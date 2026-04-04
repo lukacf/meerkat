@@ -7,10 +7,12 @@
 //! Design rule: one build consumes bindings, it does not create them.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::completion_feed::CompletionSeq;
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::types::SessionId;
 
@@ -47,6 +49,89 @@ impl std::fmt::Display for RuntimeEpochId {
     }
 }
 
+/// Shared consumer cursor state for the epoch.
+///
+/// Written by the agent boundary and runtime loop; read by the persistence
+/// channel for snapshotting. Atomics provide lock-free monotonic updates.
+///
+/// Cursor values may be stale relative to the agent's true position when
+/// read for persistence — this is safe (stale cursors produce duplicate
+/// notices on recovery, never lost notices).
+pub struct EpochCursorState {
+    /// Agent's `applied_cursor` — advanced at the CallingLlm boundary.
+    pub agent_applied_cursor: AtomicU64,
+    /// Runtime loop's `observed_seq` — advanced after feed reads.
+    pub runtime_observed_seq: AtomicU64,
+    /// Runtime loop's `last_injected_seq` — advanced after continuation injection.
+    pub runtime_last_injected_seq: AtomicU64,
+}
+
+impl EpochCursorState {
+    /// Create fresh cursor state (all zeros).
+    pub fn new() -> Self {
+        Self {
+            agent_applied_cursor: AtomicU64::new(0),
+            runtime_observed_seq: AtomicU64::new(0),
+            runtime_last_injected_seq: AtomicU64::new(0),
+        }
+    }
+
+    /// Create from recovered persisted values.
+    pub fn from_recovered(
+        agent_applied_cursor: CompletionSeq,
+        runtime_observed_seq: CompletionSeq,
+        runtime_last_injected_seq: CompletionSeq,
+    ) -> Self {
+        Self {
+            agent_applied_cursor: AtomicU64::new(agent_applied_cursor),
+            runtime_observed_seq: AtomicU64::new(runtime_observed_seq),
+            runtime_last_injected_seq: AtomicU64::new(runtime_last_injected_seq),
+        }
+    }
+
+    /// Snapshot current cursor values for persistence.
+    pub fn snapshot(&self) -> EpochCursorSnapshot {
+        EpochCursorSnapshot {
+            agent_applied_cursor: self.agent_applied_cursor.load(Ordering::Acquire),
+            runtime_observed_seq: self.runtime_observed_seq.load(Ordering::Acquire),
+            runtime_last_injected_seq: self.runtime_last_injected_seq.load(Ordering::Acquire),
+        }
+    }
+}
+
+impl Default for EpochCursorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for EpochCursorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochCursorState")
+            .field(
+                "agent_applied_cursor",
+                &self.agent_applied_cursor.load(Ordering::Relaxed),
+            )
+            .field(
+                "runtime_observed_seq",
+                &self.runtime_observed_seq.load(Ordering::Relaxed),
+            )
+            .field(
+                "runtime_last_injected_seq",
+                &self.runtime_last_injected_seq.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+/// Serializable snapshot of cursor values, captured for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochCursorSnapshot {
+    pub agent_applied_cursor: CompletionSeq,
+    pub runtime_observed_seq: CompletionSeq,
+    pub runtime_last_injected_seq: CompletionSeq,
+}
+
 /// Bundle of epoch-local runtime facts.
 ///
 /// Created by the runtime epoch owner ([`RuntimeSessionAdapter::prepare_bindings`]),
@@ -64,6 +149,8 @@ pub struct SessionRuntimeBindings {
     pub epoch_id: RuntimeEpochId,
     /// Canonical ops lifecycle registry for this epoch.
     pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
+    /// Shared consumer cursor state for this epoch.
+    pub cursor_state: Arc<EpochCursorState>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -72,6 +159,7 @@ impl Clone for SessionRuntimeBindings {
             session_id: self.session_id.clone(),
             epoch_id: self.epoch_id.clone(),
             ops_lifecycle: Arc::clone(&self.ops_lifecycle),
+            cursor_state: Arc::clone(&self.cursor_state),
         }
     }
 }
@@ -82,6 +170,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("session_id", &self.session_id)
             .field("epoch_id", &self.epoch_id)
             .field("ops_lifecycle", &"<dyn OpsLifecycleRegistry>")
+            .field("cursor_state", &self.cursor_state)
             .finish()
     }
 }

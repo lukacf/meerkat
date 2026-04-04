@@ -177,8 +177,8 @@ pub(crate) struct OpsLifecycleTransition {
 ///
 /// This is exclusively owned by the authority. Shell code may read via
 /// accessor methods but cannot mutate directly.
-#[derive(Debug, Clone)]
-pub(crate) struct OperationCanonicalState {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OperationCanonicalState {
     /// Current lifecycle status.
     status: OperationStatus,
     /// Kind of operation (needed for peer_ready guard).
@@ -256,8 +256,8 @@ impl OperationCanonicalState {
 ///
 /// Tracks per-operation state plus registry-level bookkeeping (completed
 /// ordering, concurrency limits). Only mutated through the sealed authority.
-#[derive(Debug, Clone)]
-struct RegistryCanonicalState {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegistryCanonicalState {
     /// Per-operation canonical state, keyed by OperationId.
     operations: std::collections::HashMap<OperationId, OperationCanonicalState>,
     /// FIFO ordering of completed operation IDs for bounded eviction.
@@ -277,6 +277,21 @@ struct RegistryCanonicalState {
 }
 
 impl RegistryCanonicalState {
+    /// Maximum completed operations to retain.
+    pub fn max_completed(&self) -> usize {
+        self.max_completed
+    }
+
+    /// Maximum concurrent non-terminal operations (None = unlimited).
+    pub fn max_concurrent(&self) -> Option<usize> {
+        self.max_concurrent
+    }
+
+    /// Number of operations in the canonical state.
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
         Self {
             operations: std::collections::HashMap::new(),
@@ -337,6 +352,25 @@ impl OpsLifecycleAuthority {
         Self {
             state: RegistryCanonicalState::new(max_completed, max_concurrent),
         }
+    }
+
+    /// Recover from persisted canonical state.
+    ///
+    /// Strips non-terminal operations (only terminals survive recovery).
+    /// Clears ephemeral wait state (oneshot channels can't survive restart).
+    pub(crate) fn from_recovered(mut state: RegistryCanonicalState) -> Self {
+        state.wait_request_id = None;
+        state.wait_operation_ids.clear();
+        state
+            .operations
+            .retain(|_, op| op.terminal_outcome.is_some());
+        state.active_count = 0;
+        Self { state }
+    }
+
+    /// Read-only access to canonical state for serialization.
+    pub(crate) fn canonical_state(&self) -> &RegistryCanonicalState {
+        &self.state
     }
 
     /// Get canonical state for an operation (read-only).

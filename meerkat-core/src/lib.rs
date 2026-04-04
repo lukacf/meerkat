@@ -163,7 +163,9 @@ pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
     RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
 };
-pub use runtime_epoch::{RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings};
+pub use runtime_epoch::{
+    EpochCursorSnapshot, EpochCursorState, RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
+};
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };

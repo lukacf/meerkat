@@ -85,7 +85,7 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
-pub use ops_lifecycle::{OpsLifecycleConfig, RuntimeOpsLifecycleRegistry};
+pub use ops_lifecycle::{OpsLifecycleConfig, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
 pub use peer_handling_mode::{PeerHandlingModeError, validate_peer_handling_mode};
 pub use policy::{
     ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, PolicyDecision, QueueMode,

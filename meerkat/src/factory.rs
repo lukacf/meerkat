@@ -1413,6 +1413,7 @@ impl AgentFactory {
                         session_id: session.id().clone(),
                         epoch_id: RuntimeEpochId::new(),
                         ops_lifecycle: reg,
+                        cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
                     })
                 })
             })

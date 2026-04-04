@@ -18,7 +18,7 @@ use crate::ops_lifecycle::{OperationKind, OperationTerminalOutcome};
 pub type CompletionSeq = u64;
 
 /// A single completion event in the feed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompletionEntry {
     pub seq: CompletionSeq,
     pub operation_id: OperationId,

@@ -245,6 +245,8 @@ struct RuntimeSessionEntry {
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
     /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
     epoch_id: meerkat_core::RuntimeEpochId,
+    /// Shared consumer cursor state for the epoch.
+    cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
     /// Runtime-loop capabilities. Presence means a loop is attached.
@@ -445,6 +447,7 @@ impl RuntimeSessionAdapter {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
             epoch_id: meerkat_core::RuntimeEpochId::new(),
+            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
             detached_wake: None,
@@ -545,6 +548,7 @@ impl RuntimeSessionAdapter {
                             driver: driver.clone(),
                             ops_lifecycle: ops_lifecycle.clone(),
                             epoch_id: meerkat_core::RuntimeEpochId::new(),
+                            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,
@@ -1111,6 +1115,7 @@ impl RuntimeSessionAdapter {
             epoch_id: entry.epoch_id.clone(),
             ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
                 as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+            cursor_state: Arc::clone(&entry.cursor_state),
         })
     }
 

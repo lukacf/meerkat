@@ -216,7 +216,8 @@ impl BuiltinTool for WaitTool {
                 enum WakeReason {
                     Sleep,
                     FeedAdvanced,
-                    CommsChanged(Result<(), tokio::sync::watch::error::RecvError>),
+                    /// Comms channel changed. `true` if still open.
+                    CommsChanged(bool),
                 }
 
                 loop {
@@ -236,7 +237,7 @@ impl BuiltinTool for WaitTool {
                             {
                                 futures::future::Either::Left(_) => WakeReason::FeedAdvanced,
                                 futures::future::Either::Right((result, _)) => {
-                                    WakeReason::CommsChanged(result)
+                                    WakeReason::CommsChanged(result.is_ok())
                                 }
                             },
                         }
@@ -284,10 +285,8 @@ impl BuiltinTool for WaitTool {
                                 })));
                             }
                         }
-                        WakeReason::CommsChanged(result) => {
-                            if result.is_ok()
-                                && let Some(interrupt) = rx.borrow().as_ref()
-                            {
+                        WakeReason::CommsChanged(still_open) => {
+                            if still_open && let Some(interrupt) = rx.borrow().as_ref() {
                                 let waited = start.elapsed().as_secs_f64();
                                 return Ok(ToolOutput::Json(json!({
                                     "waited_seconds": waited,

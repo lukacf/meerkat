@@ -1,4 +1,4 @@
-# Phase D - Example Pattern And Smoke Specifications
+# Example Pattern And Smoke Specifications
 
 This file defines the two required ESP examples as user-facing recommended patterns that also act as authoritative smoke entrypoints.
 
@@ -17,6 +17,7 @@ This file defines the two required ESP examples as user-facing recommended patte
 | EXAMPLE-RULE-009 | When the chosen stack supports low-friction redeploy such as OTA, the example must surface that workflow in its README and script ergonomics; otherwise the README must explain the limitation. | `REQ-010`, [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md) |
 | EXAMPLE-RULE-010 | Example 037 must generate an operator-facing topology report or visualizer from the same inventory and telemetry used in run and smoke modes. | `REQ-011`, [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md) |
 | EXAMPLE-RULE-011 | Example 037 must have a predeclared topology-only fallback if metric relative-position estimation is rejected on real hardware. | `REQ-011`, `CHOKE-005` |
+| EXAMPLE-RULE-012 | Example 037 has no substitute fallback if peer discovery or bounded-latency messaging is rejected on real hardware. `ASSUMP-010` rejection is a required-scope stop, not a prompt to invent a different multi-node example. | `ASSUMP-010`, `CHOKE-005` |
 
 ## Example 036 - `examples/036-esp32-event-agent-sh`
 
@@ -170,6 +171,8 @@ The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes
 - `MKT:SMOKE:FAIL`
 
 `MKT:SWARM:POSITION_UNSUPPORTED` is not a failure by itself when it is followed by the topology-only fallback path and a passing smoke result.
+
+`MKT:SWARM:DISCOVERY_FAIL` or `MKT:SWARM:MESSAGE_FAIL` is not eligible for the topology-only fallback. Those markers mean the required comms baseline for Example 037 failed and the program must stop or be explicitly replanned.
 
 ### Cleanup
 

@@ -1,4 +1,4 @@
-# Phase E - Consistency Review And Freeze Checklist
+# Consistency Review And Freeze Checklist
 
 Use this checklist before treating the dossier as frozen and before starting the autonomous implementation run.
 
@@ -13,7 +13,7 @@ rg -n "UNEXECUTED" docs/architecture/embedded-esp32
 rg -n "shadow implementation|shadow runtime|shadow loop|shadow session" docs/architecture/embedded-esp32
 rg -n "TBD|future work|later" docs/architecture/embedded-esp32
 rg -n "redeploy|OTA|topology report|visualizer|operator workflow" docs/architecture/embedded-esp32
-rg -n "ASSUMP-012|CHOKE-005|metric-position|topology-only fallback|host-core-check" docs/architecture/embedded-esp32
+rg -n "ASSUMP-010|ASSUMP-012|CHOKE-005|metric-position|topology-only fallback|host-core-check|ed25519-dalek|fallback candidate" docs/architecture/embedded-esp32
 ```
 
 ## Freeze checklist
@@ -38,6 +38,7 @@ rg -n "ASSUMP-012|CHOKE-005|metric-position|topology-only fallback|host-core-che
 | FREEZE-015 | No invariant, contract, or swarm-specific choke point is orphaned from the phase plan. | Cross-check [03-requirements-and-rtm.md](./03-requirements-and-rtm.md) against [04-implementation-phase-plan.md](./04-implementation-phase-plan.md). |
 | FREEZE-016 | Phase 0 is explicitly limited to single-node and Meerkat-model verification, while swarm viability is owned by Phase 3 and Example 037. | Review [02-external-contract-matrix.md](./02-external-contract-matrix.md), [04-implementation-phase-plan.md](./04-implementation-phase-plan.md), and [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md). |
 | FREEZE-017 | Example 037 has a predeclared topology-only fallback and does not require an autonomous agent to invent a new product decision if metric positioning is rejected. | Review [02-external-contract-matrix.md](./02-external-contract-matrix.md), [03-requirements-and-rtm.md](./03-requirements-and-rtm.md), and [06-example-smoke-specs.md](./06-example-smoke-specs.md). |
+| FREEZE-018 | Example 037 also has an explicit hard-stop rule if peer discovery or peer messaging is rejected on real hardware, so only metric positioning can fall back. | Review [02-external-contract-matrix.md](./02-external-contract-matrix.md), [04-implementation-phase-plan.md](./04-implementation-phase-plan.md), [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md), and [06-example-smoke-specs.md](./06-example-smoke-specs.md). |
 
 ## Freeze decision rule
 

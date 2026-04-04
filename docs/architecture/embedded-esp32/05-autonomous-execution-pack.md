@@ -1,4 +1,4 @@
-# Phase D - Autonomous Execution Pack
+# Autonomous Execution Pack
 
 This file turns the sequential phase plan into agent-ready packets. A subsequent autonomous implementation run should be able to pick up this file and execute the phases in order without opening new architecture questions.
 
@@ -11,6 +11,7 @@ This file turns the sequential phase plan into agent-ready packets. A subsequent
 - Treat host-sim results as TDD support and hardware results as closing evidence.
 - Do not let sacrificial-stack probe evidence close Rust-stack-specific rows; those must be rerun on the planned production stack.
 - Store evidence under `artifacts/embedded-esp32/phase-<n>/...`.
+- Only metric-positioning rejection has a predeclared fallback in required scope. Peer-discovery or peer-messaging rejection is a hard stop for Example 037.
 
 ## Applied field heuristics
 
@@ -65,12 +66,12 @@ Close the Phase-0-owned external and repo-model assumptions on real hardware bef
 ### Exact tasks
 
 1. Create an internal probe harness under `scripts/live_smoke/esp32-contract-probe/`.
-2. Implement a `host-core-check` mode that exercises the current factory, provider, and runtime assumptions on host-sim so the plan verifies its reading of the Meerkat side before target-specific work is trusted.
+2. Implement a `host-core-check` mode that proves the dossier's Meerkat-side reading by emitting explicit pass or fail markers for three checks: canonical build path (`FactoryAgentBuilder -> SessionService -> AgentFactory::build_agent()`), provider-model expectations (shared request shaping plus incremental stream parsing on the current host path), and runtime-authority expectations (keep-alive, external-event admission, and cancellation owned by `RuntimeSessionAdapter` rather than direct surface shortcuts). This mode may wrap targeted tests or a purpose-built host harness, but it does not count as satisfied by running an unrelated broad workspace test suite without these explicit checks.
 3. Implement a `single-node` mode that can boot, connect to Wi-Fi, sync time, hit a provider endpoint, and stream output.
 4. Implement a `single-node-rust-stack` mode that boots the planned Rust stack on real hardware and records one-turn resource and scheduler evidence.
 5. Discover and validate the required backend APIs from the host before the first target flash that depends on them.
 6. Verify any board-specific APIs against actual installed headers or library source before committing the probe implementation.
-7. Add stable serial markers for boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, Rust-stack pass/fail, and pass/fail.
+7. Add stable serial markers for `host-core-check` (`MKT:HOST_CORE:FACTORY_OK`, `MKT:HOST_CORE:PROVIDER_OK`, `MKT:HOST_CORE:RUNTIME_OK`, `MKT:HOST_CORE:PASS`), plus boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, Rust-stack pass/fail, and overall pass/fail.
 8. Add a small host-sim parser that fails when required markers are missing or arrive in the wrong order.
 9. Run the probe modes on real hardware and capture metrics and logs.
 10. Establish OTA or another low-friction redeploy path after the first successful Wi-Fi-enabled flash if the probe stack supports it.
@@ -80,7 +81,7 @@ Close the Phase-0-owned external and repo-model assumptions on real hardware bef
 ### TDD order
 
 1. Write the marker parser and failing tests first.
-2. Add host-core-check assertions and get the parser green.
+2. Add host-core-check assertions and explicit host-core markers and get the parser green.
 3. Add boot markers and get the parser green.
 4. Add Wi-Fi and time markers and get the parser green.
 5. Add TLS and provider reachability and get the parser green.
@@ -104,6 +105,7 @@ These command names are part of the deliverable contract for the phase and must 
 
 - Raw serial transcript
 - Parsed marker report
+- Host-core-check marker report tied to `INV-002`, `CONTRACT-001`, and `CONTRACT-002`
 - Memory, stack, and latency measurements
 - Toolchain bootstrap log
 - Rust-stack feasibility report
@@ -278,8 +280,9 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 8. Add OTA or the best available low-friction redeploy path if the example stack supports it.
 9. Add an operator-facing topology report or visualizer for Example 037 using the same inventory and telemetry inputs as the run and smoke modes.
 10. If metric positioning is rejected on real hardware, switch Example 037 to the predeclared topology-only fallback contract and prove that path instead of reopening product scope.
-11. Write READMEs that explain the user pattern, setup, redeploy workflow, markers, and proof obligations.
-12. Collect artifact bundles from both examples on real hardware.
+11. If peer discovery or bounded-latency messaging is rejected on real hardware, emit an explicit required-scope stop record for Example 037 instead of inventing a replacement example or fallback.
+12. Write READMEs that explain the user pattern, setup, redeploy workflow, markers, and proof obligations.
+13. Collect artifact bundles from both examples on real hardware.
 
 ### TDD order
 
@@ -321,6 +324,7 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 - Either example lacks deterministic negative controls
 - Example 037 lacks an operator-facing topology artifact tied to real run data
 - Example 037 has neither metric-position proof nor the predeclared topology-only fallback proof
+- `ASSUMP-010` is rejected and no explicit required-scope stop record was produced
 
 ### Reviewer instructions
 

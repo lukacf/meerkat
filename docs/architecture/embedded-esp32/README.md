@@ -6,7 +6,7 @@ This directory is the canonical internal planning dossier for the ESP32-S3 embed
 
 ## Dossier rules
 
-1. Every current-state claim is either `CODE_GROUNDED` with direct repo evidence or `HYPOTHESIS` with a Phase 0 live contract test that can prove or reject it.
+1. Every repo-current-state claim is either `CODE_GROUNDED` with direct repo evidence or `HYPOTHESIS` with a live contract test that can prove or reject it. Verified platform and toolchain constraints live separately in [09-technical-dependency-analysis.md](./09-technical-dependency-analysis.md) so they do not masquerade as repo claims.
 2. Embedded is a surface and backend set, not a shadow runtime model.
 3. The canonical semantic path stays runtime-backed: `Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()`.
 4. Capability limits are profile limits and backend limits, not semantic forks.
@@ -16,19 +16,21 @@ This directory is the canonical internal planning dossier for the ESP32-S3 embed
 ## Reader order
 
 1. [01-code-grounded-baseline.md](./01-code-grounded-baseline.md)
-2. [02-external-contract-matrix.md](./02-external-contract-matrix.md)
-3. [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
-4. [04-implementation-phase-plan.md](./04-implementation-phase-plan.md)
-5. [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md)
-6. [06-example-smoke-specs.md](./06-example-smoke-specs.md)
-7. [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md)
-8. [07-freeze-checklist.md](./07-freeze-checklist.md)
+2. [09-technical-dependency-analysis.md](./09-technical-dependency-analysis.md)
+3. [02-external-contract-matrix.md](./02-external-contract-matrix.md)
+4. [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
+5. [04-implementation-phase-plan.md](./04-implementation-phase-plan.md)
+6. [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md)
+7. [06-example-smoke-specs.md](./06-example-smoke-specs.md)
+8. [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md)
+9. [07-freeze-checklist.md](./07-freeze-checklist.md)
 
 ## Authority map
 
 | Question | Authority | Notes |
 | --- | --- | --- |
 | What does the current codebase already guarantee? | [01-code-grounded-baseline.md](./01-code-grounded-baseline.md) | All rows in this file are `CODE_GROUNDED`. |
+| Which non-repo platform or toolchain facts already constrain the plan before live probing starts? | [09-technical-dependency-analysis.md](./09-technical-dependency-analysis.md) | This is the planning-constraint authority for reqwest/rustls, Xtensa tooling, ESP-IDF HTTP behavior, and Tokio-fit concerns. |
 | Which external assumptions can sink the project and how do we test them? | [02-external-contract-matrix.md](./02-external-contract-matrix.md) | All assumption rows are `HYPOTHESIS` until Phase 0 evidence updates them. |
 | What are the immutable invariants, contracts, requirements, E2E obligations, and choke points? | [03-requirements-and-rtm.md](./03-requirements-and-rtm.md) | This is the requirement-trace authority. |
 | What is the sequential implementation order and the gate for each phase? | [04-implementation-phase-plan.md](./04-implementation-phase-plan.md) | This file is requirement-driven, not component-driven. |

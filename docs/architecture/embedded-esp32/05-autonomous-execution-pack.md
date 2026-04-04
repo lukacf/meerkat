@@ -9,6 +9,7 @@ This file turns the sequential phase plan into agent-ready packets. A subsequent
 - Do not replace architecture drift with “temporary” embedded-only logic.
 - Keep internal contract probes under `scripts/live_smoke/*`; keep public examples user-facing and pattern-oriented.
 - Treat host-sim results as TDD support and hardware results as closing evidence.
+- Do not let sacrificial-stack probe evidence close Rust-stack-specific rows; those must be rerun on the planned production stack.
 - Store evidence under `artifacts/embedded-esp32/phase-<n>/...`.
 
 ## Applied field heuristics
@@ -50,11 +51,11 @@ The review set is mandatory even if the executor is autonomous.
 
 ### Goal
 
-Close all critical external assumptions on real hardware before architecture-prep work begins.
+Close the Phase-0-owned external and repo-model assumptions on real hardware before architecture-prep work begins.
 
 ### Required inputs
 
-- Real ESP32-S3 hardware with PSRAM
+- Real ESP32-S3 hardware with PSRAM. Use an 8MB-class PSRAM board as the planning baseline unless evidence later relaxes it.
 - USB serial access
 - Wi-Fi credentials
 - Provider API key
@@ -64,12 +65,12 @@ Close all critical external assumptions on real hardware before architecture-pre
 ### Exact tasks
 
 1. Create an internal probe harness under `scripts/live_smoke/esp32-contract-probe/`.
-2. Implement a `single-node` mode that can boot, connect to Wi-Fi, sync time, hit a provider endpoint, and stream output.
-3. Implement a `swarm-links` mode that coordinates multiple boards, checks peer discovery, and records message latency and telemetry exchange.
-4. Implement a `swarm-positioning` mode that compares estimated topology against a known fixture layout.
+2. Implement a `host-core-check` mode that exercises the current factory, provider, and runtime assumptions on host-sim so the plan verifies its reading of the Meerkat side before target-specific work is trusted.
+3. Implement a `single-node` mode that can boot, connect to Wi-Fi, sync time, hit a provider endpoint, and stream output.
+4. Implement a `single-node-rust-stack` mode that boots the planned Rust stack on real hardware and records one-turn resource and scheduler evidence.
 5. Discover and validate the required backend APIs from the host before the first target flash that depends on them.
 6. Verify any board-specific APIs against actual installed headers or library source before committing the probe implementation.
-7. Add stable serial markers for boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, tool acknowledgement, swarm peer discovery, telemetry exchange, topology estimation, and pass/fail.
+7. Add stable serial markers for boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, Rust-stack pass/fail, and pass/fail.
 8. Add a small host-sim parser that fails when required markers are missing or arrive in the wrong order.
 9. Run the probe modes on real hardware and capture metrics and logs.
 10. Establish OTA or another low-friction redeploy path after the first successful Wi-Fi-enabled flash if the probe stack supports it.
@@ -79,25 +80,24 @@ Close all critical external assumptions on real hardware before architecture-pre
 ### TDD order
 
 1. Write the marker parser and failing tests first.
-2. Add boot markers and get the parser green.
-3. Add Wi-Fi and time markers and get the parser green.
-4. Add TLS and provider reachability and get the parser green.
-5. Add streamed output markers and get the parser green.
-6. Add tool acknowledgement markers and get the parser green.
-7. Add swarm discovery and telemetry markers and get the parser green.
-8. Add topology-estimation markers and get the parser green.
-9. Add memory and timing capture and assert thresholds.
-10. Add OTA bootstrap or equivalent redeploy simplification if supported.
-11. Add negative controls and assert deterministic failure markers.
+2. Add host-core-check assertions and get the parser green.
+3. Add boot markers and get the parser green.
+4. Add Wi-Fi and time markers and get the parser green.
+5. Add TLS and provider reachability and get the parser green.
+6. Add streamed output markers and get the parser green.
+7. Add Rust-stack viability markers and get the parser green.
+8. Add memory and timing capture and assert thresholds.
+9. Add OTA bootstrap or equivalent redeploy simplification if supported.
+10. Add negative controls and assert deterministic failure markers.
 
 ### Verification commands
 
 These command names are part of the deliverable contract for the phase and must be implemented if absent.
 
+- `./scripts/live_smoke/esp32-contract-probe/run --mode host-core-check`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode single-node --host-sim`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode single-node --hardware`
-- `./scripts/live_smoke/esp32-contract-probe/run --mode swarm-links --hardware`
-- `./scripts/live_smoke/esp32-contract-probe/run --mode swarm-positioning --hardware`
+- `./scripts/live_smoke/esp32-contract-probe/run --mode single-node-rust-stack --hardware`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode negative`
 
 ### Evidence bundle requirements
@@ -105,21 +105,24 @@ These command names are part of the deliverable contract for the phase and must 
 - Raw serial transcript
 - Parsed marker report
 - Memory, stack, and latency measurements
-- Board or node-rig identity and environment summary
+- Toolchain bootstrap log
+- Rust-stack feasibility report
+- Board identity and environment summary
 - Updated matrix rows for every exercised assumption
 
 ### Gate blockers
 
-- Any High-criticality matrix row still open
+- Any Phase-0-owned High-criticality matrix row still open
 - Provider HTTPS not working on real hardware
 - Streamed reads not working incrementally
 - Memory envelope already outside the intended profile
+- The planned Rust stack is still unresolved on real hardware
 - A physical blocker is preventing progress and no escalation has been issued
 
 ### Reviewer instructions
 
-- Architecture reviewer: confirm the probe did not bypass the intended surface seams in a way that would invalidate subsequent phases.
-- Platform reviewer: confirm the probe ran on real hardware and that logs are retained.
+- Architecture reviewer: confirm the probe checked the Meerkat-side model with `host-core-check` and did not create a false architecture shortcut.
+- Platform reviewer: confirm the probe ran on real hardware and that both sacrificial-stack and Rust-stack evidence are retained where required.
 - Verification reviewer: confirm negative controls and parser checks are present.
 
 ### Handoff
@@ -135,7 +138,7 @@ Perform seam extraction and coupling cleanup without introducing embedded-specif
 ### Required inputs
 
 - Passed Phase 0 handoff
-- Closed High-criticality matrix rows
+- Closed Phase-0-owned High-criticality matrix rows
 - Current factory, session, tool, and provider code paths
 
 ### Exact tasks
@@ -202,10 +205,10 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 ### Exact tasks
 
-1. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell.
+1. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell, but only with real shared surface glue extracted in Phase 1.
 2. Add `meerkat-esp-runtime` as the ESP binding crate.
 3. Wire the embedded surface through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
-4. Implement the ESP transport against the shared transport seam.
+4. Implement the ESP transport against the shared transport seam, including the chosen TLS backend and sync/async bridge.
 5. Implement storage and runtime persistence through the existing store traits.
 6. Bind host-tool callbacks to the shared callback contract.
 7. Define the embedded profile and its deterministic unsupported-capability behavior.
@@ -215,7 +218,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 1. Write failing embedded-surface API tests on host-sim.
 2. Make the embedded surface route through the canonical factory/runtime path.
-3. Write failing ESP transport tests and get them green.
+3. Write failing ESP transport and stream-bridge tests and get them green.
 4. Write failing persistence and recovery tests and get them green in host-sim.
 5. Write failing host-tool tests on the embedded surface and get them green.
 6. Add unsupported-capability tests and get them green.
@@ -266,7 +269,7 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 ### Exact tasks
 
 1. Finalize `examples/036-esp32-event-agent-sh`.
-2. Finalize `examples/037-esp32-triangulation-swarm-sh`.
+2. Close the swarm viability gate on the real Phase 2 stack and then finalize `examples/037-esp32-triangulation-swarm-sh`.
 3. Ensure both examples rebuild repo-local runtime artifacts before building or flashing.
 4. Ensure both examples are self-contained real-surface entrypoints.
 5. Ensure both examples expose a user-facing `run` mode in addition to test modes.
@@ -274,8 +277,9 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 7. Add negative-control modes.
 8. Add OTA or the best available low-friction redeploy path if the example stack supports it.
 9. Add an operator-facing topology report or visualizer for Example 037 using the same inventory and telemetry inputs as the run and smoke modes.
-10. Write READMEs that explain the user pattern, setup, redeploy workflow, markers, and proof obligations.
-11. Collect artifact bundles from both examples on real hardware.
+10. If metric positioning is rejected on real hardware, switch Example 037 to the predeclared topology-only fallback contract and prove that path instead of reopening product scope.
+11. Write READMEs that explain the user pattern, setup, redeploy workflow, markers, and proof obligations.
+12. Collect artifact bundles from both examples on real hardware.
 
 ### TDD order
 
@@ -283,10 +287,11 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 2. Make build-only modes pass.
 3. Make user-facing `run` modes pass.
 4. Make host-sim modes pass.
-5. Make Example 037 produce a stable topology artifact in host-sim.
-6. Make hardware smoke modes pass.
-7. Add negative controls and make them fail deterministically.
-8. Run the full hardware sweep on the phase branch.
+5. Make Example 037 produce a stable metric-or-topology artifact in host-sim.
+6. Close the swarm viability gate on real hardware.
+7. Make hardware smoke modes pass.
+8. Add negative controls and make them fail deterministically.
+9. Run the full hardware sweep on the phase branch.
 
 ### Verification commands
 
@@ -307,6 +312,7 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 - Proof mapping from example markers to `E2E-*`
 - Example 036 redeploy notes or OTA evidence when supported
 - Example 037 topology report or visualizer output
+- Example 037 metric-versus-topology closure verdict
 
 ### Gate blockers
 
@@ -314,6 +320,7 @@ Ship the real user-facing examples and use them as the final smoke harnesses.
 - Either example lacks host-sim or hardware smoke mode
 - Either example lacks deterministic negative controls
 - Example 037 lacks an operator-facing topology artifact tied to real run data
+- Example 037 has neither metric-position proof nor the predeclared topology-only fallback proof
 
 ### Reviewer instructions
 
@@ -360,14 +367,14 @@ Close the remaining proof obligations and freeze the branch as implementation-co
 ### Evidence bundle requirements
 
 - Final RTM with no `UNEXECUTED` rows
-- Final matrix with no open High-criticality rows
+- Final matrix with no open High-criticality rows and explicit closure notes for any fallback-backed rejection
 - Freeze checklist result
 - Final artifact index
 
 ### Gate blockers
 
 - Any required artifact missing
-- Any High-criticality hypothesis not `LIVE_VALIDATED`
+- Any High-criticality hypothesis still open, or any rejection lacking its predeclared fallback or stop record
 - Any remaining shadow-implementation concern
 
 ### Reviewer instructions

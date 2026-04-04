@@ -3309,17 +3309,12 @@ async fn run_agent(
     let output_pipeline =
         CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
-    // Create ephemeral runtime adapter for single-authority execution.
+    // Create ephemeral runtime adapter and prepare epoch-local bindings.
     let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    // Pre-register session so we can obtain the canonical ops lifecycle registry
-    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
-    runtime_adapter.register_session(session_id.clone()).await;
-    let ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = runtime_adapter
-        .ops_lifecycle_registry(&session_id)
+    let bindings = runtime_adapter
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
     let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
@@ -3353,7 +3348,8 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        ops_lifecycle_override: ops_lifecycle,
+        ops_lifecycle_override: None,
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
         blob_store_override: None,
@@ -3813,15 +3809,11 @@ async fn resume_session_with_llm_override(
         }],
     )?;
 
-    // Pre-register session on the adapter so we can obtain the canonical ops
-    // lifecycle registry for the build options.
-    resume_adapter.register_session(session_id.clone()).await;
-    let resume_ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = resume_adapter
-        .ops_lifecycle_registry(&session_id)
+    // Prepare epoch-local bindings for the resumed session.
+    let resume_bindings = resume_adapter
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
     let build = SessionBuildOptions {
         provider: Some(provider_core),
@@ -3860,7 +3852,10 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        ops_lifecycle_override: resume_ops_lifecycle,
+        ops_lifecycle_override: None,
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+            resume_bindings,
+        )),
         resume_override_mask: ResumeOverrideMask {
             provider_params: provider_params_override,
             ..Default::default()

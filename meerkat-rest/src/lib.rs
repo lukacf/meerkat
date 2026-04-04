@@ -519,20 +519,13 @@ async fn apply_runtime_turn(
                 .await
                 .ok()
                 .map(|s| s.generation);
-            context
+            let bindings = context
                 .runtime_adapter
-                .register_session(session_id.clone())
-                .await;
-            let ops_lifecycle = context
-                .runtime_adapter
-                .ops_lifecycle_registry(session_id)
+                .prepare_bindings(session_id.clone())
                 .await
-                .map(|registry| {
-                    registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
-                })
-                .ok_or_else(|| {
+                .map_err(|e| {
                     SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to obtain runtime ops registry for session {session_id}"
+                        "failed to prepare runtime bindings for session {session_id}: {e}"
                     )))
                 })?;
             let build = SessionBuildOptions {
@@ -554,7 +547,7 @@ async fn apply_runtime_turn(
                     .llm_client_override
                     .clone()
                     .map(encode_llm_client_override_for_service),
-                ops_lifecycle_override: Some(ops_lifecycle),
+                ops_lifecycle_override: None,
                 override_builtins: tooling.builtins.to_override(),
                 override_shell: tooling.shell.to_override(),
                 override_memory: tooling.memory.to_override(),
@@ -584,6 +577,7 @@ async fn apply_runtime_turn(
                 call_timeout_override: Default::default(),
                 blob_store_override: None,
                 mob_tools: None,
+                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -2306,10 +2300,14 @@ async fn create_session_inner(
     // and event forwarding before the service call returns).
     let pre_session = Session::new();
     let session_id = pre_session.id().clone();
-    let ops_lifecycle = match ensure_runtime_session_ops_registry(state, &session_id).await {
+    let bindings = match state
+        .runtime_adapter
+        .prepare_bindings(session_id.clone())
+        .await
+    {
         Ok(v) => v,
-        Err(resp) => {
-            let message = format!("failed to prepare runtime ops registry: {}", resp.status());
+        Err(e) => {
+            let message = format!("failed to prepare runtime bindings: {e}");
             return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
         }
     };
@@ -2400,7 +2398,7 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
-        ops_lifecycle_override: Some(ops_lifecycle),
+        ops_lifecycle_override: None,
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_memory: req.enable_memory,
@@ -2438,6 +2436,7 @@ async fn create_session_inner(
         call_timeout_override: Default::default(),
         blob_store_override: None,
         mob_tools: None,
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -2962,10 +2961,14 @@ async fn continue_session_inner(
                 ))));
             }
         };
-        let ops_lifecycle = match ensure_runtime_session_ops_registry(state, &session_id).await {
+        let bindings = match state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+        {
             Ok(v) => v,
-            Err(resp) => {
-                let message = format!("failed to prepare runtime ops registry: {}", resp.status());
+            Err(e) => {
+                let message = format!("failed to prepare runtime bindings: {e}");
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
@@ -2988,7 +2991,7 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            ops_lifecycle_override: Some(ops_lifecycle),
+            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -3018,6 +3021,7 @@ async fn continue_session_inner(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: None,
+            runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
         };
         let create_req = SvcCreateSessionRequest {
             model: req

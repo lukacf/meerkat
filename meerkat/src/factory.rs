@@ -302,6 +302,9 @@ pub struct AgentBuildConfig {
     pub call_timeout_override: meerkat_core::CallTimeoutOverride,
     /// Typed explicit-override intent for resumed-session metadata merges.
     pub resume_override_mask: meerkat_core::service::ResumeOverrideMask,
+    /// Runtime build mode — determines how the factory resolves the ops lifecycle
+    /// registry and completion feed. See [`RuntimeBuildMode`] for details.
+    pub runtime_build_mode: Option<meerkat_core::RuntimeBuildMode>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -363,6 +366,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
+            .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()
     }
 }
@@ -412,6 +416,7 @@ impl AgentBuildConfig {
             checkpointer: None,
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
+            runtime_build_mode: None,
         }
     }
 
@@ -467,6 +472,7 @@ impl AgentBuildConfig {
         self.checkpointer = build.checkpointer.clone();
         self.call_timeout_override = build.call_timeout_override.clone();
         self.resume_override_mask = build.resume_override_mask;
+        self.runtime_build_mode = build.runtime_build_mode.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -507,6 +513,7 @@ impl AgentBuildConfig {
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
             resume_override_mask: self.resume_override_mask,
+            runtime_build_mode: self.runtime_build_mode.clone(),
         }
     }
 }
@@ -1388,22 +1395,52 @@ impl AgentFactory {
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
             .is_none_or(|p| p.image_tool_results);
-        // Create the ops lifecycle registry. Keep the concrete type accessible
-        // for wiring the wait-interrupt sender before trait-erasing.
-        // concrete_ops_lifecycle is kept for future wait-interrupt wiring
-        // (set_wait_interrupt on BackgroundToolOp terminal).
+        // Resolve ops lifecycle registry via RuntimeBuildMode.
+        //
+        // Precedence: runtime_build_mode > ops_lifecycle_override > StandaloneEphemeral.
+        // The ops_lifecycle_override path is a compat shim — new code should use
+        // runtime_build_mode with SessionOwned(bindings) from prepare_bindings().
+        use meerkat_core::runtime_epoch::{
+            RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
+        };
+
+        let resolved_mode = build_config
+            .runtime_build_mode
+            .take()
+            .or_else(|| {
+                build_config.ops_lifecycle_override.clone().map(|reg| {
+                    RuntimeBuildMode::SessionOwned(SessionRuntimeBindings {
+                        session_id: session.id().clone(),
+                        epoch_id: RuntimeEpochId::new(),
+                        ops_lifecycle: reg,
+                    })
+                })
+            })
+            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral);
+
         #[allow(unused_variables)]
         let (ops_lifecycle, concrete_ops_lifecycle): (
             Arc<dyn OpsLifecycleRegistry>,
             Option<Arc<RuntimeOpsLifecycleRegistry>>,
-        ) = if let Some(overridden) = build_config.ops_lifecycle_override.clone() {
-            (overridden, None)
-        } else {
-            let concrete = Arc::new(RuntimeOpsLifecycleRegistry::new());
-            (
-                Arc::clone(&concrete) as Arc<dyn OpsLifecycleRegistry>,
-                Some(concrete),
-            )
+        ) = match &resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => {
+                if bindings.session_id != *session.id() {
+                    return Err(BuildAgentError::Config(format!(
+                        "SessionRuntimeBindings.session_id ({}) does not match session ({}); \
+                         bindings may have been prepared for a different session",
+                        bindings.session_id,
+                        session.id(),
+                    )));
+                }
+                (Arc::clone(&bindings.ops_lifecycle), None)
+            }
+            RuntimeBuildMode::StandaloneEphemeral => {
+                let concrete = Arc::new(RuntimeOpsLifecycleRegistry::new());
+                (
+                    Arc::clone(&concrete) as Arc<dyn OpsLifecycleRegistry>,
+                    Some(concrete),
+                )
+            }
         };
 
         // Create the completion feed + interrupt baseline for cursor-based

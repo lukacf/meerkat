@@ -541,13 +541,44 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 impl MobProvisioner for SessionBackend {
     async fn provision_member(
         &self,
-        req: ProvisionMemberRequest,
+        mut req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
         tracing::debug!(
             backend = ?req.backend,
             peer_name = %req.peer_name,
             "SessionBackend::provision_member start"
         );
+        // Pre-register with the runtime adapter so the factory receives
+        // epoch-local bindings instead of creating a competing registry.
+        if let Some(adapter) = &self.runtime_adapter {
+            if req.create_session.build.is_none() {
+                req.create_session.build =
+                    Some(meerkat_core::service::SessionBuildOptions::default());
+            }
+            let member_session_id = req
+                .create_session
+                .build
+                .as_ref()
+                .and_then(|b| b.resume_session.as_ref())
+                .map(|s| s.id().clone())
+                .unwrap_or_else(|| {
+                    let id = SessionId::new();
+                    let session = meerkat_core::session::Session::with_id(id.clone());
+                    if let Some(ref mut build) = req.create_session.build {
+                        build.resume_session = Some(session);
+                    }
+                    id
+                });
+            let bindings = adapter
+                .prepare_bindings(member_session_id)
+                .await
+                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+            if let Some(ref mut build) = req.create_session.build {
+                build.runtime_build_mode = Some(
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings),
+                );
+            }
+        }
         let created = self
             .session_service
             .create_session(req.create_session)
@@ -904,7 +935,7 @@ impl MultiBackendProvisioner {
 
     async fn external_member_ref(
         &self,
-        create_session: CreateSessionRequest,
+        mut create_session: CreateSessionRequest,
         peer_name: String,
         owner_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
@@ -922,6 +953,34 @@ impl MultiBackendProvisioner {
             .external
             .as_ref()
             .ok_or_else(|| MobError::WiringError("external backend is not configured".into()))?;
+        // Pre-register with the runtime adapter (mirrors SessionBackend::provision_member).
+        if let Some(adapter) = &self.session.runtime_adapter {
+            if create_session.build.is_none() {
+                create_session.build = Some(meerkat_core::service::SessionBuildOptions::default());
+            }
+            let member_session_id = create_session
+                .build
+                .as_ref()
+                .and_then(|b| b.resume_session.as_ref())
+                .map(|s| s.id().clone())
+                .unwrap_or_else(|| {
+                    let id = SessionId::new();
+                    let session = meerkat_core::session::Session::with_id(id.clone());
+                    if let Some(ref mut build) = create_session.build {
+                        build.resume_session = Some(session);
+                    }
+                    id
+                });
+            let bindings = adapter
+                .prepare_bindings(member_session_id)
+                .await
+                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+            if let Some(ref mut build) = create_session.build {
+                build.runtime_build_mode = Some(
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings),
+                );
+            }
+        }
         let created = external
             .session_service
             .create_session(create_session)

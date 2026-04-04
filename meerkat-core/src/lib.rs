@@ -48,6 +48,7 @@ pub mod prompt;
 pub mod provider;
 pub mod retry;
 pub mod runtime_bootstrap;
+pub mod runtime_epoch;
 pub mod schema;
 pub mod service;
 pub mod session;
@@ -162,6 +163,7 @@ pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
     RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
 };
+pub use runtime_epoch::{RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings};
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };

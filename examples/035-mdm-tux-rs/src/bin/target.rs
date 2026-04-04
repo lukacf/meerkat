@@ -39,7 +39,7 @@ use meerkat_core::service::{
     SessionError, SessionService, StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_core::{AgentEvent, Config};
+use meerkat_core::{AgentEvent, Config, Session};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_runtime::RuntimeSessionAdapter;
 use meerkat_runtime::input::{
@@ -104,21 +104,18 @@ async fn build_target_runtime_surface(
         PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
     {
         let adapter = runtime_adapter.clone();
-        session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+        session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
             let adapter = adapter.clone();
-            let session_id = session_id.clone();
             Box::pin(async move {
-                adapter
-                    .ops_lifecycle_registry(&session_id)
-                    .await
-                    .map(|registry| {
-                        registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
-                    })
+                adapter.prepare_bindings(session_id).await.ok()
             })
         }));
     }
     let service = Arc::new(session_service);
-    let mob_state = Arc::new(MobMcpState::new(service.clone()));
+    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
+        service.clone(),
+        Some(runtime_adapter.clone()),
+    ));
     *mob_tools_slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -1228,8 +1225,16 @@ async fn setup_session(
                 .map_err(|e| anyhow::anyhow!("load session {id}: {e}"))?;
             Some(loaded.ok_or_else(|| anyhow::anyhow!("session {id} not found on disk"))?)
         }
-        None => None,
+        None => Some(Session::new()),
     };
+    let prepared_session = resume_session
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("target setup requires a prepared session"))?;
+    let prepared_session_id = prepared_session.id().clone();
+
+    // Prepare canonical runtime bindings (registers + allocates epoch in one shot).
+    let bindings = runtime_adapter.prepare_bindings(prepared_session_id.clone()).await
+        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
     // No external_tools needed — the factory composes comms tools automatically
     // from the CommsRuntime set via AgentFactory::with_comms_runtime().
@@ -1238,7 +1243,9 @@ async fn setup_session(
         override_builtins: Some(true),
         override_shell: Some(true),
         override_mob: Some(true),
-        resume_session,
+        resume_session: Some(prepared_session),
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+        ops_lifecycle_override: None,
         // When resuming a persisted session, the old metadata's tool category
         // overrides would silently replace these explicit values. Mask them so
         // the current build options win.
@@ -1264,10 +1271,13 @@ async fn setup_session(
         labels: None,
     };
 
-    let result = service
-        .create_session(req)
-        .await
-        .map_err(|e| anyhow::anyhow!("create session: {e}"))?;
+    let result = match service.create_session(req).await {
+        Ok(result) => result,
+        Err(error) => {
+            runtime_adapter.unregister_session(&prepared_session_id).await;
+            return Err(anyhow::anyhow!("create session: {error}"));
+        }
+    };
 
     let session_id = result.session_id;
     eprintln!("[target] session ready: {session_id}");
@@ -2202,23 +2212,137 @@ mod tests {
     }
 
     use super::{
-        build_target_runtime_surface, discard_live_session_with_mob_cleanup,
-        parse_provider_override,
+        TargetRuntimeSurface, build_target_runtime_surface, discard_live_session_with_mob_cleanup,
+        parse_provider_override, setup_session,
     };
+    use anyhow::Context as _;
     use mdm_tux::ProviderKind;
     use meerkat::{
-        AgentFactory, FactoryAgentBuilder, LlmClient, SessionAgentBuilder, SessionService,
+        AgentFactory, FactoryAgentBuilder, LlmClient, PersistenceBundle,
+        PersistentSessionService, SessionAgentBuilder, SessionService,
         encode_llm_client_override_for_service,
     };
-    use meerkat_client::TestClient;
+    use meerkat_client::types::LlmStream;
+    use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, TestClient};
     use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
+    use meerkat_core::ops_lifecycle::OperationKind;
     use meerkat_core::Config;
-    use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
-    use meerkat_core::types::ContentInput;
+    use meerkat_core::service::{
+        CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
+    };
+    use meerkat_core::types::{ContentInput, HandlingMode};
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
-    use std::sync::Arc;
+    use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
+    use std::collections::{HashSet, VecDeque};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
     use test_support::CaptureClient;
     use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    struct ScriptedClient {
+        responses: Mutex<VecDeque<Vec<LlmEvent>>>,
+    }
+
+    impl ScriptedClient {
+        fn new(responses: Vec<Vec<LlmEvent>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for ScriptedClient {
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            let _ = request;
+            let events = self
+                .responses
+                .lock()
+                .expect("scripted client lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    vec![LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    }]
+                });
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> &'static str {
+            "test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    async fn build_target_runtime_surface_with_client(
+        session_dir: &Path,
+        comms_runtime: Arc<CommsRuntime>,
+        llm_client: Arc<dyn LlmClient>,
+    ) -> anyhow::Result<TargetRuntimeSurface> {
+        let factory = AgentFactory::new(session_dir)
+            .shell(true)
+            .builtins(true)
+            .mob(true)
+            .with_comms_runtime(comms_runtime);
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(llm_client);
+        let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+
+        let jsonl_store = JsonlStore::new(session_dir.to_path_buf());
+        jsonl_store.init().await?;
+
+        let bundle_store = JsonlStore::new(session_dir.to_path_buf());
+        bundle_store.init().await?;
+
+        let persistence = PersistenceBundle::new(
+            Arc::new(bundle_store) as Arc<dyn SessionStore>,
+            None,
+            Arc::new(MemoryBlobStore::new()),
+        );
+        let runtime_adapter = persistence.runtime_adapter();
+        let (session_store, runtime_store, blob_store) = persistence.into_parts();
+
+        let mut session_service =
+            PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
+        {
+            let adapter = runtime_adapter.clone();
+            session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+                let adapter = adapter.clone();
+                let session_id = session_id.clone();
+                Box::pin(async move {
+                    adapter
+                        .ops_lifecycle_registry(&session_id)
+                        .await
+                        .map(|registry| {
+                            registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
+                        })
+                })
+            }));
+        }
+        let service = Arc::new(session_service);
+        let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
+            service.clone(),
+            Some(runtime_adapter.clone()),
+        ));
+        *mob_tools_slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+            AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
+        ));
+
+        Ok(TargetRuntimeSurface {
+            service,
+            runtime_adapter,
+            jsonl_store,
+            mob_state,
+        })
+    }
 
     #[test]
     fn provider_override_requires_model_and_provider_together() {
@@ -2407,7 +2531,127 @@ mod tests {
                 .mob_state
                 .find_implicit_mob(&session_id.to_string())
                 .await
-                .is_none()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn target_setup_session_routes_background_shell_completions_into_runtime_feed() {
+        let temp = tempfile::tempdir().unwrap();
+        let comms_runtime = Arc::new(
+            CommsRuntime::new_with_silent_intents(
+                ResolvedCommsConfig {
+                    enabled: true,
+                    name: "test-background-feed".to_string(),
+                    inproc_namespace: None,
+                    listen_tcp: None,
+                    listen_uds: None,
+                    event_listen_tcp: None,
+                    #[cfg(unix)]
+                    event_listen_uds: None,
+                    identity_dir: temp.path().join("identity"),
+                    trusted_peers_path: temp.path().join("trusted_peers.json"),
+                    comms_config: Default::default(),
+                    auth: Default::default(),
+                    require_peer_auth: false,
+                    allow_external_unauthenticated: false,
+                },
+                Arc::new(HashSet::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let llm_client: Arc<dyn LlmClient> = Arc::new(ScriptedClient::new(vec![
+            vec![
+                LlmEvent::ToolCallComplete {
+                    id: "tc_shell_background".to_string(),
+                    name: "shell".to_string(),
+                    args: serde_json::json!({
+                        "command": "echo target-background-feed",
+                        "background": true,
+                    }),
+                    meta: None,
+                },
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::ToolUse,
+                    },
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta {
+                    delta: "background started".to_string(),
+                    meta: None,
+                },
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                },
+            ],
+        ]));
+        let surface =
+            build_target_runtime_surface_with_client(temp.path(), comms_runtime, llm_client)
+                .await
+                .unwrap();
+
+        let session_id = setup_session(
+            &surface.service,
+            &surface.runtime_adapter,
+            None,
+            "gpt-5.2",
+            "test background shell",
+            &surface.mob_state,
+            "openai",
+        )
+        .await
+        .unwrap();
+
+        let runtime_registry = surface
+            .runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .expect("runtime registry must exist after setup");
+        let feed = runtime_registry.completion_feed_handle();
+        assert_eq!(feed.watermark(), 0);
+
+        surface
+            .service
+            .start_turn(
+                &session_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("run shell".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: HandlingMode::Queue,
+                    event_tx: None,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if feed.watermark() > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("background shell completion should advance the runtime feed")
+        .unwrap();
+
+        let batch = feed.list_since(0);
+        assert!(
+            batch
+                .entries
+                .iter()
+                .any(|entry| entry.kind == OperationKind::BackgroundToolOp),
+            "runtime feed should contain a background shell completion"
         );
     }
 }

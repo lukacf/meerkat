@@ -2399,7 +2399,7 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
     let session = prepared_session.session;
     let session_id = prepared_session.session_id;
-    let ops_lifecycle = prepared_session.ops_lifecycle;
+    let bindings = prepared_session.bindings;
 
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
@@ -2453,7 +2453,8 @@ async fn handle_meerkat_run(
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
-        ops_lifecycle_override: Some(ops_lifecycle),
+        ops_lifecycle_override: None,
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
         override_builtins: input.enable_builtins,
         override_shell: enable_shell_override,
         override_memory: input.enable_memory,
@@ -2692,18 +2693,13 @@ async fn handle_meerkat_resume(
             })?),
             None => None,
         };
-    state
+    let resume_bindings = state
         .runtime_adapter
-        .register_session(session_id.clone())
-        .await;
-    let ops_lifecycle = state
-        .runtime_adapter
-        .ops_lifecycle_registry(&session_id)
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-        .ok_or_else(|| {
+        .map_err(|e| {
             ToolCallError::internal(format!(
-                "failed to obtain runtime ops registry for session {session_id}"
+                "failed to prepare bindings for session {session_id}: {e}"
             ))
         })?;
     let build = SessionBuildOptions {
@@ -2720,7 +2716,10 @@ async fn handle_meerkat_resume(
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
-        ops_lifecycle_override: Some(ops_lifecycle),
+        ops_lifecycle_override: None,
+        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+            resume_bindings,
+        )),
         override_builtins: enable_builtins_override,
         override_shell: enable_shell_override,
         override_memory: input.enable_memory,

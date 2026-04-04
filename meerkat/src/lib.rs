@@ -98,6 +98,9 @@ pub use meerkat_core::{
     // Retry
     RetryPolicy,
     RunResult,
+    // Runtime epoch types
+    RuntimeBuildMode,
+    RuntimeEpochId,
     SESSION_VERSION,
     SchemaCompat,
     SchemaError,
@@ -109,6 +112,7 @@ pub use meerkat_core::{
     SessionLlmIdentity,
     SessionMeta,
     SessionMetadata,
+    SessionRuntimeBindings,
     SessionTooling,
     SpawnSpec,
     StopReason,

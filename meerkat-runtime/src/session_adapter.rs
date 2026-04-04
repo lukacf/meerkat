@@ -41,6 +41,14 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
 };
 
+/// Error type for [`RuntimeSessionAdapter::prepare_bindings`].
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeBindingsError {
+    /// Session was not found after registration (should not happen in practice).
+    #[error("session {0} not found in runtime adapter after registration")]
+    SessionNotFound(SessionId),
+}
+
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 
@@ -235,6 +243,8 @@ struct RuntimeSessionEntry {
     driver: SharedDriver,
     /// Shared async-operation lifecycle registry for this runtime/session.
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+    /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
+    epoch_id: meerkat_core::RuntimeEpochId,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
     /// Runtime-loop capabilities. Presence means a loop is attached.
@@ -434,6 +444,7 @@ impl RuntimeSessionAdapter {
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            epoch_id: meerkat_core::RuntimeEpochId::new(),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
             detached_wake: None,
@@ -533,6 +544,7 @@ impl RuntimeSessionAdapter {
                         RuntimeSessionEntry {
                             driver: driver.clone(),
                             ops_lifecycle: ops_lifecycle.clone(),
+                            epoch_id: meerkat_core::RuntimeEpochId::new(),
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,
@@ -1074,6 +1086,32 @@ impl RuntimeSessionAdapter {
         sessions
             .get(session_id)
             .map(|e| Arc::clone(&e.ops_lifecycle))
+    }
+
+    /// Prepare canonical runtime bindings for a session.
+    ///
+    /// This is the single canonical helper that replaces the hand-rolled
+    /// `register_session()` + `ops_lifecycle_registry()` + manual threading
+    /// dance. All runtime-backed surfaces should call this instead.
+    ///
+    /// The method is idempotent: if the session is already registered, it
+    /// returns bindings from the existing entry. The epoch_id is stable
+    /// across repeated calls for the same session.
+    pub async fn prepare_bindings(
+        &self,
+        session_id: SessionId,
+    ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
+        self.register_session(session_id.clone()).await;
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .ok_or(RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
+        Ok(meerkat_core::SessionRuntimeBindings {
+            session_id,
+            epoch_id: entry.epoch_id.clone(),
+            ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
+                as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+        })
     }
 
     /// Manage the comms drain lifecycle for a session based on keep_alive intent.

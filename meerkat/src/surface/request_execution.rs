@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::{Session, SessionId};
+use meerkat_core::{Session, SessionId, SessionRuntimeBindings};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -319,7 +318,7 @@ impl SurfaceRequestExecutor {
 pub struct PreparedSurfaceSession {
     pub session: Session,
     pub session_id: SessionId,
-    pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
+    pub bindings: SessionRuntimeBindings,
 }
 
 pub async fn prepare_surface_session(
@@ -327,16 +326,14 @@ pub async fn prepare_surface_session(
 ) -> Result<PreparedSurfaceSession, String> {
     let session = Session::new();
     let session_id = session.id().clone();
-    runtime_adapter.register_session(session_id.clone()).await;
-    let ops_lifecycle = runtime_adapter
-        .ops_lifecycle_registry(&session_id)
+    let bindings = runtime_adapter
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|registry| registry as Arc<dyn OpsLifecycleRegistry>)
-        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
+        .map_err(|e| format!("failed to prepare bindings for session {session_id}: {e}"))?;
     Ok(PreparedSurfaceSession {
         session,
         session_id,
-        ops_lifecycle,
+        bindings,
     })
 }
 

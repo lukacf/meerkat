@@ -239,6 +239,18 @@ pub struct SessionBuildOptions {
     /// construction with the session ID, ops lifecycle registry, and optional
     /// comms runtime — then composes the result into the tool gateway.
     pub mob_tools: Option<Arc<dyn MobToolsFactory>>,
+    /// Runtime build mode — determines how the factory resolves the ops lifecycle
+    /// registry and completion feed.
+    ///
+    /// - `Some(SessionOwned(bindings))`: runtime-backed build with epoch-owned
+    ///   bindings. Factory validates `bindings.session_id == session.id()`.
+    /// - `Some(StandaloneEphemeral)`: factory creates local-only ephemeral bindings.
+    /// - `None`: legacy compatibility path — resolves from `ops_lifecycle_override`
+    ///   if present, otherwise falls back to `StandaloneEphemeral`.
+    ///
+    /// New code should always set this explicitly. The `None` path will be
+    /// removed when `ops_lifecycle_override` is deleted.
+    pub runtime_build_mode: Option<crate::runtime_epoch::RuntimeBuildMode>,
 }
 
 /// Session-scoped arguments passed to [`MobToolsFactory::build_mob_tools`].
@@ -328,6 +340,7 @@ impl Default for SessionBuildOptions {
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
             mob_tools: None,
+            runtime_build_mode: None,
         }
     }
 }
@@ -372,6 +385,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())
+            .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()
     }
 }

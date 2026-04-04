@@ -63,6 +63,11 @@ type OpsLifecycleProviderFuture<'a> = std::pin::Pin<
 >;
 type OpsLifecycleProvider = dyn Fn(&SessionId) -> OpsLifecycleProviderFuture<'_> + Send + Sync;
 
+type RuntimeBindingsProviderFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<meerkat_core::SessionRuntimeBindings>> + Send>,
+>;
+type RuntimeBindingsProvider = dyn Fn(SessionId) -> RuntimeBindingsProviderFuture + Send + Sync;
+
 /// Shared gate between the checkpointer and archive.
 ///
 /// The `Mutex` provides mutual exclusion so that `checkpoint()` cannot
@@ -146,6 +151,10 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// rebuilds. When set, lazy-rebuilt sessions bind to the canonical registry
     /// instead of allocating an orphaned fallback.
     ops_lifecycle_provider: Option<Arc<OpsLifecycleProvider>>,
+    /// Optional provider for runtime bindings used during lazy session rebuilds.
+    /// When set, preferred over `ops_lifecycle_provider` — supplies both the
+    /// canonical ops lifecycle registry and the runtime build mode in one shot.
+    runtime_bindings_provider: Option<Arc<RuntimeBindingsProvider>>,
 }
 
 /// Extract session labels from a metadata map.
@@ -423,6 +432,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
             ops_lifecycle_provider: None,
+            runtime_bindings_provider: None,
         }
     }
 
@@ -434,6 +444,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// visible to the runtime adapter.
     pub fn set_ops_lifecycle_provider(&mut self, provider: Arc<OpsLifecycleProvider>) {
         self.ops_lifecycle_provider = Some(provider);
+    }
+
+    /// Set a runtime bindings provider for lazy session rebuilds.
+    ///
+    /// When set, this is preferred over `ops_lifecycle_provider`. On lazy
+    /// rebuild the callback is invoked with the session ID; if it returns
+    /// `Some(bindings)`, the rebuild sets `runtime_build_mode` to
+    /// `SessionOwned(bindings)` and skips the legacy `ops_lifecycle_override`
+    /// path.
+    pub fn set_runtime_bindings_provider(&mut self, provider: Arc<RuntimeBindingsProvider>) {
+        self.runtime_bindings_provider = Some(provider);
     }
 
     pub fn runtime_mode(&self) -> RuntimeMode {
@@ -618,6 +639,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .as_ref()
                 .map(|meta| meta.tooling.clone())
                 .unwrap_or_default();
+            // Prefer runtime_bindings_provider (returns full bindings bundle)
+            // over the legacy ops_lifecycle_provider (returns bare registry).
+            let (runtime_build_mode, ops_lifecycle_override) =
+                if let Some(provider) = &self.runtime_bindings_provider {
+                    match (provider)(id.clone()).await {
+                        Some(bindings) => (
+                            Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                            None,
+                        ),
+                        None => (None, None),
+                    }
+                } else {
+                    let legacy = match &self.ops_lifecycle_provider {
+                        Some(provider) => (provider)(id).await,
+                        None => None,
+                    };
+                    (None, legacy)
+                };
             let build = SessionBuildOptions {
                 provider: stored_metadata.as_ref().map(|meta| meta.provider),
                 comms_name: stored_metadata
@@ -628,10 +667,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .and_then(|meta| meta.peer_meta.clone()),
                 resume_session: Some(stored),
                 blob_store_override: Some(Arc::clone(&self.blob_store)),
-                ops_lifecycle_override: match &self.ops_lifecycle_provider {
-                    Some(provider) => (provider)(id).await,
-                    None => None,
-                },
+                ops_lifecycle_override,
+                runtime_build_mode,
                 override_builtins: tooling.builtins.to_override(),
                 override_shell: tooling.shell.to_override(),
                 override_memory: tooling.memory.to_override(),

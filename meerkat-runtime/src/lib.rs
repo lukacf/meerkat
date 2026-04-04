@@ -108,7 +108,7 @@ pub use runtime_ingress_authority::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
-pub use session_adapter::RuntimeSessionAdapter;
+pub use session_adapter::{RuntimeBindingsError, RuntimeSessionAdapter};
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,

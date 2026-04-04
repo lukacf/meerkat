@@ -1,0 +1,31 @@
+[package]
+name = "esp32-contract-probe-fw"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "esp32-contract-probe-fw"
+harness = false
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1.0"
+embedded-svc = "0.29.0"
+embedded-graphics = "0.8.2"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+log = "0.4"
+mipidsi = "0.10.0"
+serde_json = "1.0"
+
+[build-dependencies]
+embuild = "0.33"

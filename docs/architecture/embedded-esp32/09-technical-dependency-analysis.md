@@ -12,6 +12,7 @@ These items are not repo-current-state claims, so they do not belong in the `COD
 | TD-LOCAL-002 | `CODE_GROUNDED` | Provider clients own concrete `reqwest::Client` instances directly. | [meerkat-client/src/openai.rs#L20-L61](../../../meerkat-client/src/openai.rs#L20-L61), [meerkat-client/src/anthropic.rs#L24-L104](../../../meerkat-client/src/anthropic.rs#L24-L104) | The transport seam is not optional. It is the first architecture-prep seam. |
 | TD-LOCAL-003 | `CODE_GROUNDED` | Provider streaming currently assumes an async byte-stream interface by calling `response.bytes_stream()` and parsing SSE or chunked events above that stream. | [meerkat-client/src/openai.rs#L329-L370](../../../meerkat-client/src/openai.rs#L329-L370), [meerkat-client/src/anthropic.rs#L568-L640](../../../meerkat-client/src/anthropic.rs#L568-L640) | Phase 1 must define a shared provider contract at the level of request shaping, incremental bytes, and normalized event mapping. It cannot assume identical underlying I/O primitives across platforms. |
 | TD-LOCAL-004 | `CODE_GROUNDED` | The non-wasm runtime path already uses `tokio` primitives directly in key factory wiring such as watch channels and spawned tasks. | [Cargo.toml#L46-L49](../../../Cargo.toml#L46-L49), [meerkat/src/factory.rs#L1310-L1395](../../../meerkat/src/factory.rs#L1310-L1395) | Phase 0 must explicitly gate Tokio or executor viability on the target. This is not a background implementation detail. |
+| TD-LOCAL-005 | `CODE_GROUNDED` | The current comms path depends on Ed25519 signing and verification through `ed25519-dalek` and on target-gated Tokio I/O in non-wasm builds. | [meerkat-comms/Cargo.toml#L14-L52](../../../meerkat-comms/Cargo.toml#L14-L52), [meerkat-comms/src/identity.rs#L1-L117](../../../meerkat-comms/src/identity.rs#L1-L117) | Swarm closure cannot treat comms as transport-only. Phase 3 must prove that the target can compile, boot, and execute the identity path used by real peer messaging. |
 
 ## Externally verified platform and toolchain constraints
 
@@ -25,6 +26,16 @@ These items come from primary or near-primary ecosystem sources and should be tr
 | TD-EXT-004 | The Rust on ESP `std` approach relies on the Espressif stack and installation flow for Xtensa targets rather than a plain upstream Rust target setup. | [Rust on ESP training intro](https://docs.esp-rs.org/std-training/03_0_intro_workshop.html) | The toolchain bootstrap belongs in Phase 0 evidence, not as an implicit prerequisite. |
 | TD-EXT-005 | Mio's `mio_unsupported_force_poll_poll` and related flags are explicitly described as unsupported and may disappear in the future. | [mio README](https://github.com/tokio-rs/mio) | Any Tokio-on-ESP strategy that depends on unsupported Mio flags needs an explicit feasibility gate and a fallback plan. |
 
+## Predeclared executor fallback candidates
+
+If Phase 0 rejects the current Rust `std` plus Tokio baseline, the autonomous run may only choose among these predeclared fallback families before Phase 1 starts:
+
+1. A smaller `std`-retaining execution envelope with a single-threaded or `block_on`-style control loop plus a bounded blocking I/O worker for provider traffic.
+2. A lighter embedded executor path, such as an Embassy-class or edge-executor-class runtime, provided it still satisfies the Phase 1 and Phase 2 contracts.
+3. A hybrid bridge where the embedded surface remains canonical, but provider and network work is isolated behind a bounded worker and explicit async-to-sync bridge.
+
+These are candidate families, not validated recommendations. The point is to keep the autonomous run from inventing a brand-new runtime category midstream if the baseline Tokio plan is rejected.
+
 ## Planning consequences that are now fixed
 
 1. Phase 0 must answer four technical questions before architecture-prep work starts:
@@ -35,6 +46,7 @@ These items come from primary or near-primary ecosystem sources and should be tr
 2. `CONTRACT-003` cannot mean "the same transport abstraction everywhere." It must mean "shared request construction, incremental response parsing, retry semantics, and normalized event mapping," while allowing different TLS backends, HTTP clients, and sync/async bridges per target.
 3. Passing a sacrificial Phase 0 probe on Arduino, PlatformIO, or ESP-IDF C does not automatically close Rust-stack-specific risk. Toolchain, executor, and memory claims must be rerun on the planned Rust stack before later phases close.
 4. Swarm and RSSI viability do not belong in Phase 0. They belong with Example 037 on the real Phase 2 stack, where the transport, comms, and runtime choices are no longer hypothetical.
+5. Swarm viability is not just a radio question. The real comms identity and signing stack must compile and execute on target before Example 037 can be considered credible.
 
 ## What this file does not close
 

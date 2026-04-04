@@ -1,4 +1,4 @@
-# Phase C - Requirements, Contracts, And RTM
+# Requirements, Contracts, And RTM
 
 This file converts the dossier into a traced specification. IDs here are the authoritative handles for planning, implementation, review, and evidence collection.
 
@@ -18,7 +18,7 @@ This file converts the dossier into a traced specification. IDs here are the aut
 | INV-002 | The canonical embedded semantic path is `Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()`. | All phases | Embedded surface | Build-path tests and architecture review against canonical path | `SPECIFIED` | `BASELINE_CODE_GROUNDED` |
 | INV-003 | Capability limits are expressed as profile limits and backend limits, not semantic forks. | All phases | Embedded surface and examples | Unsupported-capability tests and embedded profile spec | `SPECIFIED` | `BASELINE_CODE_GROUNDED` |
 | INV-004 | Every current-state claim in the planning dossier is code-grounded and every external assumption has a live-validation path. | Planning output and all phases | Planning dossier | Dossier review plus Phase 0 matrix updates | `SPECIFIED` | `BASELINE_CODE_GROUNDED` |
-| INV-005 | Phase 0 is hardware-first; simulator evidence is supplemental and cannot close critical assumptions alone. | Phase 0 and Phase 3 | Phase 0 and example smoke harnesses | Hardware artifact bundle and matrix status updates | `SPECIFIED` | `UNEXECUTED` |
+| INV-005 | Critical embedded assumptions must be closed with real hardware in the phase that owns them. Phase 0 is hardware-first for baseline board and toolchain assumptions, and Phase 3 is hardware-first for swarm-specific assumptions. Simulator evidence is supplemental and cannot close critical assumptions alone. | Phase 0 and Phase 3 | Phase 0 and example smoke harnesses | Hardware artifact bundle and matrix status updates | `SPECIFIED` | `UNEXECUTED` |
 | INV-006 | Sacrificial probe evidence only closes board and external contract questions. Rust-stack-specific behavior must be revalidated on the planned production stack before later phases close. | Phase 0 through final closure | Probe harnesses and final examples | Matrix updates keyed to probe stack and production stack evidence | `SPECIFIED` | `UNEXECUTED` |
 
 ## Contracts

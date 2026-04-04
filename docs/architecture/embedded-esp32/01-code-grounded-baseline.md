@@ -1,4 +1,4 @@
-# Phase A - Code-Grounded Baseline
+# Code-Grounded Baseline
 
 This file is the current-state source map for the embedded program. Every row below is `CODE_GROUNDED` and cites the real repository rather than prior summaries.
 

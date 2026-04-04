@@ -1,4 +1,4 @@
-# Phase C - Sequential Implementation Phase Plan
+# Sequential Implementation Phase Plan
 
 This file derives the implementation order from the traced requirements, not from crate names. The program is sequential and exhaustive: each phase either closes its scope or forces an immediate plan update before the next phase begins.
 
@@ -150,10 +150,12 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - `CONTRACT-005`
 - `E2E-004`
 - `CHOKE-003`
+- `ASSUMP-005`
+- `ASSUMP-006`
+- `ASSUMP-009`
 
 ### Required outputs
 
-- `meerkat-embedded-runtime`
 - `meerkat-embedded-runtime` for any real shared surface glue extracted in Phase 1
 - `meerkat-esp-runtime`
 - Embedded profile definitions and deterministic unsupported-capability behavior
@@ -165,6 +167,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - The ESP backend satisfies the surface through transport, persistence, and host-tool bindings instead of direct semantic shortcuts.
 - The embedded profile is explicit and test-backed.
 - The surface can be exercised in host-sim mode before hardware smoke.
+- Host-sim or preflight evidence moves `ASSUMP-005`, `ASSUMP-006`, and `ASSUMP-009` to at least `PROVISIONAL` before Phase 3 attempts real-hardware closure.
 
 ### Real-entrypoint proof
 
@@ -201,6 +204,9 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 - `CONTRACT-006`
 - `CHOKE-004`
 - `CHOKE-005`
+- `ASSUMP-005`
+- `ASSUMP-006`
+- `ASSUMP-009`
 - `ASSUMP-010`
 - `ASSUMP-011`
 
@@ -221,6 +227,7 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 - Example 037 produces a user-facing topology artifact from the same run data used for validation.
 - Both examples follow the repo-local rebuild pattern and the self-contained real-surface pattern.
 - Both examples run in build-only, host-sim, and hardware smoke modes.
+- If `ASSUMP-010` is rejected on the real Phase 3 stack, the program records a required-scope stop for Example 037 instead of inventing a replacement multi-node pattern.
 
 ### Real-entrypoint proof
 
@@ -229,7 +236,7 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 
 ### Negative control
 
-- Run each example in a misconfigured mode that should fail deterministically and assert that the script exits non-zero with stable failure markers. For Example 037, also verify that a metric-positioning rejection falls back to the predeclared topology contract rather than reopening scope.
+- Run each example in a misconfigured mode that should fail deterministically and assert that the script exits non-zero with stable failure markers. For Example 037, verify both that metric-positioning rejection falls back to the predeclared topology contract and that discovery or messaging rejection is treated as a hard required-scope stop rather than a fallback case.
 
 ### Evidence bundle
 
@@ -281,3 +288,4 @@ Finish the required scope, close any remaining provisional state, and freeze the
 - A rejected external assumption in Phase 0 stops the program until the plan is revised.
 - A failed choke point in any phase means the phase remains open.
 - There is no backlog lane for core scope. If a required item is not done, the current phase remains active.
+- Only `ASSUMP-011` has a predeclared fallback. A rejected `ASSUMP-010` is a required-scope stop for Example 037.

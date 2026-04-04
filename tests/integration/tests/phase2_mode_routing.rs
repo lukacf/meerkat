@@ -284,6 +284,7 @@ impl MobSessionService for MockSessionService {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: None,
         })
     }

@@ -1212,6 +1212,7 @@ impl MobSessionService for LocalSessionService {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: None,
         })
     }
@@ -2371,6 +2372,7 @@ mod tests {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }

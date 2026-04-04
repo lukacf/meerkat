@@ -322,6 +322,7 @@ impl CoreExecutor for NoopExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: None,
         })
     }

@@ -408,6 +408,16 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
+            let run_result = RunResult {
+                text: "done".into(),
+                session_id: SessionId::new(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            };
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceipt {
                     run_id,
@@ -418,16 +428,12 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                     sequence: 0,
                 },
                 session_snapshot: None,
-                run_result: Some(RunResult {
-                    text: "done".into(),
-                    session_id: SessionId::new(),
-                    usage: Usage::default(),
-                    turns: 1,
-                    tool_calls: 0,
-                    structured_output: None,
-                    schema_warnings: None,
-                    skill_diagnostics: None,
-                }),
+                terminal: Some(
+                    meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
+                        run_result.clone(),
+                    ),
+                ),
+                run_result: Some(run_result),
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {

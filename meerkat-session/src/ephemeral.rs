@@ -806,6 +806,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let mut deferred_turn_state = resumed_session
             .and_then(meerkat_core::Session::deferred_turn_state)
             .unwrap_or_default();
+        let resumed_session_is_deferred_template = resumed_session.is_some_and(|session| {
+            session.messages().is_empty() && session.deferred_turn_state().is_none()
+        });
         if let Some(blob_store) = req
             .build
             .as_ref()
@@ -823,7 +826,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 )))
             })?;
         }
-        if defer_initial_turn && resumed_session.is_none() {
+        if defer_initial_turn && (resumed_session.is_none() || resumed_session_is_deferred_template)
+        {
             deferred_turn_state.mark_initial_turn_pending();
         }
         if defer_initial_turn && req.deferred_prompt_policy == DeferredPromptPolicy::Stage {

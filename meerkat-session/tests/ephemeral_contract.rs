@@ -887,6 +887,44 @@ async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_wind
 }
 
 #[tokio::test]
+async fn test_template_resume_session_still_arms_deferred_first_turn_override_window() {
+    let service = make_service(MockAgentBuilder::new());
+    let template = Session::new();
+
+    let mut request = create_req("template-backed deferred session");
+    request.initial_turn = InitialTurnPolicy::Defer;
+    request.deferred_prompt_policy = DeferredPromptPolicy::Discard;
+    request.build = Some(SessionBuildOptions {
+        resume_session: Some(template),
+        ..Default::default()
+    });
+
+    let created = service
+        .create_session(request)
+        .await
+        .expect("create deferred session from template");
+
+    let deferred_state = service
+        .deferred_turn_state(&created.session_id)
+        .await
+        .expect("template-backed deferred session should expose deferred state");
+    let allows_override = deferred_state
+        .lock()
+        .expect("deferred-turn state lock poisoned")
+        .allows_initial_turn_overrides();
+    assert!(
+        allows_override,
+        "template-backed deferred session should still arm the first-turn override window"
+    );
+
+    let started = service
+        .start_turn(&created.session_id, turn_req("resume turn"))
+        .await
+        .expect("template-backed deferred session should still run its first turn");
+    assert!(started.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
 async fn test_subscribe_session_events_available_before_first_turn() {
     let service = make_service(MockAgentBuilder::new());
     let created = service

@@ -53,8 +53,8 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
-    FileConfigStore, PendingSystemContextAppend, Provider, RealmSelection, RuntimeBootstrap,
-    agent_event_type, format_verbose_event,
+    FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
+    RuntimeBootstrap, agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};

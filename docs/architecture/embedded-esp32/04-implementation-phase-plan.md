@@ -1,0 +1,257 @@
+# Phase C - Sequential Implementation Phase Plan
+
+This file derives the implementation order from the traced requirements, not from crate names. The program is sequential and exhaustive: each phase either closes its scope or forces an immediate plan update before the next phase begins.
+
+## Phase ladder
+
+| Phase | Goal | Primary spec coverage | Entry gate | Exit gate |
+| --- | --- | --- | --- | --- |
+| Phase 0 | Close external target contracts on real hardware before architecture changes commit the project to bad assumptions. | `REQ-001`, `REQ-002`, `REQ-003`, `CHOKE-001` | Hardware, credentials, and internal probe harness can be executed | All High-criticality matrix rows are closed |
+| Phase 1 | Perform architecture prep and seam extraction without introducing embedded-specific shadow logic. | `REQ-004`, `REQ-005`, `REQ-006`, `CHOKE-002` | Phase 0 passed | Shared transport, persistent-service decoupling, and host-tool glue exist and are test-backed |
+| Phase 2 | Assemble the real embedded surface and ESP backend through the canonical runtime-backed path. | `REQ-007`, `REQ-008`, `REQ-009`, `CHOKE-003` | Phase 1 passed | Embedded runtime path, ESP backend, and embedded profile are all green |
+| Phase 3 | Deliver authoritative user-facing examples that are also full E2E smoke tests. | `REQ-010`, `REQ-011`, `E2E-001`, `E2E-002`, `E2E-003`, `E2E-004`, `E2E-005`, `CHOKE-004` | Phase 2 passed | Examples 036 and 037 pass host-sim and hardware smoke |
+| Final closure | Remove all provisional state from the required scope and freeze artifacts. | `REQ-012` plus every remaining `UNEXECUTED` row | Phase 3 passed | Full RTM and matrix are closed; freeze checklist passes |
+
+## Phase 0 - External contract validation
+
+### Goal
+
+Close the external assumptions that can invalidate the whole program before architecture refactors begin.
+
+### Covers
+
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `CHOKE-001`
+- `ASSUMP-001` through `ASSUMP-011`
+
+### Required outputs
+
+- An internal real-board probe harness under `scripts/live_smoke/esp32-contract-probe/` that emits stable markers.
+- A conscious decision on the fastest sacrificial probe stack for Phase 0, separate from the production implementation stack.
+- Updated matrix verdicts in [02-external-contract-matrix.md](./02-external-contract-matrix.md).
+- Metrics and raw logs stored in a predictable artifact path.
+- A baseline decision confirmation that native embedded remains viable.
+
+### Behavioral done-when
+
+- The single-node probe boots, joins Wi-Fi, syncs time, reaches a provider endpoint, and completes a streamed probe.
+- The probe records peak memory, stack, and latency envelopes.
+- Tool-callback acknowledgement is proven on the board.
+- The swarm probe proves peer discovery, telemetry exchange, and relative-position viability on a multi-node rig.
+- Backend APIs and service endpoints have been exercised from the host before the first target flash that depends on them.
+- No High-criticality assumption remains open.
+
+### Real-entrypoint proof
+
+- `./scripts/live_smoke/esp32-contract-probe/run --mode all --hardware`
+
+### Negative control
+
+- Run the same probe harness with deliberately invalid prerequisites such as bad credentials, missing time sync, or a broken swarm inventory and verify failure markers are emitted deterministically.
+
+### Operational notes
+
+- Phase 0 is allowed to use a sacrificial vendor-native toolchain if it closes external contracts faster.
+- Board or library APIs used in Phase 0 should be verified against actual installed headers or source, not only secondary docs.
+- If the board supports OTA or another low-friction redeploy path, establish it as soon as the first Wi-Fi-enabled flash succeeds.
+- If the run is blocked on a physical prerequisite with no remaining software work, escalate the blocker instead of staying in a noisy polling loop.
+
+### Evidence bundle
+
+- Raw serial log
+- Parsed marker summary
+- Memory and timing report
+- Board identity and environment notes
+- Matrix status updates with artifact paths
+
+## Phase 1 - Architecture prep and seam extraction
+
+### Goal
+
+Fix the accidental coupling that blocks embedded support while keeping the existing ownership model intact.
+
+### Covers
+
+- `REQ-004`
+- `REQ-005`
+- `REQ-006`
+- `INV-001`
+- `INV-002`
+- `CONTRACT-001`
+- `CONTRACT-003`
+- `CONTRACT-004`
+- `CONTRACT-005`
+- `CHOKE-002`
+
+### Required outputs
+
+- Shared provider transport seam in `meerkat-client`
+- Real persistent-session orchestration decoupled from accidental target/backend coupling
+- Shared host-tool callback glue, reusable outside the browser runtime
+- Desktop and unit tests proving no duplicate logic was introduced
+
+### Behavioral done-when
+
+- At least one provider runs through the new transport seam with shared request building and stream parsing.
+- `PersistentSessionService` can be used without implying `redb` as the only durable story.
+- Host-tool callback behavior is preserved outside browser-only code.
+- Architecture review shows no shadow loops, no shadow stores, and no duplicated provider logic.
+
+### Real-entrypoint proof
+
+- The existing host and test harnesses can exercise the extracted transport seam and host-tool contract without any ESP-specific runtime yet.
+
+### Negative control
+
+- Introduce a deliberately incompatible transport or disabled persistent backend in tests and verify that the phase fails at the seam rather than silently bypassing it.
+
+### Evidence bundle
+
+- Green transport-contract tests
+- Green persistent-service feature-graph tests
+- Green host-tool contract tests
+- Architecture review summary keyed to `INV-*` and `CONTRACT-*`
+
+## Phase 2 - Embedded surface and ESP backend
+
+### Goal
+
+Add the real embedded surface and ESP backend through the existing runtime-backed semantics.
+
+### Covers
+
+- `REQ-007`
+- `REQ-008`
+- `REQ-009`
+- `CONTRACT-001`
+- `CONTRACT-002`
+- `CONTRACT-003`
+- `CONTRACT-004`
+- `CONTRACT-005`
+- `E2E-004`
+- `CHOKE-003`
+
+### Required outputs
+
+- `meerkat-embedded-runtime`
+- `meerkat-esp-runtime`
+- Embedded profile definitions and deterministic unsupported-capability behavior
+- ESP storage, bootstrap, transport, and host-tool bindings behind existing seams
+
+### Behavioral done-when
+
+- The embedded surface bootstraps through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
+- The ESP backend satisfies the surface through transport, persistence, and host-tool bindings instead of direct semantic shortcuts.
+- The embedded profile is explicit and test-backed.
+- The surface can be exercised in host-sim mode before hardware smoke.
+
+### Real-entrypoint proof
+
+- `examples/036-esp32-event-agent-sh/examples.sh --mode host-sim`
+
+### Negative control
+
+- Exercise at least one unsupported capability path and verify a stable failure marker or deterministic error instead of silent omission.
+
+### Evidence bundle
+
+- Embedded runtime test suite
+- ESP backend test suite
+- Host-sim smoke logs
+- Unsupported-capability proofs
+
+## Phase 3 - ESP examples as smoke tests
+
+### Goal
+
+Ship the real examples that also serve as authoritative smoke-entrypoints for CI and hardware validation.
+
+### Covers
+
+- `REQ-010`
+- `REQ-011`
+- `E2E-001`
+- `E2E-002`
+- `E2E-003`
+- `E2E-004`
+- `E2E-005`
+- `CHOKE-004`
+
+### Required outputs
+
+- `examples/036-esp32-event-agent-sh`
+- `examples/037-esp32-triangulation-swarm-sh`
+- Host-sim and hardware smoke modes
+- Stable marker protocol and artifact capture
+- A documented low-friction redeploy path for Example 036 when the chosen stack supports it
+- An operator-facing topology report or visualizer for Example 037
+
+### Behavioral done-when
+
+- Example 036 proves the recommended single-node persistent event-agent pattern.
+- Example 037 proves the recommended multi-node triangulation and self-organization pattern.
+- Example 036 documents or demonstrates the best available low-friction redeploy workflow for the chosen stack.
+- Example 037 produces a user-facing topology artifact from the same run data used for validation.
+- Both examples follow the repo-local rebuild pattern and the self-contained real-surface pattern.
+- Both examples run in build-only, host-sim, and hardware smoke modes.
+
+### Real-entrypoint proof
+
+- `./examples/036-esp32-event-agent-sh/examples.sh --mode hardware-smoke`
+- `./examples/037-esp32-triangulation-swarm-sh/examples.sh --mode hardware-smoke`
+
+### Negative control
+
+- Run each example in a misconfigured mode that should fail deterministically and assert that the script exits non-zero with stable failure markers.
+
+### Evidence bundle
+
+- Example READMEs
+- Example scripts
+- Host-sim smoke logs
+- Hardware smoke logs
+- Parsed marker summaries
+- Example 036 redeploy notes or evidence when supported by the stack
+- Example 037 topology report or visualizer output
+
+## Final closure phase
+
+### Goal
+
+Finish the required scope, close any remaining provisional state, and freeze the dossier and evidence set.
+
+### Covers
+
+- `REQ-012`
+- every remaining `UNEXECUTED` row in [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
+
+### Behavioral done-when
+
+- Every `MUST` row in the RTM has a real validation verdict.
+- Every High-criticality matrix row is `LIVE_VALIDATED`.
+- No required-scope item is parked as “do this afterward”.
+- The freeze checklist passes with real artifact links.
+
+### Real-entrypoint proof
+
+- A full hardware smoke sweep of both public examples on the same frozen branch and artifact index.
+
+### Negative control
+
+- Deliberately run the freeze checklist before one required artifact is present and verify that the dossier is treated as not ready.
+
+### Evidence bundle
+
+- Final RTM
+- Final matrix
+- Freeze checklist result
+- Final artifact index
+
+## Phase transition policy
+
+- No phase may start with an open blocker from the preceding phase.
+- A rejected external assumption in Phase 0 stops the program until the plan is revised.
+- A failed choke point in any phase means the phase remains open.
+- There is no backlog lane for core scope. If a required item is not done, the current phase remains active.

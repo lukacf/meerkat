@@ -271,8 +271,11 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
-        let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = 0;
-        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = 0;
+        // Seed from the current feed watermark to avoid replaying historical
+        // completions from a prior runtime loop (e.g., after stop/resume).
+        let initial_watermark = completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0);
+        let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
 
         loop {
             // Build a future for the idle wake. Feed-based if available,

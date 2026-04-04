@@ -723,57 +723,69 @@ impl MobActor {
             let log_id = meerkat_id.clone();
             let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
 
-            let handle = tokio::spawn(async move {
-                let result = provisioner
-                    .start_turn(
-                        &member_ref_cloned,
-                        meerkat_core::service::StartTurnRequest {
-                            prompt,
-                            system_prompt: None,
-                            render_metadata: None,
-                            handling_mode: meerkat_core::types::HandlingMode::Queue,
-                            event_tx: None,
-                            skill_references: None,
-                            flow_tool_overlay: None,
-                            additional_instructions: None,
-                        },
-                    )
-                    .await;
-                match result {
-                    Ok(()) => {
-                        let _ = completion_tx.send(true);
+            let inner_handle: tokio::task::JoinHandle<Result<(), MobError>> =
+                tokio::spawn(async move {
+                    let result = provisioner
+                        .start_turn(
+                            &member_ref_cloned,
+                            meerkat_core::service::StartTurnRequest {
+                                prompt,
+                                system_prompt: None,
+                                render_metadata: None,
+                                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                                event_tx: None,
+                                skill_references: None,
+                                flow_tool_overlay: None,
+                                additional_instructions: None,
+                            },
+                        )
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            let _ = completion_tx.send(true);
+                        }
+                        Err(ref error) => {
+                            tracing::error!(
+                                meerkat_id = %log_id,
+                                error = %error,
+                                "autonomous initial turn failed"
+                            );
+                        }
                     }
-                    Err(ref error) => {
-                        tracing::error!(
-                            meerkat_id = %log_id,
-                            error = %error,
-                            "autonomous initial turn failed"
-                        );
-                        // Do NOT send true — let completion_tx drop, closing
-                        // the channel. Barrier waiters see RecvError.
-                    }
-                }
-            });
+                    result
+                });
 
             // Yield to detect immediate failures (session-not-found, etc.)
             tokio::task::yield_now().await;
-            if handle.is_finished() {
-                if let Err(join_error) = handle.await {
-                    self.teardown_autonomous_runtime(member_ref).await;
-                    return Err(MobError::Internal(format!(
-                        "autonomous initial turn panicked for '{meerkat_id}': {join_error}"
-                    )));
+            if inner_handle.is_finished() {
+                match inner_handle.await {
+                    Ok(Ok(())) => {
+                        // Turn completed immediately and successfully.
+                        return Ok(());
+                    }
+                    Ok(Err(error)) => {
+                        self.teardown_autonomous_runtime(member_ref).await;
+                        return Err(error);
+                    }
+                    Err(join_error) => {
+                        self.teardown_autonomous_runtime(member_ref).await;
+                        return Err(MobError::Internal(format!(
+                            "autonomous initial turn panicked for '{meerkat_id}': {join_error}"
+                        )));
+                    }
                 }
-                // Task completed immediately — turn finished or failed.
-                // In either case, the member is in the roster and the session
-                // is alive. No need to store the handle.
-                return Ok(());
             }
+
+            // Wrap in a JoinHandle<()> for InitialTurnHandle (result already
+            // handled inside the task via completion_tx + logging).
+            let barrier_handle = tokio::spawn(async move {
+                let _ = inner_handle.await;
+            });
 
             self.autonomous_initial_turns.lock().await.insert(
                 meerkat_id.clone(),
                 InitialTurnHandle {
-                    handle,
+                    handle: barrier_handle,
                     completion_rx,
                 },
             );

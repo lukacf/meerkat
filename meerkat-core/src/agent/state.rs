@@ -489,7 +489,9 @@ where
                     );
                     if let Some(ref feed) = self.completion_feed {
                         let batch = feed.list_since(self.applied_cursor);
-                        for entry in &batch.entries {
+                        for entry in batch.entries.iter().filter(|e| {
+                            e.kind == crate::ops_lifecycle::OperationKind::BackgroundToolOp
+                        }) {
                             let enrichment = self
                                 .completion_enrichment
                                 .as_ref()
@@ -512,21 +514,11 @@ where
                                 detail: detail.clone(),
                             });
 
-                            let kind_label = match entry.kind {
-                                crate::ops_lifecycle::OperationKind::BackgroundToolOp => {
-                                    "Background job"
-                                }
-                                crate::ops_lifecycle::OperationKind::MobMemberChild => {
-                                    "Delegated task"
-                                }
-                            };
                             let mut notice = format!(
-                                "{BG_JOB_PREFIX}{kind_label} `{}` (id={}) {}: {}",
+                                "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
                                 entry.display_name, job_id, status_str, detail,
                             );
-                            if entry.kind == crate::ops_lifecycle::OperationKind::BackgroundToolOp {
-                                notice.push_str("\nUse shell_job_status to get the full output.");
-                            }
+                            notice.push_str("\nUse shell_job_status to get the full output.");
                             self.session.push(Message::User(UserMessage::text(notice)));
                         }
                         self.applied_cursor = batch.watermark;

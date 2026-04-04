@@ -12190,10 +12190,9 @@ async fn test_spawn_without_initial_message_uses_default() {
 
 #[tokio::test]
 async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
-    // No-adapter fallback: start_turn errors in the background task are logged
-    // but not surfaced as spawn failures (only panics are detected via
-    // yield_now + is_finished). The member stays in the roster.
-    // NOTE: The runtime-adapter path (tested elsewhere) DOES surface errors.
+    // No-adapter fallback: immediate start_turn errors are now surfaced via
+    // the Result-returning spawned task + yield_now() fast-path detection.
+    // Immediate failures propagate and trigger spawn rollback.
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_fail_start_turn(true);
 
@@ -12201,25 +12200,9 @@ async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-fail"), None)
         .await;
 
-    // In the no-adapter fallback, the background task swallows start_turn
-    // errors (logs them). Spawn succeeds but the turn silently failed.
     assert!(
-        result.is_ok(),
-        "no-adapter fallback spawn returns Ok even when start_turn fails (error is logged, not surfaced): {result:?}"
-    );
-    assert!(
-        handle
-            .get_member(&MeerkatId::from("w-fail"))
-            .await
-            .is_some(),
-        "member stays in roster — start_turn failure is not propagated to spawn"
-    );
-    // Verify the start_turn was actually attempted.
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(
-        service.keep_alive_start_turn_call_count(),
-        1,
-        "start_turn should have been attempted"
+        result.is_err(),
+        "no-adapter fallback spawn should propagate immediate start_turn failures: {result:?}"
     );
 }
 

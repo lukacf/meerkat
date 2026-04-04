@@ -172,9 +172,17 @@ impl BuiltinTool for WaitTool {
         ) {
             let baseline = baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
 
-            // Check for already-pending BackgroundToolOp completions
+            // Check for already-pending completions.
+            // Advance the baseline atomically so concurrent waits in the same
+            // turn don't re-fire on the same completion.
             let (has_completions, watermark) = check_feed_for_completions(feed.as_ref(), baseline);
             if has_completions {
+                let _ = baseline_atomic.compare_exchange(
+                    baseline,
+                    watermark,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                );
                 return Ok(ToolOutput::Json(json!({
                     "waited_seconds": 0.0,
                     "requested_seconds": seconds,

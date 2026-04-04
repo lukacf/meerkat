@@ -49,6 +49,7 @@ pub struct AgentBuilder {
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
+    pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
 }
 
 impl AgentBuilder {
@@ -80,6 +81,7 @@ impl AgentBuilder {
             default_event_tx: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
+            epoch_cursor_state: None,
         }
     }
 
@@ -252,11 +254,20 @@ impl AgentBuilder {
             system_context_state,
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
-            // Seed from the current feed watermark to avoid replaying retained
+            // Seed from epoch cursor state if available (runtime-backed surfaces),
+            // otherwise fall back to the feed watermark to avoid replaying retained
             // completions from prior agent lifetimes (stop/resume, live reattach).
             // Same pattern as runtime_loop.rs line 276. Computed before move.
-            applied_cursor: self.completion_feed.as_ref().map_or(0, |f| f.watermark()),
+            applied_cursor: self
+                .epoch_cursor_state
+                .as_ref()
+                .map(|cs| {
+                    cs.agent_applied_cursor
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .unwrap_or_else(|| self.completion_feed.as_ref().map_or(0, |f| f.watermark())),
             completion_feed: self.completion_feed,
+            epoch_cursor_state: self.epoch_cursor_state,
             interrupt_baseline: self.interrupt_baseline,
             completion_enrichment: self.completion_enrichment,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
@@ -395,6 +406,15 @@ impl AgentBuilder {
         resolver: Arc<dyn ModelOperationalDefaultsResolver>,
     ) -> Self {
         self.model_defaults_resolver = Some(resolver);
+        self
+    }
+
+    /// Set the shared epoch cursor state for runtime-backed cursor writeback.
+    pub fn with_epoch_cursor_state(
+        mut self,
+        state: Arc<crate::runtime_epoch::EpochCursorState>,
+    ) -> Self {
+        self.epoch_cursor_state = Some(state);
         self
     }
 

@@ -2020,6 +2020,9 @@ impl AgentFactory {
             builder = builder.with_blob_store(blob_store);
         }
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
+        if let RuntimeBuildMode::SessionOwned(ref bindings) = resolved_mode {
+            builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
+        }
 
         // 12h. Wire completion feed + baseline + enrichment for cursor-based delivery
         if let Some(feed) = completion_feed {

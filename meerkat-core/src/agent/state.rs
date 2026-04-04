@@ -523,6 +523,10 @@ where
                             self.session.push(Message::User(UserMessage::text(notice)));
                         }
                         self.applied_cursor = batch.watermark;
+                        if let Some(ref cs) = self.epoch_cursor_state {
+                            cs.agent_applied_cursor
+                                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+                        }
 
                         // Stamp the interrupt baseline so the wait tool only
                         // reacts to completions that arrive AFTER this point.

@@ -29,6 +29,9 @@ mod inner {
         TableDefinition::new("runtime_session_snapshots");
     /// Table: runtime_id → RuntimeState JSON
     const RUNTIME_STATES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("runtime_states");
+    /// Table: runtime_id → PersistedOpsSnapshot JSON
+    const OPS_LIFECYCLE_STATE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("runtime_ops_lifecycle");
 
     /// Key prefix length for runtime ID (stored as UTF-8 length-prefixed).
     fn runtime_prefix(runtime_id: &LogicalRuntimeId) -> Vec<u8> {
@@ -75,6 +78,9 @@ mod inner {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
                 let _ = write_txn.open_table(RUNTIME_STATES).map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
+                })?;
+                let _ = write_txn.open_table(OPS_LIFECYCLE_STATE).map_err(|e| {
                     RuntimeStoreError::WriteFailed(format!("Failed to create table: {e}"))
                 })?;
             }
@@ -578,6 +584,70 @@ mod inner {
                     RuntimeStoreError::WriteFailed(format!("Failed to commit: {e}"))
                 })?;
                 Ok(())
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), RuntimeStoreError> {
+            let db = self.db.clone();
+            let key = runtime_prefix(runtime_id);
+            let value = serde_json::to_vec(snapshot)
+                .map_err(|e| RuntimeStoreError::WriteFailed(e.to_string()))?;
+
+            tokio::task::spawn_blocking(move || {
+                let write_txn = db.begin_write().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to begin write: {e}"))
+                })?;
+                {
+                    let mut table = write_txn.open_table(OPS_LIFECYCLE_STATE).map_err(|e| {
+                        RuntimeStoreError::WriteFailed(format!("Failed to open table: {e}"))
+                    })?;
+                    table
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(|e| {
+                            RuntimeStoreError::WriteFailed(format!("Failed to insert: {e}"))
+                        })?;
+                }
+                write_txn.commit().map_err(|e| {
+                    RuntimeStoreError::WriteFailed(format!("Failed to commit: {e}"))
+                })?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
+            let db = self.db.clone();
+            let key = runtime_prefix(runtime_id);
+
+            tokio::task::spawn_blocking(move || {
+                let read_txn = db.begin_read().map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to begin read: {e}"))
+                })?;
+                let table = read_txn.open_table(OPS_LIFECYCLE_STATE).map_err(|e| {
+                    RuntimeStoreError::ReadFailed(format!("Failed to open table: {e}"))
+                })?;
+                match table.get(key.as_slice()) {
+                    Ok(Some(data)) => {
+                        let snapshot = serde_json::from_slice(data.value()).map_err(|e| {
+                            RuntimeStoreError::ReadFailed(format!("Failed to deserialize: {e}"))
+                        })?;
+                        Ok(Some(snapshot))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(RuntimeStoreError::ReadFailed(format!(
+                        "Failed to read ops lifecycle: {e}"
+                    ))),
+                }
             })
             .await
             .map_err(|e| RuntimeStoreError::Internal(format!("Task join failed: {e}")))?

@@ -171,6 +171,25 @@ pub trait RuntimeStore: Send + Sync {
         runtime_state: RuntimeState,
         input_states: &[InputState],
     ) -> Result<(), RuntimeStoreError>;
+
+    /// Persist a snapshot of the ops lifecycle registry state.
+    async fn persist_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = (runtime_id, snapshot);
+        Ok(())
+    }
+
+    /// Load a previously persisted ops lifecycle snapshot.
+    async fn load_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
+        let _ = runtime_id;
+        Ok(None)
+    }
 }
 
 pub use memory::InMemoryRuntimeStore;

@@ -443,11 +443,67 @@ impl RuntimeSessionAdapter {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return;
         }
+
+        // Try to recover ops lifecycle from durable store (if persistent).
+        let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
+        let (ops_lifecycle, epoch_id, cursor_state) = if let Some(ref store) = self.store {
+            match store.load_ops_lifecycle(&runtime_id).await {
+                Ok(Some(snapshot)) => {
+                    let recovered_epoch = snapshot.epoch_id.clone();
+                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
+                        snapshot.cursors.agent_applied_cursor,
+                        snapshot.cursors.runtime_observed_seq,
+                        snapshot.cursors.runtime_last_injected_seq,
+                    );
+                    let recovered_ops_count = snapshot.completion_entries.len();
+                    let registry =
+                        crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+                    tracing::info!(
+                        %session_id,
+                        epoch_id = %recovered_epoch,
+                        recovered_ops = recovered_ops_count,
+                        "ops lifecycle recovered from durable store (same epoch)"
+                    );
+                    (
+                        Arc::new(registry),
+                        recovered_epoch,
+                        Arc::new(recovered_cursors),
+                    )
+                }
+                Ok(None) => {
+                    tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
+                    (
+                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                        meerkat_core::RuntimeEpochId::new(),
+                        Arc::new(meerkat_core::EpochCursorState::new()),
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %err,
+                        "failed to load ops lifecycle; epoch rotated"
+                    );
+                    (
+                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                        meerkat_core::RuntimeEpochId::new(),
+                        Arc::new(meerkat_core::EpochCursorState::new()),
+                    )
+                }
+            }
+        } else {
+            (
+                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                meerkat_core::RuntimeEpochId::new(),
+                Arc::new(meerkat_core::EpochCursorState::new()),
+            )
+        };
+
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
-            ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-            epoch_id: meerkat_core::RuntimeEpochId::new(),
-            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+            ops_lifecycle,
+            epoch_id,
+            cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
             detached_wake: None,
@@ -612,11 +668,55 @@ impl RuntimeSessionAdapter {
         let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
         ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
+        // Wire persistence channel if a durable store is available.
+        if let Some(ref store) = self.store {
+            let (persist_tx, mut persist_rx) =
+                crate::tokio::sync::mpsc::channel::<crate::ops_lifecycle::PersistedOpsSnapshot>(16);
+            let entry_epoch_id = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(&session_id)
+                    .map(|e| e.epoch_id.clone())
+                    .unwrap_or_else(meerkat_core::RuntimeEpochId::new)
+            };
+            let entry_cursor = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(&session_id)
+                    .map(|e| Arc::clone(&e.cursor_state))
+                    .unwrap_or_else(|| Arc::new(meerkat_core::EpochCursorState::new()))
+            };
+            ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
+
+            // Spawn persistence task
+            let store_clone = Arc::clone(store);
+            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
+            crate::tokio::spawn(async move {
+                while let Some(snapshot) = persist_rx.recv().await {
+                    if let Err(e) = store_clone
+                        .persist_ops_lifecycle(&runtime_id, &snapshot)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to persist ops lifecycle snapshot"
+                        );
+                    }
+                }
+            });
+        }
+
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
+        let entry_cursor_state = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .map(|e| Arc::clone(&e.cursor_state))
+        };
         let mut pending_loop_handle =
             Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
                 driver.clone(),
@@ -626,6 +726,7 @@ impl RuntimeSessionAdapter {
                 Some(completions.clone()),
                 Some(Arc::clone(&detached_wake_state)),
                 Some(completion_feed),
+                entry_cursor_state,
             ));
 
         let (published, detach_after_abort) = {

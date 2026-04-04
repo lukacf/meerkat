@@ -248,6 +248,12 @@ struct ShellState {
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
     /// Shared feed buffer for completion events.
     feed_buffer: Arc<FeedBuffer>,
+    /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
+    persist_tx: Option<crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>>,
+    /// Epoch ID for persistence snapshots.
+    persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
+    /// Shared cursor state for persistence snapshots.
+    persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
 }
 
 impl ShellState {
@@ -262,6 +268,9 @@ impl ShellState {
             // so the buffer must be large enough that consumers drain before
             // the oldest entry is evicted.
             feed_buffer: Arc::new(FeedBuffer::new(max_completed.saturating_mul(4).max(1024))),
+            persist_tx: None,
+            persist_epoch_id: None,
+            persist_cursor_state: None,
         }
     }
 
@@ -409,6 +418,49 @@ impl ShellState {
         }
     }
 
+    /// Queue a persistence snapshot if a persistence channel is wired.
+    ///
+    /// Called after terminal transitions. Captures authority + entries + cursors
+    /// under the write lock (caller already holds it) and queues to the channel.
+    fn maybe_persist(&self) {
+        let (tx, epoch_id, cursor_state) = match (
+            &self.persist_tx,
+            &self.persist_epoch_id,
+            &self.persist_cursor_state,
+        ) {
+            (Some(tx), Some(epoch_id), Some(cs)) => (tx, epoch_id, cs),
+            _ => return,
+        };
+
+        let operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec> =
+            self.records
+                .iter()
+                .map(|(id, record)| (id.clone(), record.spec.clone()))
+                .collect();
+
+        let completion_entries = {
+            let inner = self
+                .feed_buffer
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.entries.iter().cloned().collect()
+        };
+
+        let snapshot = PersistedOpsSnapshot {
+            epoch_id: epoch_id.clone(),
+            authority_state: self.authority.canonical_state().clone(),
+            operation_specs,
+            completion_entries,
+            cursors: cursor_state.snapshot(),
+        };
+
+        // Non-blocking send — bounded-loss is the acknowledged contract.
+        if tx.try_send(snapshot).is_err() {
+            tracing::warn!("ops lifecycle persistence channel full or closed; snapshot dropped");
+        }
+    }
+
     fn shell_record_mut(
         &mut self,
         id: &OperationId,
@@ -497,6 +549,24 @@ impl RuntimeOpsLifecycleRegistry {
         }
     }
 
+    /// Wire a persistence channel for durable snapshot writes.
+    ///
+    /// After this call, terminal transitions (complete/fail/cancel/abort)
+    /// capture a snapshot and queue it to the channel. A dedicated
+    /// persistence task should drain the channel and write to the store.
+    pub fn set_persistence_channel(
+        &self,
+        tx: crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        cursor_state: Arc<meerkat_core::EpochCursorState>,
+    ) {
+        if let Ok(mut state) = self.state.write() {
+            state.persist_tx = Some(tx);
+            state.persist_epoch_id = Some(epoch_id);
+            state.persist_cursor_state = Some(cursor_state);
+        }
+    }
+
     /// Wire the detached-wake state so that `execute_effects` arms pending
     /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
     pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
@@ -551,6 +621,9 @@ impl RuntimeOpsLifecycleRegistry {
             pending_wait: None,
             detached_wake: None,
             feed_buffer,
+            persist_tx: None,
+            persist_epoch_id: None,
+            persist_cursor_state: None,
         };
 
         Self {
@@ -852,6 +925,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Completed(result));
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -868,6 +942,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -889,6 +964,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Aborted { reason });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -909,6 +985,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Cancelled { reason });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 

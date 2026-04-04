@@ -746,6 +746,8 @@ where
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Optional completion feed for cursor-based completion delivery.
     pub(crate) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
+    /// Shared epoch cursor state for runtime-backed cursor writeback.
+    pub(crate) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     /// Local cursor into the completion feed — only the agent boundary advances this.
     pub(crate) applied_cursor: crate::completion_feed::CompletionSeq,
     /// Shared baseline for the wait tool's interrupt check.

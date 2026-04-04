@@ -268,14 +268,42 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     completions: Option<crate::session_adapter::SharedCompletionRegistry>,
     detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
-        // Seed from the current feed watermark to avoid replaying historical
+        // Seed from epoch cursor state if available (runtime-backed surfaces),
+        // otherwise fall back to the feed watermark to avoid replaying historical
         // completions from a prior runtime loop (e.g., after stop/resume).
-        let initial_watermark = completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0);
+        let initial_watermark = epoch_cursor_state
+            .as_ref()
+            .map(|cs| {
+                let obs = cs
+                    .runtime_observed_seq
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let inj = cs
+                    .runtime_last_injected_seq
+                    .load(std::sync::atomic::Ordering::Acquire);
+                // Use the max of observed/injected as the initial watermark only
+                // if non-zero (recovered state); otherwise fall back to feed.
+                let recovered = obs.max(inj);
+                if recovered > 0 {
+                    recovered
+                } else {
+                    completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0)
+                }
+            })
+            .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
-        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq =
+            epoch_cursor_state
+                .as_ref()
+                .map(|cs| {
+                    cs.runtime_last_injected_seq
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .filter(|&v| v > 0)
+                .unwrap_or(initial_watermark);
 
         loop {
             // Build a future for the idle wake. Feed-based if available,
@@ -331,6 +359,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 detached_wake.as_ref(),
                                 &mut observed_seq,
                                 &mut last_injected_seq,
+                                epoch_cursor_state.as_deref(),
                             )
                             .await
                                 && process_queue(
@@ -374,10 +403,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 let mut d = driver.lock().await;
                                 if d.as_driver_mut().accept_input(input).await.is_ok() {
                                     last_injected_seq = batch.watermark;
+                                    if let Some(ref cs) = epoch_cursor_state {
+                                        cs.runtime_last_injected_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                                    }
                                 }
                                 // Advance cursor only after successful injection
                                 // or when quiescent (no pending BG work to retry).
                                 observed_seq = batch.watermark;
+                                if let Some(ref cs) = epoch_cursor_state {
+                                    cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                                }
                                 drop(d);
                                 if process_queue(
                                     &driver,
@@ -397,6 +432,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             // No new BG completions — advance to prevent hot-spin
                             // on non-BG entries (MobMemberChild, etc.).
                             observed_seq = batch.watermark;
+                            if let Some(ref cs) = epoch_cursor_state {
+                                cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                            }
                         }
                     } else if let Some(ref state) = detached_wake
                         && state.pending.load(std::sync::atomic::Ordering::Acquire)
@@ -444,6 +482,7 @@ async fn maybe_inject_feed_wake(
     wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
     last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
+    epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
 ) -> bool {
     if let Some(feed) = feed {
         let batch = feed.list_since(*observed_seq);
@@ -457,6 +496,10 @@ async fn maybe_inject_feed_wake(
             // No new BG completions — advance to prevent hot-spin
             // on non-BG entries (MobMemberChild, etc.).
             *observed_seq = batch.watermark;
+            if let Some(cs) = epoch_cursor_state {
+                cs.runtime_observed_seq
+                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
+            }
             return false;
         }
 
@@ -475,9 +518,17 @@ async fn maybe_inject_feed_wake(
         let mut d = driver.lock().await;
         if d.as_driver_mut().accept_input(input).await.is_ok() {
             *last_injected_seq = batch.watermark;
+            if let Some(cs) = epoch_cursor_state {
+                cs.runtime_last_injected_seq
+                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
+            }
         }
         // Advance cursor after injection attempt (quiescent path).
         *observed_seq = batch.watermark;
+        if let Some(cs) = epoch_cursor_state {
+            cs.runtime_observed_seq
+                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+        }
         true
     } else {
         // Legacy DetachedWakeState path

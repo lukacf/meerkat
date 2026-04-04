@@ -361,11 +361,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 && e.seq > last_injected_seq
                         });
 
-                        // Always advance observed_seq to prevent hot-spin.
-                        // The last_injected_seq guard prevents duplicate injection
-                        // when the session becomes quiescent on a future wake.
-                        observed_seq = batch.watermark;
-
                         if has_new_bg_completion {
                             // Verify quiescence before injecting.
                             let d = driver.lock().await;
@@ -380,6 +375,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 if d.as_driver_mut().accept_input(input).await.is_ok() {
                                     last_injected_seq = batch.watermark;
                                 }
+                                // Advance cursor only after successful injection
+                                // or when quiescent (no pending BG work to retry).
+                                observed_seq = batch.watermark;
                                 drop(d);
                                 if process_queue(
                                     &driver,
@@ -392,6 +390,13 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     break;
                                 }
                             }
+                            // Non-quiescent: do NOT advance observed_seq.
+                            // The completion stays visible for the next wake
+                            // so it's not permanently lost.
+                        } else {
+                            // No new BG completions — advance to prevent hot-spin
+                            // on non-BG entries (MobMemberChild, etc.).
+                            observed_seq = batch.watermark;
                         }
                     } else if let Some(ref state) = detached_wake
                         && state.pending.load(std::sync::atomic::Ordering::Acquire)
@@ -448,16 +453,18 @@ async fn maybe_inject_feed_wake(
                 && e.seq > *last_injected_seq
         });
 
-        // Always advance observed_seq to prevent hot-spin on non-quiescent sessions.
-        *observed_seq = batch.watermark;
-
         if !has_new_bg_completion {
+            // No new BG completions — advance to prevent hot-spin
+            // on non-BG entries (MobMemberChild, etc.).
+            *observed_seq = batch.watermark;
             return false;
         }
 
         // Verify quiescence before injecting.
         let d = driver.lock().await;
         if !d.is_quiescent_for_detached_wake() {
+            // Non-quiescent: do NOT advance observed_seq. The completion
+            // stays visible for the next wake so it's not permanently lost.
             return false;
         }
         drop(d);
@@ -467,10 +474,11 @@ async fn maybe_inject_feed_wake(
         );
         let mut d = driver.lock().await;
         if d.as_driver_mut().accept_input(input).await.is_ok() {
-            *last_injected_seq = *observed_seq;
-            return true;
+            *last_injected_seq = batch.watermark;
         }
-        false
+        // Advance cursor after injection attempt (quiescent path).
+        *observed_seq = batch.watermark;
+        true
     } else {
         // Legacy DetachedWakeState path
         let Some(state) = wake_state else {

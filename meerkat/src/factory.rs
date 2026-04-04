@@ -1559,6 +1559,8 @@ impl AgentFactory {
         //
         // BindOutcome::was_bound() tells the factory whether to wire
         // side effects (e.g. actionable-notify bridge task).
+        #[allow(unused_mut)]
+        let mut bind_succeeded_wait = false;
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
@@ -1578,7 +1580,7 @@ impl AgentFactory {
                         None::<meerkat_core::wait_interrupt::WaitInterrupt>,
                     );
 
-                    let bind_succeeded = if !tools.capabilities().wait_interrupt {
+                    bind_succeeded_wait = if !tools.capabilities().wait_interrupt {
                         tracing::debug!("Dispatcher does not support wait interrupt binding");
                         false
                     } else if Arc::strong_count(&tools) == 1 {
@@ -1596,7 +1598,7 @@ impl AgentFactory {
                         false
                     };
 
-                    if bind_succeeded {
+                    if bind_succeeded_wait {
                         #[cfg(not(target_arch = "wasm32"))]
                         tokio::spawn(async move {
                             loop {
@@ -1636,19 +1638,17 @@ impl AgentFactory {
             }
         }
 
-        // Bind completion feed when comms didn't already wire it.
+        // Bind completion feed when comms wait binding didn't already wire it.
+        // Use the actual bind result, not comms_runtime.is_some() — the comms
+        // runtime can exist while bind_wait_interrupt was skipped (shared
+        // dispatcher, no capability, etc.).
         {
-            let comms_bound_wait = {
-                #[cfg(feature = "comms")]
-                {
-                    comms_runtime.is_some()
-                }
-                #[cfg(not(feature = "comms"))]
-                {
-                    false
-                }
-            };
-            if !comms_bound_wait
+            #[cfg(feature = "comms")]
+            let comms_wired_feed = bind_succeeded_wait;
+            #[cfg(not(feature = "comms"))]
+            let comms_wired_feed = false;
+
+            if !comms_wired_feed
                 && tools.capabilities().completion_feed
                 && Arc::strong_count(&tools) == 1
                 && let (Some(feed), Some(baseline)) =

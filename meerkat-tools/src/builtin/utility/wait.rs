@@ -128,7 +128,14 @@ fn check_feed_for_completions(
     after_seq: CompletionSeq,
 ) -> (bool, CompletionSeq) {
     let batch = feed.list_since(after_seq);
-    let has_completions = !batch.entries.is_empty();
+    // Only BackgroundToolOp completions interrupt wait. MobMemberChild
+    // completions surface through the comms terminal-response path,
+    // not through the wait tool. Same filter as CallingLlm boundary
+    // (state.rs) and idle wake (runtime_loop.rs).
+    let has_completions = batch
+        .entries
+        .iter()
+        .any(|e| e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp);
     (has_completions, batch.watermark)
 }
 
@@ -170,7 +177,7 @@ impl BuiltinTool for WaitTool {
             self.completion_feed.as_ref(),
             self.interrupt_baseline.as_ref(),
         ) {
-            let baseline = baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
+            let mut baseline = baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
 
             // Check for already-pending completions.
             // Only the first concurrent wait to win the CAS returns interrupted.
@@ -248,6 +255,26 @@ impl BuiltinTool for WaitTool {
                                 check_feed_for_completions(feed.as_ref(), observed);
                             observed = new_observed;
                             if has_completions {
+                                // CAS claim: only the first concurrent wait to
+                                // advance the baseline returns interrupted. Losers
+                                // continue waiting for NEW completions. Same
+                                // pattern as the pre-check CAS above.
+                                if baseline_atomic
+                                    .compare_exchange(
+                                        baseline,
+                                        new_observed,
+                                        std::sync::atomic::Ordering::AcqRel,
+                                        std::sync::atomic::Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    // Another concurrent wait already claimed this
+                                    // completion. Update our local baseline and
+                                    // continue waiting.
+                                    baseline =
+                                        baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
+                                    continue;
+                                }
                                 let waited = start.elapsed().as_secs_f64();
                                 return Ok(ToolOutput::Json(json!({
                                     "waited_seconds": waited,
@@ -290,6 +317,21 @@ impl BuiltinTool for WaitTool {
                                 check_feed_for_completions(feed.as_ref(), observed);
                             observed = new_observed;
                             if has_completions {
+                                // CAS claim for concurrent wait dedup (same
+                                // pattern as the comms+feed branch above).
+                                if baseline_atomic
+                                    .compare_exchange(
+                                        baseline,
+                                        new_observed,
+                                        std::sync::atomic::Ordering::AcqRel,
+                                        std::sync::atomic::Ordering::Acquire,
+                                    )
+                                    .is_err()
+                                {
+                                    baseline =
+                                        baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
+                                    continue;
+                                }
                                 let waited = start.elapsed().as_secs_f64();
                                 return Ok(ToolOutput::Json(json!({
                                     "waited_seconds": waited,

@@ -17,9 +17,9 @@
 //!   CompleteOperation, FailOperation, CancelOperation, RetireRequested,
 //!   RetireCompleted, CollectTerminal, OwnerTerminated, BeginWaitAll,
 //!   CancelWaitAll
-//! - 8 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
+//! - 9 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
 //!   RetainTerminalRecord, EvictCompletedRecord, WaitAllSatisfied,
-//!   CollectCompletedResult, ConcurrencyLimitExceeded
+//!   CollectCompletedResult, ConcurrencyLimitExceeded, CompletionProduced
 
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::ops_lifecycle::{
@@ -118,6 +118,15 @@ pub(crate) enum OpsLifecycleEffect {
     },
     /// Evict a completed operation from retention.
     EvictCompletedRecord { operation_id: OperationId },
+    /// A completion was produced with a monotonic sequence number.
+    ///
+    /// Emitted alongside `RetainTerminalRecord` whenever an operation reaches
+    /// terminal status. The shell writes this entry into the feed buffer.
+    CompletionProduced {
+        seq: meerkat_core::completion_feed::CompletionSeq,
+        operation_id: OperationId,
+        kind: OperationKind,
+    },
     /// All specified operations have reached terminal status.
     ///
     /// Handoff protocol: `ops_barrier_satisfaction` — the shell routes this
@@ -263,6 +272,8 @@ struct RegistryCanonicalState {
     wait_request_id: Option<WaitRequestId>,
     /// Operation IDs tracked by the active barrier wait.
     wait_operation_ids: Vec<OperationId>,
+    /// Monotonic sequence counter for completion feed entries.
+    next_completion_seq: meerkat_core::completion_feed::CompletionSeq,
 }
 
 impl RegistryCanonicalState {
@@ -275,6 +286,7 @@ impl RegistryCanonicalState {
             active_count: 0,
             wait_request_id: None,
             wait_operation_ids: Vec::new(),
+            next_completion_seq: 0,
         }
     }
 }
@@ -548,6 +560,10 @@ impl OpsLifecycleAuthority {
             });
         }
 
+        let kind = op.kind;
+        let seq = self.state.next_completion_seq + 1;
+        self.state.next_completion_seq = seq;
+
         let mut effects = vec![
             OpsLifecycleEffect::SubmitOpEvent {
                 operation_id: operation_id.clone(),
@@ -560,6 +576,11 @@ impl OpsLifecycleAuthority {
             OpsLifecycleEffect::RetainTerminalRecord {
                 operation_id: operation_id.clone(),
                 terminal_outcome: terminal_outcome.clone(),
+            },
+            OpsLifecycleEffect::CompletionProduced {
+                seq,
+                operation_id: operation_id.clone(),
+                kind,
             },
         ];
 
@@ -914,6 +935,10 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
 
                 for id in &to_terminate {
                     if let Some(op) = self.state.operations.get_mut(id) {
+                        let kind = op.kind;
+                        let seq = self.state.next_completion_seq + 1;
+                        self.state.next_completion_seq = seq;
+
                         let outcome = OperationTerminalOutcome::Terminated {
                             reason: String::new(),
                         };
@@ -928,6 +953,11 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
                         effects.push(OpsLifecycleEffect::RetainTerminalRecord {
                             operation_id: id.clone(),
                             terminal_outcome: outcome,
+                        });
+                        effects.push(OpsLifecycleEffect::CompletionProduced {
+                            seq,
+                            operation_id: id.clone(),
+                            kind,
                         });
                     }
                     self.state.completed_order.push_back(id.clone());

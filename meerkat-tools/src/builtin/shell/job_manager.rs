@@ -1123,6 +1123,35 @@ impl Drop for SyncSlotGuard {
     }
 }
 
+impl meerkat_core::completion_feed::CompletionEnrichmentProvider for JobManager {
+    fn enrich(
+        &self,
+        operation_id: &OperationId,
+    ) -> Option<meerkat_core::completion_feed::CompletionEnrichmentData> {
+        // Reverse-lookup: find which job_id maps to this operation_id.
+        let canonical = self
+            .canonical_job_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let job_id = canonical
+            .iter()
+            .find(|(_, oid)| *oid == operation_id)
+            .map(|(jid, _)| jid.clone())?;
+        drop(canonical);
+
+        // Try to read the job record. The jobs map uses a tokio::Mutex, so
+        // we use try_lock (sync context). If contended, return None — the
+        // caller will use fallback display.
+        let jobs = self.jobs.try_lock().ok()?;
+        let record = jobs.get(&job_id)?;
+        let detail = Self::build_completion_detail(&record.view);
+        Some(meerkat_core::completion_feed::CompletionEnrichmentData {
+            job_id: job_id.to_string(),
+            detail,
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

@@ -267,18 +267,25 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     >,
     completions: Option<crate::session_adapter::SharedCompletionRegistry>,
     detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
+    completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Feed-based idle wake state (local to this loop).
+        // Seed from the current feed watermark to avoid replaying historical
+        // completions from a prior runtime loop (e.g., after stop/resume).
+        let initial_watermark = completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0);
+        let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
+
         loop {
-            // Build a future for the detached-wake Notify if present.
-            // When a BackgroundToolOp completes, the ops lifecycle fires
-            // notify_one(). We select on it here to inject a ContinuationInput
-            // directly, eliminating the need for a separate waker task.
-            let detached_notified = async {
-                if let Some(ref state) = detached_wake {
+            // Build a future for the idle wake. Feed-based if available,
+            // otherwise falls back to DetachedWakeState Notify.
+            let idle_wake = async {
+                if let Some(ref feed) = completion_feed {
+                    feed.wait_for_advance(observed_seq).await;
+                } else if let Some(ref state) = detached_wake {
                     state.notify.notified().await;
                 } else {
-                    // No detached wake configured — never resolves.
                     std::future::pending::<()>().await;
                 }
             };
@@ -315,26 +322,86 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
-                            // Secondary wake path: re-check detached wake after
-                            // queue drain in case a completion arrived mid-turn.
-                            // The primary path is the `detached_notified` select
-                            // arm above (fires from idle). This secondary path
-                            // catches completions that arrive while the session
-                            // is already running — the select arm can't fire
-                            // during process_queue because biased select won't
-                            // poll lower arms while wake_rx is active. Both
-                            // paths coalesce: Notify permits are idempotent.
-                            maybe_signal_detached_wake(&driver, detached_wake.as_ref()).await;
+                            // Secondary wake path: re-check after queue drain.
+                            // If a completion arrived during process_queue, inject
+                            // and immediately process the continuation.
+                            if maybe_inject_feed_wake(
+                                &driver,
+                                completion_feed.as_deref(),
+                                detached_wake.as_ref(),
+                                &mut observed_seq,
+                                &mut last_injected_seq,
+                            )
+                            .await
+                                && process_queue(
+                                    &driver,
+                                    &mut *executor,
+                                    &mut control_rx,
+                                    completions.as_ref(),
+                                )
+                                .await
+                            {
+                                break;
+                            }
                         }
                         None => break,
                     }
                 }
-                () = detached_notified => {
-                    // A BackgroundToolOp completed while idle. Inject a
-                    // ContinuationInput into the driver and process it.
-                    if let Some(ref state) = detached_wake
+                () = idle_wake => {
+                    // A completion arrived while idle. Check if it's a
+                    // BackgroundToolOp that hasn't been injected yet.
+                    // Only BackgroundToolOp triggers idle wake — MobMemberChild
+                    // completions already wake through comms terminal response.
+                    if let Some(ref feed) = completion_feed {
+                        let batch = feed.list_since(observed_seq);
+
+                        let has_new_bg_completion = batch.entries.iter().any(|e| {
+                            e.kind
+                                == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
+                                && e.seq > last_injected_seq
+                        });
+
+                        if has_new_bg_completion {
+                            // Verify quiescence before injecting.
+                            let d = driver.lock().await;
+                            let quiescent = d.is_quiescent_for_detached_wake();
+                            drop(d);
+
+                            if quiescent {
+                                let input = crate::input::Input::Continuation(
+                                    crate::input::ContinuationInput::detached_background_op_completed(),
+                                );
+                                let mut d = driver.lock().await;
+                                if d.as_driver_mut().accept_input(input).await.is_ok() {
+                                    last_injected_seq = batch.watermark;
+                                }
+                                // Advance cursor only after successful injection
+                                // or when quiescent (no pending BG work to retry).
+                                observed_seq = batch.watermark;
+                                drop(d);
+                                if process_queue(
+                                    &driver,
+                                    &mut *executor,
+                                    &mut control_rx,
+                                    completions.as_ref(),
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            // Non-quiescent: do NOT advance observed_seq.
+                            // The completion stays visible for the next wake
+                            // so it's not permanently lost.
+                        } else {
+                            // No new BG completions — advance to prevent hot-spin
+                            // on non-BG entries (MobMemberChild, etc.).
+                            observed_seq = batch.watermark;
+                        }
+                    } else if let Some(ref state) = detached_wake
                         && state.pending.load(std::sync::atomic::Ordering::Acquire)
                     {
+                        // Legacy detached wake path (no feed).
                         let input = crate::input::Input::Continuation(
                             crate::input::ContinuationInput::detached_background_op_completed(),
                         );
@@ -343,7 +410,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             state.pending.store(false, std::sync::atomic::Ordering::Release);
                         }
                         drop(d);
-                        // Process the queued continuation
                         if process_queue(
                             &driver,
                             &mut *executor,
@@ -360,7 +426,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         }
 
         // Loop exiting — resolve any pending completion waiters as terminated.
-        // This ensures callers don't hang if the runtime shuts down mid-work.
         if let Some(ref completions) = completions {
             let mut reg = completions.lock().await;
             reg.resolve_all_terminated("runtime loop exited");
@@ -368,38 +433,78 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     })
 }
 
-/// Signal the detached-op waker if the session is quiescent and a wake is pending.
+/// Check for new background op completions and inject a continuation if needed.
 ///
 /// Called after queue processing completes (session has returned to idle).
-/// INV-005: only signals when session is quiescent (Attached + no active inputs).
-/// INV-006: at most one wake cycle outstanding per session.
-async fn maybe_signal_detached_wake(
+/// Returns `true` if a continuation was injected (caller should process_queue).
+/// Supports both feed-based (new) and DetachedWakeState (legacy) paths.
+async fn maybe_inject_feed_wake(
     driver: &crate::session_adapter::SharedDriver,
+    feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
     wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
-) {
-    let Some(state) = wake_state else { return };
+    observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
+    last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
+) -> bool {
+    if let Some(feed) = feed {
+        let batch = feed.list_since(*observed_seq);
 
-    if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
-        return;
-    }
-    if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
-        return; // INV-006: at most one outstanding
-    }
+        let has_new_bg_completion = batch.entries.iter().any(|e| {
+            e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
+                && e.seq > *last_injected_seq
+        });
 
-    // Verify quiescence: Attached/Idle + no active inputs
-    let d = driver.lock().await;
-    if !d.is_idle_or_attached() {
-        return;
-    }
-    if !d.as_driver().active_input_ids().is_empty() {
-        return;
-    }
-    drop(d);
+        if !has_new_bg_completion {
+            // No new BG completions — advance to prevent hot-spin
+            // on non-BG entries (MobMemberChild, etc.).
+            *observed_seq = batch.watermark;
+            return false;
+        }
 
-    state
-        .signaled
-        .store(true, std::sync::atomic::Ordering::Release);
-    state.notify.notify_one();
+        // Verify quiescence before injecting.
+        let d = driver.lock().await;
+        if !d.is_quiescent_for_detached_wake() {
+            // Non-quiescent: do NOT advance observed_seq. The completion
+            // stays visible for the next wake so it's not permanently lost.
+            return false;
+        }
+        drop(d);
+
+        let input = crate::input::Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let mut d = driver.lock().await;
+        if d.as_driver_mut().accept_input(input).await.is_ok() {
+            *last_injected_seq = batch.watermark;
+        }
+        // Advance cursor after injection attempt (quiescent path).
+        *observed_seq = batch.watermark;
+        true
+    } else {
+        // Legacy DetachedWakeState path
+        let Some(state) = wake_state else {
+            return false;
+        };
+
+        if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+
+        let d = driver.lock().await;
+        if !d.is_quiescent_for_detached_wake() {
+            return false;
+        }
+        drop(d);
+
+        // Legacy path: fire notify to wake the idle arm on next iteration.
+        state
+            .signaled
+            .store(true, std::sync::atomic::Ordering::Release);
+        state.notify.notify_one();
+        false // Legacy path doesn't inject inline — idle arm handles it
+    }
 }
 
 /// Process all queued inputs until the queue is empty.

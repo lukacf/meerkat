@@ -1187,6 +1187,35 @@ impl MobSessionService for LocalSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        Some(std::sync::Arc::new(
+            meerkat_runtime::RuntimeSessionAdapter::ephemeral(),
+        ))
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        req: meerkat_core::service::StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        <Self as SessionService>::start_turn(self, session_id, req).await?;
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            run_result: None,
+        })
+    }
+
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
         true
     }
@@ -2063,6 +2092,7 @@ mod tests {
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
+        runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
     }
 
     impl MockSessionSvc {
@@ -2073,6 +2103,7 @@ mod tests {
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
+                runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
             }
         }
 
@@ -2301,6 +2332,10 @@ mod tests {
             true
         }
 
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+            Some(self.runtime_adapter.clone())
+        }
+
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
         }
@@ -2315,6 +2350,29 @@ mod tests {
                 .await
                 .get(session_id)
                 .cloned())
+        }
+
+        async fn apply_runtime_turn(
+            &self,
+            session_id: &SessionId,
+            run_id: meerkat_core::RunId,
+            req: StartTurnRequest,
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+            contributing_input_ids: Vec<meerkat_core::InputId>,
+        ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+            <Self as SessionService>::start_turn(self, session_id, req).await?;
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
         }
     }
 
@@ -3315,7 +3373,9 @@ timeout_ms = 1000
     }
 
     #[tokio::test]
-    async fn test_mob_wait_kickoff_timeout_maps_error() {
+    async fn test_mob_wait_kickoff_completes_after_initial_turn() {
+        // The kickoff barrier waits for the initial autonomous turn to complete.
+        // Use turn_driven members to avoid the keep_alive mock blocking.
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
@@ -3327,24 +3387,30 @@ timeout_ms = 1000
             "meerkat_spawn",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile":"lead","meerkat_id":"hung-kickoff"}]
+                "specs": [
+                    {"profile":"lead","meerkat_id":"kickoff-lead","runtime_mode":"turn_driven"},
+                    {"profile":"worker","meerkat_id":"kickoff-worker","runtime_mode":"turn_driven"}
+                ]
             }),
         )
         .await;
 
-        let error = call_tool_err(
+        // Turn-driven members don't run an autonomous kickoff turn,
+        // so the barrier returns immediately.
+        let waited = call_tool(
             &d,
             "mob_wait_kickoff",
             json!({
                 "mob_id": mob_id,
-                "timeout_ms": 50
+                "member_ids": ["kickoff-lead", "kickoff-worker"],
+                "timeout_ms": 2000
             }),
         )
         .await;
-        assert!(
-            matches!(error, ToolError::ExecutionFailed { .. }),
-            "kickoff timeout should surface as execution failure on the MCP tool surface"
-        );
+        let members = waited["members"].as_array().expect("members array");
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0]["meerkat_id"], "kickoff-lead");
+        assert_eq!(members[1]["meerkat_id"], "kickoff-worker");
     }
 
     #[tokio::test]
@@ -3626,6 +3692,57 @@ timeout_ms = 1000
             handle.definition().owner_session_id.as_deref(),
             Some(sid.as_str()),
             "implicit mob must have correct owner_session_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_local_session_service_provides_runtime_adapter() {
+        let svc = LocalSessionService::new();
+        assert!(
+            <LocalSessionService as MobSessionService>::runtime_adapter(&svc).is_some(),
+            "LocalSessionService must provide adapter for AutonomousHost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_local_session_service_apply_runtime_turn_succeeds() {
+        let svc = LocalSessionService::new();
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "test".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: None,
+            labels: None,
+        };
+        let created = <LocalSessionService as SessionService>::create_session(&svc, req)
+            .await
+            .expect("create session");
+        let result = <LocalSessionService as MobSessionService>::apply_runtime_turn(
+            &svc,
+            &created.session_id,
+            meerkat_core::RunId::new(),
+            StartTurnRequest {
+                prompt: "test".into(),
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                event_tx: None,
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+            vec![],
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "apply_runtime_turn must work for AutonomousHost: {result:?}"
         );
     }
 }

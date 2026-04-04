@@ -472,22 +472,23 @@ mod tests {
             Ok(ToolResult::new(call.id.to_string(), "noop".to_string(), false).into())
         }
 
+        fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+            meerkat_core::agent::DispatcherCapabilities {
+                ops_lifecycle: true,
+                ..meerkat_core::agent::DispatcherCapabilities::default()
+            }
+        }
+
         fn bind_ops_lifecycle(
             self: Arc<Self>,
             registry: Arc<dyn OpsLifecycleRegistry>,
             owner_session_id: SessionId,
-        ) -> Result<
-            Arc<dyn meerkat_core::AgentToolDispatcher>,
-            meerkat_core::agent::OpsLifecycleBindError,
-        > {
+        ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError>
+        {
             self.bound.store(true, Ordering::SeqCst);
             *self.seen_registry.lock().expect("probe lock") = Some(registry);
             *self.seen_session_id.lock().expect("probe lock") = Some(owner_session_id);
-            Ok(self)
-        }
-
-        fn supports_ops_lifecycle_binding(&self) -> bool {
-            true
+            Ok(meerkat_core::agent::BindOutcome::Bound(self))
         }
     }
 

@@ -754,10 +754,16 @@ impl AgentFactory {
         self
     }
 
-    /// Set a pre-built comms runtime shared across all sessions.
+    /// Set a pre-built comms runtime for sessions that don't request their
+    /// own identity.
     ///
     /// When set, `build_agent()` uses this runtime for tool composition and
-    /// agent wiring instead of creating a per-session runtime from config.
+    /// agent wiring — but only when the session's `comms_name` is `None`.
+    /// Sessions that set `comms_name` (e.g., mob-spawned members) get their
+    /// own per-session runtime so each member has a distinct keypair, inbox,
+    /// and trusted-peer set. Sharing the surface runtime with members would
+    /// collapse their `PeerCommsMachine` state into one instance, breaking
+    /// peer-to-peer addressing.
     #[cfg(feature = "comms")]
     pub fn with_comms_runtime(mut self, runtime: Arc<meerkat_comms::CommsRuntime>) -> Self {
         self.comms_runtime = Some(runtime);
@@ -1154,7 +1160,6 @@ impl AgentFactory {
                 .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
         }
 
-        // (wait binding happens in build_agent via bind_wait_interrupt)
         Ok(Arc::new(composite))
     }
 
@@ -1301,8 +1306,14 @@ impl AgentFactory {
         // If the factory has a pre-built runtime (surface with stable identity),
         // use it directly. Otherwise create a per-session runtime from config.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let comms_runtime = if let Some(ref runtime) = self.comms_runtime {
-            Some(Arc::clone(runtime))
+        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+            && build_config.comms_name.is_none()
+        {
+            // Use the factory's shared runtime only when no per-session comms_name
+            // is requested. Mob-spawned members set comms_name and need their own
+            // per-session identity — sharing the parent's runtime would make all
+            // members route to the same inbox and break peer-to-peer messaging.
+            Some(Arc::clone(shared))
         } else if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
@@ -1337,8 +1348,10 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime = if let Some(ref runtime) = self.comms_runtime {
-            Some(Arc::clone(runtime))
+        let comms_runtime = if let Some(ref shared) = self.comms_runtime
+            && build_config.comms_name.is_none()
+        {
+            Some(Arc::clone(shared))
         } else if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
@@ -1375,10 +1388,35 @@ impl AgentFactory {
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
             .is_none_or(|p| p.image_tool_results);
-        let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> = build_config
-            .ops_lifecycle_override
-            .clone()
-            .unwrap_or_else(|| Arc::new(RuntimeOpsLifecycleRegistry::new()));
+        // Create the ops lifecycle registry. Keep the concrete type accessible
+        // for wiring the wait-interrupt sender before trait-erasing.
+        // concrete_ops_lifecycle is kept for future wait-interrupt wiring
+        // (set_wait_interrupt on BackgroundToolOp terminal).
+        #[allow(unused_variables)]
+        let (ops_lifecycle, concrete_ops_lifecycle): (
+            Arc<dyn OpsLifecycleRegistry>,
+            Option<Arc<RuntimeOpsLifecycleRegistry>>,
+        ) = if let Some(overridden) = build_config.ops_lifecycle_override.clone() {
+            (overridden, None)
+        } else {
+            let concrete = Arc::new(RuntimeOpsLifecycleRegistry::new());
+            (
+                Arc::clone(&concrete) as Arc<dyn OpsLifecycleRegistry>,
+                Some(concrete),
+            )
+        };
+
+        // Create the completion feed + interrupt baseline for cursor-based
+        // completion delivery. The feed is obtained from the ops lifecycle
+        // registry; the baseline is a shared atomic stamped by the agent
+        // before each tool dispatch.
+        let completion_feed = ops_lifecycle.completion_feed();
+        let interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>> =
+            if completion_feed.is_some() {
+                Some(Arc::new(std::sync::atomic::AtomicU64::new(0)))
+            } else {
+                None
+            };
 
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
@@ -1444,134 +1482,7 @@ impl AgentFactory {
                 }
             };
 
-        // 9. Bind wait interrupt BEFORE comms gateway composition.
-        //
-        // Spec deviation: the plan called for binding "after all composition."
-        // That requires either CommsToolSurface implementing bind_wait_interrupt()
-        // or the gateway tolerating Unsupported without consuming the Arc.
-        // Neither is clean for 0.4.10: CommsToolSurface has no wait tool, and
-        // the default trait impl consumes the Arc on Unsupported (dyn dispatch
-        // prevents returning self). Binding before gateway composition avoids
-        // both issues — the CompositeDispatcher has refcount=1 at bind time,
-        // and the gateway wraps the already-bound dispatcher afterward.
-        //
-        // The bridge task listens on actionable_input_notify() (not the broad
-        // inbox_notify()) so only actionable peer messages interrupt wait.
-        //
-        // Fail-closed: if comms is enabled but the runtime or dispatcher doesn't
-        // support the required capabilities, the build fails.
-        #[cfg(feature = "comms")]
-        if let Some(ref runtime) = comms_runtime {
-            use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
-
-            // Attempt wait interrupt binding when the dispatcher supports it.
-            // This covers both factory-built builtins and caller-supplied
-            // overrides that implement supports_wait_interrupt(). The
-            // actionable_input_notify probe is deferred into this block so
-            // comms-enabled agents that skip wait rebinding don't fail the
-            // build on older/custom runtimes that lack the capability.
-            if effective_builtins || tools.supports_wait_interrupt() {
-                // Probe actionable_input_notify, falling back to inbox_notify
-                // for legacy/custom runtimes that predate the classified path.
-                // inbox_notify fires on ALL inbox traffic (not just actionable),
-                // which may wake wait slightly more often, but preserves the
-                // interrupt contract for send_request/wait workflows.
-                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime.as_ref())
-                    .ok()
-                    .or_else(|| Some(runtime.inbox_notify()));
-
-                if let Some(actionable_notify) = notify {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let (tx, rx) = tokio::sync::watch::channel(
-                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
-                    );
-                    #[cfg(target_arch = "wasm32")]
-                    let (tx, rx) = tokio_with_wasm::alias::sync::watch::channel(
-                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
-                    );
-
-                    // Try to bind wait interrupts.
-                    //
-                    // Exclusive ownership (refcount == 1): consume Arc, swap wait
-                    // tool, get new Arc back. Works for factory-fresh dispatchers
-                    // AND unique per-session overrides that implement
-                    // bind_wait_interrupt().
-                    //
-                    // Shared ownership (refcount > 1): cannot consume the Arc.
-                    // Skip gracefully — comms works, wait just isn't interruptible.
-                    //
-                    // Unsupported: the dispatcher doesn't have a wait tool or
-                    // doesn't implement binding. Skip gracefully.
-                    // Probe before consuming: bind_wait_interrupt takes
-                    // `self: Arc<Self>` and is destructive on Unsupported.
-                    // The probe is non-consuming so it's safe to check first.
-                    let bind_succeeded = if !tools.supports_wait_interrupt() {
-                        tracing::debug!("Dispatcher does not support wait interrupt binding");
-                        false
-                    } else if Arc::strong_count(&tools) == 1 {
-                        // Exclusive ownership — safe to consume and rebind.
-                        tools = tools.bind_wait_interrupt(rx).map_err(|e| {
-                            BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
-                        })?;
-                        true
-                    } else {
-                        tracing::debug!(
-                            "Shared dispatcher (refcount={}) — wait interrupt not bound",
-                            Arc::strong_count(&tools)
-                        );
-                        false
-                    };
-
-                    if bind_succeeded {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        tokio::spawn(async move {
-                            loop {
-                                actionable_notify.notified().await;
-                                if tx
-                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                        reason: "Incoming actionable peer message".to_string(),
-                                    }))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        });
-                        #[cfg(target_arch = "wasm32")]
-                        tokio_with_wasm::alias::task::spawn(async move {
-                            loop {
-                                actionable_notify.notified().await;
-                                if tx
-                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
-                                        reason: "Incoming actionable peer message".to_string(),
-                                    }))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-                } else {
-                    tracing::debug!(
-                        "Comms runtime lacks actionable_input_notify — wait interrupt not bound"
-                    );
-                }
-            } else {
-                tracing::debug!("Builtins disabled — skipping wait interrupt binding");
-            }
-        }
-
-        if tools.supports_ops_lifecycle_binding() {
-            tools = tools
-                .bind_ops_lifecycle(Arc::clone(&ops_lifecycle), session.id().clone())
-                .map_err(|e| {
-                    BuildAgentError::Config(format!("Ops lifecycle binding failed: {e}"))
-                })?;
-        }
-
-        // 9a. Compose tools with comms (after wait binding, so the gateway
-        // wraps the already-bound dispatcher).
+        // 9a. Compose tools with comms gateway.
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             let composed =
@@ -1624,6 +1535,126 @@ impl AgentFactory {
                 }
                 tool_usage_instructions.push_str(&mob_usage);
             }
+        }
+
+        // 9c. Bind capabilities on the FINAL composed dispatcher shape.
+        //
+        // All composition (comms gateway, mob gateway) is complete.
+        // Binding now happens once on the final shape. Gateway wrappers
+        // forward bind_* calls to inner entries that support them, with
+        // Arc::strong_count guards for shared overrides.
+        //
+        // BindOutcome::was_bound() tells the factory whether to wire
+        // side effects (e.g. actionable-notify bridge task).
+        #[allow(unused_mut)]
+        let mut bind_succeeded_wait = false;
+        #[cfg(feature = "comms")]
+        if let Some(ref runtime) = comms_runtime {
+            use meerkat_core::agent::CommsRuntime as CoreCommsRuntimeTrait;
+
+            if effective_builtins || tools.capabilities().wait_interrupt {
+                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime.as_ref())
+                    .ok()
+                    .or_else(|| Some(runtime.inbox_notify()));
+
+                if let Some(actionable_notify) = notify {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (tx, rx) = tokio::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    let (tx, rx) = tokio_with_wasm::alias::sync::watch::channel(
+                        None::<meerkat_core::wait_interrupt::WaitInterrupt>,
+                    );
+
+                    bind_succeeded_wait = if !tools.capabilities().wait_interrupt {
+                        tracing::debug!("Dispatcher does not support wait interrupt binding");
+                        false
+                    } else if Arc::strong_count(&tools) == 1 {
+                        let outcome = tools.bind_wait_interrupt(rx).map_err(|e| {
+                            BuildAgentError::Config(format!("Wait interrupt binding failed: {e}"))
+                        })?;
+                        let bound = outcome.was_bound();
+                        tools = outcome.into_dispatcher();
+                        bound
+                    } else {
+                        tracing::debug!(
+                            "Shared dispatcher (refcount={}) — wait interrupt not bound",
+                            Arc::strong_count(&tools)
+                        );
+                        false
+                    };
+
+                    if bind_succeeded_wait {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        tokio::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        #[cfg(target_arch = "wasm32")]
+                        tokio_with_wasm::alias::task::spawn(async move {
+                            loop {
+                                actionable_notify.notified().await;
+                                if tx
+                                    .send(Some(meerkat_core::wait_interrupt::WaitInterrupt {
+                                        reason: "Incoming actionable peer message".to_string(),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    tracing::debug!(
+                        "Comms runtime lacks actionable_input_notify — wait interrupt not bound"
+                    );
+                }
+            } else {
+                tracing::debug!("Builtins disabled — skipping wait interrupt binding");
+            }
+        }
+
+        // Bind completion feed when comms wait binding didn't already wire it.
+        // Use the actual bind result, not comms_runtime.is_some() — the comms
+        // runtime can exist while bind_wait_interrupt was skipped (shared
+        // dispatcher, no capability, etc.).
+        {
+            #[cfg(feature = "comms")]
+            let comms_wired_feed = bind_succeeded_wait;
+            #[cfg(not(feature = "comms"))]
+            let comms_wired_feed = false;
+
+            if !comms_wired_feed
+                && tools.capabilities().completion_feed
+                && Arc::strong_count(&tools) == 1
+                && let (Some(feed), Some(baseline)) =
+                    (completion_feed.clone(), interrupt_baseline.clone())
+            {
+                let outcome = tools.bind_completion_feed(feed, baseline).map_err(|e| {
+                    BuildAgentError::Config(format!("Completion feed binding failed: {e}"))
+                })?;
+                tools = outcome.into_dispatcher();
+            }
+        }
+
+        if tools.capabilities().ops_lifecycle {
+            let outcome = tools
+                .bind_ops_lifecycle(Arc::clone(&ops_lifecycle), session.id().clone())
+                .map_err(|e| {
+                    BuildAgentError::Config(format!("Ops lifecycle binding failed: {e}"))
+                })?;
+            tools = outcome.into_dispatcher();
         }
 
         // 10. Resolve hooks (override > filesystem layered config)
@@ -1951,6 +1982,19 @@ impl AgentFactory {
             builder = builder.with_blob_store(blob_store);
         }
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
+
+        // 12h. Wire completion feed + baseline + enrichment for cursor-based delivery
+        if let Some(feed) = completion_feed {
+            builder = builder.with_completion_feed(feed);
+        }
+        if let Some(baseline) = interrupt_baseline {
+            builder = builder.with_interrupt_baseline(baseline);
+        }
+        // Extract enrichment provider from the tool dispatcher (if the dispatcher
+        // has a shell job manager, it implements CompletionEnrichmentProvider).
+        if let Some(enrichment) = tools.completion_enrichment() {
+            builder = builder.with_completion_enrichment(enrichment);
+        }
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

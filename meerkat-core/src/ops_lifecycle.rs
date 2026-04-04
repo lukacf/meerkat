@@ -291,6 +291,17 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         Err(OpsLifecycleError::Unsupported("collect_completed".into()))
     }
 
+    /// Return the canonical completion feed, if this registry supports it.
+    ///
+    /// Runtime-backed registries return a feed handle that consumers (agent
+    /// boundary, idle wake, wait tool) use for cursor-based completion delivery.
+    /// Returns `None` for registries that don't support the feed protocol.
+    fn completion_feed(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::completion_feed::CompletionFeed>> {
+        None
+    }
+
     /// Register an authority-owned barrier wait and await its completion.
     ///
     /// Returns a [`WaitAllResult`] containing per-operation outcomes and an

@@ -7202,6 +7202,10 @@ mod tests {
             true
         }
 
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+        }
+
         async fn session_belongs_to_mob(
             &self,
             _session_id: &SessionId,

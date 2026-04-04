@@ -1694,7 +1694,11 @@ impl MobHandle {
         Ok(material.to_snapshot())
     }
 
-    /// Wait for all currently-running autonomous kickoff turns in the current roster snapshot.
+    /// Wait until all autonomous members have been admitted to the runtime.
+    ///
+    /// Autonomous members no longer run a separate kickoff turn — their initial
+    /// prompt is injected through the runtime input path at spawn time. This
+    /// method returns member snapshots immediately since admission is synchronous.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -1709,7 +1713,9 @@ impl MobHandle {
             .await
     }
 
-    /// Wait for currently-running autonomous kickoff turns for the given member ids.
+    /// Wait until the given autonomous members have been admitted to the runtime.
+    ///
+    /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for details.
     pub async fn wait_for_members_kickoff_complete(
         &self,
         ids: &[MeerkatId],

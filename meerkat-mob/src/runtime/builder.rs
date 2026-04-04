@@ -210,6 +210,22 @@ impl MobBuilder {
             ));
         }
 
+        // §8: AutonomousHost profiles require a runtime adapter. Validate at
+        // build time so Option<adapter> on the trait doesn't hide an ownership
+        // requirement that only surfaces at spawn time.
+        let has_autonomous = definition
+            .profiles
+            .values()
+            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+        if has_autonomous && runtime_adapter.is_none() {
+            return Err(MobError::Internal(
+                "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                 provide one via with_runtime_adapter() or use a session service that implements \
+                 runtime_adapter()"
+                    .to_string(),
+            ));
+        }
+
         // Emit MobCreated event first
         let definition_for_event = (*definition).clone();
         storage
@@ -277,6 +293,8 @@ impl MobBuilder {
                     .to_string(),
             ));
         }
+        // §8 check deferred until after definition recovery — the definition
+        // comes from the event log, so we can't check profiles before replay.
         let all_events = storage.events.replay_all().await?;
 
         // Use the last MobCreated event — reset appends a fresh MobCreated
@@ -293,6 +311,21 @@ impl MobBuilder {
                     "cannot resume mob: no MobCreated event found in storage".to_string(),
                 )
             })?;
+        // §8: AutonomousHost profiles require a runtime adapter. Same check
+        // as create(), but deferred until after definition recovery from events.
+        let has_autonomous = definition
+            .profiles
+            .values()
+            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+        if has_autonomous && runtime_adapter.is_none() {
+            return Err(MobError::Internal(
+                "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                 provide one via with_runtime_adapter() or use a session service that implements \
+                 runtime_adapter()"
+                    .to_string(),
+            ));
+        }
+
         Self::sync_definition_with_spec_store(
             storage.specs.clone(),
             definition.id.clone(),
@@ -975,7 +1008,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
-            autonomous_host_loops: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             next_spawn_ticket: 0,
             pending_spawns: PendingSpawnLineage::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),

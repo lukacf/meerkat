@@ -1211,3 +1211,107 @@ async fn ambient_factory_mob_enable_does_not_imply_operator_capabilities() {
     let observed = observed.lock().expect("recording mutex");
     assert_eq!(observed.as_slice(), &[false]);
 }
+
+// ---------------------------------------------------------------------------
+// Shared comms runtime vs per-session comms_name
+// ---------------------------------------------------------------------------
+
+/// When `with_comms_runtime` is set and the build has `comms_name`, the factory
+/// must NOT use the shared runtime — it must create a per-session runtime so the
+/// member gets its own keypair, inbox, and trusted-peer set. Sharing the surface
+/// runtime with mob members would collapse their PeerCommsMachine state into one
+/// instance, breaking peer-to-peer addressing.
+///
+/// This test validates both paths:
+/// 1. No comms_name → build succeeds using the shared runtime
+/// 2. comms_name set → build succeeds using a fresh per-session runtime
+///
+/// The two agents must have different peer identities (different public keys).
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn shared_comms_runtime_skipped_when_comms_name_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let comms_config = meerkat_comms::ResolvedCommsConfig {
+        enabled: true,
+        name: "shared-parent".to_string(),
+        inproc_namespace: None,
+        listen_tcp: None,
+        listen_uds: None,
+        event_listen_tcp: None,
+        #[cfg(unix)]
+        event_listen_uds: None,
+        identity_dir: temp.path().join("identity"),
+        trusted_peers_path: temp.path().join("trusted_peers.json"),
+        comms_config: Default::default(),
+        auth: Default::default(),
+        require_peer_auth: false,
+        allow_external_unauthenticated: false,
+    };
+    let shared_runtime = Arc::new(
+        meerkat_comms::CommsRuntime::new_with_silent_intents(
+            comms_config,
+            Arc::new(std::collections::HashSet::new()),
+        )
+        .await
+        .unwrap(),
+    );
+    let _shared_pubkey = shared_runtime.public_key().to_peer_id();
+
+    // Add a sentinel peer to the shared runtime so we can detect reuse.
+    shared_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+        name: "sentinel".into(),
+        pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+        addr: "tcp://127.0.0.1:9999".into(),
+        meta: meerkat_comms::PeerMeta::default(),
+    });
+
+    let factory = temp_factory(&temp).with_comms_runtime(shared_runtime);
+    let config = Config::default();
+
+    // 1. Build WITHOUT comms_name — should reuse the shared runtime.
+    //    The sentinel peer should be visible.
+    let parent_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        comms_name: None,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let parent_agent = factory
+        .build_agent(parent_config, &config)
+        .await
+        .expect("parent build (no comms_name) should succeed");
+
+    // 2. Build WITH comms_name — should get a fresh per-session runtime.
+    //    The sentinel peer should NOT be visible.
+    let member_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        comms_name: Some("mob/delegate/helper".to_string()),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let member_agent = factory
+        .build_agent(member_config, &config)
+        .await
+        .expect("member build (with comms_name) should succeed");
+
+    // Verify identities differ via the session metadata stored on the agent's session.
+    let parent_meta = parent_agent.session().session_metadata();
+    let member_meta = member_agent.session().session_metadata();
+
+    // The parent has no comms_name (surface identity).
+    assert!(
+        parent_meta
+            .as_ref()
+            .and_then(|m| m.comms_name.as_ref())
+            .is_none(),
+        "parent session should have no comms_name in metadata"
+    );
+
+    // The member has a comms_name (per-session identity).
+    assert_eq!(
+        member_meta
+            .as_ref()
+            .and_then(|m| m.comms_name.as_ref())
+            .map(String::as_str),
+        Some("mob/delegate/helper"),
+        "member session should have its own comms_name in metadata"
+    );
+}

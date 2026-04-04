@@ -21,6 +21,7 @@ pub mod checkpoint;
 pub mod comms;
 pub mod comms_drain_lifecycle_authority;
 pub mod compact;
+pub mod completion_feed;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
@@ -64,8 +65,8 @@ pub mod wait_interrupt;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
-    LlmStreamResult,
+    BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
@@ -87,6 +88,10 @@ pub use compact::{
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;
 
+pub use completion_feed::{
+    CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,
+    CompletionFeed, CompletionSeq,
+};
 pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,

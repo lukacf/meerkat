@@ -1,6 +1,6 @@
 use super::*;
 use meerkat_core::SessionId;
-use meerkat_core::agent::OpsLifecycleBindError;
+use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use std::collections::HashSet;
@@ -55,39 +55,48 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         self.inner.poll_external_updates().await
     }
 
-    fn supports_wait_interrupt(&self) -> bool {
-        self.inner.supports_wait_interrupt()
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
     }
 
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
-    {
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        let rebound = owned.inner.bind_wait_interrupt(rx)?;
-        Ok(Arc::new(NameFilteredDispatcher {
-            inner: rebound,
+        let outcome = owned.inner.bind_wait_interrupt(rx)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapper = Arc::new(NameFilteredDispatcher {
+            inner,
             excluded: owned.excluded,
-        }))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.inner.supports_ops_lifecycle_binding()
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        let rebound = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
-        Ok(Arc::new(NameFilteredDispatcher {
-            inner: rebound,
+        let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapper = Arc::new(NameFilteredDispatcher {
+            inner,
             excluded: owned.excluded,
-        }))
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
     }
 }
 
@@ -857,25 +866,28 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         }
     }
 
+    fn capabilities(&self) -> DispatcherCapabilities {
+        DispatcherCapabilities {
+            ops_lifecycle: true,
+            ..DispatcherCapabilities::default()
+        }
+    }
+
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
             return Err(OpsLifecycleBindError::SharedOwnership);
         }
         let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        Ok(Arc::new(Self {
+        Ok(BindOutcome::Bound(Arc::new(Self {
             handle: this.handle,
             tools: this.tools,
             owner_session_id: Some(owner_session_id),
             ops_registry: Some(registry),
-        }))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        true
+        })))
     }
 }
 

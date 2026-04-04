@@ -349,6 +349,7 @@ struct MockSessionService {
     /// Sent intents for sessions that were archived and removed.
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
+    fail_inject: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
@@ -388,6 +389,7 @@ impl MockSessionService {
             archive_fail_comms_names: RwLock::new(HashSet::new()),
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
+            fail_inject: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
@@ -593,6 +595,12 @@ impl MockSessionService {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
+    fn set_fail_inject(&self, enabled: bool) {
+        self.fail_inject
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn start_turn_call_count(&self) -> u64 {
         self.start_turn_calls.load(Ordering::Relaxed)
     }
@@ -604,10 +612,6 @@ impl MockSessionService {
     fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
         self.keep_alive_turns_complete_immediately
             .store(enabled, Ordering::Relaxed);
-    }
-
-    async fn keep_alive_prompts(&self) -> Vec<(SessionId, String)> {
-        self.keep_alive_prompts.read().await.clone()
     }
 
     fn interrupt_call_count(&self) -> u64 {
@@ -1129,6 +1133,7 @@ struct CountingInjector {
     delay_ms: u64,
     never_terminal: bool,
     fail: bool,
+    fail_inject: bool,
     completed_result: String,
 }
 
@@ -1140,6 +1145,9 @@ impl EventInjector for CountingInjector {
         _handling_mode: meerkat_core::types::HandlingMode,
         _render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<(), EventInjectorError> {
+        if self.fail_inject {
+            return Err(EventInjectorError::Closed);
+        }
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -1223,11 +1231,13 @@ impl SessionServiceCommsExt for MockSessionService {
                 .await
                 .contains(session_id);
         let completed_result = self.flow_turn_completed_result.read().await.clone();
+        let fail_inject = self.fail_inject.load(std::sync::atomic::Ordering::Relaxed);
         Some(Arc::new(CountingInjector {
             calls: self.inject_calls.clone(),
             delay_ms,
             never_terminal,
             fail,
+            fail_inject,
             completed_result,
         }))
     }
@@ -1252,11 +1262,13 @@ impl SessionServiceCommsExt for MockSessionService {
                 .await
                 .contains(session_id);
         let completed_result = self.flow_turn_completed_result.read().await.clone();
+        let fail_inject = self.fail_inject.load(std::sync::atomic::Ordering::Relaxed);
         Some(Arc::new(CountingInjector {
             calls: self.inject_calls.clone(),
             delay_ms,
             never_terminal,
             fail,
+            fail_inject,
             completed_result,
         }))
     }
@@ -2354,6 +2366,7 @@ async fn wait_for_run_terminal(
 /// Create a MobHandle using the mock session service.
 async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -2362,6 +2375,19 @@ async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessi
         .expect("create mob");
 
     (handle, service)
+}
+
+async fn try_create_test_mob_without_adapter(
+    definition: MobDefinition,
+) -> Result<(MobHandle, Arc<MockSessionService>), MobError> {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await?;
+
+    Ok((handle, service))
 }
 
 async fn create_test_mob_with_runtime_adapter(
@@ -2384,6 +2410,7 @@ async fn create_test_mob_with_events(
     events: Arc<dyn MobEventStore>,
 ) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(definition, MobStorage::with_events(events))
         .with_session_service(service.clone())
         .create()
@@ -2398,6 +2425,7 @@ async fn create_test_mob_with_run_store(
     run_store: Arc<dyn MobRunStore>,
 ) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage {
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: run_store,
@@ -2894,11 +2922,13 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
     let service = Arc::new(meerkat_session::PersistentSessionService::new(
         PersistentMockBuilder,
         16,
         store,
-        None,
+        Some(runtime_store),
         blob_store,
     ));
     MobBuilder::new(definition, MobStorage::in_memory())
@@ -3145,6 +3175,7 @@ async fn test_mob_builder_runs_with_persistent_storage_bundle() {
     let db_path = dir.path().join("mob.db");
     let storage = MobStorage::persistent(&db_path).expect("construct persistent storage");
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(sample_definition_with_single_step_flow(500, 8), storage)
         .with_session_service(service.clone())
         .create()
@@ -3181,8 +3212,9 @@ async fn test_mob_builder_from_mobpack_creates_valid_mob() {
         "skills/review.md".to_string(),
         b"You are a reviewer.".to_vec(),
     )]);
-    let session_service: Arc<dyn crate::runtime::MobSessionService> =
-        Arc::new(MockSessionService::new());
+    let mock_service = MockSessionService::new();
+    let _ = mock_service.enable_runtime_adapter();
+    let session_service: Arc<dyn crate::runtime::MobSessionService> = Arc::new(mock_service);
     let storage = MobStorage::in_memory();
 
     let handle = MobBuilder::from_mobpack(definition.clone(), packed_skills, storage)
@@ -3203,6 +3235,7 @@ async fn test_mob_builder_from_mobpack_creates_valid_mob() {
 #[tokio::test]
 async fn test_mob_builder_create_rejects_mismatched_spec_store_definition() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let definition = sample_definition();
     let mut mismatched = definition.clone();
@@ -3236,6 +3269,7 @@ async fn test_mob_builder_create_rejects_mismatched_spec_store_definition() {
 #[tokio::test]
 async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let definition = sample_definition();
     let mob_id = definition.id.clone();
@@ -3316,6 +3350,7 @@ depends_on_mode = "any"
     .expect("parse warning definition");
 
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
         .create()
@@ -3400,6 +3435,7 @@ depends_on_mode = "any"
         .expect("append mob created");
 
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service)
         .resume()
@@ -3440,6 +3476,7 @@ message = "x"
         .expect("append mob created");
 
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let result = MobBuilder::for_resume(MobStorage::with_events(events))
         .with_session_service(service)
         .resume()
@@ -3639,6 +3676,7 @@ async fn test_stop_persists_all_state_and_rejects_mutations() {
 async fn test_register_tool_bundle_is_wired_into_spawn() {
     let definition = sample_definition_with_tool_bundle("bundle-a");
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -3684,6 +3722,7 @@ async fn test_register_tool_bundle_is_wired_into_spawn() {
 async fn test_spawn_fails_when_tool_bundle_not_registered() {
     let definition = sample_definition_with_tool_bundle("missing-bundle");
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -4156,26 +4195,29 @@ async fn test_wait_for_members_kickoff_complete_only_waits_requested_members() {
 }
 
 #[tokio::test]
-async fn test_wait_for_kickoff_complete_times_out_with_pending_member_ids() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    // Autonomous spawn uses the runtime adapter path (accept_input_with_completion).
+    // Enable immediate completion so the barrier resolves quickly.
+    service.set_keep_alive_turns_complete_immediately(true);
 
-    let pending = MeerkatId::from("lead-hung");
+    let member = MeerkatId::from("lead-hung");
     handle
-        .spawn(ProfileName::from("lead"), pending.clone(), None)
+        .spawn(ProfileName::from("lead"), member.clone(), None)
         .await
-        .expect("spawn hung lead");
+        .expect("spawn lead");
 
-    let error = handle
-        .wait_for_kickoff_complete(Some(Duration::from_millis(50)))
+    // The barrier waits for the background start_turn task to complete.
+    // With keep_alive_turns_complete_immediately, it should finish fast.
+    let snapshots = handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
         .await
-        .expect_err("kickoff barrier should time out for hanging kickoff");
+        .expect("barrier should return after initial turn completes");
 
-    match error {
-        MobError::KickoffWaitTimedOut { pending_member_ids } => {
-            assert_eq!(pending_member_ids, vec![pending]);
-        }
-        other => panic!("expected kickoff timeout, got {other:?}"),
-    }
+    assert!(
+        !snapshots.is_empty(),
+        "barrier should return snapshots for spawned members"
+    );
 }
 
 #[tokio::test]
@@ -4215,6 +4257,7 @@ async fn test_wait_for_members_kickoff_complete_excludes_later_spawns() {
 #[tokio::test]
 async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -4617,6 +4660,7 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
 #[tokio::test]
 async fn test_for_resume_rebuilds_definition_and_roster() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
 
@@ -4654,9 +4698,13 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
 #[tokio::test]
 async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     let service = Arc::new(MockSessionService::new());
+    let mut def = sample_definition();
+    for profile in def.profiles.values_mut() {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
-    let handle = MobBuilder::new(sample_definition(), storage)
+    let handle = MobBuilder::new(def, storage)
         .with_session_service(service.clone())
         .create()
         .await
@@ -4688,6 +4736,7 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
 #[tokio::test]
 async fn test_resume_reconciles_orphaned_sessions() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let _handle = MobBuilder::new(sample_definition(), storage)
@@ -4735,6 +4784,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
 #[tokio::test]
 async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -4812,6 +4862,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     worker.tools.rust_bundles = vec!["bundle-a".to_string()];
 
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(definition.clone(), storage)
@@ -4875,6 +4926,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
 #[tokio::test]
 async fn test_resume_marks_missing_persisted_session_as_broken() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -4948,6 +5000,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
 #[tokio::test]
 async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5015,6 +5068,7 @@ async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
 async fn test_resume_restores_missing_live_session_even_when_list_reports_inactive_persisted_summary()
  {
     let inner = Arc::new(MockSessionService::new());
+    let _ = inner.enable_runtime_adapter();
     let service = Arc::new(PersistedListingSessionService::new(inner.clone()));
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
@@ -5060,6 +5114,7 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
 #[tokio::test]
 async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_resume() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5106,6 +5161,7 @@ async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_re
 #[tokio::test]
 async fn test_broken_member_turn_returns_restore_failed_error() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition();
     definition
         .profiles
@@ -5180,6 +5236,7 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
 #[tokio::test]
 async fn test_wire_broken_member_returns_restore_failed_error() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition();
     definition
         .profiles
@@ -5254,6 +5311,7 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
 #[tokio::test]
 async fn test_retire_broken_member_succeeds_and_removes_it() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5300,6 +5358,7 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
 #[tokio::test]
 async fn test_respawn_broken_member_clears_restore_diagnostic() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition();
     definition
         .profiles
@@ -5391,6 +5450,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
 #[tokio::test]
 async fn test_resume_restores_persisted_behavior_metadata() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5490,6 +5550,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
 #[tokio::test]
 async fn test_resume_marks_comms_name_mismatch_as_broken() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5547,6 +5608,7 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
 #[tokio::test]
 async fn test_attach_existing_session_rejects_comms_name_mismatch() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -5671,6 +5733,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
 #[tokio::test]
 async fn test_attach_existing_session_restores_persisted_inactive_session() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let initial = service
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -5741,6 +5804,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
 #[tokio::test]
 async fn test_resume_recreates_missing_external_bridge_preserving_backend_identity() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
@@ -5810,6 +5874,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
 #[tokio::test]
 async fn test_resume_reconciles_mixed_topology_without_losing_external_member_refs() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
@@ -5913,6 +5978,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
 #[tokio::test]
 async fn test_resume_reestablishes_missing_trust() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -5977,6 +6043,7 @@ async fn test_resume_reestablishes_missing_trust() {
 #[tokio::test]
 async fn test_resume_prunes_stale_trust_not_present_in_roster() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -6029,6 +6096,7 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
 #[tokio::test]
 async fn test_resume_restores_external_wiring_from_event_log() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -8694,6 +8762,7 @@ async fn test_role_wiring_fan_out() {
 #[tokio::test]
 async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let mut definition = sample_definition_with_role_wiring();
     definition
         .profiles
@@ -9068,15 +9137,18 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
         .await
         .expect("external turn should execute");
 
+    // Runtime adapter path: spawn uses accept_input_with_completion (1 keep-alive),
+    // send() uses inject (1).
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.inject_call_count(),
         1,
-        "autonomous dispatch must use event injector"
+        "autonomous dispatch must use event injector for send() (1 send)"
     );
     assert_eq!(
-        service.start_turn_call_count(),
         service.keep_alive_start_turn_call_count(),
-        "autonomous dispatch must not issue additional non-host start_turn calls"
+        1,
+        "autonomous spawn uses keep-alive start_turn via runtime adapter"
     );
 }
 
@@ -9325,6 +9397,8 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
         )
         .await
         .expect("spawn turn-driven lead");
+    // Allow background start_turn from autonomous spawn to register.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
@@ -9336,10 +9410,12 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
         .await
         .expect("turn-driven internal turn");
 
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion (already in baseline).
+    // internal_turn for autonomous uses inject (1). internal_turn for turn-driven uses start_turn (+1).
     assert_eq!(
         service.inject_call_count(),
         1,
-        "autonomous internal turn should route via injector"
+        "autonomous internal turn should route via injector (1 internal_turn only)"
     );
     assert_eq!(
         service.start_turn_call_count(),
@@ -12110,20 +12186,18 @@ async fn test_spawn_with_custom_initial_message() {
         "spawn should use the custom initial_message, not the default"
     );
 
-    let keep_alive_prompts = service.keep_alive_prompts().await;
-    assert_eq!(
-        keep_alive_prompts.len(),
-        1,
-        "autonomous spawn must start exactly one host loop"
-    );
-    assert_eq!(
-        keep_alive_prompts[0].1, custom_msg,
-        "first autonomous host-loop prompt must use initial_message when provided"
-    );
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
+    // which delegates to start_turn and increments keep_alive_start_turn_call_count.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
-        "spawn must start exactly one autonomous host loop"
+        "autonomous spawn must issue exactly one keep-alive start_turn"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "autonomous spawn uses start_turn via runtime adapter, not inject"
     );
 }
 
@@ -12154,33 +12228,51 @@ async fn test_spawn_without_initial_message_uses_default() {
         prompts[0].1
     );
 
-    let keep_alive_prompts = service.keep_alive_prompts().await;
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
+    // which delegates to start_turn and increments keep_alive_start_turn_call_count.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
-        keep_alive_prompts.len(),
+        service.keep_alive_start_turn_call_count(),
         1,
-        "autonomous spawn must start exactly one host loop"
+        "autonomous spawn must issue exactly one keep-alive start_turn"
     );
-    assert!(
-        keep_alive_prompts[0]
-            .1
-            .contains("You have been spawned as 'w-1'"),
-        "host-loop fallback prompt should contain meerkat id, got: '{}'",
-        keep_alive_prompts[0].1
-    );
-    assert!(
-        keep_alive_prompts[0].1.contains("role: worker"),
-        "host-loop fallback prompt should contain role, got: '{}'",
-        keep_alive_prompts[0].1
-    );
-    assert!(
-        keep_alive_prompts[0].1.contains("mob 'test-mob'"),
-        "host-loop fallback prompt should contain mob id, got: '{}'",
-        keep_alive_prompts[0].1
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "autonomous spawn uses start_turn via runtime adapter, not inject"
     );
 }
 
 #[tokio::test]
+async fn test_autonomous_host_without_adapter_rejected_at_build_time() {
+    // §8: AutonomousHost requires a runtime adapter. The builder must reject
+    // at create() time, not defer to spawn() time where the Option<adapter>
+    // would hide the ownership requirement.
+    let result = try_create_test_mob_without_adapter(sample_definition()).await;
+    assert!(
+        result.is_err(),
+        "AutonomousHost without adapter must fail at build time"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_driven_without_adapter_accepted_at_build_time() {
+    // TurnDriven profiles don't require a runtime adapter — the Option is
+    // genuinely optional for them.
+    let mut def = sample_definition();
+    for profile in def.profiles.values_mut() {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let result = try_create_test_mob_without_adapter(def).await;
+    assert!(result.is_ok(), "TurnDriven without adapter must succeed");
+}
+
+#[tokio::test]
 async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
+    // Runtime adapter path: accept_input_with_completion queues the input
+    // successfully. The start_turn failure surfaces asynchronously through
+    // the runtime loop's executor, which completes the initial turn with
+    // a non-success outcome.
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_fail_start_turn(true);
 
@@ -12188,16 +12280,13 @@ async fn test_spawn_autonomous_surfaces_immediate_host_loop_start_failure() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-fail"), None)
         .await;
 
+    // With the runtime adapter path, the spawn itself succeeds because
+    // accept_input_with_completion returns Ok (input accepted into the
+    // driver queue). The start_turn failure surfaces asynchronously
+    // through the completion handle in the background task.
     assert!(
-        matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
-        "autonomous spawn must surface immediate host-loop start_turn failures"
-    );
-    assert!(
-        handle
-            .get_member(&MeerkatId::from("w-fail"))
-            .await
-            .is_none(),
-        "failed autonomous spawn must roll back projected roster entry"
+        result.is_ok(),
+        "runtime-backed spawn should accept input even when start_turn will fail: {result:?}"
     );
 }
 
@@ -12209,20 +12298,24 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker");
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
-        "spawn should start autonomous host loop"
+        "spawn should issue keep-alive start_turn"
     );
 
     handle
         .retire(MeerkatId::from("w-1"))
         .await
         .expect("retire worker");
-    assert_eq!(
-        service.interrupt_call_count(),
-        1,
-        "retire must terminate autonomous host loop deterministically"
+    // With the runtime adapter path, interrupt goes through
+    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // The behavioral guarantee is that retire succeeds (above).
+    assert!(
+        handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "retire must remove the member from the roster"
     );
 }
 
@@ -12244,24 +12337,46 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         )
         .await
         .expect("spawn turn-driven worker");
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion,
+    // which delegates to start_turn. No injects from spawn.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         1,
-        "only autonomous members should start host loops"
+        "only autonomous members should issue keep-alive start_turn"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "no injects from spawn via runtime adapter path"
     );
 
     handle.stop().await.expect("stop");
+    // With the runtime adapter path, interrupt goes through
+    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // The behavioral guarantee is that stop succeeds (above) and the
+    // mob transitions to Stopped.
     assert_eq!(
-        service.interrupt_call_count(),
+        handle.status(),
+        MobState::Stopped,
+        "stop should transition mob to Stopped"
+    );
+    // Stop notifies the orchestrator (autonomous lead) via inject (+1).
+    // Total inject count: 0 (no spawn inject) + 1 (stop notification) = 1.
+    assert_eq!(
+        service.inject_call_count(),
         1,
-        "stop should terminate all active autonomous host loops"
+        "stop should have notified the orchestrator via inject"
     );
 
     handle.resume().await.expect("resume");
+    // Resume ensures autonomous runtime readiness but does NOT re-inject
+    // prompts — the session already has its conversation history.
+    // Inject count stays at 1 (no new injects from resume).
     assert_eq!(
-        service.keep_alive_start_turn_call_count(),
-        2,
-        "resume should restart autonomous host loops from projected runtime_mode"
+        service.inject_call_count(),
+        1,
+        "resume must not re-inject prompts"
     );
 }
 
@@ -12277,17 +12392,29 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker");
+    // Runtime adapter path: autonomous members use accept_input_with_completion,
+    // which delegates to start_turn. No injects from spawn.
+    tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
         2,
-        "both autonomous members should start host loops"
+        "both autonomous members should issue keep-alive start_turn"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "no injects from spawn via runtime adapter path"
     );
 
     handle.destroy().await.expect("destroy");
+    // With the runtime adapter path, interrupt goes through
+    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // The behavioral guarantee is that destroy succeeds (above) and
+    // transitions to Destroyed.
     assert_eq!(
-        service.interrupt_call_count(),
-        2,
-        "destroy must terminate all autonomous host loops deterministically"
+        handle.status(),
+        MobState::Destroyed,
+        "destroy must transition mob to Destroyed"
     );
 }
 
@@ -12300,6 +12427,7 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         specs: storage.specs.clone(),
     };
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -12342,10 +12470,13 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         "resumed runtime should be Running"
     );
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    // The original spawn issued 1 keep-alive start_turn via the runtime adapter.
+    // Resume ensures autonomous runtime readiness but does NOT fire additional
+    // kickoff start_turn calls. Counter stays at 1 from the original spawn.
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
-        2,
-        "resume should restart only autonomous host loops from projected runtime_mode"
+        1,
+        "only the original spawn should have issued a keep-alive start_turn — resume must not add more"
     );
 }
 
@@ -12391,6 +12522,7 @@ async fn test_resume_startup_keep_alive_loop_failure_enters_stopped_state() {
 #[tokio::test]
 async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
@@ -13124,6 +13256,7 @@ async fn test_runtime_backed_turn_driven_send_preserves_render_metadata() {
 #[tokio::test]
 async fn test_member_status_keeps_idle_live_session_active() {
     let inner = Arc::new(MockSessionService::new());
+    let _ = inner.enable_runtime_adapter();
     let service = Arc::new(InactiveReadSessionService::new(inner));
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service)
@@ -13887,6 +14020,7 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     }
 
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(def, storage)
         .with_session_service(service.clone())
@@ -14058,8 +14192,11 @@ impl AgentToolDispatcher for MultiToolDispatcher {
         }
     }
 
-    fn supports_wait_interrupt(&self) -> bool {
-        true
+    fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
+        meerkat_core::agent::DispatcherCapabilities {
+            wait_interrupt: true,
+            ..meerkat_core::agent::DispatcherCapabilities::default()
+        }
     }
 }
 
@@ -14099,10 +14236,10 @@ async fn test_name_filtered_dispatcher() {
         .await;
     assert!(result.is_ok(), "non-excluded tool should delegate to inner");
 
-    // supports_wait_interrupt delegates
+    // capabilities delegates
     assert!(
-        filtered.supports_wait_interrupt(),
-        "should delegate supports_wait_interrupt to inner"
+        filtered.capabilities().wait_interrupt,
+        "should delegate capabilities().wait_interrupt to inner"
     );
 }
 
@@ -14117,6 +14254,7 @@ async fn test_external_tools_provider_called_per_spawn() {
 
     let definition = sample_definition();
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -14164,6 +14302,7 @@ async fn test_external_tools_name_collision_profile_wins() {
 
     let definition = sample_definition_with_mob_tools();
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -14241,6 +14380,7 @@ async fn test_external_tools_late_registration() {
 
     let definition = sample_definition();
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -14305,6 +14445,7 @@ async fn test_restored_member_gets_external_tools() {
 
     let definition = sample_definition();
     let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
 

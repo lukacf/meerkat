@@ -81,6 +81,16 @@ impl DriverEntry {
         }
     }
 
+    /// Whether this session is quiescent for detached-wake purposes.
+    ///
+    /// A session is quiescent when it is idle/attached (not running) AND has
+    /// no non-terminal inputs in its ledger. Queued-only inputs intentionally
+    /// block quiescence — `accept_input_without_wake` stages work without
+    /// waking, so detached-wake must not race with pending queue processing.
+    pub(crate) fn is_quiescent_for_detached_wake(&self) -> bool {
+        self.is_idle_or_attached() && self.as_driver().active_input_ids().is_empty()
+    }
+
     /// Attach an executor (Idle → Attached).
     pub(crate) fn attach(&mut self) -> Result<(), RuntimeStateTransitionError> {
         match self {
@@ -586,6 +596,9 @@ impl RuntimeSessionAdapter {
         let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
         ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
+        // Get the completion feed from the registry for feed-based idle wake.
+        let completion_feed = ops_lifecycle.completion_feed_handle();
+
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let mut pending_loop_handle =
@@ -596,6 +609,7 @@ impl RuntimeSessionAdapter {
                 control_rx,
                 Some(completions.clone()),
                 Some(Arc::clone(&detached_wake_state)),
+                Some(completion_feed),
             ));
 
         let (published, detach_after_abort) = {

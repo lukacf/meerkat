@@ -65,6 +65,8 @@ pub enum InputAbandonReason {
     Destroyed,
     /// Input was explicitly cancelled.
     Cancelled,
+    /// The input was staged for execution too many times without success.
+    MaxAttemptsExhausted { attempts: u32 },
 }
 
 /// Terminal outcome of an input.
@@ -153,8 +155,6 @@ pub struct InputState {
     pub durability: Option<crate::input::InputDurability>,
     /// Idempotency key (retained for dedup across restarts).
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
-    /// Number of times this input has been applied (for crash-loop detection).
-    pub attempt_count: u32,
     /// Number of times this input has been recovered.
     pub recovery_count: u32,
     /// How to reconstruct this input (for derived inputs).
@@ -175,7 +175,6 @@ impl InputState {
             policy: None,
             durability: None,
             idempotency_key: None,
-            attempt_count: 0,
             recovery_count: 0,
             reconstruction_source: None,
             persisted_input: None,
@@ -218,6 +217,13 @@ impl InputState {
     /// When the input was last updated.
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.authority.updated_at()
+    }
+
+    /// Number of times this input has been staged for a run (retry budget).
+    ///
+    /// Owned by [`InputLifecycleAuthority`]. No shadow copy on InputState.
+    pub fn attempt_count(&self) -> u32 {
+        self.authority.attempt_count()
     }
 
     // ---- Authority access ----
@@ -298,7 +304,7 @@ impl Serialize for InputState {
             terminal_outcome: self.authority.terminal_outcome().cloned(),
             durability: self.durability,
             idempotency_key: self.idempotency_key.clone(),
-            attempt_count: self.attempt_count,
+            attempt_count: self.authority.attempt_count(),
             recovery_count: self.recovery_count,
             history: self.authority.history().to_vec(),
             reconstruction_source: self.reconstruction_source.clone(),
@@ -320,6 +326,7 @@ impl<'de> Deserialize<'de> for InputState {
             helper.terminal_outcome,
             helper.last_run_id,
             helper.last_boundary_sequence,
+            helper.attempt_count,
             helper.history,
             helper.updated_at,
         );
@@ -329,7 +336,6 @@ impl<'de> Deserialize<'de> for InputState {
             policy: helper.policy,
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
-            attempt_count: helper.attempt_count,
             recovery_count: helper.recovery_count,
             reconstruction_source: helper.reconstruction_source,
             persisted_input: helper.persisted_input,
@@ -347,6 +353,12 @@ mod tests {
         WakeMode,
     };
     use meerkat_core::ops::{OpEvent, OperationId};
+
+    #[test]
+    fn attempt_count_accessor_delegates_to_authority() {
+        let state = InputState::new_accepted(InputId::new());
+        assert_eq!(state.attempt_count(), 0);
+    }
 
     #[test]
     fn lifecycle_state_terminal() {

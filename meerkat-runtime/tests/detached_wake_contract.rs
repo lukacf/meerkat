@@ -384,6 +384,123 @@ async fn choke_004_completion_during_running_defers_wake() {
     );
 }
 
+// ─── CHOKE-004-IT-D: MobMemberChild completion does NOT trigger idle wake ───
+//
+// MobMemberChild completions already wake the session through comms-based
+// terminal response injection. The CompletionFeed-based idle wake must filter
+// them out to avoid duplicate continuation injections.
+
+#[tokio::test]
+async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountingExecutor {
+        apply_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: Some(RunResult {
+                    text: "done".into(),
+                    session_id: SessionId::new(),
+                    usage: Usage::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                }),
+            })
+        }
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let apply_count = Arc::new(AtomicUsize::new(0));
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingExecutor {
+                apply_count: apply_count.clone(),
+            }),
+        )
+        .await;
+
+    let registry = adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .expect("session registry should exist");
+
+    // Register and complete a MobMemberChild operation
+    let spec = mob_member_spec("delegate-no-idle-wake");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id, "delegate done"))
+        .unwrap();
+
+    // Give the runtime loop time to process any idle wake
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Trigger a prompt to flush any queued continuations
+    use meerkat_runtime::{Input, InputHeader, PromptInput};
+    let trigger = Input::Prompt(PromptInput {
+        header: InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: InputOrigin::Operator,
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        text: "flush".into(),
+        blocks: None,
+        turn_metadata: None,
+    });
+
+    let (_, handle) = adapter
+        .accept_input_with_completion(&session_id, trigger)
+        .await
+        .unwrap();
+    if let Some(handle) = handle {
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The executor should have been called exactly once (the flush prompt).
+    // If MobMemberChild completion triggered an idle wake, we'd see 2+ calls
+    // (the continuation + the flush).
+    let calls = apply_count.load(Ordering::SeqCst);
+    assert_eq!(
+        calls, 1,
+        "MobMemberChild completion should NOT trigger idle wake continuation; \
+         expected 1 executor call (flush only), got {calls}"
+    );
+}
+
 // ─── UNIT-003: ContinuationInput helper builds correct shape ───
 
 #[test]

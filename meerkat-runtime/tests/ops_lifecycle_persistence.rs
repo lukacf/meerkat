@@ -1,17 +1,19 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Phase 2 contract tests for ops lifecycle persistence and recovery.
-//!
-//! TDD RED: these tests define the persistence contract. Implementation
-//! in P2-B through P2-E makes them pass.
 
 use std::sync::Arc;
 
 use meerkat_core::completion_feed::CompletionFeed;
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
+use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
+use meerkat_runtime::RuntimeStore; // needed for trait method calls
 use meerkat_runtime::{PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
 
 fn bg_spec(name: &str) -> OperationSpec {
@@ -296,4 +298,175 @@ fn snapshot_captures_entries_beyond_authority_retention() {
         2,
         "authority should retain max_completed=2 ops"
     );
+}
+
+// ─── Regression: cold ensure_session_with_executor recovers persisted epoch ───
+
+/// Simple executor for recovery tests.
+struct NoopExecutor;
+
+#[async_trait::async_trait]
+impl CoreExecutor for NoopExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        Ok(CoreApplyOutput {
+            receipt: meerkat_core::RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            run_result: None,
+        })
+    }
+    async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// Regression test: cold ensure_session_with_executor creates an entry
+/// with the shared recovery helper, not a bare fresh registry.
+/// Uses ephemeral adapter (no store) to verify the code path works.
+#[tokio::test]
+async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
+    let adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let session_id = SessionId::new();
+
+    // Go straight to register_session_with_executor — no prior register_session.
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    // The session should be registered with valid bindings.
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("session should be registered after cold attach");
+
+    assert_eq!(bindings.session_id, session_id);
+
+    // Register an op — it should be visible through the same registry.
+    let spec = bg_spec("cold-attach-verify");
+    let op_id = spec.id.clone();
+    bindings.ops_lifecycle.register_operation(spec).unwrap();
+
+    let direct = adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .expect("registry should exist");
+    assert!(
+        direct.snapshot(&op_id).is_some(),
+        "cold attach-first registry must be the same instance as prepare_bindings"
+    );
+}
+
+/// Regression test: cold persistent adapter with pre-persisted snapshot
+/// recovers epoch through both register_session and
+/// register_session_with_executor paths.
+#[tokio::test]
+async fn cold_persistent_adapter_recovers_persisted_epoch() {
+    let store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+
+    let session_id = SessionId::new();
+
+    // Phase 1: Persist a snapshot manually.
+    let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let epoch_id = RuntimeEpochId::new();
+
+    let spec = bg_spec("persistent-recovery");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id))
+        .unwrap();
+
+    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+    store
+        .persist_ops_lifecycle(&runtime_id, &snapshot)
+        .await
+        .unwrap();
+
+    // Phase 2: Cold persistent adapter — register_session path.
+    let adapter = meerkat_runtime::RuntimeSessionAdapter::persistent_without_blobs(Arc::clone(
+        &store,
+    )
+        as Arc<dyn RuntimeStore>);
+    adapter.register_session(session_id.clone()).await;
+
+    let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
+    assert_eq!(
+        bindings.epoch_id, epoch_id,
+        "register_session must recover the persisted epoch_id"
+    );
+
+    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let batch = feed.list_since(0);
+    assert_eq!(
+        batch.entries.len(),
+        1,
+        "register_session must recover persisted completion entries"
+    );
+    assert_eq!(batch.entries[0].operation_id, op_id);
+}
+
+/// Same test but via the ensure_session_with_executor cold path.
+#[tokio::test]
+async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
+    let store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+
+    let session_id = SessionId::new();
+
+    // Persist a snapshot
+    let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let epoch_id = RuntimeEpochId::new();
+
+    let spec = bg_spec("executor-attach-recovery");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id))
+        .unwrap();
+
+    let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
+    let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+    store
+        .persist_ops_lifecycle(&runtime_id, &snapshot)
+        .await
+        .unwrap();
+
+    // Cold attach-first — no prior register_session
+    let adapter = Arc::new(
+        meerkat_runtime::RuntimeSessionAdapter::persistent_without_blobs(
+            Arc::clone(&store) as Arc<dyn RuntimeStore>
+        ),
+    );
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    // Verify epoch recovered
+    let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
+    assert_eq!(
+        bindings.epoch_id, epoch_id,
+        "cold ensure_session_with_executor must recover the persisted epoch_id"
+    );
+
+    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let batch = feed.list_since(0);
+    assert!(
+        !batch.entries.is_empty(),
+        "cold ensure_session_with_executor must recover persisted completion entries"
+    );
+    assert_eq!(batch.entries[0].operation_id, op_id);
 }

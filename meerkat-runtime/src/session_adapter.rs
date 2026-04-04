@@ -408,6 +408,22 @@ impl RuntimeSessionAdapter {
         }
     }
 
+    /// Create a persistent adapter with a RuntimeStore but no blob store.
+    ///
+    /// The driver will fall back to ephemeral mode for sessions (no durable
+    /// boundary commits), but ops lifecycle recovery from the store still works.
+    /// Primarily useful for tests that need to verify recovery without needing
+    /// a full blob store.
+    pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            mode: RuntimeMode::V9Compliant,
+            store: Some(store),
+            blob_store: None,
+            comms_drain_slots: RwLock::new(HashMap::new()),
+        }
+    }
+
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
@@ -598,6 +614,13 @@ impl RuntimeSessionAdapter {
                     return;
                 }
 
+                // Recover ops state OUTSIDE the sessions lock to avoid blocking
+                // other adapter operations behind potentially slow disk I/O.
+                let (recovered_ops, recovered_epoch, recovered_cursors) =
+                    self.recover_or_create_ops_state(&session_id).await;
+
+                // Double-check under the lock — another task may have inserted
+                // the entry while we were recovering.
                 let mut sessions = self.sessions.write().await;
                 if let Some(entry) = sessions.get_mut(&session_id) {
                     entry.clear_dead_attachment();
@@ -613,22 +636,19 @@ impl RuntimeSessionAdapter {
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    // Use the shared recovery helper — same path as register_session().
-                    let (ops_lifecycle, epoch_id, cursor_state) =
-                        self.recover_or_create_ops_state(&session_id).await;
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
                             driver: driver.clone(),
-                            ops_lifecycle: ops_lifecycle.clone(),
-                            epoch_id,
-                            cursor_state,
+                            ops_lifecycle: recovered_ops.clone(),
+                            epoch_id: recovered_epoch,
+                            cursor_state: recovered_cursors,
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,
                         },
                     );
-                    (driver, completions, ops_lifecycle)
+                    (driver, completions, recovered_ops)
                 }
             };
 

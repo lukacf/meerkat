@@ -560,11 +560,15 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[allow(clippy::redundant_clone)]
         // clone needed on non-wasm32 where owner_session_id is reused
         let rebound_external = match owned.external.take() {
-            Some(external) if external.capabilities().ops_lifecycle => Some(
-                external
-                    .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?
-                    .into_dispatcher(),
-            ),
+            Some(external)
+                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) == 1 =>
+            {
+                Some(
+                    external
+                        .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?
+                        .into_dispatcher(),
+                )
+            }
             other => other,
         };
 

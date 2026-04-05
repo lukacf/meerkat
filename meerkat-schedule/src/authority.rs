@@ -600,12 +600,13 @@ mod tests {
     fn await_completion_requires_dispatching_phase() {
         let authority = OccurrenceLifecycleAuthority;
         let occurrence = sample_occurrence();
-        let error = authority
-            .apply(
-                occurrence,
-                OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() },
-            )
-            .expect_err("await completion should reject non-dispatching occurrences");
-        assert!(matches!(error, OccurrenceLifecycleError::NotDispatching));
+        let result = authority.apply(
+            occurrence,
+            OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() },
+        );
+        assert!(matches!(
+            result,
+            Err(OccurrenceLifecycleError::NotDispatching)
+        ));
     }
 }

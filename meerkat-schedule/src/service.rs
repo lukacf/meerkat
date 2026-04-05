@@ -337,10 +337,10 @@ impl ScheduleService {
         }
 
         if !planned.is_empty() {
-            let planning_cursor_utc = planned
-                .last()
-                .map(|occurrence| occurrence.due_at_utc)
-                .expect("planned is not empty");
+            let Some(planning_cursor_utc) = planned.last().map(|occurrence| occurrence.due_at_utc)
+            else {
+                return Ok(planned);
+            };
             let mutator = self
                 .schedule_authority
                 .apply(

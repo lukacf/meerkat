@@ -476,8 +476,7 @@ impl PartialEq for SessionMaterializationSpec {
             && self.system_prompt == other.system_prompt
             && self.max_tokens == other.max_tokens
             && self.provider == other.provider
-            && self.output_schema.as_ref().map(output_schema_json)
-                == other.output_schema.as_ref().map(output_schema_json)
+            && self.output_schema == other.output_schema
             && self.structured_output_retries == other.structured_output_retries
             && self.provider_params == other.provider_params
             && self.comms_name == other.comms_name
@@ -506,7 +505,6 @@ pub enum MobTargetBinding {
     Flow {
         mob_id: String,
         flow_id: String,
-        #[serde(default = "raw_value_null")]
         #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
         params: Box<RawValue>,
     },
@@ -673,14 +671,6 @@ pub enum ScheduledMobRuntimeMode {
 pub enum ScheduledMobBackendKind {
     Session,
     External,
-}
-
-fn raw_value_null() -> Box<RawValue> {
-    RawValue::from_string("null".to_string()).expect("null is valid raw json")
-}
-
-fn output_schema_json(schema: &OutputSchema) -> serde_json::Value {
-    serde_json::to_value(schema).expect("output schema must serialize")
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

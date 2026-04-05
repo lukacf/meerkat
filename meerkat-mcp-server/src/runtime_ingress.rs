@@ -483,12 +483,13 @@ async fn apply_runtime_turn(
                         .and_then(|meta| meta.config_generation)
                 });
 
-            let ops_lifecycle = meerkat::surface::bind_surface_session(
-                context.runtime_adapter.as_ref(),
-                session_id,
-            )
-            .await
-            .map_err(|message| SessionError::Agent(AgentError::InternalError(message)))?;
+            let runtime_bindings = context
+                .runtime_adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
             let external_tools = context
                 .external_tools_for_session(session_id, state)
                 .await?;
@@ -498,7 +499,9 @@ async fn apply_runtime_turn(
                 SurfaceSessionRecoveryContext {
                     llm_client_override: None,
                     external_tools,
-                    ops_lifecycle_override: Some(ops_lifecycle),
+                    runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+                        runtime_bindings,
+                    )),
                     realm_id: Some(context.realm_id.clone()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),

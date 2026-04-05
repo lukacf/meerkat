@@ -160,7 +160,7 @@ impl RestScheduleContext {
             .await
             .map_err(ScheduleDomainError::Internal)?;
         let pre_session = prepared.session;
-        let ops_lifecycle = prepared.ops_lifecycle;
+        let runtime_bindings = prepared.bindings;
 
         let mut build_config = AgentBuildConfig::new(create.model.clone());
         build_config.provider = create.provider;
@@ -203,7 +203,8 @@ impl RestScheduleContext {
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
         build_config.resume_session = Some(pre_session);
-        build_config.ops_lifecycle_override = Some(ops_lifecycle);
+        build_config.runtime_build_mode =
+            meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings);
         build_config.config_generation = self
             .runtime
             .config_runtime

@@ -174,7 +174,7 @@ impl McpScheduleContext {
             .map_err(ScheduleDomainError::Internal)?;
         let session = prepared.session;
         let session_id = prepared.session_id;
-        let ops_lifecycle = prepared.ops_lifecycle;
+        let runtime_bindings = prepared.bindings;
 
         let output_schema = create
             .output_schema_json
@@ -209,7 +209,6 @@ impl McpScheduleContext {
             external_tools,
             recoverable_tool_defs: None,
             llm_client_override: None,
-            ops_lifecycle_override: Some(ops_lifecycle),
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -240,6 +239,7 @@ impl McpScheduleContext {
             resume_override_mask: Default::default(),
             blob_store_override: None,
             mob_tools: None,
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
         };
 
         let request = CreateSessionRequest {

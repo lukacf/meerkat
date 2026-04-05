@@ -919,13 +919,11 @@ impl AgentFactory {
             build_config.override_memory = metadata.tooling.memory.to_override();
         }
         if !mask.override_mob {
-            build_config.apply_persisted_mob_operator_access(
-                metadata.tooling.mob.to_override(),
-                build_config
-                    .resume_session
-                    .as_ref()
-                    .and_then(Session::mob_tool_authority_context),
-            );
+            build_config.override_mob = metadata.tooling.mob.to_override();
+            build_config.mob_tool_authority_context = build_config
+                .resume_session
+                .as_ref()
+                .and_then(Session::mob_tool_authority_context);
         }
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
@@ -1240,20 +1238,17 @@ impl AgentFactory {
         let provider = match build_config.provider {
             Some(p) => p,
             None => {
-                if let Some(client) = build_config.llm_client_override.as_ref() {
-                    // An explicit override is the authoritative execution transport.
-                    // When the model string is synthetic (for example tests or
-                    // surface-owned mock clients), carry provider metadata from
-                    // the bound client instead of rejecting the build.
+                let inferred = ProviderResolver::infer_from_model(&build_config.model);
+                if inferred != Provider::Other {
+                    inferred
+                } else if let Some(client) = build_config.llm_client_override.as_ref() {
+                    // An explicit override is the authoritative execution transport
+                    // when the model name is not recognizable.
                     Provider::from_name(client.provider())
                 } else {
-                    let inferred = ProviderResolver::infer_from_model(&build_config.model);
-                    if inferred == Provider::Other {
-                        return Err(BuildAgentError::UnknownProvider {
-                            model: build_config.model.clone(),
-                        });
-                    }
-                    inferred
+                    return Err(BuildAgentError::UnknownProvider {
+                        model: build_config.model.clone(),
+                    });
                 }
             }
         };
@@ -1561,7 +1556,12 @@ impl AgentFactory {
 
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
-        let effective_mob = build_config.override_mob.unwrap_or(self.enable_mob);
+        let effective_mob = if matches!(build_config.override_mob, Some(false)) {
+            false
+        } else {
+            build_config.override_mob.unwrap_or(self.enable_mob)
+                || build_config.mob_tool_authority_context.is_some()
+        };
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -2120,7 +2120,9 @@ impl AgentFactory {
             metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
             metadata.tooling.memory =
                 ToolCategoryOverride::from_override(build_config.override_memory);
-            metadata.tooling.active_skills = active_skill_ids;
+            if build_config.resume_override_mask.preload_skills {
+                metadata.tooling.active_skills = active_skill_ids;
+            }
             metadata.keep_alive = build_config.keep_alive;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;

@@ -357,7 +357,6 @@ pub fn spawn_schedule_host(
     #[cfg(target_arch = "wasm32")]
     let join = tokio_with_wasm::alias::task::spawn(async move {
         let mut interval = tokio_with_wasm::alias::time::interval(poll_interval);
-        interval.set_missed_tick_behavior(tokio_with_wasm::alias::time::MissedTickBehavior::Skip);
         loop {
             tokio_with_wasm::alias::select! {
                 _ = &mut shutdown_rx => break,

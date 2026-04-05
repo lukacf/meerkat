@@ -12,6 +12,7 @@ meerkat-client
 meerkat-store
 meerkat-tools
 meerkat-runtime
+meerkat-schedule
 meerkat-session
 meerkat-memory
 meerkat-mcp

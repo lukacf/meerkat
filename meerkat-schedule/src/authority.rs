@@ -480,7 +480,7 @@ mod tests {
             OccurrencePhase::AwaitingCompletion,
         ] {
             let mut occurrence = sample_occurrence();
-            occurrence.phase = phase.clone();
+            occurrence.phase = phase;
             assert!(
                 authority.apply(occurrence, input.clone()).is_err(),
                 "claim should reject occurrences already in phase {phase:?}"

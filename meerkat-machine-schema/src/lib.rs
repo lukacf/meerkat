@@ -87,8 +87,12 @@ mod tests {
             let transition = machine
                 .transitions
                 .iter()
-                .find(|transition| transition.name == transition_name)
-                .unwrap_or_else(|| panic!("missing {transition_name} transition"));
+                .find(|transition| transition.name == transition_name);
+
+            assert!(transition.is_some(), "missing {transition_name} transition");
+            let Some(transition) = transition else {
+                return;
+            };
 
             assert!(
                 transition.updates.iter().any(|update| matches!(

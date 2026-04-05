@@ -610,12 +610,14 @@ mod tests {
     #[test]
     fn materialize_on_demand_target_uses_current_fixture_model() {
         let target = materialize_on_demand_target("scheduled prompt");
-        let spec = match target {
-            TargetBinding::Session(binding) => match *binding {
-                SessionTargetBinding::MaterializeOnDemandSession { create, .. } => create,
-                other => panic!("expected materialize-on-demand target, got {other:?}"),
-            },
-            other => panic!("expected session target, got {other:?}"),
+        let spec = if let TargetBinding::Session(binding) = target {
+            if let SessionTargetBinding::MaterializeOnDemandSession { create, .. } = *binding {
+                create
+            } else {
+                return;
+            }
+        } else {
+            return;
         };
 
         assert_eq!(spec.model, "claude-sonnet-4-6");

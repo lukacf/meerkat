@@ -336,11 +336,17 @@ mod tests {
         schedule_id: &ScheduleId,
     ) -> Option<meerkat::Occurrence> {
         for _ in 0..40 {
-            let occurrences = runtime
+            let occurrences_result = runtime
                 .schedule_service()
                 .list_occurrences(schedule_id)
-                .await
-                .expect("list occurrences");
+                .await;
+            assert!(
+                occurrences_result.is_ok(),
+                "list occurrences: {occurrences_result:?}"
+            );
+            let Ok(occurrences) = occurrences_result else {
+                return None;
+            };
             if let Some(occurrence) = occurrences.into_iter().find(|occurrence| {
                 occurrence.phase == OccurrencePhase::Misfired
                     && occurrence.failure_class == Some(OccurrenceFailureClass::TargetMissing)
@@ -354,16 +360,28 @@ mod tests {
 
     #[tokio::test]
     async fn schedule_call_starts_host_and_services_due_schedule() {
-        let temp = TempDir::new().unwrap();
+        let temp_result = TempDir::new();
+        assert!(temp_result.is_ok(), "temp dir: {temp_result:?}");
+        let Ok(temp) = temp_result else {
+            return;
+        };
         let runtime = test_runtime(&temp);
-        let params = serde_json::value::RawValue::from_string(
-            serde_json::to_string(&json!({
-                "name": "meerkat_schedule_create",
-                "arguments": missing_target_schedule_tool_args(),
-            }))
-            .expect("serialize params"),
-        )
-        .expect("raw value");
+        let serialized_result = serde_json::to_string(&json!({
+            "name": "meerkat_schedule_create",
+            "arguments": missing_target_schedule_tool_args(),
+        }));
+        assert!(
+            serialized_result.is_ok(),
+            "serialize params: {serialized_result:?}"
+        );
+        let Ok(serialized) = serialized_result else {
+            return;
+        };
+        let params_result = serde_json::value::RawValue::from_string(serialized);
+        assert!(params_result.is_ok(), "raw value: {params_result:?}");
+        let Ok(params) = params_result else {
+            return;
+        };
 
         let response =
             handle_call(Some(RpcId::Num(1)), Some(params.as_ref()), runtime.clone()).await;
@@ -373,24 +391,46 @@ mod tests {
             response.error
         );
 
-        let created: Value = serde_json::from_str(
-            response
-                .result
-                .as_ref()
-                .expect("schedule/call result")
-                .get(),
-        )
-        .expect("valid JSON result");
-        let schedule_id = ScheduleId::parse(
-            created["schedule_id"]
-                .as_str()
-                .expect("schedule_id should be returned"),
-        )
-        .expect("valid schedule id");
+        assert!(
+            response.result.is_some(),
+            "schedule/call result should exist"
+        );
+        let Some(result) = response.result.as_ref() else {
+            return;
+        };
+        let created_result: Result<Value, _> = serde_json::from_str(result.get());
+        assert!(
+            created_result.is_ok(),
+            "valid JSON result: {created_result:?}"
+        );
+        let Ok(created) = created_result else {
+            return;
+        };
+        let schedule_id_str = created["schedule_id"].as_str();
+        assert!(
+            schedule_id_str.is_some(),
+            "schedule_id should be returned: {created:?}"
+        );
+        let Some(schedule_id_str) = schedule_id_str else {
+            return;
+        };
+        let schedule_id_result = ScheduleId::parse(schedule_id_str);
+        assert!(
+            schedule_id_result.is_ok(),
+            "valid schedule id: {schedule_id_result:?}"
+        );
+        let Ok(schedule_id) = schedule_id_result else {
+            return;
+        };
 
-        let occurrence = wait_for_missing_target_misfire(&runtime, &schedule_id)
-            .await
-            .expect("schedule/call should start the host and service due work");
+        let occurrence = wait_for_missing_target_misfire(&runtime, &schedule_id).await;
+        assert!(
+            occurrence.is_some(),
+            "schedule/call should start the host and service due work"
+        );
+        let Some(occurrence) = occurrence else {
+            return;
+        };
         assert_eq!(occurrence.phase, OccurrencePhase::Misfired);
     }
 }

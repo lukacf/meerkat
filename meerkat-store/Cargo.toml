@@ -24,11 +24,14 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
-redb = { workspace = true }
+redb = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 dirs = { workspace = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["fs", "io-util", "sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -39,10 +42,11 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 toml = { workspace = true }
 
 [features]
-default = ["jsonl", "memory"]
+default = ["jsonl", "memory", "redb"]
 jsonl = []
 memory = []
 sqlite = ["dep:rusqlite"]
+redb = ["dep:redb"]
 
 [package.metadata.cargo-machete]
 ignored = ["toml"]  # dev-dependency used in tests

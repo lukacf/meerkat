@@ -23,10 +23,14 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+portable-atomic = "1.11"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["macros", "sync", "time", "rt", "io-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

@@ -1,6 +1,6 @@
 //! Composite dispatcher that combines multiple dispatchers into one.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use crate::builtin::shell::{JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
@@ -16,7 +16,7 @@ use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,15 +43,15 @@ pub struct CompositeDispatcher {
     builtin_config: BuiltinToolConfig,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     project_root: Option<PathBuf>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     shell_config: Option<ShellConfig>,
     #[allow(dead_code)]
     session_id: Option<String>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     image_tool_results: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     allowed_tools: HashSet<String>,
@@ -70,7 +70,7 @@ impl CompositeDispatcher {
     /// `image_tool_results` is accepted for API compatibility but no longer used
     /// for filtering — view_image is always registered. Visibility is controlled
     /// at the factory level via `ToolScope` external filters.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn new(
         task_store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
@@ -93,7 +93,7 @@ impl CompositeDispatcher {
     }
 
     /// Create a new composite dispatcher with an optional session-canonical ops registry.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_ops_lifecycle(
         task_store: Arc<dyn TaskStore>,
@@ -203,7 +203,7 @@ impl CompositeDispatcher {
     }
 
     /// Create a new composite dispatcher with builtin tools (wasm32 version, no shell).
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     pub fn new_wasm(
         task_store: Arc<dyn TaskStore>,
         config: &BuiltinToolConfig,
@@ -300,14 +300,17 @@ impl CompositeDispatcher {
     }
 
     /// Return the shared shell job manager when shell tools are enabled.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn shell_job_manager(&self) -> Option<Arc<JobManager>> {
         self.job_manager.clone()
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl AgentToolDispatcher for CompositeDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut tools = Vec::new();
@@ -456,7 +459,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // When NO feed is wired (direct AgentBuilder paths without AgentFactory),
         // background_completions is the only delivery path — return them here so
         // the agent boundary's legacy ext.background_completions processing works.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
         if let Some(ref mgr) = self.job_manager {
             let drained = mgr.drain_completed().await;
             if self.completion_feed.is_none() {
@@ -470,7 +473,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
     fn capabilities(&self) -> DispatcherCapabilities {
         let has_wait = self.builtin_tools.iter().any(|t| t.name() == "wait");
         let mut ops_lifecycle = false;
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
         if self.job_manager.is_some() {
             ops_lifecycle = true;
         }
@@ -559,7 +562,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
             other => other,
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
         {
             if owned.job_manager.is_none() && rebound_external.is_none() {
                 return Err(OpsLifecycleBindError::Unsupported);
@@ -617,7 +620,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
             Ok(BindOutcome::Bound(Arc::new(rebound)))
         }
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
         {
             let _ = registry;
             let _ = owner_session_id;
@@ -629,7 +632,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
     fn completion_enrichment(
         &self,
     ) -> Option<Arc<dyn meerkat_core::completion_feed::CompletionEnrichmentProvider>> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
         if let Some(ref mgr) = self.job_manager {
             return Some(Arc::clone(mgr)
                 as Arc<

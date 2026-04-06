@@ -1,12 +1,12 @@
 //! Utility tool set implementation
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use super::ApplyPatchTool;
 use super::datetime::DateTimeTool;
 use super::wait::WaitTool;
 use crate::builtin::BuiltinTool;
 use meerkat_core::wait_interrupt::WaitInterruptReceiver;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use std::path::PathBuf;
 
 /// A set of utility tools for general-purpose operations
@@ -19,13 +19,13 @@ pub struct UtilityToolSet {
     /// Tool for getting current date/time
     pub datetime: DateTimeTool,
     /// Tool for applying structured file edits
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub apply_patch: ApplyPatchTool,
 }
 
 impl UtilityToolSet {
     /// Create a new UtilityToolSet without interrupt support
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     pub fn new() -> Self {
         Self {
             wait: WaitTool::new(),
@@ -34,7 +34,7 @@ impl UtilityToolSet {
     }
 
     /// Create a new UtilityToolSet without interrupt support.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             wait: WaitTool::new(),
@@ -46,7 +46,7 @@ impl UtilityToolSet {
     /// Create a UtilityToolSet with interrupt support for the wait tool
     ///
     /// The wait tool will be interrupted when a message is sent on the channel.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver) -> Self {
         Self {
             wait: WaitTool::with_interrupt(interrupt_rx),
@@ -55,7 +55,7 @@ impl UtilityToolSet {
     }
 
     /// Create a UtilityToolSet with interrupt support for the wait tool.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver, project_root: PathBuf) -> Self {
         Self {
             wait: WaitTool::with_interrupt(interrupt_rx),
@@ -65,7 +65,7 @@ impl UtilityToolSet {
     }
 
     /// Get references to all tools as a vector
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
         vec![
             &self.wait as &dyn BuiltinTool,
@@ -74,7 +74,7 @@ impl UtilityToolSet {
     }
 
     /// Get references to all tools as a vector.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
         vec![
             &self.wait as &dyn BuiltinTool,
@@ -84,13 +84,13 @@ impl UtilityToolSet {
     }
 
     /// Get tool names in this set
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     pub fn tool_names() -> Vec<&'static str> {
         vec!["wait", "datetime"]
     }
 
     /// Get tool names in this set.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     pub fn tool_names() -> Vec<&'static str> {
         vec!["wait", "datetime", "apply_patch"]
     }
@@ -135,12 +135,12 @@ Use `datetime` when you need to:
 }
 
 impl Default for UtilityToolSet {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     fn default() -> Self {
         Self::new()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     fn default() -> Self {
         Self::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }

@@ -11,6 +11,17 @@ harness = false
 
 [workspace]
 
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "mr9you/micropython-helper", version = "~1.22.1" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components"]
+
+[patch.crates-io]
+esp-idf-sys = { path = "vendor/esp-idf-sys" }
+esp-idf-hal = { path = "vendor/esp-idf-hal" }
+signal-hook-registry = { path = "../../../../third_party/signal-hook-registry-stub" }
+
 [profile.release]
 opt-level = "s"
 
@@ -20,12 +31,29 @@ opt-level = "z"
 
 [dependencies]
 anyhow = "1.0"
+async-trait = "0.1"
+ciborium = "0.2"
 embedded-svc = "0.29.0"
 embedded-graphics = "0.8.2"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+futures = "0.3"
 log = "0.4"
+meerkat-comms = { path = "../../../../meerkat-comms" }
+meerkat-client = { path = "../../../../meerkat-client", default-features = false, features = ["openai"] }
+meerkat-core = { path = "../../../../meerkat-core" }
+meerkat-hooks = { path = "../../../../meerkat-hooks" }
+meerkat-runtime = { path = "../../../../meerkat-runtime" }
+meerkat-session = { path = "../../../../meerkat-session", features = ["persistent-service"] }
+meerkat-skills = { path = "../../../../meerkat-skills", default-features = false }
+meerkat-store = { path = "../../../../meerkat-store", default-features = false, features = ["memory"] }
+meerkat-tools = { path = "../../../../meerkat-tools", default-features = false, features = ["skills"] }
 mipidsi = "0.10.0"
+parking_lot = "0.12"
 serde_json = "1.0"
+uuid = { version = "1.18", features = ["v4"] }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [build-dependencies]
 embuild = "0.33"

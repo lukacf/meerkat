@@ -813,7 +813,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
     async fn create_session(
         &self,
@@ -1135,7 +1139,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 }
 
-#[async_trait]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSessionService<B> {
     async fn read_history(
         &self,
@@ -1161,7 +1169,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
     }
 }
 
-#[async_trait]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSessionService<B> {
     async fn comms_runtime(
         &self,
@@ -1185,7 +1197,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSess
     }
 }
 
-#[async_trait]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSessionService<B> {
     async fn append_system_context(
         &self,

@@ -7,7 +7,19 @@ use crate::BlockAssembler;
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
-use futures::StreamExt;
+#[cfg(target_os = "espidf")]
+use embedded_svc::http::Method;
+#[cfg(target_os = "espidf")]
+use embedded_svc::http::client::{Client as EmbeddedHttpClient, Response as EmbeddedResponse};
+#[cfg(target_os = "espidf")]
+use embedded_svc::io::Write as _;
+#[cfg(target_os = "espidf")]
+use esp_idf_svc::http::client::{Configuration as EspHttpConfiguration, EspHttpConnection};
+#[cfg(target_os = "espidf")]
+use esp_idf_svc::sys;
+#[cfg(target_os = "espidf")]
+use esp_idf_svc::tls::X509;
+use futures::{Stream, StreamExt};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason, Usage,
@@ -16,11 +28,23 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
+#[cfg(target_os = "espidf")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "espidf")]
+use std::time::Duration;
+
+#[cfg(target_os = "espidf")]
+static OPENAI_ESP_REQUEST_SEQ: AtomicUsize = AtomicUsize::new(1);
+#[cfg(target_os = "espidf")]
+const OPENAI_WE1_PEM: &[u8] = concat!(include_str!("openai_we1.pem"), "\0").as_bytes();
+#[cfg(target_os = "espidf")]
+const OPENAI_ESP_MAX_ATTEMPTS: usize = 3;
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
     api_key: String,
     base_url: String,
+    #[cfg(not(target_os = "espidf"))]
     http: reqwest::Client,
 }
 
@@ -40,18 +64,21 @@ impl OpenAiClient {
 
     /// Create a new OpenAI client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
+        #[cfg(not(target_os = "espidf"))]
         let http =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
                 .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
             base_url,
+            #[cfg(not(target_os = "espidf"))]
             http,
         }
     }
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
+        #[cfg(not(target_os = "espidf"))]
         if let Ok(http) =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
         {
@@ -73,12 +100,13 @@ impl OpenAiClient {
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let input = Self::convert_to_responses_input(&request.messages);
         let reasoning_enabled = Self::model_supports_reasoning_payload(&request.model);
+        let stream_enabled = Self::request_stream_enabled(request);
 
         let mut body = serde_json::json!({
             "model": request.model,
             "input": input,
             "max_output_tokens": request.max_tokens,
-            "stream": true,
+            "stream": stream_enabled,
         });
 
         if reasoning_enabled {
@@ -159,6 +187,15 @@ impl OpenAiClient {
         }
 
         Ok(body)
+    }
+
+    fn request_stream_enabled(request: &LlmRequest) -> bool {
+        request
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.get("stream"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
     }
 
     /// Convert messages to Responses API input format.
@@ -301,6 +338,816 @@ impl OpenAiClient {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
+fn stream_openai_events_from_bytes<'a, S>(byte_stream: S) -> LlmStream<'a>
+where
+    S: Stream<Item = Result<Vec<u8>, LlmError>> + Send + 'a,
+{
+    let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+        futures::pin_mut!(byte_stream);
+        let mut buffer = String::with_capacity(512);
+        let mut state = OpenAiStreamState::default();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer.drain(..=newline_pos);
+
+                for event in process_openai_stream_line(&line, &mut state)? {
+                    yield event;
+                }
+            }
+        }
+    });
+
+    crate::streaming::ensure_terminal_done(inner)
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
+fn stream_openai_events_from_bytes<'a, S>(byte_stream: S) -> LlmStream<'a>
+where
+    S: Stream<Item = Result<Vec<u8>, LlmError>> + 'a,
+{
+    let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+        futures::pin_mut!(byte_stream);
+        let mut buffer = String::with_capacity(512);
+        let mut state = OpenAiStreamState::default();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer.drain(..=newline_pos);
+
+                for event in process_openai_stream_line(&line, &mut state)? {
+                    yield event;
+                }
+            }
+        }
+    });
+
+    crate::streaming::ensure_terminal_done(inner)
+}
+
+#[derive(Default)]
+struct OpenAiStreamState {
+    assembler: BlockAssembler,
+    usage: Usage,
+    saw_stream_text_delta: bool,
+    streamed_tool_ids: HashSet<String>,
+    streamed_reasoning_ids: HashSet<String>,
+    done_emitted: bool,
+}
+
+fn process_openai_stream_line(
+    line: &str,
+    state: &mut OpenAiStreamState,
+) -> Result<Vec<LlmEvent>, LlmError> {
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(Vec::new());
+    }
+
+    let Some(event) = OpenAiClient::parse_responses_sse_line(line) else {
+        return Ok(Vec::new());
+    };
+
+    let mut emitted = Vec::new();
+    match event.event_type.as_str() {
+        "response.completed" => {
+            if state.done_emitted {
+                return Ok(emitted);
+            }
+            if let Some(response_obj) = &event.response {
+                collect_response_completed_events(response_obj, state, &mut emitted);
+            }
+        }
+        "response.output_text.delta" => {
+            if let Some(delta) = event.delta {
+                state.saw_stream_text_delta = true;
+                state.assembler.on_text_delta(&delta, None);
+                emitted.push(LlmEvent::TextDelta { delta, meta: None });
+            }
+        }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = event.delta {
+                emitted.push(LlmEvent::ReasoningDelta { delta });
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let (Some(call_id), Some(delta)) = (event.call_id, event.delta) {
+                emitted.push(LlmEvent::ToolCallDelta {
+                    id: call_id,
+                    name: event.name,
+                    args_delta: delta,
+                });
+            }
+        }
+        "response.function_call_arguments.done" => {
+            if let (Some(call_id), Some(arguments)) = (event.call_id, event.arguments) {
+                let name = event.name.unwrap_or_default();
+                let args: Box<RawValue> =
+                    RawValue::from_string(arguments).unwrap_or_else(|_| fallback_raw_value());
+
+                let _ = state.assembler.on_tool_call_start(call_id.clone());
+                let _ = state.assembler.on_tool_call_complete(
+                    call_id.clone(),
+                    name.clone(),
+                    args.clone(),
+                    None,
+                );
+
+                let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+                state.streamed_tool_ids.insert(call_id.clone());
+                emitted.push(LlmEvent::ToolCallComplete {
+                    id: call_id,
+                    name,
+                    args: args_value,
+                    meta: None,
+                });
+            }
+        }
+        "response.reasoning_summary.done" | "response.reasoning.done" => {
+            if let Some(item) = &event.item {
+                collect_reasoning_complete(item, state, &mut emitted);
+            }
+        }
+        "response.done" => {
+            if let Some(response_obj) = &event.response {
+                if let Some(usage_event) =
+                    update_usage_and_make_event(response_obj, &mut state.usage)
+                {
+                    emitted.push(usage_event);
+                }
+
+                if !state.done_emitted {
+                    state.done_emitted = true;
+                    emitted.push(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: stop_reason_from_response(response_obj),
+                        },
+                    });
+                }
+            }
+        }
+        "error" => {
+            let (error_code, error_msg) = stream_error_details(event.error.as_ref());
+            tracing::error!(
+                code = error_code,
+                message = error_msg,
+                "OpenAI streaming error"
+            );
+
+            state.done_emitted = true;
+            emitted.push(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: error_from_stream_error(error_code, error_msg),
+                },
+            });
+        }
+        _ => {}
+    }
+
+    Ok(emitted)
+}
+
+fn collect_response_completed_events(
+    response_obj: &Value,
+    state: &mut OpenAiStreamState,
+    emitted: &mut Vec<LlmEvent>,
+) {
+    if let Some(output) = response_obj.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => collect_message_output(item, state, emitted),
+                Some("reasoning") => collect_reasoning_complete(item, state, emitted),
+                Some("function_call") => collect_function_call_complete(item, state, emitted),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(usage_event) = update_usage_and_make_event(response_obj, &mut state.usage) {
+        emitted.push(usage_event);
+    }
+
+    state.done_emitted = true;
+    emitted.push(LlmEvent::Done {
+        outcome: LlmDoneOutcome::Success {
+            stop_reason: stop_reason_from_response(response_obj),
+        },
+    });
+}
+
+fn collect_message_output(
+    item: &Value,
+    state: &mut OpenAiStreamState,
+    emitted: &mut Vec<LlmEvent>,
+) {
+    let Some(content_parts) = item.get("content").and_then(Value::as_array) else {
+        return;
+    };
+
+    for part in content_parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("output_text") => {
+                if let Some(text) = part.get("text").and_then(Value::as_str)
+                    && !state.saw_stream_text_delta
+                {
+                    state.assembler.on_text_delta(text, None);
+                    emitted.push(LlmEvent::TextDelta {
+                        delta: text.to_string(),
+                        meta: None,
+                    });
+                }
+            }
+            Some("refusal") => {
+                if let Some(refusal) = part.get("refusal").and_then(Value::as_str)
+                    && !state.saw_stream_text_delta
+                {
+                    state.assembler.on_text_delta(refusal, None);
+                    emitted.push(LlmEvent::TextDelta {
+                        delta: refusal.to_string(),
+                        meta: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_reasoning_complete(
+    item: &Value,
+    state: &mut OpenAiStreamState,
+    emitted: &mut Vec<LlmEvent>,
+) {
+    let Some(reasoning_id) = item.get("id").and_then(Value::as_str) else {
+        tracing::warn!("reasoning item missing id, skipping");
+        return;
+    };
+
+    if state.streamed_reasoning_ids.contains(reasoning_id) {
+        return;
+    }
+
+    let mut summary_text = String::new();
+    if let Some(summaries) = item.get("summary").and_then(Value::as_array) {
+        for summary in summaries {
+            if let Some(text) = summary.get("text").and_then(Value::as_str) {
+                if !summary_text.is_empty() {
+                    summary_text.push('\n');
+                }
+                summary_text.push_str(text);
+            }
+        }
+    }
+
+    let encrypted = item
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let meta = Some(Box::new(ProviderMeta::OpenAi {
+        id: reasoning_id.to_string(),
+        encrypted_content: encrypted,
+    }));
+
+    state.assembler.on_reasoning_start();
+    if !summary_text.is_empty() {
+        let _ = state.assembler.on_reasoning_delta(&summary_text);
+    }
+    state.assembler.on_reasoning_complete(meta.clone());
+
+    state
+        .streamed_reasoning_ids
+        .insert(reasoning_id.to_string());
+    emitted.push(LlmEvent::ReasoningComplete {
+        text: summary_text,
+        meta,
+    });
+}
+
+fn collect_function_call_complete(
+    item: &Value,
+    state: &mut OpenAiStreamState,
+    emitted: &mut Vec<LlmEvent>,
+) {
+    let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+        tracing::warn!("function_call missing call_id");
+        return;
+    };
+
+    if state.streamed_tool_ids.contains(call_id) {
+        return;
+    }
+
+    let Some(name) = item.get("name").and_then(Value::as_str) else {
+        tracing::warn!(call_id, "function_call missing name");
+        return;
+    };
+
+    let args: Box<RawValue> = match item.get("arguments").and_then(Value::as_str) {
+        Some(args_str) => match RawValue::from_string(args_str.to_string()) {
+            Ok(raw) => raw,
+            Err(error) => {
+                tracing::error!(call_id, "invalid args JSON, skipping: {error}");
+                return;
+            }
+        },
+        None => fallback_raw_value(),
+    };
+
+    let _ = state.assembler.on_tool_call_start(call_id.to_string());
+    let _ = state.assembler.on_tool_call_complete(
+        call_id.to_string(),
+        name.to_string(),
+        args.clone(),
+        None,
+    );
+
+    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
+    emitted.push(LlmEvent::ToolCallComplete {
+        id: call_id.to_string(),
+        name: name.to_string(),
+        args: args_value,
+        meta: None,
+    });
+}
+
+fn update_usage_and_make_event(response_obj: &Value, usage: &mut Usage) -> Option<LlmEvent> {
+    let usage_obj = response_obj.get("usage")?;
+    usage.input_tokens = usage_obj
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    usage.output_tokens = usage_obj
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Some(LlmEvent::UsageUpdate {
+        usage: usage.clone(),
+    })
+}
+
+fn stop_reason_from_response(response_obj: &Value) -> StopReason {
+    match response_obj.get("status").and_then(Value::as_str) {
+        Some("completed") => {
+            let has_tool_calls = response_obj
+                .get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|arr| {
+                    arr.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                });
+            if has_tool_calls {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+        Some("incomplete") => match response_obj
+            .get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+        {
+            Some("max_output_tokens") => StopReason::MaxTokens,
+            Some("content_filter") => StopReason::ContentFilter,
+            _ => StopReason::EndTurn,
+        },
+        Some("cancelled") => StopReason::Cancelled,
+        _ => StopReason::EndTurn,
+    }
+}
+
+fn stream_error_details(error: Option<&Value>) -> (&str, &str) {
+    let error_msg = error
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown streaming error");
+    let error_code = error
+        .and_then(|e| e.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    (error_code, error_msg)
+}
+
+fn error_from_stream_error(error_code: &str, error_msg: &str) -> LlmError {
+    match error_code {
+        "rate_limit_exceeded" => LlmError::RateLimited {
+            retry_after_ms: None,
+        },
+        "server_error" => LlmError::ServerError {
+            status: 500,
+            message: error_msg.to_string(),
+        },
+        "invalid_request_error" => LlmError::InvalidRequest {
+            message: error_msg.to_string(),
+        },
+        _ => LlmError::Unknown {
+            message: format!("{error_code}: {error_msg}"),
+        },
+    }
+}
+
+impl OpenAiClient {
+    #[cfg(not(target_os = "espidf"))]
+    fn stream_via_reqwest<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        if !Self::request_stream_enabled(request) {
+            return self.complete_via_reqwest(request);
+        }
+        let byte_stream = async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
+
+            let response = self.http
+                .post(format!("{}/v1/responses", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        LlmError::NetworkTimeout { duration_ms: 30000 }
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if error.is_connect() {
+                            return LlmError::ConnectionReset;
+                        }
+                        LlmError::Unknown { message: error.to_string() }
+                    }
+                })?;
+
+            let status_code = response.status().as_u16();
+            let stream_result = if (200..=299).contains(&status_code) {
+                Ok(response.bytes_stream())
+            } else {
+                let headers = response.headers().clone();
+                let text = response.text().await.unwrap_or_default();
+                Err(LlmError::from_http_response(status_code, text, &headers))
+            };
+            let mut stream = stream_result?;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                yield chunk.to_vec();
+            }
+        };
+
+        stream_openai_events_from_bytes(byte_stream)
+    }
+
+    #[cfg(not(target_os = "espidf"))]
+    fn complete_via_reqwest<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
+
+            let response = self.http
+                .post(format!("{}/v1/responses", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        LlmError::NetworkTimeout { duration_ms: 30000 }
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if error.is_connect() {
+                            return LlmError::ConnectionReset;
+                        }
+                        LlmError::Unknown { message: error.to_string() }
+                    }
+                })?;
+
+            let status_code = response.status().as_u16();
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+
+            if !(200..=299).contains(&status_code) {
+                Err(LlmError::from_http_response(
+                    status_code,
+                    text.clone(),
+                    &headers,
+                ))?;
+            }
+
+            let response_obj: Value = serde_json::from_str(&text).map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to parse OpenAI completion response: {error}"),
+            })?;
+
+            let mut state = OpenAiStreamState::default();
+            let mut emitted = Vec::new();
+            collect_response_completed_events(&response_obj, &mut state, &mut emitted);
+            for event in emitted {
+                yield event;
+            }
+        })
+    }
+
+    #[cfg(target_os = "espidf")]
+    fn stream_via_espidf<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        if !Self::request_stream_enabled(request) {
+            return self.complete_via_espidf(request);
+        }
+        let byte_stream = async_stream::try_stream! {
+            let request_seq = OPENAI_ESP_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            let body = self.build_request_body(request)?;
+            let payload = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to serialize OpenAI request body: {error}"),
+            })?;
+            println!(
+                "MKT:OPENAI:REQ_START seq={} model=\"{}\" payload_bytes={}",
+                request_seq,
+                request.model,
+                payload.len(),
+            );
+            let auth_header = format!("Bearer {}", self.api_key);
+            let content_length = payload.len().to_string();
+            let url = format!("{}/v1/responses", self.base_url);
+            let headers = [
+                ("content-type", "application/json"),
+                ("authorization", auth_header.as_str()),
+                ("content-length", content_length.as_str()),
+            ];
+
+            let http_config = EspHttpConfiguration {
+                timeout: Some(Duration::from_secs(60)),
+                buffer_size: Some(2048),
+                buffer_size_tx: Some(2048),
+                server_certificate: Some(X509::pem_until_nul(OPENAI_WE1_PEM)),
+                crt_bundle_attach: None,
+                // Repeated keep-alive sessions have been flaky on ESP32-S3 in
+                // long-lived probe runs; prefer explicit reconnects.
+                keep_alive_enable: false,
+                ..Default::default()
+            };
+            let mut client = EmbeddedHttpClient::wrap(
+                EspHttpConnection::new(&http_config).map_err(|error| LlmError::Unknown {
+                    message: format!("failed to create ESP-IDF HTTPS client: {error}"),
+                })?,
+            );
+
+            let mut http_request = client
+                .request(Method::Post, &url, &headers)
+                .map_err(|error| LlmError::Unknown {
+                    message: format!("failed to create OpenAI request: {error}"),
+                })?;
+            http_request.write_all(&payload).map_err(|error| LlmError::Unknown {
+                message: format!("failed to write OpenAI request payload: {error}"),
+            })?;
+            http_request.flush().map_err(|error| LlmError::Unknown {
+                message: format!("failed to flush OpenAI request payload: {error}"),
+            })?;
+
+            let mut response = http_request.submit().map_err(|error| LlmError::Unknown {
+                message: format!("failed to submit OpenAI request: {error}"),
+            })?;
+            let status_code = response.status();
+            println!(
+                "MKT:OPENAI:REQ_STATUS seq={} status={}",
+                request_seq,
+                status_code,
+            );
+            if !(200..=299).contains(&status_code) {
+                let retry_after_ms = response
+                    .header("retry-after")
+                    .and_then(LlmError::parse_retry_after);
+                let text = read_espidf_response_body(&mut response)?;
+                Err(LlmError::from_http_status(status_code, text, retry_after_ms))?;
+            }
+
+            let mut buffer = [0_u8; 1024];
+            let mut total_read = 0_usize;
+            let mut chunk_index = 0_usize;
+            loop {
+                let read = response.read(&mut buffer).map_err(|error| LlmError::Unknown {
+                    message: format!("failed to read OpenAI response body: {error}"),
+                })?;
+                if read == 0 {
+                    println!(
+                        "MKT:OPENAI:REQ_EOF seq={} total_bytes={} chunks={}",
+                        request_seq,
+                        total_read,
+                        chunk_index,
+                    );
+                    break;
+                }
+                chunk_index += 1;
+                total_read += read;
+                if chunk_index <= 6 || chunk_index % 10 == 0 {
+                    println!(
+                        "MKT:OPENAI:REQ_READ seq={} chunk={} bytes={} total_bytes={}",
+                        request_seq,
+                        chunk_index,
+                        read,
+                        total_read,
+                    );
+                }
+                yield buffer[..read].to_vec();
+            }
+        };
+
+        stream_openai_events_from_bytes(byte_stream)
+    }
+
+    #[cfg(target_os = "espidf")]
+    fn complete_via_espidf<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            let request_seq = OPENAI_ESP_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            let body = self.build_request_body(request)?;
+            let payload = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to serialize OpenAI request body: {error}"),
+            })?;
+            println!(
+                "MKT:OPENAI:REQ_START seq={} model=\"{}\" payload_bytes={} mode=\"complete\"",
+                request_seq,
+                request.model,
+                payload.len(),
+            );
+            let auth_header = format!("Bearer {}", self.api_key);
+            let content_length = payload.len().to_string();
+            let url = format!("{}/v1/responses", self.base_url);
+            let headers = [
+                ("content-type", "application/json"),
+                ("authorization", auth_header.as_str()),
+                ("content-length", content_length.as_str()),
+            ];
+            let mut completed = false;
+            for attempt in 1..=OPENAI_ESP_MAX_ATTEMPTS {
+                println!(
+                    "MKT:OPENAI:REQ_START seq={} attempt={} model=\"{}\" payload_bytes={} mode=\"complete\"",
+                    request_seq,
+                    attempt,
+                    request.model,
+                    payload.len(),
+                );
+                let http_config = EspHttpConfiguration {
+                    timeout: Some(Duration::from_secs(60)),
+                    buffer_size: Some(2048),
+                    buffer_size_tx: Some(2048),
+                    server_certificate: Some(X509::pem_until_nul(OPENAI_WE1_PEM)),
+                    crt_bundle_attach: None,
+                    // Repeated keep-alive sessions have been flaky on ESP32-S3 in
+                    // long-lived probe runs; prefer explicit reconnects.
+                    keep_alive_enable: false,
+                    ..Default::default()
+                };
+
+                let attempt_result: Result<Vec<LlmEvent>, LlmError> = (|| {
+                    let mut client = EmbeddedHttpClient::wrap(
+                        EspHttpConnection::new(&http_config).map_err(|error| LlmError::Unknown {
+                            message: format!("failed to create ESP-IDF HTTPS client: {error}"),
+                        })?,
+                    );
+
+                    let mut http_request = client
+                        .request(Method::Post, &url, &headers)
+                        .map_err(|error| LlmError::Unknown {
+                            message: format!("failed to create OpenAI request: {error}"),
+                        })?;
+                    http_request.write_all(&payload).map_err(|error| LlmError::Unknown {
+                        message: format!("failed to write OpenAI request payload: {error}"),
+                    })?;
+                    http_request.flush().map_err(|error| LlmError::Unknown {
+                        message: format!("failed to flush OpenAI request payload: {error}"),
+                    })?;
+
+                    let mut response =
+                        http_request.submit().map_err(|error| LlmError::Unknown {
+                            message: format!("failed to submit OpenAI request: {error}"),
+                        })?;
+                    let status_code = response.status();
+                    println!(
+                        "MKT:OPENAI:REQ_STATUS seq={} attempt={} status={} mode=\"complete\"",
+                        request_seq,
+                        attempt,
+                        status_code,
+                    );
+                    let text = read_espidf_response_body(&mut response)?;
+                    println!(
+                        "MKT:OPENAI:REQ_BODY seq={} attempt={} body_bytes={} mode=\"complete\"",
+                        request_seq,
+                        attempt,
+                        text.len(),
+                    );
+
+                    if !(200..=299).contains(&status_code) {
+                        let retry_after_ms = response
+                            .header("retry-after")
+                            .and_then(LlmError::parse_retry_after);
+                        return Err(LlmError::from_http_status(
+                            status_code,
+                            text.clone(),
+                            retry_after_ms,
+                        ));
+                    }
+
+                    let response_obj: Value =
+                        serde_json::from_str(&text).map_err(|error| LlmError::InvalidRequest {
+                            message: format!("failed to parse OpenAI completion response: {error}"),
+                        })?;
+
+                    let mut state = OpenAiStreamState::default();
+                    let mut emitted = Vec::new();
+                    collect_response_completed_events(&response_obj, &mut state, &mut emitted);
+                    Ok(emitted)
+                })();
+
+                match attempt_result {
+                    Ok(emitted) => {
+                        for event in emitted {
+                            yield event;
+                        }
+                        completed = true;
+                        break;
+                    }
+                    Err(error)
+                        if attempt < OPENAI_ESP_MAX_ATTEMPTS && openai_esp_should_retry(&error) =>
+                    {
+                        openai_esp_log_retry(request_seq, attempt, "complete", &error);
+                        std::thread::sleep(openai_esp_retry_delay(attempt));
+                    }
+                    Err(error) => Err(error)?,
+                }
+            }
+
+            if !completed {
+                Err(LlmError::Unknown {
+                    message: "OpenAI request exhausted retries without completion".to_string(),
+                })?;
+            }
+        })
+    }
+}
+
+#[cfg(target_os = "espidf")]
+fn openai_esp_retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        1 => Duration::from_millis(250),
+        2 => Duration::from_millis(750),
+        _ => Duration::from_millis(1500),
+    }
+}
+
+#[cfg(target_os = "espidf")]
+fn openai_esp_should_retry(error: &LlmError) -> bool {
+    if error.is_retryable() {
+        return true;
+    }
+
+    matches!(
+        error,
+        LlmError::Unknown { message }
+            if message.starts_with("failed to create ESP-IDF HTTPS client:")
+                || message.starts_with("failed to create OpenAI request:")
+                || message.starts_with("failed to write OpenAI request payload:")
+                || message.starts_with("failed to flush OpenAI request payload:")
+                || message.starts_with("failed to submit OpenAI request:")
+                || message.starts_with("failed to read OpenAI response body:")
+                || message.starts_with("failed to read OpenAI error response:")
+    )
+}
+
+#[cfg(target_os = "espidf")]
+fn openai_esp_log_retry(request_seq: usize, attempt: usize, mode: &str, error: &LlmError) {
+    let delay_ms = openai_esp_retry_delay(attempt).as_millis();
+    println!(
+        "MKT:OPENAI:REQ_RETRY seq={} attempt={} next_attempt={} delay_ms={} mode=\"{}\" error={:?}",
+        request_seq,
+        attempt,
+        attempt + 1,
+        delay_ms,
+        mode,
+        error,
+    );
+}
+
+#[cfg(target_os = "espidf")]
+fn read_espidf_response_body(
+    response: &mut EmbeddedResponse<&mut EspHttpConnection>,
+) -> Result<String, LlmError> {
+    let mut body = Vec::new();
+    let mut buffer = [0_u8; 512];
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| LlmError::Unknown {
+                message: format!("failed to read OpenAI error response: {error}"),
+            })?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&buffer[..read]);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 /// OpenAI strict JSON schema mode requires `additionalProperties: false` on
 /// object schemas. We preserve explicit caller values and only inject when
 /// missing.
@@ -330,422 +1177,21 @@ fn ensure_additional_properties_false(value: &mut Value) {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl LlmClient for OpenAiClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-        let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request)?;
-
-            let response = self.http
-                .post(format!("{}/v1/responses", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        LlmError::NetworkTimeout { duration_ms: 30000 }
-                    } else {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if e.is_connect() {
-                            return LlmError::ConnectionReset;
-                        }
-                        LlmError::Unknown { message: e.to_string() }
-                    }
-                })?;
-
-            let status_code = response.status().as_u16();
-            let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
-            } else {
-                let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
-            };
-            let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(512);
-            let mut assembler = BlockAssembler::new();
-            let mut usage = Usage::default();
-            let mut saw_stream_text_delta = false;
-            let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
-            let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
-            let mut done_emitted = false;
-
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim();
-                    let should_process = !line.is_empty() && !line.starts_with(':');
-                    let parsed_event = if should_process {
-                        Self::parse_responses_sse_line(line)
-                    } else {
-                        None
-                    };
-
-                    buffer.drain(..=newline_pos);
-
-                    if let Some(event) = parsed_event {
-                        // Handle response.completed event (non-streaming final response)
-                        if event.event_type == "response.completed" {
-                            if done_emitted {
-                                // Already processed a terminal event, skip
-                                continue;
-                            }
-                            if let Some(response_obj) = &event.response {
-                                // Process output items
-                                if let Some(output) = response_obj.get("output").and_then(|o| o.as_array()) {
-                                    for item in output {
-                                        if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
-                                            match item_type {
-                                                "message" => {
-                                                    // content is an array: [{"type": "output_text", "text": "..."}, ...]
-                                                    if let Some(content_parts) = item.get("content").and_then(|c| c.as_array()) {
-                                                        for part in content_parts {
-                                                            if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
-                                                                match part_type {
-                                                                    "output_text" => {
-                                                                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
-                                                                            && !saw_stream_text_delta
-                                                                        {
-                                                                            assembler.on_text_delta(text, None);
-                                                                            yield LlmEvent::TextDelta { delta: text.to_string(), meta: None };
-                                                                        }
-                                                                    }
-                                                                    "refusal" => {
-                                                                        if let Some(refusal) = part.get("refusal").and_then(|r| r.as_str())
-                                                                            && !saw_stream_text_delta
-                                                                        {
-                                                                            assembler.on_text_delta(refusal, None);
-                                                                            yield LlmEvent::TextDelta { delta: refusal.to_string(), meta: None };
-                                                                        }
-                                                                    }
-                                                                    _ => {}
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                "reasoning" => {
-                                                    // Required: reasoning item ID for replay
-                                                    let Some(reasoning_id) = item.get("id").and_then(|i| i.as_str()) else {
-                                                        tracing::warn!("reasoning item missing id, skipping");
-                                                        continue;
-                                                    };
-
-                                                    // Skip if already emitted via streaming
-                                                    if streamed_reasoning_ids.contains(reasoning_id) {
-                                                        continue;
-                                                    }
-
-                                                    // Extract summary text
-                                                    let mut summary_text = String::new();
-                                                    if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
-                                                        for summary in summaries {
-                                                            if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
-                                                                if !summary_text.is_empty() {
-                                                                    summary_text.push('\n');
-                                                                }
-                                                                summary_text.push_str(text);
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // encrypted_content is optional
-                                                    let encrypted = item.get("encrypted_content")
-                                                        .and_then(|v| v.as_str())
-                                                        .map(std::string::ToString::to_string);
-
-                                                    let meta = Some(Box::new(ProviderMeta::OpenAi {
-                                                        id: reasoning_id.to_string(),
-                                                        encrypted_content: encrypted,
-                                                    }));
-
-                                                    assembler.on_reasoning_start();
-                                                    if !summary_text.is_empty() {
-                                                        let _ = assembler.on_reasoning_delta(&summary_text);
-                                                    }
-                                                    assembler.on_reasoning_complete(meta.clone());
-
-                                                    yield LlmEvent::ReasoningComplete {
-                                                        text: summary_text,
-                                                        meta,
-                                                    };
-                                                }
-                                                "function_call" => {
-                                                    // Extract required fields
-                                                    let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) else {
-                                                        tracing::warn!("function_call missing call_id");
-                                                        continue;
-                                                    };
-
-                                                    // Skip if already emitted via streaming
-                                                    if streamed_tool_ids.contains(call_id) {
-                                                        continue;
-                                                    }
-                                                    let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                                                        tracing::warn!(call_id, "function_call missing name");
-                                                        continue;
-                                                    };
-                                                    // arguments is a JSON string
-                                                    let args: Box<RawValue> = match item.get("arguments").and_then(|a| a.as_str()) {
-                                                        Some(args_str) => match RawValue::from_string(args_str.to_string()) {
-                                                            Ok(raw) => raw,
-                                                            Err(e) => {
-                                                                tracing::error!(call_id, "invalid args JSON, skipping: {e}");
-                                                                continue;
-                                                            }
-                                                        },
-                                                        None => {
-                                                            // Empty args - treat as empty object
-                                                            fallback_raw_value()
-                                                        }
-                                                    };
-
-                                                    let _ = assembler.on_tool_call_start(call_id.to_string());
-                                                    let _ = assembler.on_tool_call_complete(
-                                                        call_id.to_string(),
-                                                        name.to_string(),
-                                                        args.clone(),
-                                                        None,
-                                                    );
-
-                                                    // Also emit as legacy Value for compatibility
-                                                    let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
-                                                    yield LlmEvent::ToolCallComplete {
-                                                        id: call_id.to_string(),
-                                                        name: name.to_string(),
-                                                        args: args_value,
-                                                        meta: None,
-                                                    };
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Extract usage
-                                if let Some(usage_obj) = response_obj.get("usage") {
-                                    usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    yield LlmEvent::UsageUpdate { usage: usage.clone() };
-                                }
-
-                                // Determine stop reason
-                                let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
-                                    Some("completed") => {
-                                        // Check if there were tool calls
-                                        let has_tool_calls = response_obj.get("output")
-                                            .and_then(|o| o.as_array())
-                                            .is_some_and(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")));
-                                        if has_tool_calls {
-                                            StopReason::ToolUse
-                                        } else {
-                                            StopReason::EndTurn
-                                        }
-                                    }
-                                    Some("incomplete") => {
-                                        match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
-                                            Some("max_output_tokens") => StopReason::MaxTokens,
-                                            Some("content_filter") => StopReason::ContentFilter,
-                                            _ => StopReason::EndTurn,
-                                        }
-                                    }
-                                    Some("cancelled") => StopReason::Cancelled,
-                                    _ => StopReason::EndTurn,
-                                };
-
-                                done_emitted = true;
-                                yield LlmEvent::Done {
-                                    outcome: LlmDoneOutcome::Success { stop_reason },
-                                };
-                            }
-                        }
-                        // Handle streaming delta events
-                        else if event.event_type == "response.output_text.delta" {
-                            if let Some(delta) = &event.delta {
-                                saw_stream_text_delta = true;
-                                assembler.on_text_delta(delta, None);
-                                yield LlmEvent::TextDelta { delta: delta.clone(), meta: None };
-                            }
-                        }
-                        else if event.event_type == "response.reasoning_summary_text.delta" {
-                            if let Some(delta) = &event.delta {
-                                yield LlmEvent::ReasoningDelta { delta: delta.clone() };
-                            }
-                        }
-                        else if event.event_type == "response.function_call_arguments.delta" {
-                            if let (Some(call_id), Some(delta)) = (&event.call_id, &event.delta) {
-                                let name = event.name.clone();
-                                yield LlmEvent::ToolCallDelta {
-                                    id: call_id.clone(),
-                                    name,
-                                    args_delta: delta.clone(),
-                                };
-                            }
-                        }
-                        else if event.event_type == "response.function_call_arguments.done" {
-                            if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
-                                let name = event.name.clone().unwrap_or_default();
-                                let args: Box<RawValue> = RawValue::from_string(arguments.clone())
-                                    .unwrap_or_else(|_| fallback_raw_value());
-
-                                let _ = assembler.on_tool_call_start(call_id.clone());
-                                let _ = assembler.on_tool_call_complete(
-                                    call_id.clone(),
-                                    name.clone(),
-                                    args.clone(),
-                                    None,
-                                );
-
-                                let args_value: Value = serde_json::from_str(args.get()).unwrap_or_default();
-                                streamed_tool_ids.insert(call_id.clone());
-                                yield LlmEvent::ToolCallComplete {
-                                    id: call_id.clone(),
-                                    name,
-                                    args: args_value,
-                                    meta: None,
-                                };
-                            }
-                        }
-                        else if event.event_type == "response.reasoning_summary.done" || event.event_type == "response.reasoning.done" {
-                            // Extract reasoning item details from the item field
-                            if let Some(item) = &event.item {
-                                let Some(reasoning_id) = item.get("id")
-                                    .and_then(|i| i.as_str()) else {
-                                    tracing::warn!("reasoning item missing id, skipping");
-                                    continue;
-                                };
-
-                                let mut summary_text = String::new();
-                                if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
-                                    for summary in summaries {
-                                        if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
-                                            if !summary_text.is_empty() {
-                                                summary_text.push('\n');
-                                            }
-                                            summary_text.push_str(text);
-                                        }
-                                    }
-                                }
-
-                                let encrypted = item.get("encrypted_content")
-                                    .and_then(|v| v.as_str())
-                                    .map(std::string::ToString::to_string);
-
-                                let meta = Some(Box::new(ProviderMeta::OpenAi {
-                                    id: reasoning_id.to_string(),
-                                    encrypted_content: encrypted,
-                                }));
-
-                                assembler.on_reasoning_start();
-                                if !summary_text.is_empty() {
-                                    let _ = assembler.on_reasoning_delta(&summary_text);
-                                }
-                                assembler.on_reasoning_complete(meta.clone());
-
-                                streamed_reasoning_ids.insert(reasoning_id.to_string());
-                                yield LlmEvent::ReasoningComplete {
-                                    text: summary_text,
-                                    meta,
-                                };
-                            }
-                        }
-                        else if event.event_type == "response.done" {
-                            // Final done event — always update usage
-                            if let Some(response_obj) = &event.response {
-                                if let Some(usage_obj) = response_obj.get("usage") {
-                                    usage.input_tokens = usage_obj.get("input_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    usage.output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or(0);
-                                    yield LlmEvent::UsageUpdate { usage: usage.clone() };
-                                }
-
-                                if !done_emitted {
-                                    let stop_reason = match response_obj.get("status").and_then(|s| s.as_str()) {
-                                        Some("completed") => {
-                                            let has_tool_calls = response_obj.get("output")
-                                                .and_then(|o| o.as_array())
-                                                .is_some_and(|arr| arr.iter().any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call")));
-                                            if has_tool_calls {
-                                                StopReason::ToolUse
-                                            } else {
-                                                StopReason::EndTurn
-                                            }
-                                        }
-                                        Some("incomplete") => {
-                                            match response_obj.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) {
-                                                Some("max_output_tokens") => StopReason::MaxTokens,
-                                                Some("content_filter") => StopReason::ContentFilter,
-                                                _ => StopReason::EndTurn,
-                                            }
-                                        }
-                                        Some("cancelled") => StopReason::Cancelled,
-                                        _ => StopReason::EndTurn,
-                                    };
-
-                                    done_emitted = true;
-                                    yield LlmEvent::Done {
-                                        outcome: LlmDoneOutcome::Success { stop_reason },
-                                    };
-                                }
-                            }
-                        }
-                        else if event.event_type == "error" {
-                            // Streaming error event from OpenAI
-                            let error_msg = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("unknown streaming error");
-                            let error_code = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("unknown");
-
-                            tracing::error!(
-                                code = error_code,
-                                message = error_msg,
-                                "OpenAI streaming error"
-                            );
-
-                            let error = match error_code {
-                                "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
-                                "server_error" => LlmError::ServerError {
-                                    status: 500,
-                                    message: error_msg.to_string(),
-                                },
-                                "invalid_request_error" => LlmError::InvalidRequest {
-                                    message: error_msg.to_string(),
-                                },
-                                _ => LlmError::Unknown {
-                                    message: format!("{error_code}: {error_msg}"),
-                                },
-                            };
-
-                            done_emitted = true;
-                            yield LlmEvent::Done {
-                                outcome: LlmDoneOutcome::Error { error },
-                            };
-                        }
-                    }
-                }
-            }
-        });
-
-        crate::streaming::ensure_terminal_done(inner)
+        #[cfg(target_os = "espidf")]
+        {
+            self.stream_via_espidf(request)
+        }
+        #[cfg(not(target_os = "espidf"))]
+        {
+            self.stream_via_reqwest(request)
+        }
     }
 
     fn provider(&self) -> &'static str {

@@ -8,6 +8,8 @@
 //! 5. Enqueues to inbox
 //! 6. Closes connection (or keeps alive)
 
+#[cfg(target_os = "espidf")]
+use std::io::Read;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -107,6 +109,113 @@ where
             InboxError::Full => IoTaskError::InboxFull,
         })?;
 
+    Ok(())
+}
+
+#[cfg(target_os = "espidf")]
+pub fn handle_blocking_connection<S>(
+    mut stream: S,
+    require_peer_auth: bool,
+    keypair: &Keypair,
+    trusted: &TrustedPeers,
+    inbox_sender: &InboxSender,
+) -> Result<(), IoTaskError>
+where
+    S: Read + std::io::Write,
+{
+    #[cfg(target_os = "espidf")]
+    println!("MKT:COMMS:IO_BEGIN");
+    let envelope = read_blocking_envelope(&mut stream)?;
+    #[cfg(target_os = "espidf")]
+    println!("MKT:COMMS:IO_FRAME_READ");
+
+    if require_peer_auth && !envelope.verify() {
+        #[cfg(target_os = "espidf")]
+        println!("MKT:COMMS:IO_INVALID_SIGNATURE");
+        tracing::warn!(
+            "Dropped message {} from {:?}: invalid signature",
+            envelope.id,
+            envelope.from
+        );
+        return Ok(());
+    }
+
+    if require_peer_auth && !trusted.is_trusted(&envelope.from) {
+        #[cfg(target_os = "espidf")]
+        println!("MKT:COMMS:IO_UNTRUSTED");
+        tracing::warn!(
+            "Dropped message {} from {:?}: sender not trusted",
+            envelope.id,
+            envelope.from
+        );
+        return Ok(());
+    }
+
+    if envelope.to != keypair.public_key() {
+        #[cfg(target_os = "espidf")]
+        println!("MKT:COMMS:IO_MISADDRESSED");
+        tracing::warn!(
+            "Dropped message {} from {:?}: misaddressed (to {:?}, we are {:?})",
+            envelope.id,
+            envelope.from,
+            envelope.to,
+            keypair.public_key()
+        );
+        return Ok(());
+    }
+
+    if should_ack(&envelope.kind) {
+        #[cfg(target_os = "espidf")]
+        println!("MKT:COMMS:IO_ACKING");
+        let ack = create_ack(&envelope, keypair);
+        write_blocking_envelope(&mut stream, &ack)?;
+    }
+
+    #[cfg(target_os = "espidf")]
+    println!("MKT:COMMS:IO_ENQUEUE");
+    inbox_sender
+        .send_classified(InboxItem::External { envelope })
+        .map_err(|err| match err {
+            InboxError::Closed => IoTaskError::InboxClosed,
+            InboxError::Full => IoTaskError::InboxFull,
+        })?;
+
+    #[cfg(target_os = "espidf")]
+    println!("MKT:COMMS:IO_DONE");
+    Ok(())
+}
+
+#[cfg(target_os = "espidf")]
+fn read_blocking_envelope<R>(reader: &mut R) -> Result<Envelope, IoTaskError>
+where
+    R: Read,
+{
+    let mut len_bytes = [0u8; 4];
+    reader.read_exact(&mut len_bytes)?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    if len > crate::transport::MAX_PAYLOAD_SIZE as usize {
+        return Err(IoTaskError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame too large: {len}"),
+        )));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload)?;
+    ciborium::from_reader(payload.as_slice()).map_err(|err| IoTaskError::Cbor(err.to_string()))
+}
+
+#[cfg(target_os = "espidf")]
+fn write_blocking_envelope<W>(writer: &mut W, envelope: &Envelope) -> Result<(), IoTaskError>
+where
+    W: std::io::Write,
+{
+    let mut payload = Vec::new();
+    ciborium::into_writer(envelope, &mut payload)
+        .map_err(|err| IoTaskError::Cbor(err.to_string()))?;
+    let len = payload.len() as u32;
+    writer.write_all(&len.to_be_bytes())?;
+    writer.write_all(&payload)?;
+    writer.flush()?;
     Ok(())
 }
 

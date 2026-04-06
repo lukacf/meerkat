@@ -7,6 +7,8 @@ use crate::InboxSender;
 use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
+#[cfg(target_os = "espidf")]
+use crate::io_task::handle_blocking_connection;
 use crate::peer_directory_reachability_authority::{
     PeerDirectoryReachabilityAuthority, ReachabilityKey,
 };
@@ -28,6 +30,8 @@ use meerkat_core::time_compat::Instant;
 use meerkat_core::{BlobStore, MissingBlobBehavior};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "espidf")]
+use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
 use std::path::Path;
 use std::pin::Pin;
@@ -35,6 +39,10 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "espidf")]
+use std::thread;
+#[cfg(target_os = "espidf")]
+use std::time::Duration as StdDuration;
 use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
@@ -230,8 +238,11 @@ impl Drop for InteractionStream {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl CoreCommsRuntime for CommsRuntime {
     async fn drain_messages(&self) -> Vec<String> {
         // Delegate through classified drain so messages from the classified
@@ -905,6 +916,32 @@ impl CommsRuntime {
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
         let trusted_peers = TrustedPeers::load_or_default(&config.trusted_peers_path)
             .map_err(|e| CommsRuntimeError::TrustLoadError(e.to_string()))?;
+        Self::new_with_state_and_silent_intents(config, keypair, trusted_peers, silent_intents)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_with_state(
+        config: ResolvedCommsConfig,
+        keypair: Keypair,
+        trusted_peers: TrustedPeers,
+    ) -> Result<Self, CommsRuntimeError> {
+        Self::new_with_state_and_silent_intents(
+            config,
+            keypair,
+            trusted_peers,
+            Arc::new(HashSet::new()),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_with_state_and_silent_intents(
+        config: ResolvedCommsConfig,
+        keypair: Keypair,
+        trusted_peers: TrustedPeers,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
         let public_key = keypair.public_key();
         // Single source of truth for trust state — shared by the Router,
         // IngressClassificationContext, and callers of trusted_peers_shared().
@@ -1697,14 +1734,43 @@ impl Drop for CommsRuntime {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ListenerHandle {
-    handle: JoinHandle<()>,
+    kind: ListenerHandleKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum ListenerHandleKind {
+    Tokio(JoinHandle<()>),
+    #[cfg(target_os = "espidf")]
+    Thread {
+        stop: Arc<AtomicBool>,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ListenerHandle {
     pub fn abort(&self) {
-        self.handle.abort();
+        match &self.kind {
+            ListenerHandleKind::Tokio(handle) => handle.abort(),
+            #[cfg(target_os = "espidf")]
+            ListenerHandleKind::Thread { stop } => stop.store(true, Ordering::SeqCst),
+        }
     }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "espidf"))]
+fn spawn_listener_task<F>(future: F) -> JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    tokio::task::spawn_local(future)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
+fn spawn_listener_task<F>(future: F) -> JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future)
 }
 
 #[cfg(unix)]
@@ -1726,11 +1792,12 @@ async fn spawn_uds_listener(
         tokio::fs::create_dir_all(parent).await?;
     }
     let listener = UnixListener::bind(&path)?;
-    let handle = tokio::spawn(async move {
+    let handle = spawn_listener_task(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let (keypair, trusted, inbox_sender) =
                 (keypair.clone(), trusted.clone(), inbox_sender.clone());
-            tokio::spawn(async move {
+            #[cfg(target_os = "espidf")]
+            {
                 let trusted_snapshot = trusted.read().clone();
                 let _ = handle_connection(
                     stream,
@@ -1740,10 +1807,26 @@ async fn spawn_uds_listener(
                     &inbox_sender,
                 )
                 .await;
-            });
+            }
+            #[cfg(not(target_os = "espidf"))]
+            {
+                tokio::spawn(async move {
+                    let trusted_snapshot = trusted.read().clone();
+                    let _ = handle_connection(
+                        stream,
+                        require_peer_auth,
+                        &keypair,
+                        &trusted_snapshot,
+                        &inbox_sender,
+                    )
+                    .await;
+                });
+            }
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        kind: ListenerHandleKind::Tokio(handle),
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1754,25 +1837,128 @@ async fn spawn_tcp_listener(
     require_peer_auth: bool,
     inbox_sender: InboxSender,
 ) -> Result<ListenerHandle, std::io::Error> {
-    let listener = TcpListener::bind(addr).await?;
-    let handle = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let (keypair, trusted, inbox_sender) =
-                (keypair.clone(), trusted.clone(), inbox_sender.clone());
-            tokio::spawn(async move {
-                let trusted_snapshot = trusted.read().clone();
-                let _ = handle_connection(
-                    stream,
-                    require_peer_auth,
-                    &keypair,
-                    &trusted_snapshot,
-                    &inbox_sender,
-                )
-                .await;
-            });
+    #[cfg(target_os = "espidf")]
+    {
+        return spawn_tcp_listener_blocking(
+            addr,
+            keypair,
+            trusted,
+            require_peer_auth,
+            inbox_sender,
+        );
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let listener = TcpListener::bind(addr).await?;
+        let handle = spawn_listener_task(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (keypair, trusted, inbox_sender) =
+                    (keypair.clone(), trusted.clone(), inbox_sender.clone());
+                #[cfg(target_os = "espidf")]
+                {
+                    let trusted_snapshot = trusted.read().clone();
+                    let _ = handle_connection(
+                        stream,
+                        require_peer_auth,
+                        &keypair,
+                        &trusted_snapshot,
+                        &inbox_sender,
+                    )
+                    .await;
+                }
+                #[cfg(not(target_os = "espidf"))]
+                {
+                    tokio::spawn(async move {
+                        let trusted_snapshot = trusted.read().clone();
+                        let _ = handle_connection(
+                            stream,
+                            require_peer_auth,
+                            &keypair,
+                            &trusted_snapshot,
+                            &inbox_sender,
+                        )
+                        .await;
+                    });
+                }
+            }
+        });
+        Ok(ListenerHandle {
+            kind: ListenerHandleKind::Tokio(handle),
+        })
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "espidf"))]
+const ESPIDF_TCP_LISTENER_STACK_CANDIDATES: &[usize] = &[20 * 1024, 16 * 1024, 12 * 1024];
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "espidf"))]
+fn spawn_tcp_listener_blocking(
+    addr: &str,
+    keypair: Arc<Keypair>,
+    trusted: Arc<parking_lot::RwLock<TrustedPeers>>,
+    require_peer_auth: bool,
+    inbox_sender: InboxSender,
+) -> Result<ListenerHandle, std::io::Error> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut last_err: Option<std::io::Error> = None;
+    for &stack_size in ESPIDF_TCP_LISTENER_STACK_CANDIDATES {
+        let listener = StdTcpListener::bind(addr)?;
+        listener.set_nonblocking(true)?;
+        let stop_flag = Arc::clone(&stop);
+        let trusted = Arc::clone(&trusted);
+        let keypair = Arc::clone(&keypair);
+        let inbox_sender = inbox_sender.clone();
+        match thread::Builder::new()
+            .name(format!("mkt-comms-tcp-{addr}"))
+            .stack_size(stack_size)
+            .spawn(move || {
+                #[cfg(target_os = "espidf")]
+                println!("MKT:COMMS:LISTENER_THREAD_STARTED stack_bytes={stack_size}");
+                while !stop_flag.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            #[cfg(target_os = "espidf")]
+                            println!("MKT:COMMS:LISTENER_ACCEPTED");
+                            let trusted_snapshot = trusted.read().clone();
+                            let result = handle_blocking_connection(
+                                stream,
+                                require_peer_auth,
+                                &keypair,
+                                &trusted_snapshot,
+                                &inbox_sender,
+                            );
+                            #[cfg(target_os = "espidf")]
+                            match result {
+                                Ok(()) => println!("MKT:COMMS:LISTENER_HANDLED"),
+                                Err(ref err) => {
+                                    println!("MKT:COMMS:LISTENER_ERROR error={err}");
+                                }
+                            }
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(StdDuration::from_millis(10));
+                        }
+                        Err(_) => {
+                            thread::sleep(StdDuration::from_millis(25));
+                        }
+                    }
+                }
+            }) {
+            Ok(_handle) => {
+                #[cfg(target_os = "espidf")]
+                println!("MKT:COMMS:LISTENER_THREAD_STACK_SELECTED stack_bytes={stack_size}");
+                return Ok(ListenerHandle {
+                    kind: ListenerHandleKind::Thread { stop },
+                });
+            }
+            Err(err) => {
+                last_err = Some(err);
+            }
         }
-    });
-    Ok(ListenerHandle { handle })
+    }
+    return Err(
+        last_err.unwrap_or_else(|| std::io::Error::other("failed to spawn espidf listener thread"))
+    );
 }
 
 /// Max concurrent connections for the plain listener (DoS protection).
@@ -1787,14 +1973,15 @@ async fn spawn_plain_tcp_listener(
 ) -> Result<ListenerHandle, std::io::Error> {
     let listener = TcpListener::bind(addr).await?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(PLAIN_LISTENER_MAX_CONCURRENT));
-    let handle = tokio::spawn(async move {
+    let handle = spawn_listener_task(async move {
         while let Ok((stream, _peer)) = listener.accept().await {
             let sender = inbox_sender.clone();
             let sem = semaphore.clone();
-            tokio::spawn(async move {
+            #[cfg(target_os = "espidf")]
+            {
                 let _permit = match sem.acquire().await {
                     Ok(p) => p,
-                    Err(_) => return, // Semaphore closed
+                    Err(_) => return,
                 };
                 crate::plain_listener::handle_plain_connection(
                     stream,
@@ -1803,10 +1990,28 @@ async fn spawn_plain_tcp_listener(
                     meerkat_core::PlainEventSource::Tcp,
                 )
                 .await;
-            });
+            }
+            #[cfg(not(target_os = "espidf"))]
+            {
+                tokio::spawn(async move {
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => return, // Semaphore closed
+                    };
+                    crate::plain_listener::handle_plain_connection(
+                        stream,
+                        sender,
+                        max_line_length,
+                        meerkat_core::PlainEventSource::Tcp,
+                    )
+                    .await;
+                });
+            }
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        kind: ListenerHandleKind::Tokio(handle),
+    })
 }
 
 #[cfg(unix)]
@@ -1827,11 +2032,12 @@ async fn spawn_plain_uds_listener(
     }
     let listener = UnixListener::bind(&path)?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(PLAIN_LISTENER_MAX_CONCURRENT));
-    let handle = tokio::spawn(async move {
+    let handle = spawn_listener_task(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let sender = inbox_sender.clone();
             let sem = semaphore.clone();
-            tokio::spawn(async move {
+            #[cfg(target_os = "espidf")]
+            {
                 let _permit = match sem.acquire().await {
                     Ok(p) => p,
                     Err(_) => return,
@@ -1843,10 +2049,28 @@ async fn spawn_plain_uds_listener(
                     meerkat_core::PlainEventSource::Uds,
                 )
                 .await;
-            });
+            }
+            #[cfg(not(target_os = "espidf"))]
+            {
+                tokio::spawn(async move {
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    crate::plain_listener::handle_plain_connection(
+                        stream,
+                        sender,
+                        max_line_length,
+                        meerkat_core::PlainEventSource::Uds,
+                    )
+                    .await;
+                });
+            }
         }
     });
-    Ok(ListenerHandle { handle })
+    Ok(ListenerHandle {
+        kind: ListenerHandleKind::Tokio(handle),
+    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -486,8 +486,11 @@ pub struct MobToolsBuildArgs {
 /// Implementations capture surface-specific state (e.g. `MobMcpState`) and
 /// receive session-scoped arguments from `build_agent()` at construction time.
 /// This avoids a cyclic dependency between the facade crate and `meerkat-mob-mcp`.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait MobToolsFactory: Send + Sync {
     /// Build a mob tool dispatcher for the given session.
     async fn build_mob_tools(
@@ -831,8 +834,11 @@ impl SessionHistoryPage {
 ///
 /// All surfaces delegate to this trait. Implementations control persistence,
 /// compaction, and event logging behavior.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionService: Send + Sync {
     /// Create a new session and run the first turn.
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError>;
@@ -956,8 +962,11 @@ pub trait SessionService: Send + Sync {
 /// Base lifecycle operations stay on `SessionService`; advanced surfaces
 /// (RPC/REST/mob orchestration) can use this trait when they need direct
 /// access to comms runtime and injector handles.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionServiceCommsExt: SessionService {
     /// Get the comms runtime for a session, if available.
     async fn comms_runtime(
@@ -993,8 +1002,11 @@ pub trait SessionServiceCommsExt: SessionService {
 ///
 /// Keeps the base lifecycle contract minimal while exposing first-class
 /// session mutation operations shared across external surfaces.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionServiceControlExt: SessionService {
     /// Append runtime system context to a session.
     ///
@@ -1026,8 +1038,11 @@ pub trait SessionServiceControlExt: SessionService {
 ///
 /// Keeps the base lifecycle contract lightweight while allowing surfaces to
 /// fetch full transcript contents when they explicitly opt in.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionServiceHistoryExt: SessionService {
     /// Read the committed transcript for a session.
     ///
@@ -1060,8 +1075,11 @@ mod tests {
 
     struct UnsupportedSessionService;
 
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+    #[cfg_attr(
+        all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+        async_trait
+    )]
     impl SessionService for UnsupportedSessionService {
         async fn create_session(
             &self,

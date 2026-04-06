@@ -4,8 +4,9 @@
 
 use crate::error::AgentError;
 use crate::time_compat::{Duration, Instant};
+use portable_atomic::AtomicU64;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Resource limits for an agent run
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

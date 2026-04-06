@@ -19,16 +19,20 @@
 pub mod comms;
 pub mod composite;
 pub mod config;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub mod file_store;
 pub mod memory_store;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub mod project;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub mod shell;
 #[cfg(feature = "skills")]
 pub mod skills;
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "sqlite",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod sqlite_store;
 pub mod store;
 pub mod tasks;
@@ -42,12 +46,16 @@ pub use composite::{CompositeDispatcher, CompositeDispatcherError};
 pub use config::{
     BuiltinToolConfig, EnforcedToolPolicy, ResolvedToolPolicy, ToolMode, ToolPolicyLayer,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use file_store::FileTaskStore;
 pub use memory_store::MemoryTaskStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use project::{ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "sqlite",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use sqlite_store::SqliteTaskStore;
 pub use store::TaskStore;
 
@@ -83,8 +91,11 @@ impl ToolOutput {
 ///
 /// Built-in tools are tools that are bundled with the Meerkat agent harness
 /// rather than being provided by external MCP servers.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait BuiltinTool: Send + Sync {
     /// Returns the unique name of this tool
     fn name(&self) -> &'static str;

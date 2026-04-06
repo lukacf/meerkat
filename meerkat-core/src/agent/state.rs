@@ -809,17 +809,28 @@ where
                     };
 
                     // Update budget + session usage
+                    #[cfg(target_os = "espidf")]
+                    println!("MKT:AGENT:AFTER_LLM_CALL turn={}", turn_count);
                     self.budget.record_usage(&result.usage);
                     self.last_input_tokens = result.usage.input_tokens;
                     self.session.record_usage(result.usage.clone());
 
                     let (blocks, stop_reason, usage) = result.into_parts();
+                    #[cfg(target_os = "espidf")]
+                    println!(
+                        "MKT:AGENT:AFTER_LLM_PARTS turn={} stop_reason={:?} blocks={}",
+                        turn_count,
+                        stop_reason,
+                        blocks.len()
+                    );
                     let mut assistant_msg = BlockAssistantMessage {
                         blocks,
                         stop_reason,
                     };
                     let mut assistant_text = assistant_msg.to_string();
 
+                    #[cfg(target_os = "espidf")]
+                    println!("MKT:AGENT:BEFORE_POST_LLM_HOOKS turn={}", turn_count);
                     let post_llm_report = self
                         .execute_hooks(
                             HookInvocation {
@@ -844,6 +855,8 @@ where
                             event_tx.as_ref(),
                         )
                         .await?;
+                    #[cfg(target_os = "espidf")]
+                    println!("MKT:AGENT:AFTER_POST_LLM_HOOKS turn={}", turn_count);
 
                     if let Some(HookDecision::Deny {
                         reason_code,
@@ -875,6 +888,12 @@ where
                     }
 
                     if !assistant_text.is_empty() {
+                        #[cfg(target_os = "espidf")]
+                        println!(
+                            "MKT:AGENT:TEXT_COMPLETE turn={} bytes={}",
+                            turn_count,
+                            assistant_text.len()
+                        );
                         emit_event!(AgentEvent::TextComplete {
                             content: assistant_text.clone(),
                         });
@@ -882,6 +901,8 @@ where
 
                     // Check if we have tool calls
                     if assistant_msg.has_tool_calls() {
+                        #[cfg(target_os = "espidf")]
+                        println!("MKT:AGENT:TOOL_CALL_BRANCH turn={}", turn_count);
                         // Add assistant message with ordered blocks
                         self.session
                             .push(Message::BlockAssistant(assistant_msg.clone()));

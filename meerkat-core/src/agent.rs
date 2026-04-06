@@ -53,8 +53,11 @@ pub use runner::AgentRunner;
 pub const CALLBACK_TOOL_PREFIX: &str = "CALLBACK_TOOL_PENDING:";
 
 /// Trait for LLM clients that can be used with the agent
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait AgentLlmClient: Send + Sync {
     /// Stream a response from the LLM
     async fn stream_response(
@@ -212,8 +215,11 @@ impl BindOutcome {
 }
 
 /// Trait for tool dispatchers
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
@@ -335,8 +341,11 @@ impl<T: AgentToolDispatcher + ?Sized> FilteredToolDispatcher<T> {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for FilteredToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.filtered_tools)
@@ -466,8 +475,11 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 }
 
 /// Trait for session stores
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait AgentSessionStore: Send + Sync {
     async fn save(&self, session: &Session) -> Result<(), AgentError>;
     async fn load(&self, id: &str) -> Result<Option<Session>, AgentError>;
@@ -509,8 +521,11 @@ pub enum CommsCapabilityError {
 }
 
 /// Trait for comms runtime that can be used with the agent
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait CommsRuntime: Send + Sync {
     /// Runtime-local public key identifier, if available.
     ///
@@ -787,8 +802,11 @@ mod tests {
         notify: Arc<Notify>,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+    #[cfg_attr(
+        all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+        async_trait
+    )]
     impl CommsRuntime for NoopCommsRuntime {
         async fn drain_messages(&self) -> Vec<String> {
             Vec::new()
@@ -860,8 +878,11 @@ mod tests {
 
         struct MockTool;
 
-        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+        #[cfg_attr(
+            all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+            async_trait
+        )]
         impl AgentToolDispatcher for MockTool {
             fn tools(&self) -> Arc<[Arc<ToolDef>]> {
                 vec![Arc::new(ToolDef {
@@ -904,8 +925,11 @@ mod tests {
 
         struct MockTool;
 
-        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+        #[cfg_attr(
+            all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+            async_trait
+        )]
         impl AgentToolDispatcher for MockTool {
             fn tools(&self) -> Arc<[Arc<ToolDef>]> {
                 vec![Arc::new(ToolDef {

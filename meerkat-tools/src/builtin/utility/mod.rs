@@ -7,18 +7,18 @@
 //!
 //! These tools are enabled by default when built-in tools are enabled.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 mod apply_patch;
 mod datetime;
 mod tool_set;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 mod view_image;
 mod wait;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use apply_patch::ApplyPatchTool;
 pub use datetime::DateTimeTool;
 pub use tool_set::UtilityToolSet;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use view_image::ViewImageTool;
 pub use wait::{WaitInterrupt, WaitTool};

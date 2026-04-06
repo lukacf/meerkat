@@ -168,17 +168,20 @@ impl GeminiParams {
 }
 
 /// Stream type alias — Send on native, not required on wasm32 (single-threaded).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
 pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + 'a>>;
 
 /// Abstraction over LLM providers
 ///
 /// Each provider implementation normalizes its streaming response
 /// to the common `LlmEvent` type, hiding provider-specific quirks.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait LlmClient: Send + Sync {
     /// Stream a completion request
     ///

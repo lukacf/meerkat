@@ -6,6 +6,7 @@
 //!
 //! # Features
 //!
+//! - `persistent-service`: Enables `PersistentSessionService`.
 //! - `session-store`: Enables `PersistentSessionService` and `RedbEventStore`.
 //! - `session-compaction`: Enables `DefaultCompactor` and `CompactionConfig`.
 
@@ -20,13 +21,13 @@ pub mod ephemeral;
 #[cfg(feature = "session-compaction")]
 pub mod compactor;
 
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 pub mod event_store;
 
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 pub mod persistent;
 
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 pub mod projector;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -49,31 +50,31 @@ pub type BroadcastEventReceiver =
 #[cfg(feature = "session-compaction")]
 pub use compactor::DefaultCompactor;
 
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 pub use persistent::PersistentSessionService;
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "session-management",
         name: "Session Management",
         description: "Session persistence, resume patterns, event store replay, compaction tuning",
         scope: meerkat_core::skills::SkillScope::Builtin,
-        requires_capabilities: &["session_store"],
+        requires_capabilities: &["persistent_session_service"],
         body: include_str!("../skills/session-management/SKILL.md"),
         extensions: &[],
     }
 }
 
 // Capability registrations (inventory not available on wasm32)
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "persistent-service", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::SessionStore,
-        description: "PersistentSessionService, RedbEventStore, SessionProjector",
+        description: "PersistentSessionService, SessionProjector",
         scope: meerkat_contracts::CapabilityScope::Universal,
-        requires_feature: Some("session-store"),
+        requires_feature: Some("persistent-service"),
         prerequisites: &[],
         status_resolver: None,
     }

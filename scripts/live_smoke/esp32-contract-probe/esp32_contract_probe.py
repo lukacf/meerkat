@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -22,11 +23,20 @@ REPO_CARGO = REPO_ROOT / "scripts" / "repo-cargo"
 PROBE_ROOT = REPO_ROOT / "scripts" / "live_smoke" / "esp32-contract-probe"
 FIRMWARE_RUST_ROOT = PROBE_ROOT / "firmware-rust"
 DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "embedded-esp32" / "phase-0"
+DEFAULT_IDF_PATH = Path.home() / ".espressif" / "esp-idf" / "v5.2.3"
+DEFAULT_IDF_TOOLS_PATH = Path.home() / ".espressif"
+DEFAULT_FIRMWARE_TARGET_DIR = Path("/tmp/esp32-mpy-live")
 HOST_CORE_MARKERS = (
     "MKT:HOST_CORE:FACTORY_OK",
     "MKT:HOST_CORE:PROVIDER_OK",
     "MKT:HOST_CORE:RUNTIME_OK",
     "MKT:HOST_CORE:PASS",
+)
+MEERKAT_BASELINE_MARKERS = (
+    "MKT:MEERKAT_BASELINE:MSRV_CAPTURED",
+    "MKT:MEERKAT_BASELINE:TARGET_CAPTURED",
+    "MKT:MEERKAT_BASELINE:DEP_TREE_CAPTURED",
+    "MKT:MEERKAT_BASELINE:PASS",
 )
 SINGLE_NODE_MARKERS = (
     "MKT:BOOT:OK",
@@ -44,6 +54,12 @@ RUST_STACK_MARKERS = (
     "MKT:TLS:OK",
     "MKT:PROVIDER:STREAM_START",
     "MKT:PROVIDER:STREAM_DONE",
+    "MKT:MEERKAT:BOOTSTRAP_OK",
+    "MKT:MEERKAT:RUN_START",
+    "MKT:MEERKAT:SKILLS_OK",
+    "MKT:MEERKAT:TOOLS_OK",
+    "MKT:MEERKAT:HOOKS_OK",
+    "MKT:MEERKAT:RUN_DONE",
     "MKT:RUST_STACK:OK",
     "MKT:SINGLE_NODE:PASS",
 )
@@ -99,6 +115,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         required=True,
         choices=(
             "host-core-check",
+            "meerkat-baseline",
             "single-node",
             "single-node-rust-stack",
             "negative",
@@ -146,6 +163,112 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def timestamp_slug() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def detect_idf_path() -> Path:
+    for candidate in (
+        os.environ.get("ESP32_PROBE_IDF_PATH"),
+        os.environ.get("IDF_PATH"),
+        str(DEFAULT_IDF_PATH),
+    ):
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if (path / "tools" / "idf_tools.py").exists():
+            return path
+    raise RuntimeError("could not locate ESP-IDF; set ESP32_PROBE_IDF_PATH")
+
+
+def detect_idf_python_env(idf_path: Path) -> Path:
+    explicit = os.environ.get("ESP32_PROBE_IDF_PYTHON_ENV") or os.environ.get(
+        "IDF_PYTHON_ENV_PATH"
+    )
+    if explicit:
+        path = Path(explicit).expanduser()
+        if (path / "bin" / "python").exists():
+            return path
+
+    version_match = re.search(r"v(?P<major>\d+)\.(?P<minor>\d+)", idf_path.name)
+    if not version_match:
+        raise RuntimeError(
+            f"could not derive ESP-IDF major/minor version from {idf_path.name}"
+        )
+    prefix = (
+        f"idf{version_match.group('major')}.{version_match.group('minor')}_py"
+    )
+    candidates = sorted(
+        path
+        for path in (DEFAULT_IDF_TOOLS_PATH / "python_env").glob(f"{prefix}*_env")
+        if (path / "bin" / "python").exists()
+    )
+    if not candidates:
+        raise RuntimeError(
+            "could not locate the ESP-IDF managed Python environment; "
+            "run idf_tools.py install-python-env or set ESP32_PROBE_IDF_PYTHON_ENV"
+        )
+    return candidates[-1]
+
+
+def resolve_idf_export_env(idf_path: Path) -> dict[str, str]:
+    python3 = locate_clean_python3()
+    completed = subprocess.run(
+        [
+            str(python3),
+            str(idf_path / "tools" / "idf_tools.py"),
+            "--idf-path",
+            str(idf_path),
+            "export",
+        ],
+        env=sanitized_subprocess_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"failed to resolve ESP-IDF export environment via idf_tools.py: {completed.stdout.strip()}"
+        )
+
+    exported: dict[str, str] = {}
+    for key, value in re.findall(r'export ([A-Z0-9_]+)="([^"]*)"', completed.stdout):
+        exported[key] = value
+
+    path_value = exported.get("PATH")
+    if path_value:
+        exported["PATH"] = path_value.replace("$PATH", os.environ.get("PATH", ""))
+
+    return exported
+
+
+def resolve_idf_export_env(idf_path: Path) -> dict[str, str]:
+    python3 = locate_clean_python3()
+    completed = subprocess.run(
+        [
+            str(python3),
+            str(idf_path / "tools" / "idf_tools.py"),
+            "--idf-path",
+            str(idf_path),
+            "export",
+        ],
+        env=sanitized_subprocess_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"failed to resolve ESP-IDF export environment via idf_tools.py: {completed.stdout.strip()}"
+        )
+
+    exported: dict[str, str] = {}
+    for key, value in re.findall(r'export ([A-Z0-9_]+)="([^"]*)"', completed.stdout):
+        exported[key] = value
+
+    path_value = exported.get("PATH")
+    if path_value:
+        exported["PATH"] = path_value.replace("$PATH", os.environ.get("PATH", ""))
+
+    return exported
 
 
 def ensure_run_context(mode: str, artifact_root: Path, dry_run: bool) -> RunContext:
@@ -207,6 +330,11 @@ def detect_port(explicit_port: str | None) -> str:
     if env_port:
         return env_port
 
+    candidates = list_serial_candidates()
+    return choose_port_from_candidates(candidates)
+
+
+def list_serial_candidates() -> list[str]:
     patterns = (
         "/dev/cu.usbmodem*",
         "/dev/cu.usbserial*",
@@ -215,8 +343,33 @@ def detect_port(explicit_port: str | None) -> str:
     )
     candidates: list[str] = []
     for pattern in patterns:
-        candidates.extend(str(path) for path in Path("/").glob(pattern.lstrip("/")))
-    return choose_port_from_candidates(candidates)
+        candidates.extend(glob.glob(pattern))
+    return sorted(dict.fromkeys(candidates))
+
+
+def wait_for_serial_port(preferred_port: str, timeout_secs: int = 15) -> str:
+    deadline = time.monotonic() + timeout_secs
+    last_candidates: list[str] = []
+    while time.monotonic() < deadline:
+        candidates = list_serial_candidates()
+        last_candidates = candidates
+        if preferred_port in candidates:
+            return preferred_port
+        usb_candidates = [
+            candidate
+            for candidate in candidates
+            if "usbmodem" in candidate or "usbserial" in candidate
+        ]
+        if len(usb_candidates) == 1:
+            return usb_candidates[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        time.sleep(0.5)
+    joined = ", ".join(last_candidates) if last_candidates else "<none>"
+    raise RuntimeError(
+        "could not rediscover ESP32 serial port after reset; "
+        f"preferred={preferred_port}, candidates={joined}"
+    )
 
 
 def sanitize_label(value: str) -> str:
@@ -232,6 +385,34 @@ def display_path(path: Path) -> str:
         return str(path.relative_to(REPO_ROOT))
     except ValueError:
         return str(path)
+
+
+def resolve_logged_path(value: str, artifact_dir: Path | None = None) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    repo_path = REPO_ROOT / path
+    if repo_path.exists():
+        return repo_path
+    if artifact_dir is not None:
+        artifact_path = artifact_dir / path
+        if artifact_path.exists():
+            return artifact_path
+    return path
+
+
+def resolve_logged_path(value: str, artifact_dir: Path | None = None) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    repo_path = REPO_ROOT / path
+    if repo_path.exists():
+        return repo_path
+    if artifact_dir is not None:
+        artifact_path = artifact_dir / path
+        if artifact_path.exists():
+            return artifact_path
+    return path
 
 
 def extract_markers(text: str) -> list[str]:
@@ -280,11 +461,75 @@ def write_marker_report(
 
 
 def run_command(context: RunContext, spec: CommandSpec, index: int) -> dict[str, object]:
+    return run_command_with_env(context, spec, index, None)
+
+
+def run_command_with_env(
+    context: RunContext,
+    spec: CommandSpec,
+    index: int,
+    env: dict[str, str] | None,
+) -> dict[str, object]:
     log_dir = context.artifact_dir / "commands"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{index:02d}-{sanitize_label(spec.label)}.log"
     context.emit(
         f"[esp32-contract-probe] running {spec.label}: {' '.join(spec.command)}"
+    )
+    if context.dry_run:
+        payload = {
+            "label": spec.label,
+            "cwd": display_path(spec.cwd),
+            "command": list(spec.command),
+            "exit_code": 0,
+            "dry_run": True,
+        }
+        write_json(log_path, payload)
+        return payload
+
+    completed = subprocess.run(
+        list(spec.command),
+        cwd=spec.cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_path.write_text(
+        "\n".join(
+            [
+                f"$ {' '.join(spec.command)}",
+                "",
+                completed.stdout,
+                "",
+                f"[exit_code={completed.returncode}]",
+            ]
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "label": spec.label,
+        "cwd": display_path(spec.cwd),
+        "command": list(spec.command),
+        "exit_code": completed.returncode,
+        "log": display_path(log_path),
+    }
+    if completed.returncode != 0:
+        raise RuntimeError(f"{spec.label} failed; see {payload['log']}")
+    return payload
+
+
+def run_command_capture(
+    context: RunContext,
+    spec: CommandSpec,
+    index: int,
+) -> dict[str, object]:
+    log_dir = context.artifact_dir / "commands"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{index:02d}-{sanitize_label(spec.label)}.log"
+    context.emit(
+        f"[esp32-contract-probe] capturing {spec.label}: {' '.join(spec.command)}"
     )
     if context.dry_run:
         payload = {
@@ -317,16 +562,74 @@ def run_command(context: RunContext, spec: CommandSpec, index: int) -> dict[str,
         + "\n",
         encoding="utf-8",
     )
-    payload = {
+    return {
         "label": spec.label,
         "cwd": display_path(spec.cwd),
         "command": list(spec.command),
         "exit_code": completed.returncode,
         "log": display_path(log_path),
     }
-    if completed.returncode != 0:
-        raise RuntimeError(f"{spec.label} failed; see {payload['log']}")
-    return payload
+
+
+def run_command_capture(
+    context: RunContext,
+    spec: CommandSpec,
+    index: int,
+) -> dict[str, object]:
+    return run_command_capture_with_env(context, spec, index, None)
+
+
+def run_command_capture_with_env(
+    context: RunContext,
+    spec: CommandSpec,
+    index: int,
+    env: dict[str, str] | None,
+) -> dict[str, object]:
+    log_dir = context.artifact_dir / "commands"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{index:02d}-{sanitize_label(spec.label)}.log"
+    context.emit(
+        f"[esp32-contract-probe] capturing {spec.label}: {' '.join(spec.command)}"
+    )
+    if context.dry_run:
+        payload = {
+            "label": spec.label,
+            "cwd": display_path(spec.cwd),
+            "command": list(spec.command),
+            "exit_code": 0,
+            "dry_run": True,
+        }
+        write_json(log_path, payload)
+        return payload
+
+    completed = subprocess.run(
+        list(spec.command),
+        cwd=spec.cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_path.write_text(
+        "\n".join(
+            [
+                f"$ {' '.join(spec.command)}",
+                "",
+                completed.stdout,
+                "",
+                f"[exit_code={completed.returncode}]",
+            ]
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "label": spec.label,
+        "cwd": display_path(spec.cwd),
+        "command": list(spec.command),
+        "exit_code": completed.returncode,
+        "log": display_path(log_path),
+    }
 
 
 def host_core_checks() -> tuple[CheckSpec, ...]:
@@ -462,6 +765,352 @@ def run_host_core_check(context: RunContext) -> int:
         return 1
 
 
+def meerkat_baseline_commands() -> tuple[CommandSpec, ...]:
+    return (
+        CommandSpec(
+            label="facade_msrv_check",
+            command=(
+                "rustup",
+                "run",
+                "esp",
+                "cargo",
+                "check",
+                "-p",
+                "meerkat",
+                "--no-default-features",
+                "--features",
+                "openai,skills",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="target_openai_build_std_check",
+            command=(
+                "zsh",
+                "-lc",
+                "source ~/export-esp.sh >/dev/null 2>&1 && "
+                "rustup run esp cargo -Zbuild-std=std,panic_abort check "
+                "-p meerkat-client --target xtensa-esp32s3-espidf "
+                "--features openai --ignore-rust-version",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="signal_hook_registry_tree",
+            command=(
+                "cargo",
+                "tree",
+                "-p",
+                "meerkat-client",
+                "--features",
+                "openai",
+                "-i",
+                "signal-hook-registry",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="ring_tree",
+            command=(
+                "cargo",
+                "tree",
+                "-p",
+                "meerkat-client",
+                "--features",
+                "openai",
+                "-i",
+                "ring",
+            ),
+            cwd=REPO_ROOT,
+        ),
+    )
+
+
+def classify_meerkat_baseline_results(
+    context: RunContext,
+    command_results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    by_label = {str(result["label"]): result for result in command_results}
+    blockers: list[dict[str, object]] = []
+
+    msrv_result = by_label.get("facade_msrv_check")
+    if msrv_result:
+        msrv_log = resolve_logged_path(str(msrv_result["log"]), context.artifact_dir)
+        msrv_text = msrv_log.read_text(encoding="utf-8")
+        if "requires rustc 1.94.0" in msrv_text:
+            blockers.append(
+                {
+                    "kind": "msrv_mismatch",
+                    "command": msrv_result["label"],
+                    "detail": "workspace crates require rustc 1.94.0 while the installed esp toolchain is 1.93.0-nightly",
+                }
+            )
+
+    target_result = by_label.get("target_openai_build_std_check")
+    if target_result:
+        target_log = resolve_logged_path(str(target_result["log"]), context.artifact_dir)
+        target_text = target_log.read_text(encoding="utf-8")
+        if (
+            "signal-hook-registry" in target_text
+            and "unresolved import `libc::siginfo_t`" in target_text
+        ):
+            blockers.append(
+                {
+                    "kind": "tokio_signal_registry_espidf_mismatch",
+                    "command": target_result["label"],
+                    "detail": "current tokio/reqwest provider stack reaches signal-hook-registry, which does not match the esp-idf libc surface for xtensa-esp32s3-espidf",
+                }
+            )
+        elif "can't find crate for `std`" in target_text or "build the standard library from source" in target_text:
+            blockers.append(
+                {
+                    "kind": "missing_build_std",
+                    "command": target_result["label"],
+                    "detail": "xtensa target requires esp-style build-std configuration before target-side compilation can proceed",
+                }
+            )
+
+    ring_result = by_label.get("ring_tree")
+    if ring_result and ring_result.get("exit_code") == 0:
+        blockers.append(
+            {
+                "kind": "rustls_ring_present",
+                "command": ring_result["label"],
+                "detail": "the current OpenAI client path still routes through reqwest -> rustls -> ring on the facade baseline",
+            }
+        )
+
+    return {
+        "blockers": blockers,
+        "facade_features": ["openai", "skills"],
+        "notes": [
+            "This probe captures the current pre-Phase-1 facade-linked baseline exactly as it exists today.",
+            "A passing probe means the blocker evidence was reproduced and recorded, not that the current Meerkat stack already runs on-device.",
+        ],
+    }
+
+
+def run_meerkat_baseline(context: RunContext) -> int:
+    command_results: list[dict[str, object]] = []
+    command_index = 1
+    try:
+        for spec in meerkat_baseline_commands():
+            result = run_command_capture(context, spec, command_index)
+            command_results.append(result)
+            command_index += 1
+            if spec.label == "facade_msrv_check":
+                context.emit("MKT:MEERKAT_BASELINE:MSRV_CAPTURED")
+            elif spec.label == "target_openai_build_std_check":
+                context.emit("MKT:MEERKAT_BASELINE:TARGET_CAPTURED")
+            elif spec.label == "ring_tree":
+                context.emit("MKT:MEERKAT_BASELINE:DEP_TREE_CAPTURED")
+
+        context.emit("MKT:MEERKAT_BASELINE:PASS")
+        report = write_marker_report(
+            context,
+            "meerkat-baseline",
+            MEERKAT_BASELINE_MARKERS,
+            context.run_log,
+        )
+        summary = classify_meerkat_baseline_results(context, command_results)
+        write_json(
+            context.artifact_dir / "summary.json",
+            {
+                "mode": "meerkat-baseline",
+                "status": "pass",
+                "commands": command_results,
+                "marker_report": report,
+                **summary,
+            },
+        )
+        return 0
+    except Exception as error:
+        context.emit(f"MKT:MEERKAT_BASELINE:FAIL error={json.dumps(str(error))}")
+        write_json(
+            context.artifact_dir / "summary.json",
+            {
+                "mode": "meerkat-baseline",
+                "status": "fail",
+                "commands": command_results,
+                "error": str(error),
+            },
+        )
+        return 1
+
+
+def meerkat_baseline_commands() -> tuple[CommandSpec, ...]:
+    return (
+        CommandSpec(
+            label="facade_msrv_check",
+            command=(
+                "rustup",
+                "run",
+                "esp",
+                "cargo",
+                "check",
+                "-p",
+                "meerkat",
+                "--no-default-features",
+                "--features",
+                "openai,skills",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="target_openai_build_std_check",
+            command=(
+                "zsh",
+                "-lc",
+                "source ~/export-esp.sh >/dev/null 2>&1 && "
+                "rustup run esp cargo -Zbuild-std=std,panic_abort check "
+                "-p meerkat-client --target xtensa-esp32s3-espidf "
+                "--features openai --ignore-rust-version",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="signal_hook_registry_tree",
+            command=(
+                "cargo",
+                "tree",
+                "-p",
+                "meerkat-client",
+                "--features",
+                "openai",
+                "-i",
+                "signal-hook-registry",
+            ),
+            cwd=REPO_ROOT,
+        ),
+        CommandSpec(
+            label="ring_tree",
+            command=(
+                "cargo",
+                "tree",
+                "-p",
+                "meerkat-client",
+                "--features",
+                "openai",
+                "-i",
+                "ring",
+            ),
+            cwd=REPO_ROOT,
+        ),
+    )
+
+
+def classify_meerkat_baseline_results(
+    context: RunContext,
+    command_results: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    by_label = {str(result["label"]): result for result in command_results}
+    blockers: list[dict[str, object]] = []
+
+    msrv_result = by_label.get("facade_msrv_check")
+    if msrv_result:
+        msrv_log = resolve_logged_path(str(msrv_result["log"]), context.artifact_dir)
+        msrv_text = msrv_log.read_text(encoding="utf-8")
+        if "requires rustc 1.94.0" in msrv_text:
+            blockers.append(
+                {
+                    "kind": "msrv_mismatch",
+                    "command": msrv_result["label"],
+                    "detail": "workspace crates require rustc 1.94.0 while the installed esp toolchain is 1.93.0-nightly",
+                }
+            )
+
+    target_result = by_label.get("target_openai_build_std_check")
+    if target_result:
+        target_log = resolve_logged_path(str(target_result["log"]), context.artifact_dir)
+        target_text = target_log.read_text(encoding="utf-8")
+        if (
+            "signal-hook-registry" in target_text
+            and "unresolved import `libc::siginfo_t`" in target_text
+        ):
+            blockers.append(
+                {
+                    "kind": "tokio_signal_registry_espidf_mismatch",
+                    "command": target_result["label"],
+                    "detail": "current tokio/reqwest provider stack reaches signal-hook-registry, which does not match the esp-idf libc surface for xtensa-esp32s3-espidf",
+                }
+            )
+        elif "can't find crate for `std`" in target_text or "build the standard library from source" in target_text:
+            blockers.append(
+                {
+                    "kind": "missing_build_std",
+                    "command": target_result["label"],
+                    "detail": "xtensa target requires esp-style build-std configuration before target-side compilation can proceed",
+                }
+            )
+
+    ring_result = by_label.get("ring_tree")
+    if ring_result and ring_result.get("exit_code") == 0:
+        blockers.append(
+            {
+                "kind": "rustls_ring_present",
+                "command": ring_result["label"],
+                "detail": "the current OpenAI client path still routes through reqwest -> rustls -> ring on the facade baseline",
+            }
+        )
+
+    return {
+        "blockers": blockers,
+        "facade_features": ["openai", "skills"],
+        "notes": [
+            "This probe captures the current pre-Phase-1 facade-linked baseline exactly as it exists today.",
+            "A passing probe means the blocker evidence was reproduced and recorded, not that the current Meerkat stack already runs on-device.",
+        ],
+    }
+
+
+def run_meerkat_baseline(context: RunContext) -> int:
+    command_results: list[dict[str, object]] = []
+    command_index = 1
+    try:
+        for spec in meerkat_baseline_commands():
+            result = run_command_capture(context, spec, command_index)
+            command_results.append(result)
+            command_index += 1
+            if spec.label == "facade_msrv_check":
+                context.emit("MKT:MEERKAT_BASELINE:MSRV_CAPTURED")
+            elif spec.label == "target_openai_build_std_check":
+                context.emit("MKT:MEERKAT_BASELINE:TARGET_CAPTURED")
+            elif spec.label == "ring_tree":
+                context.emit("MKT:MEERKAT_BASELINE:DEP_TREE_CAPTURED")
+
+        context.emit("MKT:MEERKAT_BASELINE:PASS")
+        report = write_marker_report(
+            context,
+            "meerkat-baseline",
+            MEERKAT_BASELINE_MARKERS,
+            context.run_log,
+        )
+        summary = classify_meerkat_baseline_results(context, command_results)
+        write_json(
+            context.artifact_dir / "summary.json",
+            {
+                "mode": "meerkat-baseline",
+                "status": "pass",
+                "commands": command_results,
+                "marker_report": report,
+                **summary,
+            },
+        )
+        return 0
+    except Exception as error:
+        context.emit(f"MKT:MEERKAT_BASELINE:FAIL error={json.dumps(str(error))}")
+        write_json(
+            context.artifact_dir / "summary.json",
+            {
+                "mode": "meerkat-baseline",
+                "status": "fail",
+                "commands": command_results,
+                "error": str(error),
+            },
+        )
+        return 1
+
+
 def run_single_node_host_sim(context: RunContext, provider: str) -> int:
     transcript = [
         "MKT:BOOT:OK lane=host-sim",
@@ -537,14 +1186,10 @@ def locate_clean_python3() -> Path:
     if explicit:
         candidate_paths.append(Path(explicit))
 
-    sys_base_prefix = getattr(sys, "base_prefix", None)
-    if sys_base_prefix:
-        candidate_paths.append(Path(sys_base_prefix) / "bin" / "python3")
-        candidate_paths.append(Path(sys_base_prefix) / "bin" / "python3.11")
-
     candidate_paths.extend(
         [
             Path("/opt/homebrew/opt/python@3.11/bin/python3.11"),
+            Path("/usr/local/bin/python3.11"),
             Path("/opt/homebrew/bin/python3"),
             Path("/usr/bin/python3"),
         ]
@@ -554,6 +1199,11 @@ def locate_clean_python3() -> Path:
         detected = detect_binary(binary_name)
         if detected:
             candidate_paths.append(Path(detected))
+
+    sys_base_prefix = getattr(sys, "base_prefix", None)
+    if sys_base_prefix:
+        candidate_paths.append(Path(sys_base_prefix) / "bin" / "python3.11")
+        candidate_paths.append(Path(sys_base_prefix) / "bin" / "python3")
 
     seen: set[Path] = set()
     for candidate in candidate_paths:
@@ -623,15 +1273,18 @@ def firmware_env(
     port: str,
 ) -> dict[str, str]:
     env = sanitized_subprocess_env()
-    python3_shim_dir = ensure_python3_shim(context)
+    idf_path = detect_idf_path()
+    env.update(resolve_idf_export_env(idf_path))
     env["ESPFLASH_SKIP_UPDATE_CHECK"] = "true"
     env["MCU"] = "esp32s3"
+    env["IDF_PATH"] = str(idf_path)
+    env["IDF_TOOLS_PATH"] = str(DEFAULT_IDF_TOOLS_PATH)
     env["WIFI_SSID"] = args.wifi_ssid or ""
     env["WIFI_PASS"] = args.wifi_password or ""
     env["OPENAI_API_KEY"] = provider_key
     env["OPENAI_MODEL"] = args.openai_model
     env["ESPFLASH_PORT"] = port
-    env["PATH"] = f"{python3_shim_dir}:{env.get('PATH', '')}"
+    env["CARGO_TARGET_DIR"] = str(DEFAULT_FIRMWARE_TARGET_DIR)
     return env
 
 
@@ -1041,6 +1694,85 @@ def run_monitored_command(
         }
 
 
+def run_serial_monitor(
+    context: RunContext,
+    port: str,
+    transcript_path: Path,
+    required_markers: Sequence[str],
+    timeout_secs: int,
+) -> dict[str, object]:
+    python3 = locate_clean_python3()
+    script = r"""
+import json
+import re
+import serial
+import sys
+import time
+from pathlib import Path
+
+port = sys.argv[1]
+transcript_path = Path(sys.argv[2])
+timeout_secs = int(sys.argv[3])
+required = sys.argv[4:]
+marker_pattern = re.compile(r"^(MKT:[A-Z0-9_]+(?::[A-Z0-9_]+)*)")
+seen = set()
+start = time.monotonic()
+
+with serial.Serial(port, 115200, timeout=0.25) as ser, transcript_path.open("w", encoding="utf-8") as transcript:
+    while time.monotonic() - start < timeout_secs:
+        data = ser.read(4096)
+        if not data:
+            continue
+        text = data.decode("utf-8", errors="replace")
+        transcript.write(text)
+        transcript.flush()
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        for raw_line in text.splitlines():
+            match = marker_pattern.match(raw_line.strip())
+            if match:
+                seen.add(match.group(1))
+        if all(marker in seen for marker in required):
+            print("\\nMKT:SERIAL_MONITOR:PASS")
+            raise SystemExit(0)
+
+print("\\nMKT:SERIAL_MONITOR:FAIL missing=" + json.dumps([m for m in required if m not in seen]))
+raise SystemExit(2)
+"""
+    command = [
+        str(python3),
+        "-c",
+        script,
+        port,
+        str(transcript_path),
+        str(timeout_secs),
+        *required_markers,
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=sanitized_subprocess_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.stdout:
+        for line in completed.stdout.splitlines():
+            if "MKT:" in line:
+                context.emit(line.rstrip())
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "serial monitor failed after flash; "
+            f"see {display_path(transcript_path)}"
+        )
+    return {
+        "command": command,
+        "cwd": display_path(REPO_ROOT),
+        "transcript": display_path(transcript_path),
+        "exit_code": completed.returncode,
+    }
+
+
 def run_single_node_rust_stack_hardware(context: RunContext, args: argparse.Namespace) -> int:
     try:
         if args.provider != "openai":
@@ -1085,27 +1817,48 @@ def run_single_node_rust_stack_hardware(context: RunContext, args: argparse.Name
         if not provider_key:
             raise RuntimeError("missing provider API key for rust-stack hardware run")
 
-        env = firmware_env(context, args, provider_key, prep.port)
+        active_port = wait_for_serial_port(prep.port)
+        env = firmware_env(context, args, provider_key, active_port)
         serial_log = context.artifact_dir / "serial.log"
-        host_usb_reset(context, prep.port)
+        build_spec = CommandSpec(
+            label="build_rust_firmware",
+            command=(
+                "rustup",
+                "run",
+                "esp",
+                "cargo",
+                "build",
+                "--release",
+                "--target",
+                "xtensa-esp32s3-espidf",
+                "-Zbuild-std=std,panic_abort",
+                "--ignore-rust-version",
+            ),
+            cwd=FIRMWARE_RUST_ROOT,
+        )
+        build_result = run_command_with_env(context, build_spec, 1, env)
+        image_path = (
+            Path(env["CARGO_TARGET_DIR"])
+            / "xtensa-esp32s3-espidf"
+            / "release"
+            / "esp32-contract-probe-fw"
+        )
+        if not image_path.exists():
+            raise RuntimeError(
+                f"expected built firmware image at {display_path(image_path)}"
+            )
         command = [
-            "cargo",
             "espflash",
             "flash",
-            "--release",
-            "--target",
-            "xtensa-esp32s3-espidf",
+            str(image_path),
             "--chip",
             "esp32s3",
             "--port",
-            prep.port,
+            active_port,
             "--before",
             "usb-reset",
             "--non-interactive",
             "--skip-update-check",
-            "--monitor",
-            "--monitor-baud",
-            "115200",
         ]
 
         context.emit(
@@ -1117,6 +1870,16 @@ def run_single_node_rust_stack_hardware(context: RunContext, args: argparse.Name
             command,
             FIRMWARE_RUST_ROOT,
             env,
+            context.artifact_dir / "flash.log",
+            (),
+            args.monitor_timeout_secs,
+        )
+        monitor_port = wait_for_serial_port(active_port)
+        host_usb_reset(context, monitor_port)
+        monitor_port = wait_for_serial_port(active_port)
+        monitor_result = run_serial_monitor(
+            context,
+            monitor_port,
             serial_log,
             RUST_STACK_MARKERS,
             args.monitor_timeout_secs,
@@ -1141,7 +1904,9 @@ def run_single_node_rust_stack_hardware(context: RunContext, args: argparse.Name
                 "provider": args.provider,
                 "model": args.openai_model,
                 "marker_report": report,
-                "command": command_result,
+                "build": build_result,
+                "flash": command_result,
+                "monitor": monitor_result,
             },
         )
         return 0
@@ -1209,6 +1974,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.mode == "host-core-check":
         return run_host_core_check(context)
+    if args.mode == "meerkat-baseline":
+        return run_meerkat_baseline(context)
     if args.mode == "single-node":
         if args.host_sim:
             return run_single_node_host_sim(context, args.provider)

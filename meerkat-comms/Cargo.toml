@@ -44,9 +44,15 @@ rand = "0.8"
 parking_lot = "0.12"
 tracing = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true, features = ["fs", "net", "sync", "rt", "io-util", "macros", "time"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+toml = { workspace = true }
+bytes = "1"
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["fs", "net", "sync", "rt", "io-util", "macros", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 toml = { workspace = true }
 bytes = "1"
 

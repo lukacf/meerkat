@@ -1,32 +1,35 @@
 //! Tool dispatcher implementation
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use crate::error::DispatchError;
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use meerkat_core::types::ToolResult;
 use meerkat_core::types::{ToolCallView, ToolDef};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use crate::registry::ToolRegistry;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use meerkat_core::error::ToolValidationError;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use serde_json::Value;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use std::time::Duration;
 
 /// An empty tool dispatcher that has no tools and always returns NotFound
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EmptyToolDispatcher;
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl AgentToolDispatcher for EmptyToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
@@ -40,14 +43,14 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 }
 
 /// A high-level tool dispatcher that validates arguments and handles timeouts
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub struct ToolDispatcher {
     registry: ToolRegistry,
     router: Arc<dyn AgentToolDispatcher>,
     default_timeout: Duration,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 impl ToolDispatcher {
     /// Create a new tool dispatcher
     pub fn new(registry: ToolRegistry, router: Arc<dyn AgentToolDispatcher>) -> Self {
@@ -82,7 +85,7 @@ impl ToolDispatcher {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 #[async_trait]
 impl AgentToolDispatcher for ToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -163,8 +166,11 @@ impl FilteredDispatcher {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl AgentToolDispatcher for FilteredDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.inner

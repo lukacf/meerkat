@@ -1,9 +1,12 @@
 //! Shared HTTP client helpers.
 
+#[cfg(not(target_os = "espidf"))]
+#[cfg(not(target_os = "espidf"))]
 use crate::error::LlmError;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use std::net::IpAddr;
 
+#[cfg(not(target_os = "espidf"))]
 #[allow(dead_code)]
 pub fn build_http_client_for_base_url(
     builder: reqwest::ClientBuilder,
@@ -27,7 +30,7 @@ pub fn build_http_client_for_base_url(
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 #[allow(dead_code)]
 fn is_loopback_base_url(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
@@ -44,6 +47,7 @@ fn is_loopback_base_url(base_url: &str) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(not(target_os = "espidf"))]
 #[cfg(test)]
 mod tests {
     use super::is_loopback_base_url;

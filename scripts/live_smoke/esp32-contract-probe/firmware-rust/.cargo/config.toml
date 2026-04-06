@@ -1,9 +1,16 @@
 [build]
 target = "xtensa-esp32s3-espidf"
+target-dir = "/tmp/esp32-mpy-target"
+target-dir = "/tmp/esp32-mpy-target"
 
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
-rustflags = ["--cfg", "espidf_time64"]
+rustflags = [
+    "--cfg",
+    "espidf_time64",
+    "--cfg",
+    "mio_unsupported_force_poll_poll",
+]
 
 [unstable]
 build-std = ["std", "panic_abort"]
@@ -11,3 +18,10 @@ build-std = ["std", "panic_abort"]
 [env]
 MCU = "esp32s3"
 ESP_IDF_TOOLS_INSTALL_DIR = "global"
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+ESP_IDF_GLOB_CMAKE_BASE = { value = "esp-idf-overrides", relative = true }
+ESP_IDF_GLOB_CMAKE_1 = "CMakeLists.txt"
+ESP_IDF_GLOB_CMAKE_2 = "sdkconfig.defaults"
+ESP_IDF_GLOB_CMAKE_3 = "manifest_empty.py"
+ESP_IDF_GLOB_CMAKE_3 = "manifest_empty.py"

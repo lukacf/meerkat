@@ -39,7 +39,18 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot,
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
+#[cfg(target_os = "espidf")]
+async fn cooperative_pause() {
+    std::thread::sleep(std::time::Duration::from_millis(1));
+}
+
+#[cfg(not(target_os = "espidf"))]
+async fn cooperative_pause() {}
+
 /// Capacity for the internal agent event channel.
+#[cfg(target_os = "espidf")]
+const EVENT_CHANNEL_CAPACITY: usize = 16;
+#[cfg(not(target_os = "espidf"))]
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Capacity for session command channel.
@@ -173,18 +184,37 @@ struct SessionTaskControl {
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
 }
 
+#[cfg(target_os = "espidf")]
+fn spawn_session_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    tokio::task::spawn_local(future)
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn spawn_session_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future)
+}
+
 // ---------------------------------------------------------------------------
 // Agent abstraction
 // ---------------------------------------------------------------------------
 
 /// Trait for building agents from session creation requests.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionAgentBuilder: Send + Sync {
     /// The concrete agent type.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     type Agent: SessionAgent + Send + 'static;
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     type Agent: SessionAgent + 'static;
 
     /// Build an agent for a new session.
@@ -196,8 +226,11 @@ pub trait SessionAgentBuilder: Send + Sync {
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 pub trait SessionAgent: Send {
     /// Run the agent with the given prompt, streaming events.
     async fn run_with_events(
@@ -790,8 +823,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         // Reserve capacity up front so two concurrent create_session calls cannot race
@@ -889,7 +925,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         // Spawn the session task
         let task_turn_lock = turn_lock.clone();
-        tokio::spawn(session_task(
+        spawn_session_task(session_task(
             agent,
             agent_event_tx,
             agent_event_rx,
@@ -1390,8 +1426,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSessionService<B> {
     async fn append_system_context(
         &self,
@@ -1441,8 +1480,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessionService<B> {
     async fn comms_runtime(
         &self,
@@ -1466,8 +1508,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSessionService<B> {
     async fn read_history(
         &self,
@@ -1662,7 +1707,7 @@ async fn session_task<A: SessionAgent>(
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
                 let result = {
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
                             dyn std::future::Future<
@@ -1671,7 +1716,7 @@ async fn session_task<A: SessionAgent>(
                                 + 'a,
                         >,
                     >;
-                    #[cfg(target_arch = "wasm32")]
+                    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
                             dyn std::future::Future<
@@ -1715,6 +1760,7 @@ async fn session_task<A: SessionAgent>(
                                     event_stream_open = false;
                                     tracing::warn!("session event stream receiver dropped; continuing without streaming events");
                                 }
+                                cooperative_pause().await;
                             }
                         }
                     };
@@ -1736,6 +1782,7 @@ async fn session_task<A: SessionAgent>(
                                 "session event stream receiver dropped while draining events"
                             );
                         }
+                        cooperative_pause().await;
                     }
 
                     r

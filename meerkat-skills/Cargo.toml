@@ -32,9 +32,12 @@ regex = "1"
 reqwest = { workspace = true, optional = true }
 urlencoding = { version = "2", optional = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
 gix = { version = "0.79", default-features = false, features = ["blocking-network-client", "worktree-mutation", "revision"], optional = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["macros", "sync", "time", "rt"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

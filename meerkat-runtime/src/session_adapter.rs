@@ -349,6 +349,20 @@ fn apply_runtime_drain_effects(slot: &mut CommsDrainSlot, effects: &[CommsDrainL
     }
 }
 
+#[cfg(target_os = "espidf")]
+async fn signal_runtime_wake(tx: &mpsc::Sender<()>) -> bool {
+    tx.send(()).await.is_ok()
+}
+
+#[cfg(not(target_os = "espidf"))]
+async fn signal_runtime_wake(tx: &mpsc::Sender<()>) -> bool {
+    match tx.try_send(()) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => tx.send(()).await.is_ok(),
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 fn abort_slot(slot: &mut CommsDrainSlot) {
     match protocol_comms_drain_abort::execute_stop_requested(&mut slot.authority) {
         Ok(result) => {
@@ -815,7 +829,7 @@ impl RuntimeSessionAdapter {
         }
 
         if should_wake {
-            let _ = wake_tx.try_send(());
+            let _ = signal_runtime_wake(&wake_tx).await;
         }
     }
 
@@ -1181,7 +1195,7 @@ impl RuntimeSessionAdapter {
         if (should_wake || should_process)
             && let Some(ref wake_tx) = wake_tx
         {
-            let _ = wake_tx.try_send(());
+            let _ = signal_runtime_wake(wake_tx).await;
         }
 
         Ok((outcome, handle))
@@ -1465,8 +1479,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         if should_wake || should_process {
             match wake_tx {
                 Some(ref wake_tx) => {
-                    // Non-blocking: if the channel is full, the loop is already processing
-                    let _ = wake_tx.try_send(());
+                    let _ = signal_runtime_wake(wake_tx).await;
                 }
                 None => {
                     tracing::warn!(
@@ -1694,7 +1707,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         if (should_wake || should_process)
             && let Some(ref tx) = wake_tx
         {
-            let _ = tx.try_send(());
+            let _ = signal_runtime_wake(tx).await;
         }
 
         Ok(outcome)
@@ -1800,7 +1813,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
 
         // Wake the runtime loop to process re-queued inputs
         if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
+            let _ = signal_runtime_wake(tx).await;
         }
 
         Ok(RecycleReport {
@@ -1848,7 +1861,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         drop(drv);
 
         if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
+            let _ = signal_runtime_wake(tx).await;
         }
 
         Ok(report)

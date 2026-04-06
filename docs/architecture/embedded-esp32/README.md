@@ -17,13 +17,14 @@ This directory is the canonical internal planning dossier for the ESP32-S3 embed
 
 1. [01-code-grounded-baseline.md](./01-code-grounded-baseline.md)
 2. [09-technical-dependency-analysis.md](./09-technical-dependency-analysis.md)
-3. [02-external-contract-matrix.md](./02-external-contract-matrix.md)
-4. [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
-5. [04-implementation-phase-plan.md](./04-implementation-phase-plan.md)
-6. [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md)
-7. [06-example-smoke-specs.md](./06-example-smoke-specs.md)
-8. [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md)
-9. [07-freeze-checklist.md](./07-freeze-checklist.md)
+3. [10-phase-0-live-findings.md](./10-phase-0-live-findings.md)
+4. [02-external-contract-matrix.md](./02-external-contract-matrix.md)
+5. [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
+6. [04-implementation-phase-plan.md](./04-implementation-phase-plan.md)
+7. [05-autonomous-execution-pack.md](./05-autonomous-execution-pack.md)
+8. [06-example-smoke-specs.md](./06-example-smoke-specs.md)
+9. [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md)
+10. [07-freeze-checklist.md](./07-freeze-checklist.md)
 
 ## Authority map
 
@@ -31,6 +32,7 @@ This directory is the canonical internal planning dossier for the ESP32-S3 embed
 | --- | --- | --- |
 | What does the current codebase already guarantee? | [01-code-grounded-baseline.md](./01-code-grounded-baseline.md) | All rows in this file are `CODE_GROUNDED`. |
 | Which non-repo platform or toolchain facts already constrain the plan before live probing starts? | [09-technical-dependency-analysis.md](./09-technical-dependency-analysis.md) | This is the planning-constraint authority for reqwest/rustls, Xtensa tooling, ESP-IDF HTTP behavior, and Tokio-fit concerns. |
+| What did the real Phase 0 run on the baseline board actually prove? | [10-phase-0-live-findings.md](./10-phase-0-live-findings.md) | This is the authoritative results log for the completed Phase 0 spike. |
 | Which external assumptions can sink the project and how do we test them? | [02-external-contract-matrix.md](./02-external-contract-matrix.md) | All assumption rows are `HYPOTHESIS` until Phase 0 evidence updates them. |
 | What are the immutable invariants, contracts, requirements, E2E obligations, and choke points? | [03-requirements-and-rtm.md](./03-requirements-and-rtm.md) | This is the requirement-trace authority. |
 | What is the sequential implementation order and the gate for each phase? | [04-implementation-phase-plan.md](./04-implementation-phase-plan.md) | This file is requirement-driven, not component-driven. |
@@ -41,7 +43,7 @@ This directory is the canonical internal planning dossier for the ESP32-S3 embed
 
 ## Current freeze posture
 
-This dossier is authored as a freeze candidate. A phase run should not begin until [07-freeze-checklist.md](./07-freeze-checklist.md) passes and the team can start Phase 0 immediately on real hardware.
+This dossier began as a freeze candidate and now also includes post-freeze Phase 0 evidence, including the later multi-turn comms extension on real hardware. Phase 1 should use [10-phase-0-live-findings.md](./10-phase-0-live-findings.md) and the updated matrix rows before changing architecture.
 
 ## Current repo grounding for the dossier itself
 

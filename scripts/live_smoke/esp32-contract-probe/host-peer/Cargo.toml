@@ -1,0 +1,18 @@
+[package]
+name = "esp32-contract-probe-host-peer"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "esp32-contract-probe-host-peer"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+meerkat-comms = { path = "../../../../meerkat-comms" }
+parking_lot = "0.12"
+serde_json = "1.0"
+tokio = { version = "1.43", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

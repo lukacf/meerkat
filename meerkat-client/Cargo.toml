@@ -25,9 +25,14 @@ tracing = { workspace = true }
 slab = "0.4"
 indexmap = "2"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["sync"] }
+embedded-svc = "0.29.0"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

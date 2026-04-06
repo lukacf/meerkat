@@ -1,8 +1,9 @@
 //! Tool visibility scope and external filter staging.
 
 use crate::types::ToolDef;
+use portable_atomic::AtomicU64;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Visibility filter for tools.

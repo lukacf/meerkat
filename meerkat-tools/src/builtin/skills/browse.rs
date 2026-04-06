@@ -96,8 +96,11 @@ fn canonical_key(id: &SkillId) -> Value {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl BuiltinTool for BrowseSkillsTool {
     fn name(&self) -> &'static str {
         "browse_skills"

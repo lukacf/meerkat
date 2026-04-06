@@ -97,6 +97,8 @@ impl LlmError {
         }
     }
 
+    #[cfg(not(target_os = "espidf"))]
+    #[cfg(not(target_os = "espidf"))]
     pub fn from_http_response(
         status: u16,
         message: String,

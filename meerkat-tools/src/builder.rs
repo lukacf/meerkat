@@ -1,3 +1,5 @@
+#![cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
+
 //! Shared tool dispatcher builders.
 
 use std::path::PathBuf;

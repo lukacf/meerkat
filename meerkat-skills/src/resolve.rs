@@ -171,6 +171,7 @@ pub async fn resolve_repositories_with_roots(
                         )),
                     });
                 }
+                #[cfg(feature = "skills-git")]
                 SkillRepoTransport::Git {
                     url,
                     git_ref,
@@ -231,6 +232,13 @@ pub async fn resolve_repositories_with_roots(
                         name: repo.name.clone(),
                         source: SourceNode::Git(Box::new(GitSkillSource::new(config))),
                     });
+                }
+                #[cfg(not(feature = "skills-git"))]
+                SkillRepoTransport::Git { url, .. } => {
+                    return Err(SkillError::Load(
+                        format!("git skill repositories require the `skills-git` feature: {url}")
+                            .into(),
+                    ));
                 }
             }
         }

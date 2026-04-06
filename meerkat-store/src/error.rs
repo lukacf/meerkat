@@ -15,7 +15,7 @@ pub enum StoreError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
     #[error("Database error: {0}")]
     Database(#[from] Box<redb::Error>),
 

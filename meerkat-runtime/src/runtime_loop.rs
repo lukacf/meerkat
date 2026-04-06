@@ -16,6 +16,14 @@ use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 use crate::input::Input;
 use crate::tokio;
 
+#[cfg(target_os = "espidf")]
+fn esp_marker(message: &str) {
+    println!("{message}");
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn esp_marker(_message: &str) {}
+
 /// Extract a prompt string from an `Input`.
 pub(crate) fn input_to_prompt(input: &Input) -> String {
     match input {
@@ -290,6 +298,22 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
     inputs_to_primitive(&[(input_id, input.clone())])
 }
 
+#[cfg(target_os = "espidf")]
+fn spawn_runtime_loop_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    tokio::task::spawn_local(future)
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn spawn_runtime_loop_task<F>(future: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future)
+}
+
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
@@ -304,7 +328,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    spawn_runtime_loop_task(async move {
         // Feed-based idle wake state (local to this loop).
         // Seed from epoch cursor state if available (runtime-backed surfaces),
         // otherwise fall back to the feed watermark to avoid replaying historical
@@ -374,6 +398,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 maybe_wake = wake_rx.recv() => {
                     match maybe_wake {
                         Some(()) => {
+                            esp_marker("MKT:RUNTIME_LOOP:WAKE_RX");
                             if process_queue(
                                 &driver,
                                 &mut *executor,
@@ -619,6 +644,11 @@ async fn process_queue(
 
             // Only process if the runtime can process queue (Idle or Retired)
             if !d.can_process_queue() {
+                #[cfg(target_os = "espidf")]
+                {
+                    let state = d.as_driver().runtime_state();
+                    println!("MKT:RUNTIME_LOOP:CANNOT_PROCESS state={state:?}");
+                }
                 return false;
             }
 
@@ -631,8 +661,12 @@ async fn process_queue(
                 .drain_next_batch(|id| d.ingress().input_boundary(id));
 
             if batch_ids.is_empty() {
+                esp_marker("MKT:RUNTIME_LOOP:NO_BATCH");
                 return false;
             }
+
+            #[cfg(target_os = "espidf")]
+            println!("MKT:RUNTIME_LOOP:BATCH size={}", batch_ids.len());
 
             // Dequeue the batch members from the physical queues.
             let staged_inputs: Vec<_> = batch_ids
@@ -641,6 +675,7 @@ async fn process_queue(
                 .collect();
 
             if staged_inputs.is_empty() {
+                esp_marker("MKT:RUNTIME_LOOP:NO_STAGED_INPUTS");
                 return false;
             }
 
@@ -648,8 +683,11 @@ async fn process_queue(
 
             // Start run in the state machine
             if d.start_run(run_id.clone()).is_err() {
+                esp_marker("MKT:RUNTIME_LOOP:START_RUN_FAIL");
                 return false;
             }
+
+            esp_marker("MKT:RUNTIME_LOOP:START_RUN_OK");
 
             // Stage the input batch atomically (Queued → Staged).
             // Do NOT apply here — apply only after successful execution.
@@ -658,10 +696,13 @@ async fn process_queue(
             // only rolls back Staged inputs.
             let staged_ids: Vec<_> = staged_inputs.iter().map(|(id, _)| id.clone()).collect();
             if d.stage_batch(&staged_ids, &run_id).is_err() {
+                esp_marker("MKT:RUNTIME_LOOP:STAGE_BATCH_FAIL");
                 let _ = d.rollback_staged(&staged_ids);
                 let _ = d.complete_run();
                 return false;
             }
+
+            esp_marker("MKT:RUNTIME_LOOP:STAGE_BATCH_OK");
 
             // Use the authority's boundary classification (derived from stored metadata)
             // instead of the shell-level input_boundary function.
@@ -679,8 +720,10 @@ async fn process_queue(
 
         match dequeued {
             Some((input_ids, run_id, primitive)) => {
+                esp_marker("MKT:RUNTIME_LOOP:EXECUTOR_APPLY_START");
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(run_id.clone(), primitive).await;
+                esp_marker("MKT:RUNTIME_LOOP:EXECUTOR_APPLY_DONE");
 
                 // Lock again to update driver state
                 let mut d = driver.lock().await;

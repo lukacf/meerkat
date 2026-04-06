@@ -110,6 +110,98 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(report["profile"], "host-core-check")
             self.assertTrue((artifact_dir / "marker_report.json").exists())
 
+    def test_classify_meerkat_baseline_results_detects_expected_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir)
+            run_log = artifact_dir / "run.log"
+            run_log.write_text("", encoding="utf-8")
+            commands_dir = artifact_dir / "commands"
+            commands_dir.mkdir(parents=True, exist_ok=True)
+
+            msrv_log = commands_dir / "01-facade_msrv_check.log"
+            msrv_log.write_text(
+                "error: rustc 1.93.0-nightly is not supported\nmeerkat@0.5.1 requires rustc 1.94.0\n",
+                encoding="utf-8",
+            )
+            target_log = commands_dir / "02-target_openai_build_std_check.log"
+            target_log.write_text(
+                "error[E0432]: unresolved import `libc::siginfo_t`\nerror: could not compile `signal-hook-registry` (lib)\n",
+                encoding="utf-8",
+            )
+            ring_log = commands_dir / "03-ring_tree.log"
+            ring_log.write_text("ring v0.17.14\n", encoding="utf-8")
+
+            context = probe.RunContext(artifact_dir=artifact_dir, run_log=run_log, dry_run=False)
+            summary = probe.classify_meerkat_baseline_results(
+                context,
+                [
+                    {
+                        "label": "facade_msrv_check",
+                        "log": "commands/01-facade_msrv_check.log",
+                    },
+                    {
+                        "label": "target_openai_build_std_check",
+                        "log": "commands/02-target_openai_build_std_check.log",
+                    },
+                    {
+                        "label": "ring_tree",
+                        "log": "commands/03-ring_tree.log",
+                        "exit_code": 0,
+                    },
+                ],
+            )
+
+            blocker_kinds = {item["kind"] for item in summary["blockers"]}
+            self.assertIn("msrv_mismatch", blocker_kinds)
+            self.assertIn("tokio_signal_registry_espidf_mismatch", blocker_kinds)
+            self.assertIn("rustls_ring_present", blocker_kinds)
+
+    def test_classify_meerkat_baseline_results_detects_expected_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_dir = Path(temp_dir)
+            run_log = artifact_dir / "run.log"
+            run_log.write_text("", encoding="utf-8")
+            commands_dir = artifact_dir / "commands"
+            commands_dir.mkdir(parents=True, exist_ok=True)
+
+            msrv_log = commands_dir / "01-facade_msrv_check.log"
+            msrv_log.write_text(
+                "error: rustc 1.93.0-nightly is not supported\nmeerkat@0.5.1 requires rustc 1.94.0\n",
+                encoding="utf-8",
+            )
+            target_log = commands_dir / "02-target_openai_build_std_check.log"
+            target_log.write_text(
+                "error[E0432]: unresolved import `libc::siginfo_t`\nerror: could not compile `signal-hook-registry` (lib)\n",
+                encoding="utf-8",
+            )
+            ring_log = commands_dir / "03-ring_tree.log"
+            ring_log.write_text("ring v0.17.14\n", encoding="utf-8")
+
+            context = probe.RunContext(artifact_dir=artifact_dir, run_log=run_log, dry_run=False)
+            summary = probe.classify_meerkat_baseline_results(
+                context,
+                [
+                    {
+                        "label": "facade_msrv_check",
+                        "log": "commands/01-facade_msrv_check.log",
+                    },
+                    {
+                        "label": "target_openai_build_std_check",
+                        "log": "commands/02-target_openai_build_std_check.log",
+                    },
+                    {
+                        "label": "ring_tree",
+                        "log": "commands/03-ring_tree.log",
+                        "exit_code": 0,
+                    },
+                ],
+            )
+
+            blocker_kinds = {item["kind"] for item in summary["blockers"]}
+            self.assertIn("msrv_mismatch", blocker_kinds)
+            self.assertIn("tokio_signal_registry_espidf_mismatch", blocker_kinds)
+            self.assertIn("rustls_ring_present", blocker_kinds)
+
 
 class EnvironmentTests(unittest.TestCase):
     def test_sanitized_subprocess_env_removes_python_virtualenv_state(self) -> None:

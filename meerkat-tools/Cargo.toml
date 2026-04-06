@@ -46,7 +46,7 @@ chrono = { workspace = true }
 ciborium = "0.2"
 toml = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
 meerkat-runtime = { workspace = true }
 rusqlite = { workspace = true, optional = true }
@@ -55,10 +55,13 @@ shlex = "1.3"
 globset = "0.4"
 which = { workspace = true }
 
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["macros", "sync", "time", "rt"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(all(unix, not(target_os = "espidf")))'.dependencies]
 nix = { workspace = true }
 
 [dev-dependencies]

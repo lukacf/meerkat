@@ -32,25 +32,30 @@ inventory::submit! {
 }
 
 use chrono::Utc;
+#[cfg(not(target_os = "espidf"))]
 use futures::StreamExt;
+#[cfg(not(target_os = "espidf"))]
+#[cfg(not(target_os = "espidf"))]
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
     HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HooksConfig,
 };
+use portable_atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_os = "espidf"))]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, Semaphore};
+#[cfg(not(target_os = "espidf"))]
 use tokio::time::timeout;
 
 /// Response returned by runtime adapters.
@@ -90,9 +95,9 @@ fn default_http_method() -> String {
     "POST".to_string()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, String>> + Send>>;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<RuntimeHookResponse, String>>>>;
 
 pub type InProcessHookHandler = Arc<dyn Fn(HookInvocation) -> HandlerFuture + Send + Sync>;
@@ -103,6 +108,7 @@ pub struct DefaultHookEngine {
     config: HooksConfig,
     base_entries: Arc<Vec<HookEntryConfig>>,
     base_validation_error: Option<String>,
+    #[cfg(not(target_os = "espidf"))]
     http_client: Arc<OnceLock<reqwest::Client>>,
     in_process_handlers: Arc<std::sync::RwLock<HashMap<String, InProcessHookHandler>>>,
     published_patches: Arc<Mutex<Vec<HookPatchEnvelope>>>,
@@ -111,6 +117,30 @@ pub struct DefaultHookEngine {
 }
 
 impl DefaultHookEngine {
+    #[cfg(not(target_os = "espidf"))]
+    async fn invoke_runtime_with_timeout(
+        &self,
+        entry: &HookEntryConfig,
+        invocation: HookInvocation,
+        timeout_ms: u64,
+    ) -> Result<Result<RuntimeHookResponse, HookEngineError>, tokio::time::error::Elapsed> {
+        timeout(
+            Duration::from_millis(timeout_ms),
+            self.invoke_runtime(entry, invocation),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "espidf")]
+    async fn invoke_runtime_with_timeout(
+        &self,
+        entry: &HookEntryConfig,
+        invocation: HookInvocation,
+        _timeout_ms: u64,
+    ) -> Result<Result<RuntimeHookResponse, HookEngineError>, ()> {
+        Ok(self.invoke_runtime(entry, invocation).await)
+    }
+
     pub fn new(config: HooksConfig) -> Self {
         let base_validation_error = config
             .entries
@@ -123,6 +153,7 @@ impl DefaultHookEngine {
             base_entries: Arc::new(config.entries.clone()),
             config,
             base_validation_error,
+            #[cfg(not(target_os = "espidf"))]
             http_client: Arc::new(OnceLock::new()),
             in_process_handlers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             published_patches: Arc::new(Mutex::new(Vec::new())),
@@ -168,7 +199,7 @@ impl DefaultHookEngine {
         HookRevision(self.revision.fetch_add(1, Ordering::SeqCst))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     async fn read_stream_limited<R>(
         mut stream: R,
         byte_limit: usize,
@@ -296,11 +327,9 @@ impl DefaultHookEngine {
             duration_ms: None,
         };
 
-        let runtime_result = timeout(
-            Duration::from_millis(timeout_ms),
-            self.invoke_runtime(&entry, invocation.clone()),
-        )
-        .await;
+        let runtime_result = self
+            .invoke_runtime_with_timeout(&entry, invocation.clone(), timeout_ms)
+            .await;
 
         match runtime_result {
             Err(_) => {
@@ -438,7 +467,7 @@ impl DefaultHookEngine {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
     async fn invoke_command_runtime(
         &self,
         entry: &HookEntryConfig,
@@ -558,7 +587,7 @@ impl DefaultHookEngine {
         })
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", target_os = "espidf"))]
     async fn invoke_command_runtime(
         &self,
         entry: &HookEntryConfig,
@@ -569,10 +598,11 @@ impl DefaultHookEngine {
     ) -> Result<RuntimeHookResponse, HookEngineError> {
         Err(HookEngineError::ExecutionFailed {
             hook_id: entry.id.clone(),
-            reason: "command hooks are not supported on wasm32".to_string(),
+            reason: "command hooks are not supported on this target".to_string(),
         })
     }
 
+    #[cfg(not(target_os = "espidf"))]
     async fn invoke_http_runtime(
         &self,
         entry: &HookEntryConfig,
@@ -659,10 +689,28 @@ impl DefaultHookEngine {
             }
         })
     }
+
+    #[cfg(target_os = "espidf")]
+    async fn invoke_http_runtime(
+        &self,
+        entry: &HookEntryConfig,
+        _url: &str,
+        _method: &str,
+        _headers: &HashMap<String, String>,
+        _invocation: HookInvocation,
+    ) -> Result<RuntimeHookResponse, HookEngineError> {
+        Err(HookEngineError::ExecutionFailed {
+            hook_id: entry.id.clone(),
+            reason: "http hooks are not supported on espidf in phase 0".to_string(),
+        })
+    }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
 impl HookEngine for DefaultHookEngine {
     fn matching_hooks(
         &self,
@@ -750,6 +798,17 @@ impl HookEngine for DefaultHookEngine {
                 };
                 let engine = self.clone();
                 let invocation_cloned = invocation.clone();
+                #[cfg(target_os = "espidf")]
+                {
+                    let _permit = permit;
+                    tracing::warn!(
+                        hook_id = %entry.id,
+                        "background hooks are not supported on espidf in phase 0; skipping"
+                    );
+                    let _ = (engine, invocation_cloned, registration_index);
+                    continue;
+                }
+                #[cfg(not(target_os = "espidf"))]
                 tokio::spawn(async move {
                     let _permit = permit;
                     let outcome = engine

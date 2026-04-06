@@ -113,8 +113,14 @@ impl CoreApplyOutput {
 ///
 /// # Object Safety
 /// This trait is object-safe to allow `Box<dyn CoreExecutor>` usage.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
+#[cfg_attr(
+    any(target_arch = "wasm32", target_os = "espidf"),
+    async_trait::async_trait(?Send)
+)]
 pub trait CoreExecutor: Send + Sync {
     /// Apply a run primitive to the conversation.
     ///

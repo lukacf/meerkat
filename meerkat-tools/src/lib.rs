@@ -28,7 +28,7 @@ pub mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub mod builder;
 pub mod builtin;
 pub mod dispatcher;
@@ -36,11 +36,19 @@ pub mod error;
 pub mod registry;
 pub mod schema;
 
-#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "comms",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use builder::CommsDispatcherConfig;
-#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "mcp",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use builder::McpDispatcherConfig;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_dispatcher};
 #[cfg(feature = "comms")]
 pub use builtin::CommsToolSurface;
@@ -50,9 +58,9 @@ pub use builtin::{
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
     ToolMode, ToolPolicyLayer,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use dispatcher::ToolDispatcher;
 pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};
 pub use error::{DispatchError, ToolError, ToolValidationError};
@@ -83,7 +91,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Shell,
@@ -116,7 +124,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "shell-patterns",

@@ -29,6 +29,48 @@ use crate::tokio::sync::mpsc;
 /// Default idle timeout for the comms drain loop (5 minutes).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+type CommsObserver = Arc<dyn Fn(ClassifiedInboxInteraction) + Send + Sync>;
+
+#[cfg(target_os = "espidf")]
+fn spawn_runtime_task<F>(future: F) -> crate::tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    crate::tokio::task::spawn_local(future)
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn spawn_runtime_task<F>(future: F) -> crate::tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    crate::tokio::spawn(future)
+}
+
+#[cfg(target_os = "espidf")]
+fn spawn_completion_task<F>(future: F) -> crate::tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    crate::tokio::spawn(future)
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn spawn_completion_task<F>(future: F) -> crate::tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_runtime_task(future)
+}
+
+#[cfg(target_os = "espidf")]
+async fn cooperative_pause() {
+    std::thread::sleep(Duration::from_millis(1));
+}
+
+#[cfg(not(target_os = "espidf"))]
+async fn cooperative_pause() {}
+
 fn classify_legacy_interaction(interaction: InboxInteraction) -> ClassifiedInboxInteraction {
     let (class, lifecycle_peer) = match &interaction.content {
         InteractionContent::Request { intent, params } if intent == "mob.peer_added" => (
@@ -65,6 +107,45 @@ fn classify_legacy_interaction(interaction: InboxInteraction) -> ClassifiedInbox
     }
 }
 
+#[cfg(target_os = "espidf")]
+async fn wait_for_inbox_activity(
+    inbox_notify: &std::sync::Arc<crate::tokio::sync::Notify>,
+    _timeout_dur: Duration,
+) -> bool {
+    inbox_notify.notified().await;
+    true
+}
+
+#[cfg(not(target_os = "espidf"))]
+async fn wait_for_inbox_activity(
+    inbox_notify: &std::sync::Arc<crate::tokio::sync::Notify>,
+    timeout_dur: Duration,
+) -> bool {
+    crate::tokio::time::timeout(timeout_dur, inbox_notify.notified())
+        .await
+        .is_ok()
+}
+
+#[cfg(target_os = "espidf")]
+async fn send_terminal_event_with_platform_timeout(
+    tx: mpsc::Sender<AgentEvent>,
+    event: AgentEvent,
+    _timeout_dur: Duration,
+) -> bool {
+    tx.send(event).await.is_ok()
+}
+
+#[cfg(not(target_os = "espidf"))]
+async fn send_terminal_event_with_platform_timeout(
+    tx: mpsc::Sender<AgentEvent>,
+    event: AgentEvent,
+    timeout_dur: Duration,
+) -> bool {
+    crate::tokio::time::timeout(timeout_dur, tx.send(event))
+        .await
+        .is_ok()
+}
+
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
 ///
@@ -80,16 +161,23 @@ pub fn spawn_comms_drain(
     comms_runtime: Arc<dyn CommsRuntime>,
     idle_timeout: Option<Duration>,
 ) -> crate::tokio::task::JoinHandle<()> {
+    spawn_comms_drain_with_observer(adapter, session_id, comms_runtime, idle_timeout, None)
+}
+
+pub fn spawn_comms_drain_with_observer(
+    adapter: Arc<RuntimeSessionAdapter>,
+    session_id: SessionId,
+    comms_runtime: Arc<dyn CommsRuntime>,
+    idle_timeout: Option<Duration>,
+    observer: Option<CommsObserver>,
+) -> crate::tokio::task::JoinHandle<()> {
     let timeout_dur = idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
 
-    crate::tokio::spawn(async move {
+    spawn_runtime_task(async move {
         let inbox_notify = comms_runtime.inbox_notify();
 
         loop {
-            // Wait for inbox activity.
-            let notified = inbox_notify.notified();
-
             // Try classified drain first; fall back to legacy.
             let classified = match comms_runtime.drain_classified_inbox_interactions().await {
                 Ok(v) if !v.is_empty() => v,
@@ -110,10 +198,7 @@ pub fn spawn_comms_drain(
                             .await;
                         return;
                     }
-                    if crate::tokio::time::timeout(timeout_dur, notified)
-                        .await
-                        .is_err()
-                    {
+                    if !wait_for_inbox_activity(&inbox_notify, timeout_dur).await {
                         tracing::info!("comms_drain: idle timeout expired, stopping");
                         adapter
                             .notify_comms_drain_exited(&session_id, DrainExitReason::IdleTimeout)
@@ -141,10 +226,7 @@ pub fn spawn_comms_drain(
                                 .await;
                             return;
                         }
-                        if crate::tokio::time::timeout(timeout_dur, notified)
-                            .await
-                            .is_err()
-                        {
+                        if !wait_for_inbox_activity(&inbox_notify, timeout_dur).await {
                             tracing::info!("comms_drain: idle timeout expired (legacy), stopping");
                             adapter
                                 .notify_comms_drain_exited(
@@ -165,6 +247,9 @@ pub fn spawn_comms_drain(
 
             // Route each classified interaction through the adapter.
             for ci in classified {
+                if let Some(observer) = observer.as_ref() {
+                    observer(ci.clone());
+                }
                 match ci.class {
                     PeerInputClass::Ack => {
                         // Ack envelopes are filtered at ingress. Skip here.
@@ -272,6 +357,7 @@ pub fn spawn_comms_drain(
                         }
                     }
                 }
+                cooperative_pause().await;
             }
         }
     })
@@ -398,7 +484,7 @@ fn spawn_completion_bridge(
     subscriber: Option<mpsc::Sender<AgentEvent>>,
     handle: Option<crate::completion::CompletionHandle>,
 ) {
-    crate::tokio::spawn(async move {
+    spawn_completion_task(async move {
         let outcome = match handle {
             Some(handle) => handle.wait().await,
             None => CompletionOutcome::CompletedWithoutResult,
@@ -407,9 +493,12 @@ fn spawn_completion_bridge(
         if let Some(tx) = subscriber {
             let event = interaction_terminal_event(interaction_id, outcome);
 
-            if crate::tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event))
-                .await
-                .is_err()
+            if !send_terminal_event_with_platform_timeout(
+                tx,
+                event,
+                std::time::Duration::from_secs(5),
+            )
+            .await
             {
                 tracing::warn!(
                     %interaction_id,

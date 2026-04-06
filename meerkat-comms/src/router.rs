@@ -5,13 +5,17 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 #[cfg(all(not(unix), not(target_arch = "wasm32")))]
 use std::io::ErrorKind;
+#[cfg(target_os = "espidf")]
+use std::io::{Read as _, Write as _};
+#[cfg(target_os = "espidf")]
+use std::net::TcpStream as StdTcpStream;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -202,9 +206,18 @@ impl Router {
                 )
                 .into()),
                 PeerAddr::Tcp(addr_str) => {
-                    let mut stream = TcpStream::connect(&addr_str).await?;
-                    self.send_on_stream(&mut stream, envelope, wait_for_ack)
-                        .await
+                    #[cfg(target_os = "espidf")]
+                    {
+                        let mut stream = StdTcpStream::connect(&addr_str)?;
+                        stream.set_nodelay(true)?;
+                        self.send_on_blocking_tcp_stream(&mut stream, envelope, wait_for_ack)
+                    }
+                    #[cfg(not(target_os = "espidf"))]
+                    {
+                        let mut stream = TcpStream::connect(&addr_str).await?;
+                        self.send_on_stream(&mut stream, envelope, wait_for_ack)
+                            .await
+                    }
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
@@ -331,6 +344,46 @@ impl Router {
         }
     }
 
+    #[cfg(target_os = "espidf")]
+    fn send_on_blocking_tcp_stream(
+        &self,
+        stream: &mut StdTcpStream,
+        envelope: Envelope,
+        wait_for_ack: bool,
+    ) -> Result<Uuid, SendError> {
+        let sent_id = envelope.id;
+        let sent_to = envelope.to;
+
+        write_blocking_envelope(stream, &envelope)?;
+        if wait_for_ack {
+            stream.set_read_timeout(Some(Duration::from_secs(self.config.ack_timeout_secs)))?;
+            let frame = read_blocking_envelope(stream)?;
+            if let MessageKind::Ack { in_reply_to } = frame.kind {
+                if self.require_peer_auth {
+                    if !frame.verify() {
+                        return Err(SendError::PeerOffline);
+                    }
+                    if frame.from != sent_to {
+                        return Err(SendError::PeerOffline);
+                    }
+                    if frame.to != self.keypair.public_key() {
+                        return Err(SendError::PeerOffline);
+                    }
+                } else if frame.to != self.keypair.public_key() {
+                    return Err(SendError::PeerOffline);
+                }
+                if in_reply_to != sent_id {
+                    return Err(SendError::PeerOffline);
+                }
+                Ok(sent_id)
+            } else {
+                Err(SendError::PeerOffline)
+            }
+        } else {
+            Ok(sent_id)
+        }
+    }
+
     pub async fn send_request(
         &self,
         peer_name: &str,
@@ -363,4 +416,44 @@ impl Router {
 #[cfg(not(target_arch = "wasm32"))]
 fn should_wait_for_ack(kind: &MessageKind) -> bool {
     !matches!(kind, MessageKind::Ack { .. } | MessageKind::Response { .. })
+}
+
+#[cfg(target_os = "espidf")]
+fn write_blocking_envelope(
+    stream: &mut StdTcpStream,
+    envelope: &Envelope,
+) -> Result<(), SendError> {
+    let mut payload = Vec::new();
+    ciborium::into_writer(envelope, &mut payload).map_err(|err| {
+        SendError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.to_string(),
+        ))
+    })?;
+    let len = payload.len() as u32;
+    stream.write_all(&len.to_be_bytes())?;
+    stream.write_all(&payload)?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(target_os = "espidf")]
+fn read_blocking_envelope(stream: &mut StdTcpStream) -> Result<Envelope, SendError> {
+    let mut len_bytes = [0u8; 4];
+    stream.read_exact(&mut len_bytes)?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    if len > crate::transport::MAX_PAYLOAD_SIZE as usize {
+        return Err(SendError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame too large: {len}"),
+        )));
+    }
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload)?;
+    ciborium::from_reader(payload.as_slice()).map_err(|err| {
+        SendError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.to_string(),
+        ))
+    })
 }

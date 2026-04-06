@@ -305,8 +305,11 @@ impl ToolGatewayBuilder {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl AgentToolDispatcher for ToolGateway {
     /// Returns only the tools that are currently available.
     ///
@@ -587,8 +590,11 @@ impl DynamicToolComposite {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait
+)]
 impl AgentToolDispatcher for DynamicToolComposite {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         let mut seen = std::collections::HashSet::new();
@@ -796,8 +802,11 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+    #[cfg_attr(
+        all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+        async_trait
+    )]
     impl AgentToolDispatcher for MockDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::clone(&self.tools)
@@ -1189,8 +1198,11 @@ mod tests {
         update: ExternalToolUpdate,
     }
 
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait(?Send))]
+    #[cfg_attr(
+        all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+        async_trait
+    )]
     impl AgentToolDispatcher for MockBgDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::new([])

@@ -12,9 +12,17 @@ pub mod adapter;
 pub mod blob;
 mod error;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "redb",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod index;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    any(feature = "redb", feature = "jsonl", feature = "sqlite"),
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod realm;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod schedule_redb_store;
@@ -27,7 +35,11 @@ pub mod jsonl;
 #[cfg(feature = "memory")]
 pub mod memory;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "redb",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod redb_store;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod sqlite_store;
@@ -41,11 +53,19 @@ pub use error::StoreError;
 // of meerkat-store see no change.
 pub use meerkat_core::{SessionFilter, SessionStore, SessionStoreError};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use blob::FsBlobStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "redb",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use index::SessionIndex;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    any(feature = "redb", feature = "jsonl", feature = "sqlite"),
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use realm::{
     REALM_LEASE_HEARTBEAT_SECS, REALM_LEASE_STALE_TTL_SECS, RealmBackend, RealmLeaseGuard,
     RealmLeaseRecord, RealmLeaseStatus, RealmManifest, RealmManifestEntry, RealmOrigin, RealmPaths,
@@ -54,7 +74,11 @@ pub use realm::{
     open_realm_session_store, open_realm_session_store_in, realm_lease_dir, realm_paths,
     realm_paths_in, sanitize_realm_id, start_realm_lease, start_realm_lease_in,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "redb",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use redb_store::RedbSessionStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use schedule_redb_store::RedbScheduleStore;

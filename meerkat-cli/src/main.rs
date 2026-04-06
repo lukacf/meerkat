@@ -3299,9 +3299,14 @@ async fn run_agent(
         session_id: session_id.to_string(),
     }];
 
-    // Resolve comms_name for the factory
+    // Resolve comms_name for the factory.
+    // When keep_alive is requested and no explicit name is provided, derive one
+    // from the session_id so the factory's comms_name requirement is satisfied.
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
-        comms_overrides.name.clone()
+        comms_overrides
+            .name
+            .clone()
+            .or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
     } else {
         None
     };

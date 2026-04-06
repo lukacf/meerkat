@@ -4,15 +4,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{cmp, collections::HashSet};
 
-use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig};
+#[cfg(feature = "builtin-tools")]
+use crate::{AgentFactory, AgentToolDispatcher};
 #[cfg(feature = "comms")]
 use crate::{CommsRuntime, CoreCommsConfig};
+use crate::{Config, HookEngine, HooksConfig};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+#[cfg(feature = "builtin-tools")]
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::{AgentEvent, format_verbose_event};
+#[cfg(feature = "hooks")]
 use meerkat_hooks::DefaultHookEngine;
+#[cfg(feature = "builtin-tools")]
 use meerkat_tools::builtin::shell::ShellConfig;
+#[cfg(feature = "builtin-tools")]
 use meerkat_tools::{
     BuiltinToolConfig, CompositeDispatcherError, FileTaskStore, MemoryTaskStore, ensure_rkat_dir,
     find_project_root,
@@ -150,7 +156,15 @@ pub fn create_default_hook_engine(hooks_config: HooksConfig) -> Option<Arc<dyn H
     if hooks_config.entries.is_empty() {
         return None;
     }
-    Some(Arc::new(DefaultHookEngine::new(hooks_config)))
+    #[cfg(feature = "hooks")]
+    {
+        Some(Arc::new(DefaultHookEngine::new(hooks_config)))
+    }
+    #[cfg(not(feature = "hooks"))]
+    {
+        let _ = hooks_config;
+        None
+    }
 }
 
 /// Create a tool dispatcher with built-in tools enabled.
@@ -173,6 +187,7 @@ pub fn create_default_hook_engine(hooks_config: HooksConfig) -> Option<Arc<dyn H
 /// For built-in async tools that must participate in a shared canonical ops
 /// registry, use [`create_dispatcher_with_builtins_with_ops_lifecycle`] and pass
 /// the same registry to `AgentBuilder::with_ops_lifecycle(...)`.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -196,6 +211,7 @@ pub async fn create_dispatcher_with_builtins(
 /// When built-in async tools such as `shell` are enabled, pass the same registry
 /// to [`meerkat_core::AgentBuilder::with_ops_lifecycle`] so async operations
 /// resolve to canonical `AsyncOpRef`s owned by the caller's lifecycle registry.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins_with_ops_lifecycle(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -221,6 +237,7 @@ pub async fn create_dispatcher_with_builtins_with_ops_lifecycle(
 /// Create a tool dispatcher with built-in tools and a file-backed task store.
 ///
 /// This persists tasks to the provided path (explicit persistence).
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins_persisted(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -243,6 +260,7 @@ pub async fn create_dispatcher_with_builtins_persisted(
 
 /// Create a tool dispatcher with built-in tools, a file-backed task store,
 /// and an explicit ops registry.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins_persisted_with_ops_lifecycle(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -271,6 +289,7 @@ pub async fn create_dispatcher_with_builtins_persisted_with_ops_lifecycle(
 /// This is a convenience for explicit persistence inside the project.
 ///
 /// If `factory.project_root` is set, it is used instead of scanning `cwd`.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins_in_project(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -290,6 +309,7 @@ pub async fn create_dispatcher_with_builtins_in_project(
 }
 
 /// Create a built-in dispatcher using the nearest `.rkat` project root and an explicit ops registry.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_dispatcher_with_builtins_in_project_with_ops_lifecycle(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -337,6 +357,7 @@ pub async fn create_dispatcher_with_builtins_in_project_with_ops_lifecycle(
 /// Create a tool dispatcher with only built-in task tools (no shell tools, no external tools).
 ///
 /// This is a convenience wrapper around [`create_dispatcher_with_builtins`].
+#[cfg(feature = "builtin-tools")]
 pub async fn create_builtins_dispatcher(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -346,6 +367,7 @@ pub async fn create_builtins_dispatcher(
 }
 
 /// Create a tool dispatcher with only built-in task tools and an explicit ops registry.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_builtins_dispatcher_with_ops_lifecycle(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -364,6 +386,7 @@ pub async fn create_builtins_dispatcher_with_ops_lifecycle(
 }
 
 /// Create a tool dispatcher with built-in task and shell tools.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_shell_dispatcher(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
@@ -374,6 +397,7 @@ pub async fn create_shell_dispatcher(
 }
 
 /// Create a tool dispatcher with built-in task and shell tools and an explicit ops registry.
+#[cfg(feature = "builtin-tools")]
 pub async fn create_shell_dispatcher_with_ops_lifecycle(
     factory: &AgentFactory,
     config: BuiltinToolConfig,

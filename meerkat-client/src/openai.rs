@@ -5,6 +5,7 @@
 
 use crate::BlockAssembler;
 use crate::error::LlmError;
+use crate::transport::{ReqwestTransportClient, TransportClient, TransportError, TransportRequest};
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -16,12 +17,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
     api_key: String,
     base_url: String,
-    http: reqwest::Client,
+    transport: Arc<dyn TransportClient>,
 }
 
 impl OpenAiClient {
@@ -43,10 +45,11 @@ impl OpenAiClient {
         let http =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
                 .unwrap_or_else(|_| reqwest::Client::new());
+        let transport = Arc::new(ReqwestTransportClient::new(http));
         Self {
             api_key,
             base_url,
-            http,
+            transport,
         }
     }
 
@@ -55,7 +58,7 @@ impl OpenAiClient {
         if let Ok(http) =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
         {
-            self.http = http;
+            self.transport = Arc::new(ReqwestTransportClient::new(http));
         }
         self.base_url = url;
         self
@@ -67,6 +70,19 @@ impl OpenAiClient {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .map_err(|_| LlmError::InvalidApiKey)?;
         Ok(Self::new(api_key))
+    }
+
+    #[cfg(test)]
+    fn with_transport_for_test(
+        api_key: String,
+        base_url: String,
+        transport: Arc<dyn TransportClient>,
+    ) -> Self {
+        Self {
+            api_key,
+            base_url,
+            transport,
+        }
     }
 
     /// Build request body for OpenAI Responses API
@@ -305,6 +321,27 @@ impl OpenAiClient {
             None
         }
     }
+
+    fn build_transport_request(&self, body: &Value) -> Result<TransportRequest, LlmError> {
+        let body = serde_json::to_vec(body).map_err(|e| LlmError::InvalidRequest {
+            message: format!("failed to encode OpenAI request body: {e}"),
+        })?;
+        Ok(TransportRequest::new(
+            reqwest::Method::POST,
+            format!("{}/v1/responses", self.base_url),
+        )
+        .header("Authorization", format!("Bearer {}", self.api_key))
+        .header("Content-Type", "application/json")
+        .body(body))
+    }
+
+    fn map_transport_error(error: TransportError) -> LlmError {
+        match error {
+            TransportError::Timeout { duration_ms } => LlmError::NetworkTimeout { duration_ms },
+            TransportError::ConnectionReset => LlmError::ConnectionReset,
+            TransportError::Other { message } => LlmError::Unknown { message },
+        }
+    }
 }
 
 /// OpenAI strict JSON schema mode requires `additionalProperties: false` on
@@ -343,32 +380,20 @@ impl LlmClient for OpenAiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
 
-            let response = self.http
-                .post(format!("{}/v1/responses", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
+            let transport_request = self.build_transport_request(&body)?;
+            let response = self
+                .transport
+                .execute(transport_request)
                 .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        LlmError::NetworkTimeout { duration_ms: 30000 }
-                    } else {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if e.is_connect() {
-                            return LlmError::ConnectionReset;
-                        }
-                        LlmError::Unknown { message: e.to_string() }
-                    }
-                })?;
+                .map_err(Self::map_transport_error)?;
 
-            let status_code = response.status().as_u16();
+            let status_code = response.status;
             let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
+                Ok(response.into_body())
             } else {
-                let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
+                let headers = response.headers.clone();
+                let text = response.into_text().await.unwrap_or_default();
+                Err(LlmError::from_transport_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(512);
@@ -380,7 +405,7 @@ impl LlmClient for OpenAiClient {
             let mut done_emitted = false;
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                let chunk = chunk.map_err(Self::map_transport_error)?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(newline_pos) = buffer.find('\n') {
@@ -809,8 +834,16 @@ fn fallback_raw_value() -> Box<RawValue> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::transport::{
+        TransportByteStream, TransportClient, TransportError, TransportHeaders, TransportRequest,
+        TransportResponse,
+    };
     use axum::{Router, extract::State, response::IntoResponse, routing::post};
+    use futures::StreamExt;
     use meerkat_core::UserMessage;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     async fn responses_sse(State(payload): State<String>) -> impl IntoResponse {
@@ -829,6 +862,125 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    fn request_header_end(bytes: &[u8]) -> Option<usize> {
+        bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|pos| pos + 4)
+    }
+
+    fn parse_content_length(headers: &[u8]) -> usize {
+        String::from_utf8_lossy(headers)
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = socket.read(&mut chunk).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none()
+                && let Some(end) = request_header_end(&request)
+            {
+                content_length = parse_content_length(&request[..end]);
+                header_end = Some(end);
+            }
+
+            if let Some(end) = header_end
+                && request.len() >= end + content_length
+            {
+                break;
+            }
+        }
+    }
+
+    async fn spawn_openai_truncated_stream_server(
+        partial_payload: String,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept client");
+            read_http_request(&mut socket).await;
+
+            let declared_len = partial_payload.len() + 32;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {declared_len}\r\nconnection: close\r\n\r\n{partial_payload}"
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write truncated response");
+            socket
+                .shutdown()
+                .await
+                .expect("shutdown truncated response");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[derive(Clone)]
+    struct FakeTransport {
+        requests: Arc<Mutex<Vec<TransportRequest>>>,
+        responses: Arc<Mutex<VecDeque<Result<TransportResponse, TransportError>>>>,
+    }
+
+    impl FakeTransport {
+        fn new(responses: Vec<Result<TransportResponse, TransportError>>) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(responses.into())),
+            }
+        }
+
+        fn take_requests(&self) -> Vec<TransportRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl TransportClient for FakeTransport {
+        async fn execute(
+            &self,
+            request: TransportRequest,
+        ) -> Result<TransportResponse, TransportError> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fake transport response missing")
+        }
+    }
+
+    fn transport_stream(chunks: Vec<Result<&'static str, TransportError>>) -> TransportByteStream {
+        Box::pin(futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.map(|value| value.as_bytes().to_vec())),
+        ))
     }
 
     // =========================================================================
@@ -861,6 +1013,157 @@ mod tests {
                 .any(|v| v.as_str() == Some("reasoning.encrypted_content")),
             "should include reasoning.encrypted_content"
         );
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_openai_streams_fragmented_bytes_and_captures_request_shape() {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            transport_stream(vec![
+                Ok("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel"),
+                Ok("lo\"}\n"),
+                Ok("data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\"}}\n"),
+            ]),
+        ))]));
+        let client = OpenAiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://example.test".to_string(),
+            fake_transport.clone(),
+        );
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::TextDelta { delta, .. }) if delta == "Hello"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn
+                }
+            })
+        )));
+
+        let requests = fake_transport.take_requests();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0];
+        assert_eq!(sent.url, "https://example.test/v1/responses");
+        assert_eq!(sent.headers.get("authorization"), Some("Bearer test-key"));
+        assert_eq!(sent.headers.get("content-type"), Some("application/json"));
+        let body: Value = serde_json::from_slice(&sent.body).expect("openai body should be JSON");
+        assert_eq!(body["model"], "gpt-5.2");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_openai_maps_non_2xx_response() {
+        let mut headers = TransportHeaders::default();
+        headers.insert("retry-after", "2");
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            429,
+            headers,
+            transport_stream(vec![Ok("rate limited")]),
+        ))]));
+        let client = OpenAiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://example.test".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let first = client
+            .stream(&request)
+            .next()
+            .await
+            .expect("expected first stream item")
+            .expect("transport failures should be normalized into Done events");
+
+        assert!(matches!(
+            first,
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::RateLimited {
+                        retry_after_ms: Some(2000)
+                    }
+                }
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_openai_maps_transport_execution_failure() {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Err(TransportError::Timeout {
+            duration_ms: 30000,
+        })]));
+        let client = OpenAiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://example.test".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let first = client
+            .stream(&request)
+            .next()
+            .await
+            .expect("expected first stream item")
+            .expect("transport failures should be normalized into Done events");
+
+        assert!(matches!(
+            first,
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::NetworkTimeout { duration_ms: 30000 }
+                }
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_openai_maps_mid_stream_reset_to_connection_reset() {
+        let payload = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel".to_string();
+        let (base_url, server) = spawn_openai_truncated_stream_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+        server.await.expect("server join");
+
+        let last = events
+            .last()
+            .expect("stream should yield a terminal Done event")
+            .as_ref()
+            .expect("ensure_terminal_done should normalize transport errors into Done events");
+        assert!(matches!(
+            last,
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::ConnectionReset
+                }
+            }
+        ));
     }
 
     #[test]

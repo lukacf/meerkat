@@ -50,19 +50,31 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
 use meerkat_tools::BuiltinDispatcherConfig;
+#[cfg(feature = "builtin-tools")]
 use meerkat_tools::CompositeDispatcherError;
-use meerkat_tools::EmptyToolDispatcher;
-#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "builtin-tools",
+    not(feature = "sqlite-store"),
+    not(target_arch = "wasm32")
+))]
 use meerkat_tools::builtin::FileTaskStore;
-#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "builtin-tools",
+    not(feature = "sqlite-store"),
+    not(target_arch = "wasm32")
+))]
 use meerkat_tools::builtin::MemoryTaskStore;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "builtin-tools",
+    feature = "sqlite-store",
+    not(target_arch = "wasm32")
+))]
 use meerkat_tools::builtin::SqliteTaskStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::shell::ShellConfig;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolPolicyLayer};
 #[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
@@ -147,6 +159,23 @@ impl SessionStore for EphemeralSessionStore {
     async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
         self.sessions.write().await.remove(id);
         Ok(())
+    }
+}
+
+struct NoopToolDispatcher;
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for NoopToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        Vec::<Arc<meerkat_core::ToolDef>>::new().into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Err(meerkat_core::ToolError::not_found(call.name))
     }
 }
 
@@ -586,6 +615,7 @@ pub enum BuildAgentError {
 
     /// Tool dispatcher creation failed.
     #[error("Tool dispatcher creation failed: {0}")]
+    #[cfg(feature = "builtin-tools")]
     ToolDispatcher(#[from] CompositeDispatcherError),
 
     /// Comms runtime failed to initialize.
@@ -1093,7 +1123,7 @@ impl AgentFactory {
     }
 
     /// Build a composite dispatcher so callers can register additional tools.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     pub async fn build_composite_dispatcher(
         &self,
@@ -1119,7 +1149,7 @@ impl AgentFactory {
     }
 
     /// Build a shared builtin dispatcher using the provided config.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     pub async fn build_builtin_dispatcher(
         &self,
@@ -1145,7 +1175,7 @@ impl AgentFactory {
     }
 
     /// Build a shared builtin dispatcher, optionally including skill tools.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     pub async fn build_builtin_dispatcher_with_skills(
         &self,
@@ -1176,7 +1206,7 @@ impl AgentFactory {
     }
 
     /// Internal dispatcher builder used by `build_agent`.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     async fn build_builtin_dispatcher_with_skills_internal(
         &self,
@@ -1552,7 +1582,7 @@ impl AgentFactory {
                     // Fallback: empty tool dispatcher when no override is set on wasm32.
                     let usage = String::new();
                     (
-                        Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>,
+                        Arc::new(NoopToolDispatcher) as Arc<dyn AgentToolDispatcher>,
                         usage,
                     )
                 }
@@ -2158,7 +2188,7 @@ impl AgentFactory {
     ///
     /// `effective_builtins` and `effective_shell` override the factory-level
     /// flags for this specific build.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     async fn build_tool_dispatcher_for_agent_with_overrides(
         &self,
@@ -2179,20 +2209,20 @@ impl AgentFactory {
                     let usage = render_tool_usage_instructions(ext.tools().as_ref());
                     Ok((ext, usage))
                 }
-                None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
+                None => Ok((Arc::new(NoopToolDispatcher), String::new())),
             };
         }
 
         // Create a task store.
-        // With session-store: SQLite-backed, scoped to the session so /resume
+        // With sqlite-store: SQLite-backed, scoped to the session so /resume
         // restores the correct task set.
-        // Without: file-backed (project root) or in-memory fallback.
-        #[cfg(feature = "session-store")]
+        // Without sqlite-store: file-backed (project root) or in-memory fallback.
+        #[cfg(feature = "sqlite-store")]
         let task_store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::for_session(
             self.store_path.join("tasks.db"),
             &session_id,
         ));
-        #[cfg(not(feature = "session-store"))]
+        #[cfg(not(feature = "sqlite-store"))]
         let task_store: Arc<dyn TaskStore> = match self.project_root.as_ref() {
             Some(root) => Arc::new(FileTaskStore::in_project(root)),
             None => Arc::new(MemoryTaskStore::new()),
@@ -2243,6 +2273,40 @@ impl AgentFactory {
 
         let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
         Ok((dispatcher, usage))
+    }
+
+    #[cfg(all(not(feature = "builtin-tools"), not(target_arch = "wasm32")))]
+    #[allow(clippy::too_many_arguments)]
+    async fn build_tool_dispatcher_for_agent_with_overrides(
+        &self,
+        _config: &Config,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        effective_builtins: bool,
+        effective_shell: bool,
+        _skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        _shell_env: Option<std::collections::HashMap<String, String>>,
+        _session_id: String,
+        _ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
+        _image_tool_results: bool,
+    ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
+        if effective_shell {
+            return Err(BuildAgentError::Config(
+                "shell tools require the builtin-tools feature".to_string(),
+            ));
+        }
+        if effective_builtins {
+            return Err(BuildAgentError::Config(
+                "builtins require the builtin-tools feature".to_string(),
+            ));
+        }
+
+        match external {
+            Some(ext) => {
+                let usage = render_tool_usage_instructions(ext.tools().as_ref());
+                Ok((ext, usage))
+            }
+            None => Ok((Arc::new(NoopToolDispatcher), String::new())),
+        }
     }
 }
 

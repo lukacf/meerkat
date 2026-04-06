@@ -109,6 +109,15 @@ impl LlmError {
         Self::from_http_status(status, message, retry_after_ms)
     }
 
+    pub(crate) fn from_transport_response(
+        status: u16,
+        message: String,
+        headers: &crate::transport::TransportHeaders,
+    ) -> Self {
+        let retry_after_ms = headers.get("retry-after").and_then(Self::parse_retry_after);
+        Self::from_http_status(status, message, retry_after_ms)
+    }
+
     pub fn parse_retry_after(value: &str) -> Option<u64> {
         if let Ok(secs) = value.trim().parse::<u64>() {
             return Some(secs * 1000);

@@ -37,11 +37,11 @@ path = "tests/live_rest_matrix.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "builtin-tools", "hooks", "jsonl-store", "sqlite-store", "session-store", "memory-store", "skills", "schedule"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
-meerkat-store = { workspace = true }
+meerkat-store = { workspace = true, features = ["sqlite"] }
 meerkat-tools = { workspace = true }
 meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
 meerkat-mob = { workspace = true, optional = true }

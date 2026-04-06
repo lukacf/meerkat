@@ -68,6 +68,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+use meerkat::surface::{
+    HostToolBridge, HostToolDispatchMode, HostToolDispatcher, HostToolRegistry,
+};
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
 use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
@@ -321,7 +325,7 @@ struct RuntimeState {
     #[allow(dead_code)]
     model: String,
     #[cfg(target_arch = "wasm32")]
-    js_tools: Vec<JsToolEntry>,
+    js_tools: HostToolRegistry<js_sys::Function>,
 }
 
 /// Resolve per-provider API keys into a `Config.providers.api_keys` map.
@@ -810,22 +814,6 @@ fn create_llm_client(
 // JS Tool Callbacks — register tool implementations from JavaScript
 // ═══════════════════════════════════════════════════════════
 
-/// How a JS-registered tool is dispatched.
-#[cfg(target_arch = "wasm32")]
-enum JsToolMode {
-    /// Calls a JS callback and awaits its Promise result.
-    Callback(js_sys::Function),
-    /// Returns `"acknowledged"` immediately. The tool call appears in the event
-    /// stream (`ToolCallRequested`) for the host to act on asynchronously.
-    FireAndForget,
-}
-
-#[cfg(target_arch = "wasm32")]
-struct JsToolEntry {
-    def: Arc<meerkat_core::ToolDef>,
-    mode: JsToolMode,
-}
-
 /// Register a tool implementation from JavaScript.
 ///
 /// Requires initialized runtime state.
@@ -859,11 +847,12 @@ pub fn register_tool_callback(
         });
 
         with_runtime_state_mut(|state| {
-            state.js_tools.retain(|e| e.def.name != def.name);
-            state.js_tools.push(JsToolEntry {
-                def,
-                mode: JsToolMode::Callback(func),
-            });
+            state.js_tools.register_callback(
+                def.name.clone(),
+                def.description.clone(),
+                def.input_schema.clone(),
+                func,
+            );
             Ok(())
         })?;
     }
@@ -917,11 +906,11 @@ pub fn register_js_tool(
         });
 
         with_runtime_state_mut(|state| {
-            state.js_tools.retain(|e| e.def.name != def.name);
-            state.js_tools.push(JsToolEntry {
-                def,
-                mode: JsToolMode::FireAndForget,
-            });
+            state.js_tools.register_fire_and_forget(
+                def.name.clone(),
+                def.description.clone(),
+                def.input_schema.clone(),
+            );
             Ok(())
         })?;
     }
@@ -959,87 +948,56 @@ pub fn runtime_version() -> String {
 /// callbacks from the initialized runtime's tool registry on each access,
 /// avoiding `!Send` callback state inside the dispatcher.
 #[cfg(target_arch = "wasm32")]
-struct JsToolDispatcher;
+struct JsHostToolBridge;
 
 #[cfg(target_arch = "wasm32")]
-impl JsToolDispatcher {
+impl JsHostToolBridge {
     fn tools_from_runtime() -> Arc<[Arc<meerkat_core::ToolDef>]> {
         RUNTIME_STATE.with(|cell| {
             let borrow = cell.borrow();
             let Some(state) = borrow.as_ref() else {
                 return Vec::<Arc<meerkat_core::ToolDef>>::new().into();
             };
-            let defs: Vec<_> = state
-                .js_tools
-                .iter()
-                .map(|entry| entry.def.clone())
-                .collect();
-            defs.into()
+            state.js_tools.definitions()
         })
     }
 
-    /// Check whether a tool is registered as fire-and-forget.
-    fn is_fire_and_forget(name: &str) -> bool {
+    fn dispatch_mode(name: &str) -> Option<HostToolDispatchMode> {
         RUNTIME_STATE.with(|cell| {
             let borrow = cell.borrow();
-            let Some(state) = borrow.as_ref() else {
-                return false;
-            };
-            state
-                .js_tools
-                .iter()
-                .find(|e| e.def.name == name)
-                .map(|e| matches!(e.mode, JsToolMode::FireAndForget))
-                .unwrap_or(false)
+            let state = borrow.as_ref()?;
+            state.js_tools.dispatch_mode(name)
         })
     }
 
-    /// Look up the JS callback for a tool by name from initialized runtime state.
     fn get_callback(name: &str) -> Option<js_sys::Function> {
         RUNTIME_STATE.with(|cell| {
             let borrow = cell.borrow();
             let state = borrow.as_ref()?;
-            state.js_tools.iter().find_map(|e| {
-                if e.def.name == name {
-                    match &e.mode {
-                        JsToolMode::Callback(f) => Some(f.clone()),
-                        JsToolMode::FireAndForget => None,
-                    }
-                } else {
-                    None
-                }
-            })
+            state.js_tools.callback(name)
         })
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait(?Send)]
-impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
+impl HostToolBridge for JsHostToolBridge {
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
         Self::tools_from_runtime()
     }
 
-    async fn dispatch(
+    fn dispatch_mode(&self, name: &str) -> Option<HostToolDispatchMode> {
+        Self::dispatch_mode(name)
+    }
+
+    async fn invoke_callback(
         &self,
-        call: meerkat_core::ToolCallView<'_>,
-    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
-        // Fire-and-forget tools return immediately. The host watches
-        // ToolCallRequested events in the stream to act on the call.
-        if Self::is_fire_and_forget(call.name) {
-            return Ok(meerkat_core::ToolResult::new(
-                call.id.to_string(),
-                "acknowledged".to_string(),
-                false,
-            )
-            .into());
-        }
-
-        let callback = Self::get_callback(call.name)
-            .ok_or_else(|| meerkat_core::error::ToolError::not_found(call.name))?;
-
-        let args_str = call.args.get();
-        let js_args = JsValue::from_str(args_str);
+        name: &str,
+        args_json: &str,
+    ) -> Result<String, meerkat_core::error::ToolError> {
+        let callback = Self::get_callback(name)
+            .ok_or_else(|| meerkat_core::error::ToolError::not_found(name))?;
+        let js_args = JsValue::from_str(args_json);
         let promise_val = callback.call1(&JsValue::NULL, &js_args).map_err(|e| {
             meerkat_core::error::ToolError::execution_failed(format!("JS callback threw: {e:?}"))
         })?;
@@ -1051,25 +1009,7 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
                     "JS promise rejected: {e:?}"
                 ))
             })?;
-        let result_str = result_val.as_string().unwrap_or_default();
-
-        // Parse JSON result: {"content": "...", "is_error": false}
-        #[derive(Deserialize)]
-        struct JsToolResult {
-            content: String,
-            #[serde(default)]
-            is_error: bool,
-        }
-        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
-            meerkat_core::error::ToolError::execution_failed(format!(
-                "invalid tool result JSON: {e}"
-            ))
-        })?;
-
-        Ok(
-            meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
-                .into(),
-        )
+        Ok(result_val.as_string().unwrap_or_default())
     }
 }
 
@@ -1082,7 +1022,8 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
     let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
         Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
     let config = meerkat_tools::builtin::BuiltinToolConfig::default();
-    let external = Some(Arc::new(JsToolDispatcher) as Arc<dyn meerkat_core::AgentToolDispatcher>);
+    let external = Some(Arc::new(HostToolDispatcher::new(JsHostToolBridge))
+        as Arc<dyn meerkat_core::AgentToolDispatcher>);
     let composite =
         meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, external, None)
             .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
@@ -1147,7 +1088,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         next_handle: 1,
         model: model.clone(),
         #[cfg(target_arch = "wasm32")]
-        js_tools: Vec::new(),
+        js_tools: HostToolRegistry::default(),
     });
 
     let result = serde_json::json!({
@@ -1207,7 +1148,7 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         next_handle: 1,
         model: model.clone(),
         #[cfg(target_arch = "wasm32")]
-        js_tools: Vec::new(),
+        js_tools: HostToolRegistry::default(),
     });
 
     let result = serde_json::json!({

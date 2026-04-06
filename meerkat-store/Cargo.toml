@@ -26,7 +26,8 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-rusqlite = { workspace = true }
+redb = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 dirs = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -41,7 +42,8 @@ toml = { workspace = true }
 default = ["jsonl", "memory"]
 jsonl = []
 memory = []
-sqlite = []
+redb-store = ["dep:redb"]
+sqlite = ["dep:rusqlite"]
 
 [package.metadata.cargo-machete]
 ignored = ["toml"]  # dev-dependency used in tests

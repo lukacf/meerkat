@@ -17,18 +17,19 @@ name = "integration_shell_jobs"
 path = "tests/integration_shell_jobs.rs"
 
 [features]
-default = ["comms", "mcp", "skills"]
+default = ["comms", "mcp", "skills", "capability-registrations"]
+capability-registrations = ["dep:inventory"]
 comms = ["dep:meerkat-comms", "dep:parking_lot"]
 mcp = ["dep:meerkat-mcp"]
 sqlite = ["dep:rusqlite"]
-skills = []
+skills = ["capability-registrations", "dep:meerkat-skills"]
 integration-real-tests = []
 
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-skills = { workspace = true }
-inventory = { workspace = true }
+meerkat-skills = { workspace = true, optional = true }
+inventory = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }

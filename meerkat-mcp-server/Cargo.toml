@@ -21,12 +21,12 @@ name = "live_mcp_matrix"
 path = "tests/live_mcp_matrix.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "builtin-tools", "hooks", "jsonl-store", "sqlite-store", "session-store", "memory-store", "skills", "schedule"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat-client = { workspace = true }
-meerkat-store = { workspace = true }
+meerkat-store = { workspace = true, features = ["sqlite"] }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-tools = { workspace = true }

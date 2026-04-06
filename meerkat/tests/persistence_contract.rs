@@ -70,7 +70,6 @@ mod tests {
             "the facade-level persistent service should expose the memory-backed persisted session"
         );
     }
-
     #[tokio::test]
     async fn persistence_contract_build_persistent_runtime_adapter_shares_bundle_runtime() {
         let temp = tempfile::tempdir().expect("tempdir should succeed");

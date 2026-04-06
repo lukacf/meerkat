@@ -13,6 +13,7 @@ use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::SessionDeferredTurnState;
+use meerkat_core::SessionFilter;
 use meerkat_core::SessionSystemContextState;
 use meerkat_core::error::AgentError;
 use meerkat_core::image_content::{externalize_deferred_turn_state, externalize_messages_from};
@@ -27,7 +28,7 @@ use meerkat_core::service::{
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
-use meerkat_core::{InputId, RunId};
+use meerkat_core::{InputId, RunId, SessionStore};
 use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
 };
@@ -36,7 +37,6 @@ use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
 use meerkat_runtime::input_state::InputState;
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
-use meerkat_store::SessionStore;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -970,10 +970,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             Err(SessionError::NotFound { .. }) => {
                 // Fall back to persisted session
                 let session = self
-                    .store
-                    .load(id)
-                    .await
-                    .map_err(|e| SessionError::Store(Box::new(e)))?
+                    .load_authoritative_session_base(id)
+                    .await?
                     .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
 
                 let labels = extract_labels_from_metadata(session.metadata());
@@ -1013,7 +1011,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // Merge persisted sessions not currently live
         let stored = self
             .store
-            .list(meerkat_store::SessionFilter::default())
+            .list(SessionFilter::default())
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
 
@@ -1617,10 +1615,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Used by surfaces to resume sessions that aren't currently live.
     /// Returns the complete `Session` including message history.
     pub async fn load_persisted(&self, id: &SessionId) -> Result<Option<Session>, SessionError> {
-        self.store
-            .load(id)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))
+        self.load_authoritative_session_base(id).await
     }
 
     /// Export the full session from the live task and persist it to the store.
@@ -3165,6 +3160,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_runtime_backed_read_prefers_newer_runtime_snapshot_over_stale_store_row() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .apply_runtime_turn_with_result(
+                &result.session_id,
+                RunId::new(),
+                start_turn_request("runtime committed turn"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
+            .await
+            .expect("runtime-backed turn should succeed");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard_live_session should succeed");
+
+        let view = service
+            .read(&result.session_id)
+            .await
+            .expect("read should prefer the runtime snapshot");
+        assert_eq!(
+            view.state.message_count, 2,
+            "read must surface the newest runtime snapshot instead of the stale session-store row"
+        );
+        assert!(
+            view.state.last_assistant_text.is_some(),
+            "runtime-backed read should preserve the committed assistant turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_load_persisted_prefers_newer_runtime_snapshot_over_stale_store_row()
+     {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .apply_runtime_turn_with_result(
+                &result.session_id,
+                RunId::new(),
+                start_turn_request("runtime committed turn"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
+            .await
+            .expect("runtime-backed turn should succeed");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard_live_session should succeed");
+
+        let session = service
+            .load_persisted(&result.session_id)
+            .await
+            .expect("load_persisted should prefer the runtime snapshot")
+            .expect("runtime-backed session should exist");
+        assert_eq!(
+            session.messages().len(),
+            2,
+            "load_persisted must surface the newest runtime snapshot instead of the stale store row"
+        );
+        assert_eq!(
+            session.last_assistant_text().as_deref(),
+            Some("ok"),
+            "runtime-backed load_persisted should preserve the committed assistant reply"
+        );
+    }
+
+    #[tokio::test]
     async fn test_runtime_backed_append_system_context_prefers_newer_store_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -3748,6 +3845,41 @@ mod tests {
         assert!(
             exported.session_metadata().unwrap().keep_alive,
             "should roll back to true after failed true→false (not flip to false)"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_service_contract_memory_lane_persists_without_runtime_store() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("memory contract", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed without a runtime store");
+
+        let persisted = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("persistent lane should save the created session");
+        assert_eq!(persisted.id(), &created.session_id);
+
+        let summaries = service
+            .list(meerkat_core::service::SessionQuery::default())
+            .await
+            .expect("list should succeed");
+        assert!(
+            summaries
+                .iter()
+                .any(|summary| summary.session_id == created.session_id),
+            "memory-backed persistent orchestration should surface the saved session through the service facade"
         );
     }
 

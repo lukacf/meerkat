@@ -16,6 +16,8 @@ mod error;
 pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod realm;
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub mod schedule_redb_store;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod schedule_sqlite_store;
 
@@ -25,6 +27,8 @@ pub mod jsonl;
 #[cfg(feature = "memory")]
 pub mod memory;
 
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub mod redb_store;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod sqlite_store;
 
@@ -50,6 +54,10 @@ pub use realm::{
     open_realm_session_store, open_realm_session_store_in, realm_lease_dir, realm_paths,
     realm_paths_in, sanitize_realm_id, start_realm_lease, start_realm_lease_in,
 };
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub use redb_store::RedbSessionStore;
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub use schedule_redb_store::RedbScheduleStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use schedule_sqlite_store::SqliteScheduleStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]

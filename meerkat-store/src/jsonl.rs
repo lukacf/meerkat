@@ -3,7 +3,6 @@
 //! Each session is stored as a single file with the session as JSON.
 
 use crate::error::into_session_store_error;
-use crate::index::SqliteSessionIndex;
 use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
@@ -12,14 +11,68 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
-use tokio::task::spawn_blocking;
+
+#[derive(Default)]
+struct JsonlMetadataIndex {
+    entries: std::sync::RwLock<std::collections::HashMap<SessionId, SessionMeta>>,
+}
+
+impl JsonlMetadataIndex {
+    fn read_entries(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, std::collections::HashMap<SessionId, SessionMeta>> {
+        self.entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write_entries(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, std::collections::HashMap<SessionId, SessionMeta>> {
+        self.entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn from_sidecars(metas: Vec<SessionMeta>) -> Self {
+        let mut entries = std::collections::HashMap::with_capacity(metas.len());
+        for meta in metas {
+            entries.insert(meta.id.clone(), meta);
+        }
+        Self {
+            entries: std::sync::RwLock::new(entries),
+        }
+    }
+
+    fn insert(&self, meta: SessionMeta) {
+        let mut entries = self.write_entries();
+        entries.insert(meta.id.clone(), meta);
+    }
+
+    fn remove(&self, id: &SessionId) {
+        let mut entries = self.write_entries();
+        entries.remove(id);
+    }
+
+    fn sorted_entries(&self) -> Vec<SessionMeta> {
+        let entries = self.read_entries();
+        let mut metas = entries.values().cloned().collect::<Vec<_>>();
+        metas.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        metas
+    }
+}
 
 /// File-based session store using JSONL format
 pub struct JsonlStore {
     dir: PathBuf,
     /// Whether to use pretty-printed JSON (default: true for readability)
     pretty_print: bool,
-    index: RwLock<Option<Arc<SqliteSessionIndex>>>,
+    index: RwLock<Option<Arc<JsonlMetadataIndex>>>,
 }
 
 /// Builder for configuring JsonlStore
@@ -77,10 +130,6 @@ impl JsonlStore {
         Ok(())
     }
 
-    fn index_path(&self) -> PathBuf {
-        self.dir.join("session_index.sqlite3")
-    }
-
     async fn read_all_metadata_sidecars(&self) -> Result<Vec<SessionMeta>, StoreError> {
         let mut entries = fs::read_dir(&self.dir).await?;
         let mut sessions = Vec::new();
@@ -100,7 +149,30 @@ impl JsonlStore {
             };
 
             match serde_json::from_str::<SessionMeta>(&contents) {
-                Ok(meta) => sessions.push(meta),
+                Ok(meta) => {
+                    let session_path = self.session_path(&meta.id);
+                    match fs::try_exists(&session_path).await {
+                        Ok(true) => sessions.push(meta),
+                        Ok(false) => {
+                            tracing::warn!(
+                                session_id = %meta.id,
+                                "pruning orphaned JSONL metadata sidecar without a payload file"
+                            );
+                            if let Err(err) = fs::remove_file(&path).await
+                                && err.kind() != std::io::ErrorKind::NotFound
+                            {
+                                tracing::warn!(
+                                    "failed to remove orphaned session metadata sidecar: {path:?}: {err}"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "failed to verify session payload for metadata sidecar: {path:?}: {err}"
+                            );
+                        }
+                    }
+                }
                 Err(err) => {
                     tracing::warn!("failed to parse session metadata sidecar: {path:?}: {err}");
                 }
@@ -110,102 +182,13 @@ impl JsonlStore {
         Ok(sessions)
     }
 
-    async fn open_index(&self) -> Result<Arc<SqliteSessionIndex>, StoreError> {
+    async fn open_index(&self) -> Result<Arc<JsonlMetadataIndex>, StoreError> {
         self.init().await?;
-
-        let index_path = self.index_path();
-
-        let open_attempt = {
-            let index_path = index_path.clone();
-            spawn_blocking(move || SqliteSessionIndex::open(index_path)).await
-        };
-
-        let index = match open_attempt {
-            Ok(Ok(index)) => Arc::new(index),
-            Ok(Err(open_err)) => {
-                tracing::warn!("failed to open session index, attempting rebuild: {open_err}");
-
-                // Best-effort: quarantine the old index file if it exists, then retry.
-                let quarantined = {
-                    let ts =
-                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                            Ok(duration) => duration.as_secs(),
-                            Err(_) => 0,
-                        };
-                    let filename = match index_path.file_name() {
-                        Some(file) => file.to_string_lossy().to_string(),
-                        None => "session_index.sqlite3".to_string(),
-                    };
-                    let quarantine_path =
-                        index_path.with_file_name(format!("{filename}.corrupt-{ts}"));
-                    match fs::rename(&index_path, &quarantine_path).await {
-                        Ok(()) => {
-                            tracing::warn!(
-                                "quarantined corrupt session index: {index_path:?} -> {quarantine_path:?}"
-                            );
-                            Ok(())
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        Err(err) => Err(StoreError::Io(err)),
-                    }
-                };
-
-                quarantined?;
-
-                let retry = {
-                    let index_path = index_path.clone();
-                    spawn_blocking(move || SqliteSessionIndex::open(index_path)).await
-                };
-                match retry {
-                    Ok(Ok(index)) => Arc::new(index),
-                    Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(StoreError::Join(err)),
-                }
-            }
-            Err(err) => return Err(StoreError::Join(err)),
-        };
-
-        // Always reconcile: rebuild from sidecars if index is missing entries
-        // This handles the case where a crash happens after writing session/meta but before index insert
         let metas = self.read_all_metadata_sidecars().await?;
-        let sidecar_count = metas.len();
-
-        let index_count = {
-            let index = Arc::clone(&index);
-            spawn_blocking(move || index.entry_count()).await
-        };
-        let index_count = match index_count {
-            Ok(Ok(count)) => count,
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Join(err)),
-        };
-
-        // Always reconcile on startup when sidecars exist.
-        // This handles:
-        // 1. Missing index entries (sidecar_count > index_count)
-        // 2. Stale updated_at entries when session was updated but index write failed
-        // 3. Any other partial-write scenarios where counts match but metadata differs
-        if sidecar_count > 0 {
-            if sidecar_count != index_count {
-                tracing::info!(
-                    "Reconciling session index: {} sidecars vs {} indexed entries",
-                    sidecar_count,
-                    index_count
-                );
-            }
-            let index = Arc::clone(&index);
-            let result = spawn_blocking(move || index.insert_many(metas)).await;
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(err),
-                Err(err) => return Err(StoreError::Join(err)),
-            }
-        }
-
-        Ok(index)
+        Ok(Arc::new(JsonlMetadataIndex::from_sidecars(metas)))
     }
 
-    async fn index(&self) -> Result<Arc<SqliteSessionIndex>, StoreError> {
+    async fn index(&self) -> Result<Arc<JsonlMetadataIndex>, StoreError> {
         if let Some(index) = self.index.read().await.as_ref() {
             return Ok(Arc::clone(index));
         }
@@ -221,12 +204,75 @@ impl JsonlStore {
         })
     }
 
+    async fn refresh_index_from_sidecars(
+        &self,
+        index: &Arc<JsonlMetadataIndex>,
+    ) -> Result<(), StoreError> {
+        let metas = self.read_all_metadata_sidecars().await?;
+        let mut seen_ids = std::collections::HashSet::with_capacity(metas.len());
+
+        {
+            let mut entries = index.write_entries();
+            for meta in metas {
+                seen_ids.insert(meta.id.clone());
+                entries.insert(meta.id.clone(), meta);
+            }
+        }
+
+        let cached_ids = {
+            let entries = index.read_entries();
+            entries.keys().cloned().collect::<Vec<_>>()
+        };
+
+        let mut stale_ids = Vec::new();
+        for id in cached_ids {
+            if seen_ids.contains(&id) {
+                continue;
+            }
+            if !self.session_payload_exists(&id).await? {
+                stale_ids.push(id);
+            }
+        }
+
+        if !stale_ids.is_empty() {
+            let mut entries = index.write_entries();
+            for id in stale_ids {
+                entries.remove(&id);
+            }
+        }
+
+        Ok(())
+    }
+
     fn session_path(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{}.jsonl", id.0))
     }
 
     fn metadata_path(&self, id: &SessionId) -> PathBuf {
         self.dir.join(format!("{}.meta", id.0))
+    }
+
+    async fn session_payload_exists(&self, id: &SessionId) -> Result<bool, StoreError> {
+        fs::try_exists(self.session_path(id))
+            .await
+            .map_err(StoreError::from)
+    }
+
+    async fn prune_orphaned_metadata(
+        &self,
+        index: &Arc<JsonlMetadataIndex>,
+        id: &SessionId,
+    ) -> Result<(), StoreError> {
+        index.remove(id);
+        let meta_path = self.metadata_path(id);
+        if let Err(err) = fs::remove_file(&meta_path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove orphaned session metadata sidecar: {meta_path:?}: {err}"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -273,12 +319,7 @@ impl JsonlStore {
         fs::rename(&meta_temp_path, &meta_path).await?;
 
         let index = self.index().await?;
-        let result = spawn_blocking(move || index.insert_meta(meta)).await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Join(err)),
-        }
+        index.insert(meta);
 
         Ok(())
     }
@@ -304,12 +345,42 @@ impl JsonlStore {
 
     async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let index = self.index().await?;
-        let result = spawn_blocking(move || index.list_meta(filter)).await;
-        match result {
-            Ok(Ok(sessions)) => Ok(sessions),
-            Ok(Err(err)) => Err(err),
-            Err(err) => Err(StoreError::Join(err)),
+        self.refresh_index_from_sidecars(&index).await?;
+        let limit = filter.limit.unwrap_or(usize::MAX);
+        let mut offset = filter.offset.unwrap_or(0);
+        let mut results = Vec::new();
+
+        for meta in index.sorted_entries() {
+            if !self.session_payload_exists(&meta.id).await? {
+                tracing::warn!(
+                    session_id = %meta.id,
+                    "pruning orphaned JSONL metadata entry because the payload file is missing"
+                );
+                self.prune_orphaned_metadata(&index, &meta.id).await?;
+                continue;
+            }
+            if let Some(updated_after) = filter.updated_after
+                && meta.updated_at < updated_after
+            {
+                continue;
+            }
+            if let Some(created_after) = filter.created_after
+                && meta.created_at < created_after
+            {
+                continue;
+            }
+            if offset > 0 {
+                offset -= 1;
+                continue;
+            }
+
+            results.push(meta);
+            if results.len() >= limit {
+                break;
+            }
         }
+
+        Ok(results)
     }
 
     async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
@@ -330,13 +401,7 @@ impl JsonlStore {
         }
 
         let index = self.index().await?;
-        let id = id.clone();
-        let result = spawn_blocking(move || index.remove(&id)).await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Join(err)),
-        }
+        index.remove(id);
 
         Ok(())
     }
@@ -432,7 +497,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_list_reads_only_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_jsonl_store_list_prunes_cached_orphaned_metadata_sidecar()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
@@ -443,12 +509,51 @@ mod tests {
 
         // Delete the main session file but keep the metadata
         let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
+        let meta_path = temp_dir.path().join(format!("{}.meta", session.id().0));
         fs::remove_file(&session_path).await?;
 
-        // list() should still work because it reads from metadata sidecar
+        // list() must not advertise a session whose payload has vanished.
         let sessions = store.list(SessionFilter::default()).await?;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, *session.id());
+        assert!(
+            sessions.is_empty(),
+            "list should prune orphaned metadata entries instead of reporting ghost sessions"
+        );
+        assert!(
+            !fs::try_exists(&meta_path).await?,
+            "orphaned metadata sidecar should be removed during pruning"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_store_rebuild_prunes_orphaned_metadata_sidecar_on_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store_path = temp_dir.path().to_path_buf();
+
+        let session_id = {
+            let store = JsonlStore::new(store_path.clone());
+            let mut session = Session::new();
+            session.push(Message::User(UserMessage::text("Hello".to_string())));
+            let session_id = session.id().clone();
+            store.save(&session).await?;
+
+            let session_path = temp_dir.path().join(format!("{}.jsonl", session_id.0));
+            fs::remove_file(&session_path).await?;
+            session_id
+        };
+
+        let meta_path = temp_dir.path().join(format!("{}.meta", session_id.0));
+        let restarted = JsonlStore::new(store_path);
+        let sessions = restarted.list(SessionFilter::default()).await?;
+        assert!(
+            sessions.is_empty(),
+            "a fresh store should ignore orphaned metadata sidecars during index rebuild"
+        );
+        assert!(
+            !fs::try_exists(&meta_path).await?,
+            "startup reconciliation should prune the orphaned metadata sidecar"
+        );
         Ok(())
     }
 
@@ -488,14 +593,57 @@ mod tests {
             id
         };
 
-        // Remove the index file to force an index rebuild from `.meta` sidecars.
-        let index_path = store_path.join("session_index.sqlite3");
-        fs::remove_file(&index_path).await?;
-
+        // A fresh store instance should rebuild its in-memory metadata index
+        // directly from the existing `.meta` sidecars.
         let store = JsonlStore::new(store_path);
         let sessions = store.list(SessionFilter::default()).await?;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_store_list_refreshes_after_external_save()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store_path = temp_dir.path().to_path_buf();
+        let store_a = JsonlStore::new(store_path.clone());
+        let store_b = JsonlStore::new(store_path);
+
+        // Prime store_a's in-memory cache while the directory is still empty.
+        let sessions = store_a.list(SessionFilter::default()).await?;
+        assert!(sessions.is_empty());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(
+            "Hello from store_b".to_string(),
+        )));
+        let id = session.id().clone();
+        store_b.save(&session).await?;
+
+        let sessions = store_a.list(SessionFilter::default()).await?;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_jsonl_store_does_not_create_redb_index_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = JsonlStore::new(temp_dir.path().to_path_buf());
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
+        store.save(&session).await?;
+        let _ = store.list(SessionFilter::default()).await?;
+
+        let index_path = temp_dir.path().join("session_index.redb");
+        assert!(
+            !tokio::fs::try_exists(&index_path).await?,
+            "jsonl lane should not create a redb index file"
+        );
+
         Ok(())
     }
 

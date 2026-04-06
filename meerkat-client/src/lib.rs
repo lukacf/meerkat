@@ -18,6 +18,7 @@ mod http;
 pub mod provider;
 mod streaming;
 mod test_client;
+mod transport;
 pub mod types;
 
 #[cfg(feature = "anthropic")]

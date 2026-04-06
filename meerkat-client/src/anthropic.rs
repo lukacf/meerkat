@@ -1004,6 +1004,7 @@ struct AnthropicUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::transport::{TransportHeaders, TransportResponse};
     use meerkat_core::{
         AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
     };
@@ -1071,6 +1072,34 @@ mod tests {
 
         assert_eq!(delta.delta_type, "input_json_delta");
         assert_eq!(delta.partial_json.as_deref(), Some("{\"path\":"));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_anthropic_sse_fit_check_uses_shared_byte_stream_shape() {
+        let response = TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            Box::pin(futures::stream::iter(vec![
+                Ok(b"event: message_start\n".to_vec()),
+                Ok(b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n".to_vec()),
+                Ok(b"event: content_block_start\n".to_vec()),
+                Ok(b"data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n\n".to_vec()),
+                Ok(b"event: content_block_delta\n".to_vec()),
+                Ok(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello from Anthrop".to_vec()),
+                Ok(b"ic\"}}\n\n".to_vec()),
+                Ok(b"event: message_delta\n".to_vec()),
+                Ok(b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n".to_vec()),
+            ])),
+        );
+        let text = response
+            .into_text()
+            .await
+            .expect("transport response should preserve Anthropic SSE bytes");
+
+        assert!(text.contains("event: message_start"));
+        assert!(text.contains("\"type\":\"content_block_delta\""));
+        assert!(text.contains("Hello from Anthropic"));
+        assert!(text.contains("\"stop_reason\":\"end_turn\""));
     }
 
     // =========================================================================

@@ -2,6 +2,7 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
+mod host_tools;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
@@ -11,6 +12,10 @@ mod schedule_host;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
+pub use host_tools::{
+    HOST_TOOL_ACKNOWLEDGED, HostToolBridge, HostToolDispatchMode, HostToolDispatcher,
+    HostToolRegistry,
+};
 pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
     SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,

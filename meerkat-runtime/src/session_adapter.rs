@@ -49,6 +49,87 @@ pub enum RuntimeBindingsError {
     SessionNotFound(SessionId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WakeDeliveryPolicy {
+    BestEffortTrySend,
+    GuaranteedAwaitSend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WakeDeliveryOutcome {
+    Delivered,
+    AlreadyPending,
+    NoReceiver,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WakeReason {
+    PublishAttach,
+    AcceptedInput,
+    AcceptedInputWithCompletion,
+    ControlPlaneIngest,
+    RetireDrain,
+    ControlPlaneRetireDrain,
+    Recycle,
+    Recover,
+    TestHarness,
+}
+
+impl WakeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PublishAttach => "publish_attach",
+            Self::AcceptedInput => "accepted_input",
+            Self::AcceptedInputWithCompletion => "accepted_input_with_completion",
+            Self::ControlPlaneIngest => "control_plane_ingest",
+            Self::RetireDrain => "retire_drain",
+            Self::ControlPlaneRetireDrain => "control_plane_retire_drain",
+            Self::Recycle => "recycle",
+            Self::Recover => "recover",
+            Self::TestHarness => "test_harness",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WakeHandle {
+    policy: WakeDeliveryPolicy,
+    wake_tx: mpsc::Sender<()>,
+}
+
+impl WakeHandle {
+    async fn signal_wake(self, session_id: &SessionId, reason: WakeReason) -> WakeDeliveryOutcome {
+        match self.policy {
+            WakeDeliveryPolicy::BestEffortTrySend => match self.wake_tx.try_send(()) {
+                Ok(()) => WakeDeliveryOutcome::Delivered,
+                Err(mpsc::error::TrySendError::Full(())) => WakeDeliveryOutcome::AlreadyPending,
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    tracing::warn!(
+                        %session_id,
+                        reason = reason.as_str(),
+                        "failed to deliver best-effort runtime wake because the loop is gone"
+                    );
+                    WakeDeliveryOutcome::NoReceiver
+                }
+            },
+            WakeDeliveryPolicy::GuaranteedAwaitSend => match self.wake_tx.send(()).await {
+                Ok(()) => WakeDeliveryOutcome::Delivered,
+                Err(err) => {
+                    tracing::warn!(
+                        %session_id,
+                        reason = reason.as_str(),
+                        error = %err,
+                        "failed to deliver guaranteed runtime wake"
+                    );
+                    WakeDeliveryOutcome::NoReceiver
+                }
+            },
+        }
+    }
+}
+
+const DEFAULT_WAKE_CHANNEL_CAPACITY: usize = 16;
+
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 
@@ -251,15 +332,13 @@ struct RuntimeSessionEntry {
     cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
+    /// Wake delivery policy resolved for this session entry.
+    wake_policy: WakeDeliveryPolicy,
     /// Runtime-loop capabilities. Presence means a loop is attached.
     attachment: Option<RuntimeLoopAttachment>,
     /// Detached-wake state for background op completions.
     /// Shared with the runtime loop which selects on the Notify directly.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
-    /// Whether this session should remain hosted for peer ingress while idle.
-    keep_alive: bool,
-    /// Comms runtime used to realize peer ingress for this session, if any.
-    comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -308,13 +387,14 @@ impl RuntimeSessionEntry {
         false
     }
 
-    fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
+    fn capture_wake_handle(&self) -> Option<WakeHandle> {
         if !self.attachment_is_live() {
             return None;
         }
-        self.attachment
-            .as_ref()
-            .map(|attachment| attachment.wake_tx.clone())
+        self.attachment.as_ref().map(|attachment| WakeHandle {
+            policy: self.wake_policy,
+            wake_tx: attachment.wake_tx.clone(),
+        })
     }
 
     fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
@@ -372,28 +452,6 @@ fn abort_slot(slot: &mut CommsDrainSlot) {
     }
 }
 
-fn desired_peer_ingress_mode(
-    runtime_state: RuntimeState,
-    comms_enabled: bool,
-    keep_alive: bool,
-) -> Option<CommsDrainMode> {
-    if !comms_enabled {
-        return None;
-    }
-
-    match runtime_state {
-        RuntimeState::Attached | RuntimeState::Running | RuntimeState::Recovering => {
-            Some(CommsDrainMode::AttachedSession)
-        }
-        RuntimeState::Idle if keep_alive => Some(CommsDrainMode::PersistentHost),
-        RuntimeState::Initializing
-        | RuntimeState::Idle
-        | RuntimeState::Retired
-        | RuntimeState::Stopped
-        | RuntimeState::Destroyed => None,
-    }
-}
-
 /// Wraps a SessionService to provide v9 runtime capabilities.
 ///
 /// Maintains a per-session RuntimeDriver registry. When sessions are registered
@@ -409,31 +467,57 @@ pub struct RuntimeSessionAdapter {
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
+    /// Default wake delivery policy for new session entries.
+    wake_policy: WakeDeliveryPolicy,
+    /// Wake channel capacity for attached runtime loops.
+    wake_channel_capacity: usize,
     /// Per-session comms drain lifecycle, driven by machine authority.
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
 }
 
 impl RuntimeSessionAdapter {
-    /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
-    pub fn ephemeral() -> Self {
+    fn default_wake_delivery_policy() -> WakeDeliveryPolicy {
+        // Phase 1 owns the wake-delivery seam and the tested guaranteed-wake
+        // mechanics, but it should not silently change default runtime policy
+        // for a future embedded surface before that surface exists.
+        WakeDeliveryPolicy::BestEffortTrySend
+    }
+
+    fn new_with_settings(
+        store: Option<Arc<dyn RuntimeStore>>,
+        blob_store: Option<Arc<dyn BlobStore>>,
+        wake_policy: WakeDeliveryPolicy,
+        wake_channel_capacity: usize,
+    ) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
-            store: None,
-            blob_store: None,
+            store,
+            blob_store,
+            wake_policy,
+            wake_channel_capacity: wake_channel_capacity.max(1),
             comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
+    /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
+    pub fn ephemeral() -> Self {
+        Self::new_with_settings(
+            None,
+            None,
+            Self::default_wake_delivery_policy(),
+            DEFAULT_WAKE_CHANNEL_CAPACITY,
+        )
+    }
+
     /// Create a persistent adapter with a RuntimeStore.
     pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
-            store: Some(store),
-            blob_store: Some(blob_store),
-            comms_drain_slots: RwLock::new(HashMap::new()),
-        }
+        Self::new_with_settings(
+            Some(store),
+            Some(blob_store),
+            Self::default_wake_delivery_policy(),
+            DEFAULT_WAKE_CHANNEL_CAPACITY,
+        )
     }
 
     /// Create a persistent adapter with a RuntimeStore but no blob store.
@@ -443,13 +527,56 @@ impl RuntimeSessionAdapter {
     /// Primarily useful for tests that need to verify recovery without needing
     /// a full blob store.
     pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-            mode: RuntimeMode::V9Compliant,
-            store: Some(store),
-            blob_store: None,
-            comms_drain_slots: RwLock::new(HashMap::new()),
-        }
+        Self::new_with_settings(
+            Some(store),
+            None,
+            Self::default_wake_delivery_policy(),
+            DEFAULT_WAKE_CHANNEL_CAPACITY,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn ephemeral_with_test_settings(
+        wake_channel_capacity: usize,
+        guaranteed_wake: bool,
+    ) -> Self {
+        let wake_policy = if guaranteed_wake {
+            WakeDeliveryPolicy::GuaranteedAwaitSend
+        } else {
+            WakeDeliveryPolicy::BestEffortTrySend
+        };
+        Self::new_with_settings(None, None, wake_policy, wake_channel_capacity)
+    }
+
+    #[doc(hidden)]
+    pub async fn signal_runtime_wake_for_test(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let (driver, wake_handle) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.capture_wake_handle())
+        };
+
+        let Some(wake_handle) = wake_handle else {
+            let state = {
+                let driver = driver.lock().await;
+                driver.as_driver().runtime_state()
+            };
+            return Err(RuntimeDriverError::NotReady { state });
+        };
+
+        Ok(matches!(
+            wake_handle
+                .signal_wake(session_id, WakeReason::TestHarness)
+                .await,
+            WakeDeliveryOutcome::Delivered
+        ))
     }
 
     /// Create a driver entry for a session.
@@ -566,10 +693,9 @@ impl RuntimeSessionAdapter {
             epoch_id,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
+            wake_policy: self.wake_policy,
             attachment: None,
             detached_wake: None,
-            keep_alive: false,
-            comms_runtime: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -674,10 +800,9 @@ impl RuntimeSessionAdapter {
                             epoch_id: recovered_epoch,
                             cursor_state: recovered_cursors,
                             completions: completions.clone(),
+                            wake_policy: self.wake_policy,
                             attachment: None,
                             detached_wake: None,
-                            keep_alive: false,
-                            comms_runtime: None,
                         },
                     );
                     (driver, completions, recovered_ops)
@@ -779,7 +904,7 @@ impl RuntimeSessionAdapter {
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
-        let (wake_tx, wake_rx) = mpsc::channel(16);
+        let (wake_tx, wake_rx) = mpsc::channel(self.wake_channel_capacity);
         let (control_tx, control_rx) = mpsc::channel(16);
         let entry_cursor_state = {
             let sessions = self.sessions.read().await;
@@ -847,7 +972,12 @@ impl RuntimeSessionAdapter {
         }
 
         if should_wake {
-            let _ = wake_tx.try_send(());
+            WakeHandle {
+                policy: self.wake_policy,
+                wake_tx,
+            }
+            .signal_wake(&session_id, WakeReason::PublishAttach)
+            .await;
         }
     }
 
@@ -1146,7 +1276,7 @@ impl RuntimeSessionAdapter {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        let (driver, completions, wake_tx, _control_tx) = {
+        let (driver, completions, wake_handle, control_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -1156,7 +1286,7 @@ impl RuntimeSessionAdapter {
             (
                 entry.driver.clone(),
                 entry.completions.clone(),
-                entry.wake_sender(),
+                entry.capture_wake_handle(),
                 entry.control_sender(),
             )
         };
@@ -1219,9 +1349,18 @@ impl RuntimeSessionAdapter {
         };
 
         if signal.should_wake()
-            && let Some(ref wake_tx) = wake_tx
+            && let Some(wake_handle) = wake_handle
         {
-            let _ = wake_tx.try_send(());
+            wake_handle
+                .signal_wake(session_id, WakeReason::AcceptedInputWithCompletion)
+                .await;
+        }
+        if signal.should_interrupt_yielding()
+            && let Some(ref tx) = control_tx
+        {
+            let _ = tx.try_send(
+                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+            );
         }
 
         Ok((outcome, handle))
@@ -1300,64 +1439,46 @@ impl RuntimeSessionAdapter {
         })
     }
 
-    /// Update the session's peer-ingress context, then reconcile the canonical
-    /// drain lifecycle.
+    /// Manage the comms drain lifecycle for a session based on keep_alive intent.
     ///
-    /// Surfaces may call this when they learn or change keep_alive/comms
-    /// context, but the adapter owns the actual drain-mode decision.
-    pub async fn update_peer_ingress_context(
+    /// When `keep_alive` is true, spawns a drain if one is not already running.
+    /// When `keep_alive` is false, aborts any running drain for the session.
+    /// Returns `true` if a new drain was spawned.
+    ///
+    /// All state transitions go through `CommsDrainLifecycleAuthority`.
+    pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get_mut(session_id) else {
-                tracing::warn!(
-                    %session_id,
-                    "refusing to configure comms drain for unregistered session"
-                );
-                return false;
-            };
-            entry.keep_alive = keep_alive;
-            entry.comms_runtime = comms_runtime;
-        }
-        self.reconcile_peer_ingress(session_id).await
-    }
-
-    async fn reconcile_peer_ingress(self: &Arc<Self>, session_id: &SessionId) -> bool {
-        let (keep_alive, comms_runtime) = {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get_mut(session_id) else {
-                return false;
-            };
-            entry.clear_dead_attachment();
-            (entry.keep_alive, entry.comms_runtime.clone())
-        };
-
-        let state = match self.runtime_state(session_id).await {
-            Ok(state) => state,
-            Err(_) => RuntimeState::Destroyed,
-        };
-        let desired = desired_peer_ingress_mode(state, comms_runtime.is_some(), keep_alive);
-
-        let Some(comms) = comms_runtime else {
-            if desired.is_none() {
-                self.abort_comms_drain(session_id).await;
-            }
+        if !keep_alive {
+            // Explicit disable: stop any running drain for this session.
+            self.abort_comms_drain(session_id).await;
             return false;
+        }
+
+        let mode = CommsDrainMode::PersistentHost;
+
+        let comms = match comms_runtime {
+            Some(c) => c,
+            None => return false,
         };
 
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(session_id) {
+            tracing::warn!(
+                %session_id,
+                "refusing to spawn comms drain for unregistered session"
+            );
+            return false;
+        }
+        // Keep the session read guard while mutating drain slots so unregister
+        // cannot race between registration check and slot publication.
         let mut slots = self.comms_drain_slots.write().await;
         let slot = slots
             .entry(session_id.clone())
             .or_insert_with(CommsDrainSlot::new);
-
-        let Some(mode) = desired else {
-            abort_slot(slot);
-            return false;
-        };
 
         let result =
             match protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode) {
@@ -1371,11 +1492,16 @@ impl RuntimeSessionAdapter {
         // Execute effects from the transition
         for effect in &result.effects {
             match effect {
-                CommsDrainLifecycleEffect::SpawnDrainTask { .. } => {
+                CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
+                    let idle_timeout = match spawn_mode {
+                        CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
+                        CommsDrainMode::Timed => None,
+                    };
                     let handle = crate::comms_drain::spawn_comms_drain(
                         Arc::clone(self),
                         session_id.clone(),
                         comms.clone(),
+                        idle_timeout,
                     );
                     slot.handle = Some(handle);
                 }
@@ -1411,24 +1537,17 @@ impl RuntimeSessionAdapter {
     /// Called from drain task exit paths (or by wrappers that detect task
     /// completion). The authority decides whether to enter ExitedRespawnable
     /// (PersistentHost + Failed) or Stopped.
-    pub async fn notify_comms_drain_exited(
-        self: &Arc<Self>,
-        session_id: &SessionId,
-        reason: DrainExitReason,
-    ) {
-        {
-            let mut slots = self.comms_drain_slots.write().await;
-            if let Some(slot) = slots.get_mut(session_id) {
-                slot.handle.take(); // clean up finished handle
-                match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
-                    Ok(_effects) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
-                    }
+    pub async fn notify_comms_drain_exited(&self, session_id: &SessionId, reason: DrainExitReason) {
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            slot.handle.take(); // clean up finished handle
+            match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
+                Ok(_effects) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
                 }
             }
         }
-        let _ = self.reconcile_peer_ingress(session_id).await;
     }
 
     /// Abort all active comms drain tasks.
@@ -1502,7 +1621,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let (driver, wake_tx, _control_tx) = {
+        let (driver, wake_handle, control_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -1511,7 +1630,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                 })?;
             (
                 entry.driver.clone(),
-                entry.wake_sender(),
+                entry.capture_wake_handle(),
                 entry.control_sender(),
             )
         };
@@ -1524,11 +1643,12 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             (result, signal)
         };
 
-        // Deliver typed post-admission signals.
         if signal.should_wake() {
-            match wake_tx {
-                Some(ref wake_tx) => {
-                    let _ = wake_tx.try_send(());
+            match wake_handle {
+                Some(wake_handle) => {
+                    wake_handle
+                        .signal_wake(session_id, WakeReason::AcceptedInput)
+                        .await;
                 }
                 None => {
                     tracing::warn!(
@@ -1539,6 +1659,15 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                     );
                 }
             }
+        }
+        // InterruptYielding: deliver through the per-session control channel
+        // so the running agent can break out of cooperative yield points.
+        if signal.should_interrupt_yielding()
+            && let Some(ref tx) = control_tx
+        {
+            let _ = tx.try_send(
+                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+            );
         }
 
         Ok(outcome)
@@ -1574,7 +1703,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<RetireReport, RuntimeDriverError> {
-        let (driver_handle, completions, wake_tx) = {
+        let (driver_handle, completions, wake_handle) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -1584,7 +1713,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             (
                 entry.driver.clone(),
                 entry.completions.clone(),
-                entry.wake_sender(),
+                entry.capture_wake_handle(),
             )
         };
         let mut driver = driver_handle.lock().await;
@@ -1594,10 +1723,13 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         if report.inputs_pending_drain > 0 {
             // Wake the runtime loop so it drains already-queued inputs.
             // Retired state allows processing but rejects new accepts.
-            if let Some(ref wake_tx) = wake_tx
-                && wake_tx.send(()).await.is_ok()
-            {
-                return Ok(report);
+            if let Some(wake_handle) = wake_handle {
+                let wake_outcome = wake_handle
+                    .signal_wake(session_id, WakeReason::RetireDrain)
+                    .await;
+                if !matches!(wake_outcome, WakeDeliveryOutcome::NoReceiver) {
+                    return Ok(report);
+                }
             }
 
             // No live loop can drain this retired queue. Abandon the queued work
@@ -1712,7 +1844,7 @@ impl RuntimeSessionAdapter {
             SessionId,
             SharedDriver,
             SharedCompletionRegistry,
-            Option<mpsc::Sender<()>>,
+            Option<WakeHandle>,
         ),
         RuntimeControlPlaneError,
     > {
@@ -1725,7 +1857,7 @@ impl RuntimeSessionAdapter {
             session_id,
             entry.driver.clone(),
             entry.completions.clone(),
-            entry.wake_sender(),
+            entry.capture_wake_handle(),
         ))
     }
 }
@@ -1738,7 +1870,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         runtime_id: &LogicalRuntimeId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeControlPlaneError> {
-        let (session_id, driver, _completions, wake_tx, _control_tx) = {
+        let (session_id, driver, _completions, wake_handle, control_tx) = {
             let (sid, d, c, w) = self.lookup_entry(runtime_id).await?;
             let ctrl = {
                 let sessions = self.sessions.read().await;
@@ -1748,7 +1880,6 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
             };
             (sid, d, c, w, ctrl)
         };
-        let _ = session_id;
 
         let (outcome, signal) = {
             let mut drv = driver.lock().await;
@@ -1762,9 +1893,18 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         };
 
         if signal.should_wake()
-            && let Some(ref tx) = wake_tx
+            && let Some(wake_handle) = wake_handle
         {
-            let _ = tx.try_send(());
+            wake_handle
+                .signal_wake(&session_id, WakeReason::ControlPlaneIngest)
+                .await;
+        }
+        if signal.should_interrupt_yielding()
+            && let Some(ref tx) = control_tx
+        {
+            let _ = tx.try_send(
+                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+            );
         }
 
         Ok(outcome)
@@ -1788,8 +1928,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RetireReport, RuntimeControlPlaneError> {
-        let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
-        let _ = session_id;
+        let (session_id, driver, completions, wake_handle) = self.lookup_entry(runtime_id).await?;
 
         let mut drv = driver.lock().await;
         let mut report = drv
@@ -1800,10 +1939,13 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         drop(drv);
 
         if report.inputs_pending_drain > 0 {
-            if let Some(ref tx) = wake_tx
-                && tx.send(()).await.is_ok()
-            {
-                return Ok(report);
+            if let Some(wake_handle) = wake_handle {
+                let wake_outcome = wake_handle
+                    .signal_wake(&session_id, WakeReason::ControlPlaneRetireDrain)
+                    .await;
+                if !matches!(wake_outcome, WakeDeliveryOutcome::NoReceiver) {
+                    return Ok(report);
+                }
             }
 
             // No live loop — abandon queued work
@@ -1826,7 +1968,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RecycleReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let (session_id, driver, completions, wake_handle) = self.lookup_entry(runtime_id).await?;
 
         let (transferred, active_after_recycle) = {
             let mut drv = driver.lock().await;
@@ -1869,8 +2011,10 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         }
 
         // Wake the runtime loop to process re-queued inputs
-        if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
+        if let Some(wake_handle) = wake_handle {
+            wake_handle
+                .signal_wake(&session_id, WakeReason::Recycle)
+                .await;
         }
 
         Ok(RecycleReport {
@@ -1907,7 +2051,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RecoveryReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, _completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let (session_id, driver, _completions, wake_handle) = self.lookup_entry(runtime_id).await?;
 
         let mut drv = driver.lock().await;
         let report = drv
@@ -1917,8 +2061,10 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
             .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
         drop(drv);
 
-        if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
+        if let Some(wake_handle) = wake_handle {
+            wake_handle
+                .signal_wake(&session_id, WakeReason::Recover)
+                .await;
         }
 
         Ok(report)
@@ -1980,7 +2126,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use meerkat_core::agent::CommsRuntime;
+    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
     use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
     use tokio::sync::Notify;
 
@@ -2019,10 +2165,11 @@ mod tests {
             self.dismiss.load(Ordering::Acquire)
         }
 
-        async fn drain_peer_input_candidates(
+        async fn drain_classified_inbox_interactions(
             &self,
-        ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
-            Vec::new()
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
+        {
+            Ok(Vec::new())
         }
     }
 
@@ -2031,6 +2178,7 @@ mod tests {
         session_id: &SessionId,
         mode: CommsDrainMode,
         comms_runtime: Arc<dyn CommsRuntime>,
+        idle_timeout: Duration,
     ) {
         adapter.register_session(session_id.clone()).await;
         let mut slots = adapter.comms_drain_slots.write().await;
@@ -2050,6 +2198,7 @@ mod tests {
                     Arc::clone(adapter),
                     session_id.clone(),
                     Arc::clone(&comms_runtime),
+                    Some(idle_timeout),
                 ));
             }
         }
@@ -2104,6 +2253,7 @@ mod tests {
             &session_id,
             CommsDrainMode::PersistentHost,
             comms_runtime,
+            Duration::from_millis(25),
         )
         .await;
 
@@ -2120,47 +2270,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn desired_peer_ingress_mode_tracks_live_attachment_and_keep_alive() {
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Attached, true, false),
-            Some(CommsDrainMode::AttachedSession)
+    #[tokio::test]
+    async fn idle_timeout_updates_authority_before_join() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::Timed,
+            comms_runtime,
+            Duration::from_millis(25),
+        )
+        .await;
+
+        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
+        assert!(
+            !handle_present(&adapter, &session_id).await,
+            "drain task should clear its slot before wait_comms_drain joins"
         );
+
+        adapter.wait_comms_drain(&session_id).await;
         assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Running, true, false),
-            Some(CommsDrainMode::AttachedSession)
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Recovering, true, false),
-            Some(CommsDrainMode::AttachedSession)
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Idle, true, true),
-            Some(CommsDrainMode::PersistentHost)
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Idle, true, false),
-            None
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Attached, false, true),
-            None
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Initializing, true, true),
-            None
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Retired, true, true),
-            None
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Stopped, true, true),
-            None
-        );
-        assert_eq!(
-            desired_peer_ingress_mode(RuntimeState::Destroyed, true, true),
-            None
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Stopped)
         );
     }
 
@@ -2176,6 +2310,7 @@ mod tests {
             &session_id,
             CommsDrainMode::PersistentHost,
             comms_runtime,
+            Duration::from_secs(60),
         )
         .await;
 

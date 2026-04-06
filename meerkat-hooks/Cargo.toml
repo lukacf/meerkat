@@ -15,14 +15,19 @@ categories.workspace = true
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-skills = { workspace = true }
-inventory = { workspace = true }
+meerkat-skills = { workspace = true, optional = true }
+inventory = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = ["capability-registrations"]
+capability-registrations = ["dep:inventory"]
+skill-registrations = ["capability-registrations", "dep:meerkat-skills"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

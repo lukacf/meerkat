@@ -126,7 +126,7 @@ meerkat-cli = { version = "0.5.1", path = "meerkat-cli" }
 meerkat-rest = { version = "0.5.1", path = "meerkat-rest" }
 meerkat = { version = "0.5.1", path = "meerkat", default-features = false }
 meerkat-comms = { version = "0.5.1", path = "meerkat-comms" }
-meerkat-hooks = { version = "0.5.1", path = "meerkat-hooks" }
+meerkat-hooks = { version = "0.5.1", path = "meerkat-hooks", default-features = false }
 meerkat-rpc = { version = "0.5.1", path = "meerkat-rpc" }
 meerkat-runtime = { version = "0.5.1", path = "meerkat-runtime", default-features = false }
 meerkat-session = { version = "0.5.1", path = "meerkat-session", default-features = false }

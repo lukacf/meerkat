@@ -1,12 +1,11 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use meerkat_core::{SessionId, SessionMeta};
+use meerkat_core::{Message, Session, UserMessage};
 use meerkat_store::SessionFilter;
 use meerkat_store::SessionStore;
-use meerkat_store::index::SqliteSessionIndex;
 use meerkat_store::jsonl::JsonlStore;
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 struct PreparedStore {
     _temp_dir: tempfile::TempDir,
@@ -19,42 +18,16 @@ fn p95(samples: &mut [Duration]) -> Duration {
     samples[idx]
 }
 
-fn make_metas(count: usize) -> Vec<SessionMeta> {
-    let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
-    (0..count)
-        .map(|i| {
-            let delta = Duration::from_millis(i as u64);
-            let created_at = base + delta;
-            SessionMeta {
-                id: SessionId::new(),
-                created_at,
-                updated_at: created_at,
-                message_count: 0,
-                total_tokens: 0,
-                metadata: serde_json::Map::new(),
-            }
-        })
-        .collect()
-}
-
 async fn prepare_store(session_count: usize) -> PreparedStore {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let store_dir = temp_dir.path().to_path_buf();
-
-    let store = Arc::new(JsonlStore::new(store_dir.clone()));
+    let store = Arc::new(JsonlStore::new(temp_dir.path().to_path_buf()));
     store.init().await.expect("init store dir");
 
-    let index_path = store_dir.join("session_index.sqlite3");
-    let metas = make_metas(session_count);
-
-    tokio::task::spawn_blocking(move || {
-        let index = SqliteSessionIndex::open(index_path)?;
-        index.insert_many(metas)?;
-        Ok::<_, meerkat_store::StoreError>(())
-    })
-    .await
-    .expect("spawn_blocking")
-    .expect("insert_many");
+    for i in 0..session_count {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text(format!("session-{i}"))));
+        store.save(&session).await.expect("save session");
+    }
 
     // Warm the index cache inside JsonlStore.
     let _ = store

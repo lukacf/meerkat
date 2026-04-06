@@ -26,11 +26,9 @@ sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-meerkat-skills = { workspace = true }
-inventory = { workspace = true }
-
-# Optional dependencies (gated by features, not available on wasm32)
-meerkat-store = { workspace = true, optional = true }
+meerkat-skills = { workspace = true, optional = true }
+inventory = { workspace = true, optional = true }
+redb = { workspace = true, optional = true }
 meerkat-runtime = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -43,8 +41,11 @@ meerkat-store = { workspace = true, features = ["memory"] }
 
 [features]
 default = []
-session-store = ["dep:meerkat-store", "dep:meerkat-runtime"]
-session-compaction = []
+session-store = ["dep:meerkat-runtime", "capability-registrations"]
+capability-registrations = ["dep:inventory"]
+redb-events = ["dep:redb"]
+skill-registrations = ["capability-registrations", "dep:meerkat-skills"]
+session-compaction = ["capability-registrations"]
 
 [lints]
 workspace = true

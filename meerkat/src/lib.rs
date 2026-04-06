@@ -150,12 +150,14 @@ pub use meerkat_core::SessionServiceControlExt;
 pub use meerkat_core::SessionServiceHistoryExt;
 #[cfg(feature = "comms")]
 pub use meerkat_core::{
-    CommsCommand, EventStream, InputSource, PeerDirectoryEntry, PeerDirectorySource, PeerName,
-    SendError, SendReceipt, StreamError, StreamScope,
+    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
+    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
+    StreamScope,
 };
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_core::ToolError;
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
     DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
@@ -166,12 +168,11 @@ pub use meerkat_schedule::{
     SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
     ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService, ScheduleStore,
     ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe,
-    ScheduleToolDispatcher, ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind,
-    ScheduledMobRuntimeMode, ScheduledSessionAction, SessionMaterializationSpec,
-    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
-    handle_schedule_tools_call, schedule_tools_list,
+    ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+    TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call,
+    schedule_tools_list,
 };
-pub use meerkat_tools::ToolError;
 
 // AgentFactory and build_agent types
 mod factory;
@@ -184,7 +185,15 @@ mod persistence;
 pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "session-store",
+    any(
+        feature = "jsonl-store",
+        feature = "sqlite-store",
+        feature = "redb-store"
+    ),
+    not(target_arch = "wasm32")
+))]
 pub use persistence::open_realm_persistence_in;
 
 // Factory-backed SessionService wiring (substrate — testing/embedded use).
@@ -230,13 +239,17 @@ pub use meerkat_store::JsonlStore;
 #[cfg(feature = "memory-store")]
 pub use meerkat_store::MemoryStore;
 
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::RedbScheduleStore;
+#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::RedbSessionStore;
+#[cfg(all(feature = "sqlite-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteScheduleStore;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "sqlite-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteSessionStore;
 
 // Re-export tools
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidationError};
 
 // Embedded skill registration.
@@ -246,7 +259,7 @@ pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolRegistry, ToolValidat
 // example RPC). Register it from the base crate so any skills-enabled surface
 // links the embedded skill inventory entry even when `meerkat-mob` itself is
 // not compiled into that binary.
-#[cfg(feature = "skills")]
+#[cfg(feature = "skill-registrations")]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "mob-communication",
@@ -260,16 +273,21 @@ inventory::submit! {
 }
 
 // Re-export builtin tools infrastructure
-#[cfg(feature = "comms")]
+#[cfg(all(feature = "comms", feature = "builtin-tools"))]
 pub use meerkat_tools::CommsToolSurface;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "builtin-tools",
+    feature = "sqlite-store",
+    not(target_arch = "wasm32")
+))]
 pub use meerkat_tools::builtin::SqliteTaskStore;
+#[cfg(feature = "builtin-tools")]
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
     ToolMode, ToolPolicyLayer,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "builtin-tools", not(target_arch = "wasm32")))]
 pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 
 // Re-export MCP client

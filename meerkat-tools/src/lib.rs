@@ -63,6 +63,7 @@ pub use registry::ToolRegistry;
 pub use schema::{empty_object_schema, schema_for};
 
 // Capability registrations
+#[cfg(feature = "capability-registrations")]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Builtins,
@@ -82,7 +83,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "capability-registrations", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Shell,
@@ -103,6 +104,7 @@ inventory::submit! {
 }
 
 // Skill registrations
+#[cfg(feature = "skills")]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "task-workflow",
@@ -115,7 +117,7 @@ inventory::submit! {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "shell-patterns",

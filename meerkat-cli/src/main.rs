@@ -6906,11 +6906,11 @@ fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet<String> {
-    let mut caps = std::collections::BTreeSet::from([
-        "core".to_string(),
-        "skills".to_string(),
-        "hooks".to_string(),
-    ]);
+    let mut caps = std::collections::BTreeSet::from(["core".to_string()]);
+    #[cfg(feature = "skills")]
+    caps.insert("skills".to_string());
+    #[cfg(feature = "hooks")]
+    caps.insert("hooks".to_string());
     #[cfg(feature = "comms")]
     caps.insert("comms".to_string());
     #[cfg(feature = "mcp")]
@@ -7229,6 +7229,16 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
+    }
+
+    #[test]
+    fn test_runtime_capabilities_reflect_compiled_optional_support() {
+        let caps = runtime_capabilities(DeploySurfaceArg::Cli);
+        assert!(caps.contains("core"));
+        assert_eq!(caps.contains("skills"), cfg!(feature = "skills"));
+        assert_eq!(caps.contains("hooks"), cfg!(feature = "hooks"));
+        assert_eq!(caps.contains("comms"), cfg!(feature = "comms"));
+        assert_eq!(caps.contains("mcp"), cfg!(feature = "mcp"));
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {

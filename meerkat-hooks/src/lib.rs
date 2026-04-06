@@ -7,6 +7,7 @@ mod tokio {
 }
 
 // Skill registration
+#[cfg(feature = "skill-registrations")]
 inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "hook-authoring",
@@ -20,6 +21,7 @@ inventory::submit! {
 }
 
 // Capability registration
+#[cfg(feature = "capability-registrations")]
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Hooks,

@@ -151,6 +151,12 @@ impl AnthropicClient {
                 Message::System(s) => {
                     system_prompt = Some(s.content.clone());
                 }
+                Message::SystemNotice(notice) => {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": notice.rendered_text()
+                    }));
+                }
                 Message::User(u) => {
                     if meerkat_core::has_images(&u.content) {
                         let content_array: Vec<Value> = u

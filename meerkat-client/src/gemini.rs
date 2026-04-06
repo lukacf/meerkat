@@ -75,6 +75,12 @@ impl GeminiClient {
                         "parts": [{"text": s.content}]
                     }));
                 }
+                Message::SystemNotice(notice) => {
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": [{"text": notice.rendered_text()}]
+                    }));
+                }
                 Message::User(u) => {
                     if meerkat_core::has_images(&u.content) {
                         let parts: Vec<Value> = u

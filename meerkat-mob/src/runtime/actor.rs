@@ -62,6 +62,9 @@ fn render_fork_context(
             Message::System(s) => {
                 lines.push(format!("[system]: {}", s.content));
             }
+            Message::SystemNotice(notice) => {
+                lines.push(format!("[system_notice]: {}", notice.rendered_text()));
+            }
             Message::User(u) => {
                 lines.push(format!("[user]: {}", u.text_content()));
             }

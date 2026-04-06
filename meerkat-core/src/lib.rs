@@ -207,7 +207,7 @@ pub use turn_execution_authority::{
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
     ContentInput, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta, RunResult,
-    SecurityMode, SessionId, StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView,
-    ToolDef, ToolResult, Usage, UserMessage, has_images,
+    SecurityMode, SessionId, StopReason, SystemMessage, SystemNoticeKind, SystemNoticeMessage,
+    ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage, UserMessage, has_images,
 };
 pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

@@ -179,6 +179,13 @@ impl OpenAiClient {
                         "content": s.content
                     }));
                 }
+                Message::SystemNotice(notice) => {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": notice.rendered_text()
+                    }));
+                }
                 Message::User(u) => {
                     if meerkat_core::has_images(&u.content) {
                         let content_array: Vec<Value> = u

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
-    SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason,
+    SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
 };
 use std::convert::TryFrom;
 
@@ -370,6 +370,10 @@ pub enum WireSessionMessage {
     System {
         content: String,
     },
+    SystemNotice {
+        kind: SystemNoticeKind,
+        body: String,
+    },
     User {
         content: WireContentInput,
     },
@@ -395,6 +399,10 @@ impl From<Message> for WireSessionMessage {
         match value {
             Message::System(message) => Self::System {
                 content: message.content,
+            },
+            Message::SystemNotice(message) => Self::SystemNotice {
+                kind: message.kind,
+                body: message.body,
             },
             Message::User(message) => {
                 let content = if message.content.len() == 1
@@ -680,7 +688,10 @@ mod tests {
                 Message::System(SystemMessage {
                     content: "sys".to_string(),
                 }),
-                Message::User(UserMessage::text("hi".to_string())),
+                Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                    meerkat_core::SystemNoticeKind::BackgroundJob,
+                    "still running",
+                )),
                 Message::Assistant(AssistantMessage {
                     content: "hello".to_string(),
                     tool_calls: vec![ToolCall::new(
@@ -699,7 +710,10 @@ mod tests {
             wire.messages[0],
             WireSessionMessage::System { .. }
         ));
-        assert!(matches!(wire.messages[1], WireSessionMessage::User { .. }));
+        assert!(matches!(
+            wire.messages[1],
+            WireSessionMessage::SystemNotice { .. }
+        ));
         assert!(matches!(
             wire.messages[2],
             WireSessionMessage::Assistant { .. }

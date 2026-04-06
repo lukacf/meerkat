@@ -652,20 +652,19 @@ impl std::fmt::Display for SessionId {
 }
 
 /// A message in the conversation history
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "role", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum Message {
     /// System prompt (injected at start)
     System(SystemMessage),
+    /// Typed synthetic/runtime system notice.
+    SystemNotice(SystemNoticeMessage),
     /// User input
     User(UserMessage),
     /// Assistant response (may include tool calls) - legacy format
     Assistant(AssistantMessage),
     /// Assistant response with ordered blocks - new format (spec v2)
-    #[serde(rename = "block_assistant")]
     BlockAssistant(BlockAssistantMessage),
     /// Results from tool execution
-    #[serde(rename = "tool_results")]
     ToolResults { results: Vec<ToolResult> },
 }
 
@@ -677,6 +676,7 @@ impl Message {
     /// content, tool results are structured data).
     pub fn as_indexable_text(&self) -> String {
         match self {
+            Message::SystemNotice(_) => String::new(),
             Message::User(u) => u.text_content(),
             Message::Assistant(a) => a.content.clone(),
             Message::BlockAssistant(ba) => {
@@ -694,11 +694,144 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+enum MessageWire {
+    System(SystemMessage),
+    SystemNotice(SystemNoticeMessage),
+    User(UserMessage),
+    Assistant(AssistantMessage),
+    #[serde(rename = "block_assistant")]
+    BlockAssistant(BlockAssistantMessage),
+    #[serde(rename = "tool_results")]
+    ToolResults {
+        results: Vec<ToolResult>,
+    },
+}
+
+impl Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = match self {
+            Self::System(message) => MessageWire::System(message.clone()),
+            Self::SystemNotice(message) => MessageWire::SystemNotice(message.clone()),
+            Self::User(message) => MessageWire::User(message.clone()),
+            Self::Assistant(message) => MessageWire::Assistant(message.clone()),
+            Self::BlockAssistant(message) => MessageWire::BlockAssistant(message.clone()),
+            Self::ToolResults { results } => MessageWire::ToolResults {
+                results: results.clone(),
+            },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MessageWire::deserialize(deserializer)?;
+        Ok(match wire {
+            MessageWire::System(message) => Self::System(message),
+            MessageWire::SystemNotice(message) => Self::SystemNotice(message),
+            MessageWire::User(message) => SystemNoticeMessage::try_from_legacy_user(&message)
+                .map(Self::SystemNotice)
+                .unwrap_or(Self::User(message)),
+            MessageWire::Assistant(message) => Self::Assistant(message),
+            MessageWire::BlockAssistant(message) => Self::BlockAssistant(message),
+            MessageWire::ToolResults { results } => Self::ToolResults { results },
+        })
+    }
+}
+
 /// System message content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemMessage {
     pub content: String,
+}
+
+/// Typed system notice content carried in the transcript.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemNoticeKind {
+    Generic,
+    McpPending,
+    BackgroundJob,
+    ToolScope,
+    ToolScopeWarning,
+}
+
+impl SystemNoticeKind {
+    pub const fn render_class(self) -> RenderClass {
+        match self {
+            Self::Generic | Self::McpPending => RenderClass::SystemNotice,
+            Self::BackgroundJob => RenderClass::OpsProgress,
+            Self::ToolScope | Self::ToolScopeWarning => RenderClass::ToolScopeNotice,
+        }
+    }
+
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::Generic => "[SYSTEM NOTICE]",
+            Self::McpPending => "[SYSTEM NOTICE][MCP_PENDING]",
+            Self::BackgroundJob => "[SYSTEM NOTICE][BG_JOB]",
+            Self::ToolScope => "[SYSTEM NOTICE][TOOL_SCOPE]",
+            Self::ToolScopeWarning => "[SYSTEM NOTICE][TOOL_SCOPE][WARNING]",
+        }
+    }
+
+    fn parse_legacy(text: &str) -> Option<(Self, &str)> {
+        const PREFIXES: &[(SystemNoticeKind, &str)] = &[
+            (
+                SystemNoticeKind::ToolScopeWarning,
+                "[SYSTEM NOTICE][TOOL_SCOPE][WARNING] ",
+            ),
+            (SystemNoticeKind::ToolScope, "[SYSTEM NOTICE][TOOL_SCOPE] "),
+            (
+                SystemNoticeKind::McpPending,
+                "[SYSTEM NOTICE][MCP_PENDING] ",
+            ),
+            (SystemNoticeKind::BackgroundJob, "[SYSTEM NOTICE][BG_JOB] "),
+            (SystemNoticeKind::Generic, "[SYSTEM NOTICE] "),
+        ];
+
+        PREFIXES
+            .iter()
+            .find_map(|(kind, prefix)| text.strip_prefix(prefix).map(|body| (*kind, body)))
+    }
+}
+
+/// System notice message stored in the canonical transcript.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SystemNoticeMessage {
+    pub kind: SystemNoticeKind,
+    pub body: String,
+}
+
+impl SystemNoticeMessage {
+    pub fn new(kind: SystemNoticeKind, body: impl Into<String>) -> Self {
+        Self {
+            kind,
+            body: body.into(),
+        }
+    }
+
+    pub fn rendered_text(&self) -> String {
+        format!("{} {}", self.kind.prefix(), self.body)
+    }
+
+    fn try_from_legacy_user(user: &UserMessage) -> Option<Self> {
+        let text = user.text_content();
+        let (kind, body) = SystemNoticeKind::parse_legacy(&text)?;
+        Some(Self::new(kind, body))
+    }
 }
 
 /// User message content

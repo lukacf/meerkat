@@ -61,6 +61,16 @@ fn test_message_json_schema() {
     assert_eq!(json["content"], "Hello!");
     assert!(json.get("render_metadata").is_none());
 
+    // System notice message
+    let notice = Message::SystemNotice(SystemNoticeMessage::new(
+        SystemNoticeKind::BackgroundJob,
+        "Background job still running.",
+    ));
+    let json = serde_json::to_value(&notice).unwrap();
+    assert_eq!(json["role"], "system_notice");
+    assert_eq!(json["kind"], "background_job");
+    assert_eq!(json["body"], "Background job still running.");
+
     // Assistant message
     let assistant = Message::Assistant(AssistantMessage {
         content: "Hi there!".to_string(),
@@ -100,6 +110,23 @@ fn test_user_message_render_metadata_serialization() {
     assert_eq!(json["role"], "user");
     assert_eq!(json["render_metadata"]["class"], "tool_scope_notice");
     assert_eq!(json["render_metadata"]["salience"], "normal");
+}
+
+#[test]
+fn test_legacy_user_notice_deserializes_to_system_notice() {
+    let parsed: Message = serde_json::from_value(json!({
+        "role": "user",
+        "content": "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed."
+    }))
+    .unwrap();
+
+    match parsed {
+        Message::SystemNotice(notice) => {
+            assert_eq!(notice.kind, SystemNoticeKind::ToolScope);
+            assert_eq!(notice.body, "Tool configuration changed.");
+        }
+        other => panic!("expected system notice, got {other:?}"),
+    }
 }
 
 #[test]

@@ -8,7 +8,6 @@ use crate::hooks::{
 };
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
-use crate::lifecycle::run_primitive::ConversationAppendRole;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -17,8 +16,8 @@ use crate::turn_execution_authority::{
     TurnExecutionTransition,
 };
 use crate::types::{
-    AssistantBlock, BlockAssistantMessage, Message, RenderClass, RunResult, ToolCallView, ToolDef,
-    ToolResult, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolResult, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -38,91 +37,12 @@ enum CallTimeoutSource {
     TurnBudget,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SystemNoticeKind {
-    McpPending,
-    BackgroundJob,
-    ToolScope,
-    ToolScopeWarning,
-}
-
-impl SystemNoticeKind {
-    const fn role(self) -> ConversationAppendRole {
-        ConversationAppendRole::SystemNotice
-    }
-
-    const fn render_class(self) -> RenderClass {
-        match self {
-            Self::McpPending => RenderClass::SystemNotice,
-            Self::BackgroundJob => RenderClass::OpsProgress,
-            Self::ToolScope | Self::ToolScopeWarning => RenderClass::ToolScopeNotice,
-        }
-    }
-
-    const fn role_prefix(self) -> &'static str {
-        match self.role() {
-            ConversationAppendRole::SystemNotice => "[SYSTEM NOTICE]",
-            ConversationAppendRole::User
-            | ConversationAppendRole::Assistant
-            | ConversationAppendRole::Tool => "",
-        }
-    }
-
-    const fn render_class_prefix(self) -> &'static str {
-        match self.render_class() {
-            RenderClass::ToolScopeNotice => "[TOOL_SCOPE]",
-            RenderClass::UserPrompt
-            | RenderClass::PeerMessage
-            | RenderClass::PeerRequest
-            | RenderClass::PeerResponse
-            | RenderClass::ExternalEvent
-            | RenderClass::FlowStep
-            | RenderClass::Continuation
-            | RenderClass::SystemNotice
-            | RenderClass::OpsProgress => "",
-        }
-    }
-
-    const fn detail_prefix(self) -> &'static str {
-        match self {
-            Self::McpPending => "[MCP_PENDING]",
-            Self::BackgroundJob => "[BG_JOB]",
-            Self::ToolScope => "",
-            Self::ToolScopeWarning => "[WARNING]",
-        }
-    }
-
-    fn prefix(self) -> String {
-        format!(
-            "{}{}{}",
-            self.role_prefix(),
-            self.render_class_prefix(),
-            self.detail_prefix()
-        )
-    }
-}
-
 fn synthetic_notice_message(kind: SystemNoticeKind, body: impl Into<String>) -> Message {
-    Message::User(UserMessage::text_with_render_metadata(
-        format!("{} {}", kind.prefix(), body.into()),
-        Some(crate::types::RenderMetadata {
-            class: kind.render_class(),
-            salience: crate::types::RenderSalience::Normal,
-        }),
-    ))
+    Message::SystemNotice(SystemNoticeMessage::new(kind, body))
 }
 
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
-    let prefix = kind.prefix();
-    matches!(
-        message,
-        Message::User(user)
-            if user
-                .render_metadata
-                .as_ref()
-                .is_some_and(|meta| meta.class == kind.render_class())
-                && user.text_content().starts_with(&prefix)
-    )
+    matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -2953,8 +2873,10 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|msg| match msg {
-                Message::User(user) if is_synthetic_notice(msg, SystemNoticeKind::ToolScope) => {
-                    Some(user.text_content())
+                Message::SystemNotice(notice)
+                    if is_synthetic_notice(msg, SystemNoticeKind::ToolScope) =>
+                {
+                    Some(notice.rendered_text())
                 }
                 _ => None,
             })
@@ -3005,10 +2927,10 @@ mod tests {
             .messages()
             .iter()
             .filter_map(|msg| match msg {
-                Message::User(user)
+                Message::SystemNotice(notice)
                     if is_synthetic_notice(msg, SystemNoticeKind::ToolScopeWarning) =>
                 {
-                    Some(user.text_content())
+                    Some(notice.rendered_text())
                 }
                 _ => None,
             })

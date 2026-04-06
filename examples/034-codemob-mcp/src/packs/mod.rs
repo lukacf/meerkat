@@ -195,5 +195,7 @@ pub fn mob_definition(
         spawn_policy,
         event_router: None,
         owner_session_id: None,
+        is_implicit: false,
+        session_cleanup_policy: SessionCleanupPolicy::Manual,
     }
 }

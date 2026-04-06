@@ -1,8 +1,9 @@
 use std::io::Write as _;
-use std::io::Write as _;
 use std::path::PathBuf;
+use std::ffi::{CString, c_char};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +29,7 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::EspSntp;
 use esp_idf_svc::sys;
+use esp_idf_svc::tls::X509;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use futures::StreamExt;
 use meerkat_comms::agent::wrap_with_comms;
@@ -36,16 +38,18 @@ use meerkat_comms::{
 };
 use meerkat_client::{LlmClientAdapter, OpenAiClient};
 use meerkat_core::event::EventEnvelope;
+use meerkat_core::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookCapability, HookEntryConfig,
-    HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, RetryPolicy, Session,
+    HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, RetryPolicy,
 };
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::SessionServiceCommsExt;
-use meerkat_core::types::{HandlingMode, RenderMetadata, RunResult, SessionId};
+use meerkat_core::types::{HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
 use meerkat_runtime::{InMemoryRuntimeStore, RuntimeSessionAdapter};
 use meerkat_runtime::comms_drain::spawn_comms_drain_with_observer;
@@ -64,7 +68,7 @@ use tokio::sync::mpsc;
 mod runtime_support;
 
 use runtime_support::{
-    ProbeNoopStore, ProbeSessionAgent, ProbeSessionRuntimeExecutor,
+    ProbeDynAgent, ProbeNoopStore, ProbeSessionAgent, ProbeSessionRuntimeExecutor,
 };
 
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
@@ -87,6 +91,7 @@ const HOST_PEER_NAME: &str = match option_env!("HOST_PEER_NAME") {
     Some(value) => value,
     None => "phase0-host",
 };
+const MICROPYTHON_TOOL_NAME: &str = "micropython_exec";
 const HOST_PEER_ADDR: &str = match option_env!("HOST_PEER_ADDR") {
     Some(value) => value,
     None => "tcp://127.0.0.1:4220",
@@ -99,6 +104,8 @@ const MEERKAT_WORKER_STACK_BYTES: &[usize] =
     &[56 * 1024, 48 * 1024, 40 * 1024, 32 * 1024];
 const PHASE0_HOST_SECRET: [u8; 32] = [7; 32];
 const PHASE0_DEVICE_SECRET: [u8; 32] = [9; 32];
+const OPENAI_WE1_PEM: &[u8] =
+    concat!(include_str!("../../../../../meerkat-client/src/openai_we1.pem"), "\0").as_bytes();
 
 type LcdSpi<'d> = SpiDeviceDriver<'d, SpiDriver<'d>>;
 type LcdDc<'d> = PinDriver<'d, Output>;
@@ -183,13 +190,169 @@ struct DeviceProbeAgentBuilder {
     comms_runtime: Arc<CommsRuntime>,
 }
 
-struct NoopStore;
+struct MicroPythonToolArgs {
+    code: String,
+    background: bool,
+}
+
+impl MicroPythonToolArgs {
+    fn parse(call: ToolCallView<'_>) -> Result<Self, ToolError> {
+        let raw: Value = call
+            .parse_args()
+            .map_err(|error| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, error.to_string()))?;
+        let code = raw
+            .get("code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "missing string field 'code'"))?
+            .to_string();
+        let background = raw
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(Self { code, background })
+    }
+}
+
+#[repr(C)]
+struct Phase0MpyResult {
+    job_id: u32,
+    background: bool,
+    ok: bool,
+    truncated: bool,
+    status_code: i32,
+    payload_len: usize,
+    payload: [c_char; 2048],
+}
+
+unsafe extern "C" {
+    fn phase0_mpy_init() -> i32;
+    fn phase0_mpy_exec_sync(
+        code: *const c_char,
+        timeout_ms: u32,
+        out_result: *mut Phase0MpyResult,
+    ) -> i32;
+}
+
+struct EspMicroPythonToolDispatcher {
+    tools: Arc<[Arc<ToolDef>]>,
+    exec_lock: Mutex<()>,
+}
+
+impl EspMicroPythonToolDispatcher {
+    fn new() -> Self {
+        let tool = Arc::new(ToolDef {
+            name: MICROPYTHON_TOOL_NAME.to_string(),
+            description: "Execute Python code using the embedded MicroPython interpreter on the ESP32 device.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute on the embedded device."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Reserved for long-running jobs; sync execution is the proven baseline."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": false
+            }),
+        });
+        Self {
+            tools: vec![tool].into(),
+            exec_lock: Mutex::new(()),
+        }
+    }
+
+    fn ensure_ready() -> Result<(), ToolError> {
+        static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+        let init = INIT_RESULT.get_or_init(|| {
+            emit_marker("MKT:MICROPY:INIT_START", &[]);
+            let err = unsafe { phase0_mpy_init() };
+            emit_marker("MKT:MICROPY:INIT_RESULT", &[("esp_err", &err.to_string())]);
+            if err == 0 {
+                emit_marker("MKT:MICROPY:INIT_OK", &[]);
+                Ok(())
+            } else {
+                Err(format!("embedded MicroPython init failed with esp_err={err}"))
+            }
+        });
+        init.clone().map_err(ToolError::execution_failed)
+    }
+
+    fn exec_sync(&self, call: ToolCallView<'_>, args: MicroPythonToolArgs) -> Result<ToolDispatchOutcome, ToolError> {
+        if args.background {
+            return Err(ToolError::Unavailable {
+                name: MICROPYTHON_TOOL_NAME.to_string(),
+                reason: "background micropython execution is not enabled in this phase-0 firmware".to_string(),
+            });
+        }
+        Self::ensure_ready()?;
+        let _guard = self
+            .exec_lock
+            .lock()
+            .map_err(|_| ToolError::execution_failed("micropython execution lock poisoned"))?;
+        let code = CString::new(args.code.clone())
+            .map_err(|_| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "code contains interior NUL byte"))?;
+        let mut result = Phase0MpyResult {
+            job_id: 0,
+            background: false,
+            ok: false,
+            truncated: false,
+            status_code: 0,
+            payload_len: 0,
+            payload: [0; 2048],
+        };
+        emit_marker("MKT:MICROPY:REQUESTED", &[("bytes", &args.code.len().to_string())]);
+        let err = unsafe { phase0_mpy_exec_sync(code.as_ptr(), 15_000, &mut result) };
+        if err != 0 {
+            emit_marker("MKT:MICROPY:FAILED", &[("esp_err", &err.to_string())]);
+            return Err(ToolError::execution_failed(format!(
+                "embedded MicroPython exec failed with esp_err={err}"
+            )));
+        }
+
+        let payload_len = result.payload_len.min(result.payload.len().saturating_sub(1));
+        let payload = unsafe {
+            let bytes = std::slice::from_raw_parts(result.payload.as_ptr() as *const u8, payload_len);
+            String::from_utf8_lossy(bytes).to_string()
+        };
+        emit_marker(
+            "MKT:MICROPY:COMPLETED",
+            &[
+                ("is_error", if result.ok { "false" } else { "true" }),
+                ("status_code", &result.status_code.to_string()),
+                ("payload_len", &result.payload_len.to_string()),
+            ],
+        );
+        Ok(ToolResult::new(call.id.to_string(), payload, !result.ok).into())
+    }
+}
+
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
+impl AgentToolDispatcher for EspMicroPythonToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tools)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        let args = MicroPythonToolArgs::parse(call)?;
+        self.exec_sync(call, args)
+    }
+}
 
 fn main() {
     sys::link_patches();
+    rom_marker("MKT:ROM:MAIN_ENTER");
     println!("MKT:EARLY:MAIN_ENTER");
     let _ = std::io::stdout().flush();
     EspLogger::initialize_default();
+    rom_marker("MKT:ROM:LOGGER_READY");
     println!("MKT:EARLY:LOGGER_READY");
     let _ = std::io::stdout().flush();
     std::panic::set_hook(Box::new(|panic_info| {
@@ -206,35 +369,68 @@ fn main() {
         );
     }));
 
-    let worker = thread::Builder::new()
-        .name("probe-main".to_string())
-        .stack_size(PROBE_MAIN_STACK_BYTES)
-        .spawn(|| {
-            if let Err(error) = run_probe() {
-                emit_marker(
-                    "MKT:RUST_STACK:FAIL",
-                    &[("error", &json_quote(&error.to_string()))],
-                );
-                emit_marker(
-                    "MKT:SINGLE_NODE:FAIL",
-                    &[("error", &json_quote(&error.to_string()))],
-                );
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        })
-        .expect("failed to spawn probe-main worker");
+    #[cfg(target_os = "espidf")]
+    {
+        rom_marker("MKT:ROM:BEFORE_RUN_PROBE");
+        if let Err(error) = run_probe() {
+            rom_marker("MKT:ROM:RUN_PROBE_ERR");
+            emit_marker(
+                "MKT:RUST_STACK:FAIL",
+                &[("error", &json_quote(&error.to_string()))],
+            );
+            emit_marker(
+                "MKT:SINGLE_NODE:FAIL",
+                &[("error", &json_quote(&error.to_string()))],
+            );
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        rom_marker("MKT:ROM:RUN_PROBE_OK");
+    }
 
-    if let Err(error) = worker.join() {
-        emit_marker(
-            "MKT:RUST_STACK:FAIL",
-            &[("error", &json_quote(&format!("probe-main panicked: {error:?}")))],
-        );
-        std::process::exit(1);
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let worker = thread::Builder::new()
+            .name("probe-main".to_string())
+            .stack_size(PROBE_MAIN_STACK_BYTES)
+            .spawn(|| {
+                if let Err(error) = run_probe() {
+                    emit_marker(
+                        "MKT:RUST_STACK:FAIL",
+                        &[("error", &json_quote(&error.to_string()))],
+                    );
+                    emit_marker(
+                        "MKT:SINGLE_NODE:FAIL",
+                        &[("error", &json_quote(&error.to_string()))],
+                    );
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            })
+            .expect("failed to spawn probe-main worker");
+
+        if let Err(error) = worker.join() {
+            emit_marker(
+                "MKT:RUST_STACK:FAIL",
+                &[("error", &json_quote(&format!("probe-main panicked: {error:?}")))],
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn rom_marker(message: &str) {
+    let mut bytes = Vec::with_capacity(message.len() + 2);
+    bytes.extend_from_slice(message.as_bytes());
+    bytes.push(b'\n');
+    bytes.push(0);
+    unsafe {
+        sys::esp_rom_printf(bytes.as_ptr() as *const c_char);
     }
 }
 
 fn run_probe() -> anyhow::Result<()> {
+    rom_marker("MKT:ROM:RUN_PROBE_ENTER");
     let park_only = option_env!("PARK_ONLY") == Some("1");
     let wifi_ssid = required_build_input(WIFI_SSID, "WIFI_SSID")?;
     let wifi_pass = required_build_input(WIFI_PASS, "WIFI_PASS")?;
@@ -443,20 +639,11 @@ fn run_probe() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl AgentSessionStore for NoopStore {
-    async fn save(&self, _session: &Session) -> Result<(), AgentError> {
-        Ok(())
-    }
-
-    async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
-        Ok(None)
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
 impl SessionAgentBuilder for DeviceProbeAgentBuilder {
     type Agent = ProbeSessionAgent;
 
@@ -484,70 +671,6 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
 
         let tools: Arc<dyn AgentToolDispatcher> =
             wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime));
-        let llm = Arc::new(
-            LlmClientAdapter::new(
-                Arc::new(OpenAiClient::new_with_base_url(
-                    self.openai_api_key.clone(),
-                    self.openai_base_url.clone(),
-                )),
-                self.model.clone(),
-            )
-            .with_provider_params(Some(json!({
-                "reasoning_effort": "low",
-                "stream": false
-            }))),
-        );
-        let store: Arc<dyn AgentSessionStore> = Arc::new(ProbeNoopStore);
-
-        let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> =
-            self.comms_runtime.clone();
-
-        let agent = AgentBuilder::new()
-            .model(req.model.clone())
-            .system_prompt(
-                req.system_prompt
-                    .clone()
-                    .unwrap_or_else(|| device_system_prompt(&self.host_peer_name)),
-            )
-            .max_tokens_per_turn(req.max_tokens.unwrap_or(128))
-            .with_comms_runtime(comms_runtime)
-            .build(llm, tools, store)
-            .await;
-
-        Ok(ProbeSessionAgent::new(agent))
-    }
-}
-
-#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
-    async_trait::async_trait
-)]
-impl SessionAgentBuilder for DeviceProbeAgentBuilder {
-    type Agent = ProbeSessionAgent;
-
-    async fn build_agent(
-        &self,
-        req: &CreateSessionRequest,
-        _event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<Self::Agent, SessionError> {
-        let task_store = Arc::new(MemoryTaskStore::new());
-        let inner = CompositeDispatcher::new_wasm(
-            task_store,
-            &BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .with_mode(ToolMode::DenyAll)
-                    .enable_tool("datetime"),
-                ..Default::default()
-            },
-            None,
-            Some("esp32-phase0-runtime".to_string()),
-        )
-        .context("failed to construct ESP32 comms dispatcher")
-        .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))?;
-
-        let tools: Arc<dyn AgentToolDispatcher> =
-            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime));
         let llm: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::new(
                 Arc::new(OpenAiClient::new_with_base_url(
@@ -566,7 +689,7 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
         let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> =
             self.comms_runtime.clone();
 
-        let agent = AgentBuilder::new()
+        let agent: ProbeDynAgent = AgentBuilder::new()
             .model(req.model.clone())
             .system_prompt(
                 req.system_prompt
@@ -813,7 +936,7 @@ fn run_meerkat_turn_inner(
         };
         let external_tools: Arc<dyn AgentToolDispatcher> =
             Arc::new(EspMicroPythonToolDispatcher::new());
-        let mut dispatcher = CompositeDispatcher::new_wasm(
+        let dispatcher = CompositeDispatcher::new_wasm(
             task_store.clone(),
             &builtin_config,
             Some(external_tools),
@@ -957,7 +1080,7 @@ fn run_meerkat_turn_inner(
             )
             .max_tokens_per_turn(96)
             .with_hook_engine(Arc::new(hooks))
-            .build(llm, Arc::new(dispatcher), Arc::new(NoopStore))
+            .build(llm, Arc::new(dispatcher), Arc::new(ProbeNoopStore))
             .await;
         emit_meerkat_step("after_agent_build");
 
@@ -1420,12 +1543,12 @@ fn device_comms_config() -> ResolvedCommsConfig {
 
 fn device_system_prompt(host_peer_name: &str) -> String {
     format!(
-        "You are the ESP32 half of a two-agent comedy duo talking to {host_peer_name}. \
-         Each turn, read the latest peer message and continue the collaborative joke. \
-         You must respond by calling the send tool exactly once per turn with kind=peer_message and to={host_peer_name}. \
+        "You are the ESP32 peer talking to {host_peer_name}. \
+         Each turn, read the latest peer message and respond by calling the send tool exactly once with kind=peer_message and to={host_peer_name}. \
          Do not finish a turn with plain assistant text and do not skip the send call. \
-         If you are unsure, still use send with one short witty line. \
-         Call the datetime tool only when it materially helps, but keep each outgoing line short, witty, and specific. \
+         If the latest peer message asks you to run Python, micropython, code, or a snippet, you must call micropython_exec exactly once before your send call. \
+         Use short safe embedded Python only, then summarize the observed print output or result in your outgoing send message. \
+         Call the datetime tool only when it materially helps. \
          If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
     )
 }
@@ -1701,6 +1824,7 @@ fn unix_time_secs() -> u64 {
 fn emit_marker(marker: &str, fields: &[(&str, &str)]) {
     if fields.is_empty() {
         println!("{marker}");
+        log::info!("{marker}");
     } else {
         let suffix = fields
             .iter()
@@ -1708,6 +1832,7 @@ fn emit_marker(marker: &str, fields: &[(&str, &str)]) {
             .collect::<Vec<_>>()
             .join(" ");
         println!("{marker} {suffix}");
+        log::info!("{marker} {suffix}");
     }
     let _ = std::io::stdout().flush();
 }
@@ -1833,32 +1958,6 @@ impl<'d> StatusDisplay<'d> {
         Ok(())
     }
 
-    fn show_chat(&mut self, title: &str, lines: &[String]) -> anyhow::Result<()> {
-        Rectangle::new(
-            Point::zero(),
-            Size::new(LCD_WIDTH.into(), LCD_HEIGHT.into()),
-        )
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 8, 20)))
-        .draw(&mut self.panel)
-        .map_err(|error| anyhow!("failed to paint lcd chat background: {error:?}"))?;
-
-        let header_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
-        let body_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(180, 220, 255));
-
-        Text::with_baseline(title, Point::new(8, 12), header_style, Baseline::Top)
-            .draw(&mut self.panel)
-            .map_err(|error| anyhow!("failed to draw lcd chat title: {error:?}"))?;
-
-        let mut y = 42;
-        for line in lines.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev() {
-            Text::with_baseline(line, Point::new(8, y), body_style, Baseline::Top)
-                .draw(&mut self.panel)
-                .map_err(|error| anyhow!("failed to draw lcd chat line: {error:?}"))?;
-            y += 14;
-        }
-
-        Ok(())
-    }
 }
 
 fn short_display_line(input: &str, max_chars: usize) -> String {

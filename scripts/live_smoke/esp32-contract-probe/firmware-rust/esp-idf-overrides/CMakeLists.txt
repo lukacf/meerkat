@@ -336,13 +336,131 @@ if(EXISTS ${MICROPY_HELPER_DIR})
                 "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=\n"
                 "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y\n"
                 "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"\n"
-                "CONFIG_PARTITION_TABLE_CUSTOM=\n"
-                "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y\n"
+                "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=\n"
+                "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
+                "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions-phase0.csv\"\n"
             )
             file(WRITE ${micropy_generated_sdkconfig} "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}")
         endif()
     endforeach()
 endif()
+
+function(phase0_force_patch_generated_micropy_helper helper_dir)
+    if(NOT EXISTS ${helper_dir})
+        return()
+    endif()
+
+    set(board_dir ${helper_dir}/micropython/ports/esp32/boards/${MICROPY_BOARD})
+    set(port_config ${helper_dir}/micropython/ports/esp32/mpconfigport.h)
+    set(common_cmake ${helper_dir}/esp32_common.cmake)
+
+    if(EXISTS ${port_config})
+        file(READ ${port_config} port_config_contents)
+        string(REPLACE
+            "#include \"mpconfigboard.h\""
+            "#include \"boards/${MICROPY_BOARD}/mpconfigboard.h\""
+            port_config_contents
+            "${port_config_contents}"
+        )
+        string(REPLACE
+            "#include \"esp_wifi_types.h\""
+            "/* phase0 micropython spike: wifi types disabled */"
+            port_config_contents
+            "${port_config_contents}"
+        )
+        foreach(symbol
+            MICROPY_PY_THREAD
+            MICROPY_PY_THREAD_GIL
+            MICROPY_PY_ESPNOW
+            MICROPY_PY_BLUETOOTH
+            MICROPY_PY_NETWORK
+            MICROPY_PY_NETWORK_WLAN
+            MICROPY_HW_ENABLE_SDCARD
+            MICROPY_PY_SSL
+            MICROPY_PY_WEBSOCKET
+            MICROPY_PY_WEBREPL
+        )
+            string(REGEX REPLACE
+                "(#define[ \t]+${symbol}[ \t]+)\\(1\\)"
+                "\\1(0)"
+                port_config_contents
+                "${port_config_contents}"
+            )
+        endforeach()
+        file(WRITE ${port_config} "${port_config_contents}")
+    endif()
+
+    if(EXISTS ${common_cmake})
+        file(READ ${common_cmake} common_cmake_contents)
+        string(REPLACE
+            "set(MICROPY_PY_BTREE ON)"
+            "set(MICROPY_PY_BTREE OFF)"
+            common_cmake_contents
+            "${common_cmake_contents}"
+        )
+        foreach(line
+            "\\$\\{MICROPY_DIR\\}/shared/netutils/netutils\\.c"
+            "ppp_set_auth\\.c"
+            "network_common\\.c"
+            "network_lan\\.c"
+            "network_ppp\\.c"
+            "network_wlan\\.c"
+            "mpnimbleport\\.c"
+            "modsocket\\.c"
+            "modesp\\.c"
+            "machine_sdcard\\.c"
+            "machine_bitstream\\.c"
+            "modespnow\\.c"
+            "esp32_ulp\\.c"
+            "esp32_rmt\\.c"
+            "mpthreadport\\.c"
+            "usb\\.c"
+            "usb_serial_jtag\\.c"
+        )
+            string(REGEX REPLACE
+                "[ \t]*${line}\n"
+                ""
+                common_cmake_contents
+                "${common_cmake_contents}"
+            )
+        endforeach()
+        foreach(line
+            "bt"
+            "esp_eth"
+            "esp_event"
+            "esp_netif"
+            "esp_ringbuf"
+            "esp_wifi"
+            "lwip"
+            "sdmmc"
+            "ulp"
+        )
+            string(REGEX REPLACE
+                "[ \t]*${line}\n"
+                ""
+                common_cmake_contents
+                "${common_cmake_contents}"
+            )
+        endforeach()
+        string(REGEX REPLACE
+            "[ \t]*target_link_libraries\\(\\$\\{MICROPY_TARGET\\}[ \t]+micropy_extmod_btree\\)\n"
+            ""
+            common_cmake_contents
+            "${common_cmake_contents}"
+        )
+        string(REPLACE
+            "target_link_libraries(${MICROPY_TARGET} micropy_extmod_btree)"
+            ""
+            common_cmake_contents
+            "${common_cmake_contents}"
+        )
+        file(WRITE ${common_cmake} "${common_cmake_contents}")
+    endif()
+
+    if(TARGET __idf_mr9you__micropython-helper AND EXISTS ${board_dir})
+        target_include_directories(__idf_mr9you__micropython-helper PUBLIC ${board_dir})
+    endif()
+endfunction()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
@@ -362,6 +480,16 @@ else()
 endif()
 
 project(libespidf)
+
+file(GLOB PHASE0_GENERATED_MICROPY_HELPERS
+    "${CMAKE_BINARY_DIR}/managed_components/mr9you__micropython-helper"
+    "${CMAKE_BINARY_DIR}/../managed_components/mr9you__micropython-helper"
+    "${CMAKE_BINARY_DIR}/../../managed_components/mr9you__micropython-helper"
+)
+list(REMOVE_DUPLICATES PHASE0_GENERATED_MICROPY_HELPERS)
+foreach(candidate ${PHASE0_GENERATED_MICROPY_HELPERS})
+    phase0_force_patch_generated_micropy_helper(${candidate})
+endforeach()
 
 if(EXISTS ${MICROPY_HELPER_DIR})
     set(MICROPY_BOARD_DIR ${MICROPY_HELPER_DIR}/micropython/ports/esp32/boards/${MICROPY_BOARD})

@@ -51,16 +51,6 @@ static uint32_t s_next_job_id = 1;
 static size_t s_mpy_stack_bytes = PHASE0_MPY_STACK_BYTES;
 static bool s_mpy_stack_in_spiram = true;
 
-STATIC const mp_rom_map_elem_t phase0_mpy_btree_globals_table[] = {
-    { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_btree) },
-};
-STATIC MP_DEFINE_CONST_DICT(phase0_mpy_btree_globals, phase0_mpy_btree_globals_table);
-extern const mp_obj_module_t mp_module_btree;
-__attribute__((used)) const mp_obj_module_t mp_module_btree = {
-    .base = { &mp_type_module },
-    .globals = (mp_obj_dict_t *)&phase0_mpy_btree_globals,
-};
-
 extern void pthread_internal_local_storage_destructor_callback(TaskHandle_t handle);
 
 void vPortCleanUpTCB(void *pxTCB) {

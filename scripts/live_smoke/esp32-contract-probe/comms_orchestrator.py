@@ -43,6 +43,7 @@ def main() -> int:
     host_listen = f"{host_ip}:{host_port}"
     device_ip_hint = os.environ.get("ESP32_DEVICE_IP_HINT")
     skip_build_flash = os.environ.get("ESP32_SKIP_BUILD_FLASH") == "1"
+    force_reset = os.environ.get("ESP32_FORCE_RESET") == "1"
     device_peer_id = os.environ.get("ESP32_PEER_ID", DEFAULT_DEVICE_PEER_ID)
     device_mac = os.environ.get("ESP32_MAC", DEFAULT_DEVICE_MAC).lower()
 
@@ -150,7 +151,8 @@ def main() -> int:
 
     else:
         print("SKIP_BUILD_FLASH", 1)
-        probe.host_usb_reset(ctx, port)
+        if force_reset:
+            probe.host_usb_reset(ctx, port)
         probe.wait_for_serial_port(port)
 
     active_port = monitor_port
@@ -165,6 +167,7 @@ def main() -> int:
         "host_error": None,
     }
     lock = threading.Lock()
+    saw_serial_output = False
 
     def run_host(peer_id: str, wifi_ip: str) -> None:
         host_cmd = [
@@ -240,9 +243,11 @@ def main() -> int:
     ) as slog:
         deadline = time.monotonic() + 300
         fallback_host_start = time.monotonic() + 20
+        host_pass_grace_deadline = None
         while time.monotonic() < deadline:
             chunk = ser.read(4096)
             if chunk:
+                saw_serial_output = True
                 text = chunk.decode("utf-8", errors="replace")
                 slog.write(text)
                 slog.flush()
@@ -270,33 +275,41 @@ def main() -> int:
                         with lock:
                             state["comms_pass"] = True
 
-                with lock:
-                    if not state["wifi_ip"]:
-                        arp_ip = arp_lookup_ip()
-                        if arp_ip:
-                            state["wifi_ip"] = arp_ip
-                        elif device_ip_hint:
-                            state["wifi_ip"] = device_ip_hint
-                    if (
-                        (
-                            state["comms_ready"]
-                            or state["comms_waiting"]
-                            or time.monotonic() >= fallback_host_start
-                        )
-                        and state["wifi_ip"]
-                        and state["peer_id"]
-                        and not state["host_started"]
-                    ):
-                        threading.Thread(
-                            target=run_host,
-                            args=(state["peer_id"], state["wifi_ip"]),
-                            daemon=True,
-                        ).start()
-                        state["host_started"] = True
+            with lock:
+                if not state["wifi_ip"]:
+                    arp_ip = arp_lookup_ip()
+                    if arp_ip:
+                        state["wifi_ip"] = arp_ip
+                    elif device_ip_hint:
+                        state["wifi_ip"] = device_ip_hint
+                if (
+                    (
+                        state["comms_ready"]
+                        or state["comms_waiting"]
+                        or time.monotonic() >= fallback_host_start
+                    )
+                    and state["wifi_ip"]
+                    and state["peer_id"]
+                    and not state["host_started"]
+                ):
+                    threading.Thread(
+                        target=run_host,
+                        args=(state["peer_id"], state["wifi_ip"]),
+                        daemon=True,
+                    ).start()
+                    state["host_started"] = True
+
                 if state["host_error"]:
                     raise SystemExit(state["host_error"])
+
                 if state["host_pass"] and state["comms_pass"]:
                     break
+
+                if state["host_pass"] and not saw_serial_output:
+                    if host_pass_grace_deadline is None:
+                        host_pass_grace_deadline = time.monotonic() + 3
+                    elif time.monotonic() >= host_pass_grace_deadline:
+                        break
             time.sleep(0.1)
         else:
             raise SystemExit(f"timed out waiting for comms pass; state={state}")
@@ -308,6 +321,9 @@ def main() -> int:
         "host_listen": host_listen,
         "serial_log": str(serial_log),
         "host_log": str(host_log),
+        "saw_serial_output": saw_serial_output,
+        "comms_pass": state["comms_pass"],
+        "host_pass": state["host_pass"],
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("SUMMARY", json.dumps(summary))

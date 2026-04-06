@@ -1,0 +1,77 @@
+dependencies:
+  espressif/esp_tinyusb:
+    component_hash: 5e37c53a10518f40b288a48afec4ab549784be9e6eb74add699a30395543418a
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    - name: espressif/tinyusb
+      registry_url: https://components.espressif.com
+      require: public
+      version: 0.*
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    version: 1.0.3
+  espressif/mdns:
+    component_hash: 46ee81d32fbf850462d8af1e83303389602f6a6a9eddd2a55104cb4c063858ed
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.0
+  espressif/tinyusb:
+    component_hash: 5ea9d3b6d6b0734a0a0b3491967aa0e1bece2974132294dbda5dd2839b247bfa
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    version: 0.19.0~2
+  idf:
+    source:
+      type: idf
+    version: 5.2.3
+  mr9you/micropython-helper:
+    component_hash: 317e0b635a52daa64f25407d750a3364fcb88d4be1d2cf14df2bbbcfe0d18e2d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.4'
+    - name: espressif/esp_tinyusb
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32s2, esp32s3]
+      version: ~1.0.0
+    - name: espressif/mdns
+      registry_url: https://components.espressif.com
+      require: private
+      version: ~1.1.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c3
+    - esp32s2
+    - esp32s3
+    version: 1.22.1
+direct_dependencies:
+- mr9you/micropython-helper
+manifest_hash: 59d53f88024ab2fdd01f9d4786914f7394bfb59839e9bb41217fdbdcfef20988
+target: esp32s3
+version: 2.0.0

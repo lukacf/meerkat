@@ -76,37 +76,51 @@ def monitor_serial(
 
 
 def reset_and_monitor(port: str, serial_log: pathlib.Path) -> tuple[serial.Serial, SerialState, threading.Event, threading.Thread]:
-    ser = serial.Serial(port, 115200, timeout=0.2)
-    ser.dtr = False
-    ser.rts = True
-    time.sleep(0.1)
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-    ser.dtr = True
-    ser.rts = False
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            print(f"MKT:VALIDATOR:RESET_ATTEMPT attempt={attempt}", flush=True)
+            ser = serial.Serial(port, 115200, timeout=0.2)
+            ser.dtr = False
+            ser.rts = True
+            time.sleep(0.15)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            ser.dtr = True
+            ser.rts = False
+            time.sleep(0.2)
 
-    state = SerialState()
-    stop_event = threading.Event()
-    thread = threading.Thread(
-        target=monitor_serial,
-        args=(ser, serial_log, state, stop_event),
-        daemon=True,
-    )
-    thread.start()
+            state = SerialState()
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=monitor_serial,
+                args=(ser, serial_log, state, stop_event),
+                daemon=True,
+            )
+            thread.start()
 
-    deadline = time.time() + 25
-    while time.time() < deadline:
-        with state.lock:
-            if state.ready and state.peer_id and state.peer_addr:
-                return ser, state, stop_event, thread
-        time.sleep(0.1)
+            deadline = time.time() + 35
+            while time.time() < deadline:
+                with state.lock:
+                    if state.ready and state.peer_id and state.peer_addr:
+                        print(
+                            f"MKT:VALIDATOR:DEVICE_READY peer_id={state.peer_id} peer_addr={state.peer_addr}",
+                            flush=True,
+                        )
+                        return ser, state, stop_event, thread
+                time.sleep(0.1)
 
-    stop_event.set()
-    thread.join(timeout=2)
-    ser.close()
-    raise SystemExit(
-        f"device did not reach COMMS:READY on {port}; peer_id={state.peer_id} peer_addr={state.peer_addr}"
-    )
+            stop_event.set()
+            thread.join(timeout=2)
+            ser.close()
+            last_error = RuntimeError(
+                f"attempt {attempt}: device did not reach COMMS:READY on {port}; peer_id={state.peer_id} peer_addr={state.peer_addr}"
+            )
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.5)
+
+    raise SystemExit(str(last_error))
 
 
 def run_host(
@@ -139,6 +153,7 @@ def run_host(
     host_env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
     host_env["OPENAI_MODEL"] = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini")
     host_env["OPENAI_STREAM_HOST"] = os.environ.get("OPENAI_STREAM_HOST", "0")
+    host_env["ESP32_SCENARIO"] = "micropython"
     lines: list[str] = []
     timed_out = False
     with host_log.open("w", encoding="utf-8") as sink:

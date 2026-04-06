@@ -349,18 +349,8 @@ fn apply_runtime_drain_effects(slot: &mut CommsDrainSlot, effects: &[CommsDrainL
     }
 }
 
-#[cfg(target_os = "espidf")]
 async fn signal_runtime_wake(tx: &mpsc::Sender<()>) -> bool {
     tx.send(()).await.is_ok()
-}
-
-#[cfg(not(target_os = "espidf"))]
-async fn signal_runtime_wake(tx: &mpsc::Sender<()>) -> bool {
-    match tx.try_send(()) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(_)) => tx.send(()).await.is_ok(),
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
-    }
 }
 
 fn abort_slot(slot: &mut CommsDrainSlot) {

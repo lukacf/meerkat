@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, bail};
 use chrono::Utc;
@@ -12,13 +13,15 @@ use meerkat_comms::{
 };
 use meerkat_core::agent::CommsRuntime as _;
 use meerkat_core::comms::CommsCommand;
+use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::EventEnvelope;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionService,
 };
-use meerkat_core::types::{ContentInput, SessionId};
-use meerkat_core::{AgentBuilder, AgentLlmClient, AgentToolDispatcher};
+use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolResult};
+use meerkat_core::{AgentBuilder, AgentLlmClient, AgentToolDispatcher, BudgetLimits};
 use meerkat_runtime::comms_drain::spawn_comms_drain_with_observer;
 use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_runtime::input::{Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput};
@@ -62,15 +65,18 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind host listener on {}", args.listen_addr))?;
     let comms_runtime = Arc::new(comms_runtime);
+    let inbound_epoch = Arc::new(AtomicUsize::new(1));
 
     let service = Arc::new(EphemeralSessionService::new(
         HostProbeAgentBuilder {
             peer_name: args.peer_name.clone(),
+            scenario: args.scenario.clone(),
             model: args.model.clone(),
             stream: args.stream,
             openai_api_key: args.openai_api_key.clone(),
             openai_base_url: args.openai_base_url.clone(),
             comms_runtime: Arc::clone(&comms_runtime),
+            inbound_epoch: Arc::clone(&inbound_epoch),
         },
         1,
     ));
@@ -103,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let (transcript_tx, mut transcript_rx) = mpsc::unbounded_channel::<TranscriptEvent>();
     let observer_tx = transcript_tx.clone();
     let peer_name = args.peer_name.clone();
+    let inbound_epoch_for_observer = Arc::clone(&inbound_epoch);
     let _drain = spawn_comms_drain_with_observer(
         Arc::clone(&runtime_adapter),
         session_id.clone(),
@@ -110,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         None,
         Some(Arc::new(move |ci| {
             if let Some(text) = inbound_text(ci) {
+                inbound_epoch_for_observer.fetch_add(1, Ordering::SeqCst);
                 let _ = observer_tx.send(TranscriptEvent::Incoming {
                     from: peer_name.clone(),
                     text,
@@ -186,7 +194,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let _ = runtime_adapter
-        .accept_input(&session_id, make_prompt_input(&kickoff_prompt(&args.peer_name)))
+        .accept_input(
+            &session_id,
+            make_prompt_input(&kickoff_prompt(&args.peer_name, &args.scenario)),
+        )
         .await
         .context("failed to inject kickoff input")?;
     println!(
@@ -252,7 +263,10 @@ async fn main() -> anyhow::Result<()> {
             stop_deadline =
                 Some(tokio::time::Instant::now() + std::time::Duration::from_secs(8));
             let _ = runtime_adapter
-                .accept_input(&session_id, make_prompt_input(&stop_prompt(&args.peer_name)))
+                .accept_input(
+                    &session_id,
+                    make_prompt_input(&stop_prompt(&args.peer_name, &args.scenario)),
+                )
                 .await
                 .context("failed to inject stop prompt")?;
             println!(
@@ -274,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
         .context("failed to send DISMISS to ESP peer")?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     let _ = service.archive(&session_id).await;
     runtime_adapter.unregister_session(&session_id).await;
@@ -288,11 +303,13 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone)]
 struct HostProbeAgentBuilder {
     peer_name: String,
+    scenario: String,
     model: String,
     stream: bool,
     openai_api_key: String,
     openai_base_url: String,
     comms_runtime: Arc<CommsRuntime>,
+    inbound_epoch: Arc<AtomicUsize>,
 }
 
 #[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
@@ -329,8 +346,10 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
             )
         })?;
 
-        let tools: Arc<dyn AgentToolDispatcher> =
-            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime));
+        let tools: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
+            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime)),
+            Arc::clone(&self.inbound_epoch),
+        ));
         let llm: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::new(
                 Arc::new(OpenAiClient::new_with_base_url(
@@ -354,9 +373,10 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
             .system_prompt(
                 req.system_prompt
                     .clone()
-                    .unwrap_or_else(|| host_system_prompt(&self.peer_name)),
+                    .unwrap_or_else(|| host_system_prompt(&self.peer_name, &self.scenario)),
             )
-            .max_tokens_per_turn(req.max_tokens.unwrap_or(128))
+            .budget(BudgetLimits::default())
+            .max_tokens_per_turn(req.max_tokens.unwrap_or(256))
             .with_comms_runtime(comms_runtime)
             .build(llm, tools, store)
             .await;
@@ -374,6 +394,88 @@ struct PendingPrompt {
     step: usize,
     prompt: String,
     retries: usize,
+}
+
+struct HostSendGuardDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    inbound_epoch: Arc<AtomicUsize>,
+    sent_epoch: AtomicUsize,
+}
+
+impl HostSendGuardDispatcher {
+    fn new(inner: Arc<dyn AgentToolDispatcher>, inbound_epoch: Arc<AtomicUsize>) -> Self {
+        Self {
+            inner,
+            inbound_epoch,
+            sent_epoch: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentToolDispatcher for HostSendGuardDispatcher {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        self.inner.tools()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if call.name == "send" {
+            let epoch = self.inbound_epoch.load(Ordering::SeqCst);
+            let last = self.sent_epoch.load(Ordering::SeqCst);
+            if epoch == last {
+                println!("MKT:HOST_MEERKAT:SEND_SUPPRESSED epoch={epoch}");
+                return Ok(ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "{\"kind\":\"peer_message\",\"status\":\"sent\"}".to_string(),
+                    false,
+                )));
+            }
+            let outcome = self.inner.dispatch(call).await?;
+            self.sent_epoch.store(epoch, Ordering::SeqCst);
+            return Ok(outcome);
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
+    {
+        match Arc::clone(&self.inner).bind_wait_interrupt(rx) {
+            Ok(inner) => Ok(Arc::new(HostSendGuardDispatcher::new(
+                inner,
+                Arc::clone(&self.inbound_epoch),
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.inner.supports_wait_interrupt()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::agent::OpsLifecycleBindError> {
+        match Arc::clone(&self.inner).bind_ops_lifecycle(registry, owner_session_id) {
+            Ok(inner) => Ok(Arc::new(HostSendGuardDispatcher::new(
+                inner,
+                Arc::clone(&self.inbound_epoch),
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.inner.supports_ops_lifecycle_binding()
+    }
 }
 
 fn inbound_text(ci: meerkat_core::interaction::ClassifiedInboxInteraction) -> Option<String> {
@@ -403,7 +505,7 @@ async fn create_keep_alive_session(
             prompt: ContentInput::Text(String::new()),
             render_metadata: None,
             system_prompt: None,
-            max_tokens: Some(128),
+            max_tokens: Some(256),
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -451,37 +553,69 @@ fn host_comms_config(listen_addr: &str) -> ResolvedCommsConfig {
         event_listen_uds: None,
         comms_config: CommsConfig::default(),
         auth: meerkat_core::CommsAuthMode::Open,
-        require_peer_auth: false,
+        require_peer_auth: true,
         allow_external_unauthenticated: false,
     }
 }
 
-fn kickoff_prompt(peer_name: &str) -> String {
-    format!(
-        "Start the conversation with {peer_name}. Collaboratively write the greatest LLM joke ever. \
-         Use the send tool exactly once to send a short opening line to your peer. \
-         Do not explain the tool use and do not answer with plain assistant text."
-    )
+fn kickoff_prompt(peer_name: &str, scenario: &str) -> String {
+    match scenario {
+        "micropython" => format!(
+            "Start the conversation with {peer_name}. \
+             Your goal is to make {peer_name} run embedded micropython_exec snippets on the ESP32. \
+             You are not done until you have observed many successful micropython_exec replies across the session. \
+             In your opening line, instruct {peer_name} to run micropython_exec exactly once with short Python that prints a tiny fact and sets result to a small integer. \
+             Ask for the observed print output and result in the reply. \
+             Use the send tool exactly once and do not answer with plain assistant text."
+        ),
+        _ => format!(
+            "Start the conversation with {peer_name}. Collaboratively write the greatest LLM joke ever. \
+             Use the send tool exactly once to send a short opening line to your peer. \
+             Do not explain the tool use and do not answer with plain assistant text."
+        ),
+    }
 }
 
-fn stop_prompt(peer_name: &str) -> String {
-    format!(
-        "Stop now. Use the send tool exactly once to send a short closing line to {peer_name}. \
-         Include the word STOP so the peer knows the conversation is ending. \
-         Do not continue afterward and do not answer with plain assistant text."
-    )
+fn stop_prompt(peer_name: &str, scenario: &str) -> String {
+    match scenario {
+        "micropython" => format!(
+            "Stop now. Use the send tool exactly once to send a short closing line to {peer_name}. \
+             Include the word STOP and mention that the micropython validation is complete. \
+             Do not continue afterward and do not answer with plain assistant text."
+        ),
+        _ => format!(
+            "Stop now. Use the send tool exactly once to send a short closing line to {peer_name}. \
+             Include the word STOP so the peer knows the conversation is ending. \
+             Do not continue afterward and do not answer with plain assistant text."
+        ),
+    }
 }
 
-fn host_system_prompt(peer_name: &str) -> String {
-    format!(
-        "You are the host half of a two-agent comedy duo talking to {peer_name}. \
-         Each turn, read the latest peer message and continue the collaborative joke. \
-         You must respond by calling the send tool exactly once per turn with kind=peer_message and to={peer_name}. \
-         Do not finish a turn with plain assistant text and do not skip the send call. \
-         If you are unsure, still use send with one short witty line. \
-         Keep each line short, witty, and specific. \
-         If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
-    )
+fn host_system_prompt(peer_name: &str, scenario: &str) -> String {
+    match scenario {
+        "micropython" => format!(
+            "You are the host Meerkat coordinating validation with {peer_name}. \
+             Each turn, read the latest peer message and send exactly one short instruction or follow-up to {peer_name}. \
+             Your job is to get {peer_name} to call micropython_exec on the ESP32 repeatedly with short safe snippets. \
+             Continue until you have observed at least ten successful micropython_exec replies from {peer_name}; do not stop early. \
+             Prefer snippets that print something simple and set result to a small integer or string. \
+             Ask for varied snippets across turns so the peer performs multiple micropython_exec calls over the session. \
+             After every successful reply, immediately ask for the next micropython_exec snippet unless the latest peer message contains STOP or DISMISS. \
+             You must respond by calling the send tool exactly once per turn with kind=peer_message and to={peer_name}. \
+             Do not finish a turn with plain assistant text and do not skip the send call. \
+             Never say validation is complete on your own; wait for an explicit stop prompt from the runtime harness. \
+             If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
+        ),
+        _ => format!(
+            "You are the host half of a two-agent comedy duo talking to {peer_name}. \
+             Each turn, read the latest peer message and continue the collaborative joke. \
+             You must respond by calling the send tool exactly once per turn with kind=peer_message and to={peer_name}. \
+             Do not finish a turn with plain assistant text and do not skip the send call. \
+             If you are unsure, still use send with one short witty line. \
+             Keep each line short, witty, and specific. \
+             If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
+        ),
+    }
 }
 
 struct Args {
@@ -490,6 +624,7 @@ struct Args {
     peer_addr: String,
     listen_addr: String,
     exchanges: usize,
+    scenario: String,
     model: String,
     stream: bool,
     openai_api_key: String,
@@ -503,6 +638,8 @@ impl Args {
         let mut peer_addr = None;
         let mut listen_addr = None;
         let mut exchanges = 15_usize;
+        let mut scenario =
+            std::env::var("ESP32_SCENARIO").unwrap_or_else(|_| "joke".to_string());
         let mut model =
             std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
         let stream = parse_env_bool("OPENAI_STREAM_HOST") || parse_env_bool("OPENAI_STREAM");
@@ -521,6 +658,7 @@ impl Args {
                     let value = iter.next().context("missing value for --exchanges")?;
                     exchanges = value.parse().context("invalid --exchanges value")?;
                 }
+                "--scenario" => scenario = iter.next().context("missing value for --scenario")?,
                 "--model" => model = iter.next().context("missing value for --model")?,
                 other => bail!("unknown argument: {other}"),
             }
@@ -532,6 +670,7 @@ impl Args {
             peer_addr: peer_addr.context("missing --peer-addr")?,
             listen_addr: listen_addr.context("missing --listen-addr")?,
             exchanges,
+            scenario,
             model,
             stream,
             openai_api_key,

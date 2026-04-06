@@ -28,6 +28,8 @@ pub struct ModelProfile {
     pub supports_thinking: bool,
     /// Whether the model supports explicit reasoning effort control.
     pub supports_reasoning: bool,
+    /// Whether the model accepts inline video content in user messages.
+    pub inline_video: bool,
     /// Whether the model accepts image content in user messages.
     pub vision: bool,
     /// Whether the model can process image blocks in tool results.
@@ -89,6 +91,10 @@ mod tests {
             profile.image_tool_results,
             "Anthropic models must support image tool results"
         );
+        assert!(
+            !profile.inline_video,
+            "Anthropic models must NOT support inline video"
+        );
 
         let profile = profile_for("anthropic", "claude-sonnet-4-5")
             .expect("claude-sonnet-4-5 must have a profile");
@@ -104,6 +110,10 @@ mod tests {
             !profile.image_tool_results,
             "OpenAI models must NOT support image tool results"
         );
+        assert!(
+            !profile.inline_video,
+            "OpenAI models must NOT support inline video"
+        );
     }
 
     #[test]
@@ -114,6 +124,10 @@ mod tests {
         assert!(
             profile.image_tool_results,
             "Gemini models must support image tool results"
+        );
+        assert!(
+            profile.inline_video,
+            "Gemini models must support inline video"
         );
     }
 

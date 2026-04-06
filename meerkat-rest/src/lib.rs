@@ -444,6 +444,37 @@ fn pending_system_context_appends(
         .collect()
 }
 
+fn provider_supports_inline_video(provider: meerkat_core::Provider) -> bool {
+    provider == meerkat_core::Provider::Gemini
+}
+
+fn validate_prompt_video_input(
+    prompt: &ContentInput,
+    model: &str,
+    provider: Option<meerkat_core::Provider>,
+) -> Result<(), String> {
+    let blocks = match prompt {
+        ContentInput::Text(_) => return Ok(()),
+        ContentInput::Blocks(blocks) => blocks,
+    };
+
+    meerkat_core::validate_inline_video_blocks(blocks)?;
+
+    if meerkat_core::has_video(blocks) {
+        let effective_provider = provider
+            .or_else(|| meerkat_core::Provider::infer_from_model(model))
+            .unwrap_or(meerkat_core::Provider::Other);
+        if !provider_supports_inline_video(effective_provider) {
+            return Err(format!(
+                "inline video input requires a Gemini model; current provider is '{}'",
+                effective_provider.as_str()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 async fn apply_runtime_turn(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
@@ -510,6 +541,26 @@ async fn apply_runtime_turn(
             .turn_metadata()
             .and_then(|meta| meta.additional_instructions.clone()),
     };
+
+    let session_identity = context
+        .session_service
+        .load_persisted(session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|session| {
+            session
+                .session_metadata()
+                .map(|metadata| metadata.llm_identity())
+        });
+    if let Some(identity) = session_identity
+        && let Err(message) =
+            validate_prompt_video_input(&prompt, &identity.model, Some(identity.provider))
+    {
+        return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
+            message,
+        )));
+    }
 
     let boundary = match primitive {
         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2486,6 +2537,7 @@ async fn create_session_inner(
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
     ));
+    let create_provider = build.provider;
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
@@ -2502,6 +2554,11 @@ async fn create_session_inner(
         labels: req.labels,
     };
 
+    if let Err(err) = validate_prompt_video_input(&svc_req.prompt, &svc_req.model, create_provider)
+    {
+        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+    }
+
     let adapter = state.runtime_adapter.clone();
 
     // Create session with Defer, then route through runtime
@@ -2516,6 +2573,9 @@ async fn create_session_inner(
             let api_err = match err {
                 SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
                 SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
+                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
+                    ApiError::BadRequest(err.to_string())
+                }
                 _ => ApiError::Agent(err.to_string()),
             };
             return RequestOutcome::Unpublished(Err(api_err));
@@ -3228,6 +3288,14 @@ async fn continue_session_inner(
             build: Some(build),
             labels: None,
         };
+        let create_provider = create_req.build.as_ref().and_then(|build| build.provider);
+        if let Err(err) =
+            validate_prompt_video_input(&create_req.prompt, &create_req.model, create_provider)
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
+        }
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
             Err(e) => {
@@ -3359,6 +3427,26 @@ async fn continue_session_inner(
             adapter
                 .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
                 .await;
+        }
+
+        let current_identity = stored_metadata
+            .as_ref()
+            .map(meerkat::SessionMetadata::llm_identity)
+            .or_else(|| {
+                Some(meerkat_core::SessionLlmIdentity {
+                    model: state.default_model.to_string(),
+                    provider: meerkat_core::Provider::infer_from_model(&state.default_model)
+                        .unwrap_or(meerkat_core::Provider::Other),
+                    provider_params: None,
+                })
+            });
+        if let Some(identity) = current_identity
+            && let Err(err) =
+                validate_prompt_video_input(&turn_prompt, &identity.model, Some(identity.provider))
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
         }
 
         // Install cancel action: interrupt the session.

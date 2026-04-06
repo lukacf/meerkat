@@ -70,7 +70,8 @@ export interface SessionConfig {
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'image'; media_type: string; data: string };
+  | { type: 'image'; media_type: string; data: string }
+  | { type: 'video'; media_type: string; duration_ms: number; source?: 'inline'; data: string };
 
 /** Canonical ordinary content input. */
 export type ContentInput = string | ContentBlock[];

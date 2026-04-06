@@ -1529,8 +1529,8 @@ export class MeerkatClient {
       return { type: "text", text: String(data.text ?? "") };
     }
     if (type === "image") {
-      const source = String(data.source ?? "inline");
-      if (source === "blob") {
+        const source = String(data.source ?? "inline");
+        if (source === "blob") {
         return {
           type: "image",
           media_type: String(data.media_type ?? ""),
@@ -1541,6 +1541,15 @@ export class MeerkatClient {
       return {
         type: "image",
         media_type: String(data.media_type ?? ""),
+        source: "inline",
+        data: String(data.data ?? ""),
+      };
+    }
+    if (type === "video") {
+      return {
+        type: "video",
+        media_type: String(data.media_type ?? ""),
+        duration_ms: Number(data.duration_ms ?? 0),
         source: "inline",
         data: String(data.data ?? ""),
       };

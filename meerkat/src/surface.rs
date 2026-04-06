@@ -97,6 +97,7 @@ pub fn build_models_catalog_response() -> meerkat_contracts::ModelsCatalogRespon
                             supports_temperature: p.supports_temperature,
                             supports_thinking: p.supports_thinking,
                             supports_reasoning: p.supports_reasoning,
+                            inline_video: p.inline_video,
                             params_schema: p.params_schema,
                         }
                     });

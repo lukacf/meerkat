@@ -466,6 +466,41 @@ impl SessionRuntime {
         }
     }
 
+    fn provider_supports_inline_video(identity: &SessionLlmIdentity) -> bool {
+        meerkat_models::profile::profile_for(identity.provider.as_str(), &identity.model)
+            .map(|profile| profile.inline_video)
+            .unwrap_or(false)
+    }
+
+    fn validate_prompt_video_input(
+        prompt: &ContentInput,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), RpcError> {
+        let blocks = match prompt {
+            ContentInput::Text(_) => return Ok(()),
+            ContentInput::Blocks(blocks) => blocks,
+        };
+
+        meerkat_core::validate_inline_video_blocks(blocks).map_err(|message| RpcError {
+            code: error::INVALID_PARAMS,
+            message,
+            data: None,
+        })?;
+
+        if meerkat_core::has_video(blocks) && !Self::provider_supports_inline_video(identity) {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: format!(
+                    "inline video input requires a Gemini model; current provider is '{}'",
+                    identity.provider.as_str()
+                ),
+                data: None,
+            });
+        }
+
+        Ok(())
+    }
+
     fn resolve_target_llm_identity(
         current: &SessionLlmIdentity,
         ov: &crate::handlers::turn::TurnOverrides,
@@ -532,6 +567,25 @@ impl SessionRuntime {
                 Ok(metadata.llm_identity())
             }
             Err(err) => Err(session_error_to_rpc(err)),
+        }
+    }
+
+    async fn effective_llm_identity_for_turn(
+        &self,
+        session_id: &SessionId,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Result<SessionLlmIdentity, RpcError> {
+        if let Some(pending) = self.pending.read().await.get(session_id) {
+            return match overrides {
+                Some(ov) => Self::resolve_target_llm_identity(&pending.effective_llm_identity, ov),
+                None => Ok(pending.effective_llm_identity.clone()),
+            };
+        }
+
+        let current = self.current_materialized_llm_identity(session_id).await?;
+        match overrides {
+            Some(ov) => Self::resolve_target_llm_identity(&current, ov),
+            None => Ok(current),
         }
     }
 
@@ -860,6 +914,10 @@ impl SessionRuntime {
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
+        let effective_identity = self
+            .effective_llm_identity_for_turn(session_id, overrides.as_ref())
+            .await?;
+        Self::validate_prompt_video_input(&prompt, &effective_identity)?;
 
         if self.live_session_is_stale(session_id).await? {
             let _ = self.service.discard_live_session(session_id).await;
@@ -1067,6 +1125,11 @@ impl SessionRuntime {
                 .await
                 .map_err(session_error_to_rpc);
         }
+
+        let effective_identity = self
+            .effective_llm_identity_for_turn(session_id, overrides.as_ref())
+            .await?;
+        Self::validate_prompt_video_input(&prompt, &effective_identity)?;
 
         let pending_session = {
             let mut pending = self.pending.write().await;
@@ -1537,6 +1600,11 @@ impl SessionRuntime {
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
     ) -> Result<SessionId, RpcError> {
+        let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
+        if let Some(prompt) = deferred_prompt.as_ref() {
+            Self::validate_prompt_video_input(prompt, &effective_llm_identity)?;
+        }
+
         // Check combined capacity (pending + active).
         {
             let pending = self.pending.read().await;
@@ -1585,7 +1653,6 @@ impl SessionRuntime {
             .await?;
 
         {
-            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
             let mut pending = self.pending.write().await;
             pending.insert(
                 session_id.clone(),
@@ -2895,6 +2962,7 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
             | meerkat_core::AgentError::ToolCallBudgetExceeded { .. } => error::BUDGET_EXHAUSTED,
+            meerkat_core::AgentError::ConfigError(_) => error::INVALID_PARAMS,
             meerkat_core::AgentError::HookDenied { .. } => error::HOOK_DENIED,
             meerkat_core::AgentError::Llm { .. } => error::PROVIDER_ERROR,
             meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,

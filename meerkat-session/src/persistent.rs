@@ -26,7 +26,7 @@ use meerkat_core::service::{
     SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
-use meerkat_core::types::{RunResult, SessionId};
+use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{InputId, RunId};
 use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
@@ -78,6 +78,15 @@ fn control_error_into_session_error(err: SessionControlError) -> SessionError {
         SessionControlError::Session(session_err) => session_err,
         other => SessionError::Unsupported(other.to_string()),
     }
+}
+
+fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError> {
+    if results.iter().any(ToolResult::has_video) {
+        return Err(SessionError::Agent(AgentError::ConfigError(
+            "video blocks are not supported in tool results".to_string(),
+        )));
+    }
+    Ok(())
 }
 
 type OpsLifecycleRegistryArc = Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>;
@@ -1351,6 +1360,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         id: &SessionId,
         req: StageToolResultsRequest,
     ) -> Result<StageToolResultsResult, SessionError> {
+        validate_tool_result_video(&req.results)?;
         if self.cached_archived_session(id).await.is_some() {
             return Err(SessionError::NotFound { id: id.clone() });
         }

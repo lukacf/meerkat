@@ -36,8 +36,8 @@ impl DefaultCompactor {
     }
 }
 
-/// Replace image blocks with text placeholders for compaction.
-fn strip_images_for_compaction(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+/// Replace media blocks with text placeholders for compaction.
+fn strip_media_for_compaction(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     blocks
         .iter()
         .map(|block| match block {
@@ -50,28 +50,31 @@ fn strip_images_for_compaction(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
                     text: format!("[image: {media_type}]"),
                 }
             }
+            ContentBlock::Video { media_type, .. } => ContentBlock::Text {
+                text: format!("[video: {media_type}]"),
+            },
             other => other.clone(),
         })
         .collect()
 }
 
-/// Strip images from all messages in a history, replacing them with text placeholders.
+/// Strip media from all messages in a history, replacing them with text placeholders.
 ///
-/// Applies `strip_images_for_compaction` to `UserMessage.content` and
+/// Applies `strip_media_for_compaction` to `UserMessage.content` and
 /// `ToolResult.content` blocks. Other message types pass through unchanged.
-fn strip_images_from_messages(messages: &[Message]) -> Vec<Message> {
+fn strip_media_from_messages(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
         .map(|msg| match msg {
             Message::User(user) => {
-                let content = strip_images_for_compaction(&user.content);
+                let content = strip_media_for_compaction(&user.content);
                 Message::User(meerkat_core::types::UserMessage::with_blocks(content))
             }
             Message::ToolResults { results } => {
                 let results = results
                     .iter()
                     .map(|r| {
-                        let content = strip_images_for_compaction(&r.content);
+                        let content = strip_media_for_compaction(&r.content);
                         meerkat_core::types::ToolResult::with_blocks(
                             r.tool_use_id.clone(),
                             content,
@@ -108,7 +111,7 @@ impl Compactor for DefaultCompactor {
     }
 
     fn prepare_for_summarization(&self, messages: &[Message]) -> Vec<Message> {
-        strip_images_from_messages(messages)
+        strip_media_from_messages(messages)
     }
 
     fn compaction_prompt(&self) -> &str {
@@ -166,11 +169,11 @@ impl Compactor for DefaultCompactor {
             discarded.push(msg.clone());
         }
 
-        // Everything from retain_from goes to rebuilt, but image-bearing content
+        // Everything from retain_from goes to rebuilt, but media-bearing content
         // is stripped to placeholders as part of compaction. This is the v1
-        // "logical GC" contract: compacted sessions do not keep image payload
-        // references in active history after compaction.
-        rebuilt.extend(strip_images_from_messages(&history[retain_from..]));
+        // "logical GC" contract: compacted sessions do not keep inline media
+        // payloads in active history after compaction.
+        rebuilt.extend(strip_media_from_messages(&history[retain_from..]));
 
         CompactionResult {
             messages: rebuilt,
@@ -431,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_strips_images_preserves_text() {
+    fn compaction_strips_media_preserves_text() {
         let blocks = vec![
             ContentBlock::Text {
                 text: "hello".to_string(),
@@ -440,15 +443,23 @@ mod tests {
                 media_type: "image/png".to_string(),
                 data: "base64data".into(),
             },
+            ContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 5_000,
+                data: meerkat_core::VideoData::Inline {
+                    data: "videodata".to_string(),
+                },
+            },
             ContentBlock::Text {
                 text: "world".to_string(),
             },
         ];
-        let result = strip_images_for_compaction(&blocks);
-        assert_eq!(result.len(), 3);
+        let result = strip_media_for_compaction(&blocks);
+        assert_eq!(result.len(), 4);
         assert!(matches!(&result[0], ContentBlock::Text { text } if text == "hello"));
         assert!(matches!(&result[1], ContentBlock::Text { text } if text == "[image: image/png]"));
-        assert!(matches!(&result[2], ContentBlock::Text { text } if text == "world"));
+        assert!(matches!(&result[2], ContentBlock::Text { text } if text == "[video: video/mp4]"));
+        assert!(matches!(&result[3], ContentBlock::Text { text } if text == "world"));
     }
 
     #[test]
@@ -459,7 +470,7 @@ mod tests {
             media_type: "image/png".to_string(),
             data: "base64data".into(),
         }];
-        let result = strip_images_for_compaction(&blocks);
+        let result = strip_media_for_compaction(&blocks);
         assert_eq!(result.len(), 1);
         assert!(matches!(&result[0], ContentBlock::Text { text } if text == "[image: image/png]"));
         // Verify source_path is NOT in the output
@@ -481,14 +492,14 @@ mod tests {
                 text: "two".to_string(),
             },
         ];
-        let result = strip_images_for_compaction(&blocks);
+        let result = strip_media_for_compaction(&blocks);
         assert_eq!(result.len(), 2);
         assert!(matches!(&result[0], ContentBlock::Text { text } if text == "one"));
         assert!(matches!(&result[1], ContentBlock::Text { text } if text == "two"));
     }
 
     #[test]
-    fn prepare_for_summarization_strips_user_and_tool_images() {
+    fn prepare_for_summarization_strips_user_and_tool_media() {
         use meerkat_core::types::ToolResult;
 
         let c = DefaultCompactor::new(make_config());
@@ -502,6 +513,13 @@ mod tests {
                     media_type: "image/jpeg".to_string(),
                     data: "bigdata".into(),
                 },
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 5_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "video".to_string(),
+                    },
+                },
             ])),
             Message::ToolResults {
                 results: vec![ToolResult::with_blocks(
@@ -514,6 +532,13 @@ mod tests {
                             media_type: "image/png".to_string(),
                             data: "screenshotdata".into(),
                         },
+                        ContentBlock::Video {
+                            media_type: "video/webm".to_string(),
+                            duration_ms: 7_000,
+                            data: meerkat_core::VideoData::Inline {
+                                data: "toolvideo".to_string(),
+                            },
+                        },
                     ],
                     false,
                 )],
@@ -525,27 +550,76 @@ mod tests {
 
         // User message: text preserved, image replaced
         if let Message::User(u) = &prepared[0] {
-            assert_eq!(u.content.len(), 2);
+            assert_eq!(u.content.len(), 3);
             assert!(matches!(&u.content[0], ContentBlock::Text { text } if text == "Look at this"));
             assert!(
                 matches!(&u.content[1], ContentBlock::Text { text } if text == "[image: image/jpeg]")
+            );
+            assert!(
+                matches!(&u.content[2], ContentBlock::Text { text } if text == "[video: video/mp4]")
             );
         } else {
             panic!("expected User message");
         }
 
-        // Tool result: text preserved, image replaced
+        // Tool result: text preserved, media replaced
         if let Message::ToolResults { results } = &prepared[1] {
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0].content.len(), 2);
+            assert_eq!(results[0].content.len(), 3);
             assert!(
                 matches!(&results[0].content[0], ContentBlock::Text { text } if text == "screenshot captured")
             );
             assert!(
                 matches!(&results[0].content[1], ContentBlock::Text { text } if text == "[image: image/png]")
             );
+            assert!(
+                matches!(&results[0].content[2], ContentBlock::Text { text } if text == "[video: video/webm]")
+            );
         } else {
             panic!("expected ToolResults message");
+        }
+    }
+
+    #[test]
+    fn rebuild_history_nukes_videos_from_retained_turns() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+
+        let messages = vec![
+            Message::User(UserMessage::text("old text turn")),
+            Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "latest with video".to_string(),
+                },
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 5_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "video-data".to_string(),
+                    },
+                },
+            ])),
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(result.messages.len(), 2, "summary + retained turn");
+        let retained = result.messages.last().expect("retained turn");
+        match retained {
+            Message::User(user) => {
+                assert_eq!(user.content.len(), 2);
+                assert!(matches!(
+                    &user.content[0],
+                    ContentBlock::Text { text } if text == "latest with video"
+                ));
+                assert!(matches!(
+                    &user.content[1],
+                    ContentBlock::Text { text } if text == "[video: video/mp4]"
+                ));
+            }
+            other => panic!("expected retained user turn, got {other:?}"),
         }
     }
 

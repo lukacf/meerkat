@@ -1159,6 +1159,12 @@ where
                                 is_error: tool_result.is_error,
                             });
 
+                            if tool_result.has_video() {
+                                return Err(AgentError::ConfigError(
+                                    "video blocks are not supported in tool results".to_string(),
+                                ));
+                            }
+
                             tool_results.push(tool_result);
 
                             // Track tool call in budget

@@ -69,7 +69,15 @@ class BlobImageBlock(TypedDict):
     blob_id: str
 
 
-ContentBlock = Union[TextBlock, InlineImageBlock, BlobImageBlock]
+class InlineVideoBlock(TypedDict, total=False):
+    type: Literal["video"]
+    media_type: str
+    duration_ms: int
+    source: Literal["inline"]
+    data: str
+
+
+ContentBlock = Union[TextBlock, InlineImageBlock, BlobImageBlock, InlineVideoBlock]
 """A multimodal content block accepted by input-bearing APIs."""
 
 ContentInput = str | list[ContentBlock]

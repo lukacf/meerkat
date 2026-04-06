@@ -37,6 +37,16 @@ pub enum CompactionError {
 /// (which inflate the estimate by ~200x).
 const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
 
+fn estimate_inline_video_tokens(data: &str) -> u64 {
+    let len = data.len() as u64;
+    if len > 0 { (len / 4).max(1) } else { 0 }
+}
+
+fn estimate_video_duration_tokens(duration_ms: u64) -> u64 {
+    // Rough default-resolution Gemini heuristic, scaled by caller-provided duration.
+    duration_ms.saturating_mul(300).div_ceil(1000)
+}
+
 /// Estimate token count from message history.
 ///
 /// Text content uses `json_bytes / 4` as a rough heuristic.
@@ -52,6 +62,14 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                         crate::types::ContentBlock::Image { .. } => {
                             tokens += IMAGE_TOKEN_ESTIMATE;
                         }
+                        crate::types::ContentBlock::Video {
+                            duration_ms,
+                            data: crate::types::VideoData::Inline { data },
+                            ..
+                        } => {
+                            tokens += estimate_inline_video_tokens(data)
+                                .max(estimate_video_duration_tokens(*duration_ms));
+                        }
                         _ => {
                             let len = block.text_projection().len() as u64;
                             tokens += if len > 0 { (len / 4).max(1) } else { 0 };
@@ -65,6 +83,14 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                         match block {
                             crate::types::ContentBlock::Image { .. } => {
                                 tokens += IMAGE_TOKEN_ESTIMATE;
+                            }
+                            crate::types::ContentBlock::Video {
+                                duration_ms,
+                                data: crate::types::VideoData::Inline { data },
+                                ..
+                            } => {
+                                tokens += estimate_inline_video_tokens(data)
+                                    .max(estimate_video_duration_tokens(*duration_ms));
                             }
                             _ => {
                                 let len = block.text_projection().len() as u64;
@@ -288,7 +314,10 @@ pub struct CompactionOutcome {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::types::{AssistantBlock, BlockAssistantMessage, StopReason, Usage, UserMessage};
+    use crate::types::{
+        AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, ToolResult, Usage,
+        UserMessage, VideoData,
+    };
 
     #[test]
     fn load_compaction_cadence_infers_boundary_count_from_existing_history() {
@@ -326,5 +355,33 @@ mod tests {
         persist_compaction_cadence(&mut session, &cadence).unwrap();
 
         assert_eq!(load_compaction_cadence(&session), cadence);
+    }
+
+    #[test]
+    fn estimate_tokens_uses_video_heuristic_for_user_and_tool_results() {
+        let messages = vec![
+            Message::User(UserMessage::with_blocks(vec![ContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 8_000,
+                data: VideoData::Inline {
+                    data: "A".repeat(8_000),
+                },
+            }])),
+            Message::ToolResults {
+                results: vec![ToolResult::with_blocks(
+                    "tool-1".to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/webm".to_string(),
+                        duration_ms: 4_000,
+                        data: VideoData::Inline {
+                            data: "B".repeat(4_000),
+                        },
+                    }],
+                    false,
+                )],
+            },
+        ];
+
+        assert_eq!(estimate_tokens(&messages).unwrap(), 3_600);
     }
 }

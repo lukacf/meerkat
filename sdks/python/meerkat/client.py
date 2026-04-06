@@ -1536,6 +1536,14 @@ class MeerkatClient:
                 "source": "inline",
                 "data": str(data.get("data", "")),
             }
+        if data.get("type") == "video":
+            return {
+                "type": "video",
+                "media_type": str(data.get("media_type", "")),
+                "duration_ms": int(data.get("duration_ms", 0) or 0),
+                "source": "inline",
+                "data": str(data.get("data", "")),
+            }
         return {
             "type": "text",
             "text": str(data.get("text", "")),

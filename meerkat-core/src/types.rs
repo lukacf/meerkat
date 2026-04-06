@@ -16,6 +16,8 @@ use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, Sche
 // Multimodal content blocks
 // ===========================================================================
 
+pub const SUPPORTED_VIDEO_MEDIA_TYPES: &[&str] = &["video/mp4", "video/webm", "video/quicktime"];
+
 /// A block of content in user messages and tool results.
 ///
 /// Supports text and images for multimodal agent interactions.
@@ -43,6 +45,28 @@ impl From<&str> for ImageData {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum VideoData {
+    /// Base64-encoded inline bytes used for ingress and live execution.
+    Inline { data: String },
+}
+
+impl From<String> for VideoData {
+    fn from(data: String) -> Self {
+        Self::Inline { data }
+    }
+}
+
+impl From<&str> for VideoData {
+    fn from(data: &str) -> Self {
+        Self::Inline {
+            data: data.to_string(),
+        }
+    }
+}
+
 #[non_exhaustive]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,17 +82,28 @@ pub enum ContentBlock {
         #[serde(flatten)]
         data: ImageData,
     },
+    /// Base64-encoded video content.
+    Video {
+        /// MIME type (e.g. "video/mp4", "video/webm").
+        media_type: String,
+        /// Caller-provided clip duration in milliseconds.
+        duration_ms: u64,
+        /// Inline video bytes.
+        #[serde(flatten)]
+        data: VideoData,
+    },
 }
 
 impl ContentBlock {
     /// Canonical text projection for display, hooks, and indexing.
     ///
-    /// Text blocks return their content. Image blocks return `[image: {media_type}]`.
+    /// Text blocks return their content. Media blocks return `[kind: {media_type}]`.
     /// `source_path` is internal metadata and is NOT included in the projection.
     pub fn text_projection(&self) -> Cow<'_, str> {
         match self {
             ContentBlock::Text { text } => Cow::Borrowed(text),
             ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
+            ContentBlock::Video { media_type, .. } => Cow::Owned(format!("[video: {media_type}]")),
         }
     }
 
@@ -93,6 +128,17 @@ impl ContentBlock {
                 media_type,
                 data: ImageData::Blob { blob_id },
             } => Some((media_type, blob_id)),
+            _ => None,
+        }
+    }
+
+    pub fn video_inline_data(&self) -> Option<(&str, u64, &str)> {
+        match self {
+            ContentBlock::Video {
+                media_type,
+                duration_ms,
+                data: VideoData::Inline { data },
+            } => Some((media_type, *duration_ms, data)),
             _ => None,
         }
     }
@@ -122,6 +168,56 @@ pub fn has_images(blocks: &[ContentBlock]) -> bool {
     blocks
         .iter()
         .any(|b| matches!(b, ContentBlock::Image { .. }))
+}
+
+/// Check if any content blocks contain video.
+pub fn has_video(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Video { .. }))
+}
+
+/// Check if any content blocks are non-text.
+pub fn has_non_text_content(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .any(|b| !matches!(b, ContentBlock::Text { .. }))
+}
+
+pub fn is_supported_video_media_type(media_type: &str) -> bool {
+    SUPPORTED_VIDEO_MEDIA_TYPES.contains(&media_type)
+}
+
+pub fn validate_inline_video_blocks(blocks: &[ContentBlock]) -> Result<(), String> {
+    for block in blocks {
+        if let ContentBlock::Video {
+            media_type,
+            duration_ms,
+            data,
+        } = block
+        {
+            if !is_supported_video_media_type(media_type) {
+                return Err(format!(
+                    "unsupported video media type '{media_type}'; expected one of {}",
+                    SUPPORTED_VIDEO_MEDIA_TYPES.join(", ")
+                ));
+            }
+            if *duration_ms == 0 {
+                return Err(format!(
+                    "video block duration_ms must be greater than 0 for {media_type}"
+                ));
+            }
+            match data {
+                VideoData::Inline { data } if data.is_empty() => {
+                    return Err(format!(
+                        "video block data must not be empty for {media_type}"
+                    ));
+                }
+                VideoData::Inline { .. } => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Custom serde for `Vec<ContentBlock>` fields that provides backwards
@@ -203,6 +299,22 @@ impl ContentInput {
         match self {
             ContentInput::Text(_) => false,
             ContentInput::Blocks(blocks) => has_images(blocks),
+        }
+    }
+
+    /// Check if this input contains any video blocks.
+    pub fn has_video(&self) -> bool {
+        match self {
+            ContentInput::Text(_) => false,
+            ContentInput::Blocks(blocks) => has_video(blocks),
+        }
+    }
+
+    /// Check if this input contains any non-text blocks.
+    pub fn has_non_text_content(&self) -> bool {
+        match self {
+            ContentInput::Text(_) => false,
+            ContentInput::Blocks(blocks) => has_non_text_content(blocks),
         }
     }
 }
@@ -890,6 +1002,16 @@ impl UserMessage {
     pub fn has_images(&self) -> bool {
         has_images(&self.content)
     }
+
+    /// Check whether any content blocks are video.
+    pub fn has_video(&self) -> bool {
+        has_video(&self.content)
+    }
+
+    /// Check whether any content blocks are non-text.
+    pub fn has_non_text_content(&self) -> bool {
+        has_non_text_content(&self.content)
+    }
 }
 
 /// New assistant message with ordered blocks - no billing metadata.
@@ -1037,6 +1159,11 @@ impl ToolResult {
     /// Check whether any content blocks are images.
     pub fn has_images(&self) -> bool {
         has_images(&self.content)
+    }
+
+    /// Check whether any content blocks are video.
+    pub fn has_video(&self) -> bool {
+        has_video(&self.content)
     }
 
     /// Set text content, replacing all blocks with a single text block.

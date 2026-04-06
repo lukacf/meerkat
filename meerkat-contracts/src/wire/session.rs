@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
+    VideoData,
 };
 use std::convert::TryFrom;
 
@@ -167,6 +168,27 @@ impl From<&str> for WireImageData {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum WireVideoData {
+    Inline { data: String },
+}
+
+impl From<String> for WireVideoData {
+    fn from(data: String) -> Self {
+        Self::Inline { data }
+    }
+}
+
+impl From<&str> for WireVideoData {
+    fn from(data: &str) -> Self {
+        Self::Inline {
+            data: data.to_string(),
+        }
+    }
+}
+
 /// Wire-safe content block (no `source_path` — internal only).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -179,6 +201,12 @@ pub enum WireContentBlock {
         media_type: String,
         #[serde(flatten)]
         data: WireImageData,
+    },
+    Video {
+        media_type: String,
+        duration_ms: u64,
+        #[serde(flatten)]
+        data: WireVideoData,
     },
     /// Forward-compatibility for unknown block types.
     #[serde(other)]
@@ -194,6 +222,17 @@ impl From<ContentBlock> for WireContentBlock {
                 data: match data {
                     ImageData::Inline { data } => WireImageData::Inline { data },
                     ImageData::Blob { blob_id } => WireImageData::Blob { blob_id },
+                },
+            },
+            ContentBlock::Video {
+                media_type,
+                duration_ms,
+                data,
+            } => WireContentBlock::Video {
+                media_type,
+                duration_ms,
+                data: match data {
+                    VideoData::Inline { data } => WireVideoData::Inline { data },
                 },
             },
             _ => WireContentBlock::Unknown,
@@ -212,6 +251,17 @@ impl TryFrom<WireContentBlock> for ContentBlock {
                 data: match data {
                     WireImageData::Inline { data } => ImageData::Inline { data },
                     WireImageData::Blob { blob_id } => ImageData::Blob { blob_id },
+                },
+            }),
+            WireContentBlock::Video {
+                media_type,
+                duration_ms,
+                data,
+            } => Ok(ContentBlock::Video {
+                media_type,
+                duration_ms,
+                data: match data {
+                    WireVideoData::Inline { data } => VideoData::Inline { data },
                 },
             }),
             WireContentBlock::Unknown => Err("unknown content block type"),
@@ -778,8 +828,20 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_content_block_video_roundtrip() {
+        let block = WireContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: "AAAA".into(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
     fn test_wire_content_block_unknown_forward_compat() {
-        let json = r#"{"type":"video","url":"https://example.com/v.mp4"}"#;
+        let json = r#"{"type":"hologram","url":"https://example.com/v.mp4"}"#;
         let parsed: WireContentBlock = serde_json::from_str(json).unwrap();
         assert_eq!(parsed, WireContentBlock::Unknown);
     }
@@ -798,6 +860,28 @@ mod tests {
                 data: "base64data".into(),
             }
         );
+    }
+
+    #[test]
+    fn test_wire_content_block_from_core_video_roundtrip() {
+        let core_block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: VideoData::Inline {
+                data: "base64video".to_string(),
+            },
+        };
+        let wire: WireContentBlock = core_block.clone().into();
+        assert_eq!(
+            wire,
+            WireContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 12_000,
+                data: "base64video".into(),
+            }
+        );
+        let restored = ContentBlock::try_from(wire).unwrap();
+        assert_eq!(restored, core_block);
     }
 
     #[test]

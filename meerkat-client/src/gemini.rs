@@ -82,7 +82,7 @@ impl GeminiClient {
                     }));
                 }
                 Message::User(u) => {
-                    if meerkat_core::has_images(&u.content) {
+                    if meerkat_core::has_non_text_content(&u.content) {
                         let parts: Vec<Value> = u
                             .content
                             .iter()
@@ -93,6 +93,16 @@ impl GeminiClient {
                                 ContentBlock::Image {
                                     media_type,
                                     data: ImageData::Inline { data },
+                                } => serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": data
+                                    }
+                                }),
+                                ContentBlock::Video {
+                                    media_type,
+                                    duration_ms: _,
+                                    data: meerkat_core::VideoData::Inline { data },
                                 } => serde_json::json!({
                                     "inlineData": {
                                         "mimeType": media_type,
@@ -182,6 +192,12 @@ impl GeminiClient {
                     let mut parts: Vec<Value> = Vec::new();
 
                     for r in results {
+                        if r.has_video() {
+                            return Err(LlmError::InvalidRequest {
+                                message: "video blocks are not supported in Gemini tool results"
+                                    .to_string(),
+                            });
+                        }
                         let function_name = tool_name_by_id
                             .get(&r.tool_use_id)
                             .cloned()
@@ -1381,6 +1397,62 @@ mod tests {
         assert_eq!(response_schema["type"], "object");
         assert!(response_schema.get("properties").is_some());
         Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_serializes_inline_video_user_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "video/mp4");
+        assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_rejects_video_tool_results() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::ToolResults {
+                results: vec![meerkat_core::ToolResult::with_blocks(
+                    "tool_1".to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 12_000,
+                        data: meerkat_core::VideoData::Inline {
+                            data: "AAAA".to_string(),
+                        },
+                    }],
+                    false,
+                )],
+            }],
+        );
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("video tool results should be rejected");
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(message.contains("video blocks are not supported"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

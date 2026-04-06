@@ -158,7 +158,7 @@ impl AnthropicClient {
                     }));
                 }
                 Message::User(u) => {
-                    if meerkat_core::has_images(&u.content) {
+                    if meerkat_core::has_non_text_content(&u.content) {
                         let content_array: Vec<Value> = u
                             .content
                             .iter()
@@ -299,6 +299,12 @@ impl AnthropicClient {
                     let mut content = Vec::new();
 
                     for r in results {
+                        if r.has_video() {
+                            return Err(LlmError::InvalidRequest {
+                                message: "video blocks are not supported in Anthropic tool results"
+                                    .to_string(),
+                            });
+                        }
                         if r.has_images() {
                             let result_content: Vec<Value> = r
                                 .content
@@ -1124,6 +1130,65 @@ mod tests {
         assert_eq!(assistant_content[1]["text"], "The answer is 42.");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_degrades_video_user_content_to_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().ok_or("missing messages")?;
+        let content = messages[0]["content"]
+            .as_array()
+            .ok_or("missing content array")?;
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "[video: video/mp4]");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_rejects_video_tool_results() {
+        let client = AnthropicClient::new("test-key".to_string()).expect("client");
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::ToolResults {
+                results: vec![meerkat_core::ToolResult::with_blocks(
+                    "tool_1".to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 12_000,
+                        data: meerkat_core::VideoData::Inline {
+                            data: "AAAA".to_string(),
+                        },
+                    }],
+                    false,
+                )],
+            }],
+        );
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("video tool results should be rejected");
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(message.contains("video blocks are not supported"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

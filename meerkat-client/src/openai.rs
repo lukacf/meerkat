@@ -71,7 +71,7 @@ impl OpenAiClient {
 
     /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
-        let input = Self::convert_to_responses_input(&request.messages);
+        let input = Self::convert_to_responses_input(&request.messages)?;
         let reasoning_enabled = Self::model_supports_reasoning_payload(&request.model);
 
         let mut body = serde_json::json!({
@@ -167,7 +167,7 @@ impl OpenAiClient {
     /// OpenAI enforces strict adjacency invariants for reasoning replay, and
     /// violating them causes hard request failures. Replaying only user/assistant
     /// messages and tool items is robust across retries and tool-call turns.
-    fn convert_to_responses_input(messages: &[Message]) -> Vec<Value> {
+    fn convert_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, LlmError> {
         let mut items = Vec::new();
 
         for msg in messages {
@@ -187,7 +187,7 @@ impl OpenAiClient {
                     }));
                 }
                 Message::User(u) => {
-                    if meerkat_core::has_images(&u.content) {
+                    if meerkat_core::has_non_text_content(&u.content) {
                         let content_array: Vec<Value> = u
                             .content
                             .iter()
@@ -275,6 +275,12 @@ impl OpenAiClient {
                     // OpenAI function_call_output only accepts strings; images
                     // degrade to text projection via text_content().
                     for r in results {
+                        if r.has_video() {
+                            return Err(LlmError::InvalidRequest {
+                                message: "video blocks are not supported in OpenAI tool results"
+                                    .to_string(),
+                            });
+                        }
                         items.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": r.tool_use_id,
@@ -285,7 +291,7 @@ impl OpenAiClient {
             }
         }
 
-        items
+        Ok(items)
     }
 
     /// Parse an SSE event from the Responses API stream
@@ -882,6 +888,57 @@ mod tests {
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[1]["role"], "user");
         assert_eq!(input[1]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_request_input_format_degrades_video_user_content_to_text() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.2",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input should be array");
+        assert_eq!(input[0]["role"], "user");
+        let content = input[0]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "[video: video/mp4]");
+    }
+
+    #[test]
+    fn test_request_input_rejects_video_tool_results() {
+        let err = OpenAiClient::convert_to_responses_input(&[Message::ToolResults {
+            results: vec![meerkat_core::ToolResult::with_blocks(
+                "tool_1".to_string(),
+                vec![ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                }],
+                false,
+            )],
+        }])
+        .expect_err("video tool results should be rejected");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(message.contains("video blocks are not supported"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

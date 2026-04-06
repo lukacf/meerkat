@@ -294,6 +294,34 @@ describe("Typed Events", () => {
     assert.equal(history.messages[2].blocks[0].name, "lookup");
   });
 
+  it("should parse inline video content blocks from history payloads", () => {
+    const history = MeerkatClient.parseSessionHistory({
+      session_id: "s1",
+      message_count: 1,
+      offset: 0,
+      has_more: false,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "video",
+              media_type: "video/mp4",
+              duration_ms: 12000,
+              source: "inline",
+              data: "AAAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.equal(history.messages[0].content[0].type, "video");
+    assert.equal(history.messages[0].content[0].media_type, "video/mp4");
+    assert.equal(history.messages[0].content[0].duration_ms, 12000);
+    assert.equal(history.messages[0].content[0].data, "AAAA");
+  });
+
   it("Session.history should delegate to readSessionHistory", async () => {
     const expected = {
       sessionId: "s1",

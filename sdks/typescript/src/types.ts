@@ -69,11 +69,21 @@ export interface BlobImageBlock {
   readonly blob_id: string;
 }
 
+/** Inline video content accepted by input-bearing APIs. */
+export interface InlineVideoBlock {
+  readonly type: "video";
+  readonly media_type: string;
+  readonly duration_ms: number;
+  readonly source?: "inline";
+  readonly data: string;
+}
+
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
   | { type: "text"; text: string }
   | InlineImageBlock
-  | BlobImageBlock;
+  | BlobImageBlock
+  | InlineVideoBlock;
 
 /** Canonical content input returned by history surfaces and accepted by input-bearing APIs. */
 export type ContentInput = string | readonly ContentBlock[];

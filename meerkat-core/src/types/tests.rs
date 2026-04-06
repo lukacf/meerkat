@@ -1250,6 +1250,24 @@ mod content_block_tests {
     }
 
     #[test]
+    fn content_block_video_roundtrip() {
+        let block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: crate::types::VideoData::Inline {
+                data: "AAA".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "video");
+        assert_eq!(json["media_type"], "video/mp4");
+        assert_eq!(json["duration_ms"], 12000);
+        assert_eq!(json["source"], "inline");
+        let parsed: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
     fn text_projection_text_returns_text() {
         let block = ContentBlock::Text {
             text: "hello".to_string(),
@@ -1264,6 +1282,24 @@ mod content_block_tests {
             data: "d".into(),
         };
         assert_eq!(block.text_projection().as_ref(), "[image: image/png]");
+    }
+
+    #[test]
+    fn text_projection_video_returns_placeholder() {
+        let block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: crate::types::VideoData::Inline {
+                data: "d".to_string(),
+            },
+        };
+        assert_eq!(block.text_projection().as_ref(), "[video: video/mp4]");
+    }
+
+    #[test]
+    fn content_block_video_requires_duration_ms() {
+        let json = r#"{"type":"video","media_type":"video/mp4","source":"inline","data":"abc"}"#;
+        assert!(serde_json::from_str::<ContentBlock>(json).is_err());
     }
 
     #[test]
@@ -1348,6 +1384,24 @@ mod content_block_tests {
     }
 
     #[test]
+    fn tool_result_has_video() {
+        let with = ToolResult::with_blocks(
+            "t".into(),
+            vec![ContentBlock::Video {
+                media_type: "video/mp4".into(),
+                duration_ms: 12_000,
+                data: crate::types::VideoData::Inline {
+                    data: "abc".to_string(),
+                },
+            }],
+            false,
+        );
+        assert!(with.has_video());
+        let without = ToolResult::new("t".into(), "text".into(), false);
+        assert!(!without.has_video());
+    }
+
+    #[test]
     fn user_message_deserialize_legacy_string() {
         let json = json!({"role": "user", "content": "hello"});
         let msg: Message = serde_json::from_value(json).unwrap();
@@ -1401,6 +1455,8 @@ mod content_block_tests {
         let input = ContentInput::from("hello".to_string());
         assert_eq!(input.text_content(), "hello");
         assert!(!input.has_images());
+        assert!(!input.has_video());
+        assert!(!input.has_non_text_content());
     }
 
     #[test]
@@ -1415,7 +1471,27 @@ mod content_block_tests {
             },
         ]);
         assert!(input.has_images());
+        assert!(input.has_non_text_content());
         assert!(input.text_content().contains("[image: image/png]"));
+    }
+
+    #[test]
+    fn content_input_video_helpers_work() {
+        let input = ContentInput::Blocks(vec![
+            ContentBlock::Text {
+                text: "watch".to_string(),
+            },
+            ContentBlock::Video {
+                media_type: "video/mp4".into(),
+                duration_ms: 12_000,
+                data: crate::types::VideoData::Inline {
+                    data: "abc".to_string(),
+                },
+            },
+        ]);
+        assert!(input.has_video());
+        assert!(input.has_non_text_content());
+        assert!(input.text_content().contains("[video: video/mp4]"));
     }
 
     #[test]
@@ -1482,5 +1558,17 @@ mod content_block_tests {
             data: "abc".into(),
         };
         assert_eq!(format!("{block}"), "[image: image/png]");
+    }
+
+    #[test]
+    fn content_block_display_video() {
+        let block = ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 12_000,
+            data: crate::types::VideoData::Inline {
+                data: "abc".to_string(),
+            },
+        };
+        assert_eq!(format!("{block}"), "[video: video/mp4]");
     }
 }

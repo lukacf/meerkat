@@ -21,7 +21,7 @@ use meerkat_core::service::{
     TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
-use meerkat_core::types::{RunResult, SessionId, Usage};
+use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
     InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
     SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
@@ -453,6 +453,41 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    fn provider_supports_inline_video(identity: &SessionLlmIdentity) -> bool {
+        identity.provider == meerkat_core::Provider::Gemini
+    }
+
+    fn validate_prompt_video_input(
+        prompt: &ContentInput,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        let blocks = match prompt {
+            ContentInput::Text(_) => return Ok(()),
+            ContentInput::Blocks(blocks) => blocks,
+        };
+
+        meerkat_core::validate_inline_video_blocks(blocks)
+            .map_err(|err| SessionError::Agent(AgentError::ConfigError(err)))?;
+
+        if meerkat_core::has_video(blocks) && !Self::provider_supports_inline_video(identity) {
+            return Err(SessionError::Agent(AgentError::ConfigError(format!(
+                "inline video input requires a Gemini model; current provider is '{}'",
+                identity.provider.as_str()
+            ))));
+        }
+
+        Ok(())
+    }
+
+    fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError> {
+        if results.iter().any(ToolResult::has_video) {
+            return Err(SessionError::Agent(AgentError::ConfigError(
+                "video blocks are not supported in tool results".to_string(),
+            )));
+        }
+        Ok(())
+    }
+
     fn llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
         let provider = req
             .build
@@ -813,6 +848,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
+        let llm_identity = Self::llm_identity_from_create_request(&req);
+        Self::validate_prompt_video_input(&prompt, &llm_identity)?;
         let labels = req.labels.clone().unwrap_or_default();
         let resumed_session = req
             .build
@@ -858,8 +895,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .builder
             .build_agent(&req, agent_event_tx.clone())
             .await?;
-        let llm_identity = Self::llm_identity_from_create_request(&req);
-
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
         let turn_lock = Arc::new(AtomicBool::new(false));
@@ -1021,7 +1056,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     prefix.push_str(instruction);
                     prefix.push_str("]\n\n");
                 }
-                if req.prompt.has_images() {
+                if req.prompt.has_non_text_content() {
                     // Preserve original block ordering; prepend instructions as a leading text block.
                     let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
                     blocks.extend(req.prompt.clone().into_blocks());
@@ -1039,6 +1074,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             let handle = sessions
                 .get(id)
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            let identity = handle.llm_identity_rx.borrow().clone();
+            Self::validate_prompt_video_input(&prompt, &identity)?;
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
@@ -1427,6 +1464,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
         id: &SessionId,
         req: StageToolResultsRequest,
     ) -> Result<StageToolResultsResult, SessionError> {
+        Self::validate_tool_result_video(&req.results)?;
         let state = self
             .deferred_turn_state(id)
             .await

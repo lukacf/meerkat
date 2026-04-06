@@ -509,7 +509,7 @@ where
 
         // Apply canonical per-turn skill references staged by the surface.
         // Skill refs are text-only so they operate on the text projection.
-        let user_input = if user_input.has_images() {
+        let user_input = if user_input.has_non_text_content() {
             // For multimodal input, prepend skill text to the text blocks only.
             let skill_text = self.apply_skill_ref(String::new()).await;
             if skill_text.is_empty() {
@@ -529,7 +529,7 @@ where
         let run_prompt = user_input.text_content();
 
         // Add user message — preserve image blocks when present.
-        let user_message = if user_input.has_images() {
+        let user_message = if user_input.has_non_text_content() {
             crate::types::UserMessage::with_blocks(user_input.into_blocks())
         } else {
             crate::types::UserMessage::text(user_input.text_content())

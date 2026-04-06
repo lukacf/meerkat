@@ -205,13 +205,9 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
             blocks: f.blocks.clone().unwrap_or_default(),
         },
-        Input::ExternalEvent(e) if e.blocks.is_some() => {
-            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                text: external_event_projection_text(e),
-            }];
-            blocks.extend(e.blocks.clone().unwrap_or_default());
-            CoreRenderable::Blocks { blocks }
-        }
+        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: e.blocks.clone().unwrap_or_default(),
+        },
         Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
             CoreRenderable::Text {
                 text: input_to_prompt(input),
@@ -1127,15 +1123,10 @@ mod tests {
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
             CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 3);
-                assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[EVENT via webhook] see this event".into(),
-                    }
-                );
-                assert_eq!(got[1], blocks[0]);
-                assert_eq!(got[2], blocks[1]);
+                // Blocks are preserved directly — no synthetic text header prepended.
+                assert_eq!(got.len(), 2);
+                assert_eq!(got[0], blocks[0]);
+                assert_eq!(got[1], blocks[1]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
@@ -1175,14 +1166,9 @@ mod tests {
         };
         match &staged.appends[0].content {
             CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 2);
-                assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[EVENT via webhook] see attached screenshot".into(),
-                    }
-                );
-                assert_eq!(got[1], blocks[0]);
+                // Image-only blocks preserved directly without text header.
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0], blocks[0]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }

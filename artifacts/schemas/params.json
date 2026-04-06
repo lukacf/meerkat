@@ -1317,6 +1317,46 @@
             "type": "object"
           },
           {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {

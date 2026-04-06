@@ -4,6 +4,10 @@
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "inline_video": {
+            "description": "Whether the model accepts inline video content in user messages.",
+            "type": "boolean"
+          },
           "model_family": {
             "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
             "type": "string"
@@ -29,6 +33,7 @@
           "supports_temperature",
           "supports_thinking",
           "supports_reasoning",
+          "inline_video",
           "params_schema"
         ],
         "type": "object"
@@ -211,6 +216,10 @@
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "inline_video": {
+            "description": "Whether the model accepts inline video content in user messages.",
+            "type": "boolean"
+          },
           "model_family": {
             "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
             "type": "string"
@@ -236,6 +245,7 @@
           "supports_temperature",
           "supports_thinking",
           "supports_reasoning",
+          "inline_video",
           "params_schema"
         ],
         "type": "object"
@@ -335,6 +345,10 @@
       "WireModelProfile": {
         "description": "Runtime profile for a model — capabilities and parameter schema.",
         "properties": {
+          "inline_video": {
+            "description": "Whether the model accepts inline video content in user messages.",
+            "type": "boolean"
+          },
           "model_family": {
             "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
             "type": "string"
@@ -360,6 +374,7 @@
           "supports_temperature",
           "supports_thinking",
           "supports_reasoning",
+          "inline_video",
           "params_schema"
         ],
         "type": "object"
@@ -411,6 +426,10 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Runtime profile for a model — capabilities and parameter schema.",
     "properties": {
+      "inline_video": {
+        "description": "Whether the model accepts inline video content in user messages.",
+        "type": "boolean"
+      },
       "model_family": {
         "description": "Model family identifier (e.g., `\"claude-opus-4\"`, `\"gpt-5\"`).",
         "type": "string"
@@ -436,6 +455,7 @@
       "supports_temperature",
       "supports_thinking",
       "supports_reasoning",
+      "inline_video",
       "params_schema"
     ],
     "title": "WireModelProfile",

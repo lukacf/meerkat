@@ -454,6 +454,16 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
                 "meerkat-mob/src/runtime/flow.rs",
             ]
         }
+        ("FlowFrameMachine", "FlowRunMachine" | "LoopIterationMachine")
+        | ("LoopIterationMachine", "FlowRunMachine" | "FlowFrameMachine") => {
+            vec![
+                "meerkat-mob/src/runtime/flow_frame_engine.rs",
+                "meerkat-mob/src/runtime/flow.rs",
+            ]
+        }
+        ("ScheduleLifecycleMachine", "OccurrenceLifecycleMachine") => {
+            vec!["meerkat-schedule/src/service.rs"]
+        }
         _ => vec![],
     }
 }

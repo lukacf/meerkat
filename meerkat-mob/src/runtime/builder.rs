@@ -18,6 +18,7 @@ pub struct MobBuilder {
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
+    default_external_tools_provider: Option<crate::ExternalToolsProvider>,
 }
 
 enum BuilderMode {
@@ -47,6 +48,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            default_external_tools_provider: None,
         }
     }
 
@@ -88,6 +90,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            default_external_tools_provider: None,
         }
     }
 
@@ -151,6 +154,16 @@ impl MobBuilder {
         self
     }
 
+    /// Set a provider closure that is called at each member spawn to get a fresh
+    /// snapshot of default external tools (e.g. callback tools from the SDK).
+    pub fn with_default_external_tools_provider(
+        mut self,
+        provider: Option<crate::ExternalToolsProvider>,
+    ) -> Self {
+        self.default_external_tools_provider = provider;
+        self
+    }
+
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     pub async fn create(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
@@ -162,6 +175,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: _,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         } = self;
 
         let definition = match mode {
@@ -196,6 +210,22 @@ impl MobBuilder {
             ));
         }
 
+        // §8: AutonomousHost profiles require a runtime adapter. Validate at
+        // build time so Option<adapter> on the trait doesn't hide an ownership
+        // requirement that only surfaces at spawn time.
+        let has_autonomous = definition
+            .profiles
+            .values()
+            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+        if has_autonomous && runtime_adapter.is_none() {
+            return Err(MobError::Internal(
+                "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                 provide one via with_runtime_adapter() or use a session service that implements \
+                 runtime_adapter()"
+                    .to_string(),
+            ));
+        }
+
         // Emit MobCreated event first
         let definition_for_event = (*definition).clone();
         storage
@@ -226,6 +256,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         ))
     }
 
@@ -245,6 +276,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         } = self;
 
         if !matches!(mode, BuilderMode::Resume) {
@@ -261,6 +293,8 @@ impl MobBuilder {
                     .to_string(),
             ));
         }
+        // §8 check deferred until after definition recovery — the definition
+        // comes from the event log, so we can't check profiles before replay.
         let all_events = storage.events.replay_all().await?;
 
         // Use the last MobCreated event — reset appends a fresh MobCreated
@@ -277,6 +311,21 @@ impl MobBuilder {
                     "cannot resume mob: no MobCreated event found in storage".to_string(),
                 )
             })?;
+        // §8: AutonomousHost profiles require a runtime adapter. Same check
+        // as create(), but deferred until after definition recovery from events.
+        let has_autonomous = definition
+            .profiles
+            .values()
+            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+        if has_autonomous && runtime_adapter.is_none() {
+            return Err(MobError::Internal(
+                "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                 provide one via with_runtime_adapter() or use a session service that implements \
+                 runtime_adapter()"
+                    .to_string(),
+            ));
+        }
+
         Self::sync_definition_with_spec_store(
             storage.specs.clone(),
             definition.id.clone(),
@@ -376,6 +425,7 @@ impl MobBuilder {
                 default_llm_client.clone(),
                 &tool_bundles,
                 &preview_handle,
+                &default_external_tools_provider,
             )
             .await?;
         }
@@ -392,6 +442,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         ))
     }
 
@@ -423,6 +474,7 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
+        default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
     ) -> Result<(), MobError> {
         tool_handle.restore_diagnostics.write().await.clear();
         let provisioner = MultiBackendProvisioner::new(
@@ -497,6 +549,7 @@ impl MobBuilder {
                     .profiles
                     .get(&entry.profile)
                     .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                let default_ext = default_external_tools_provider.as_ref().and_then(|p| p());
                 let resumed_config =
                     build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
                         base: build::BuildAgentConfigParams {
@@ -509,11 +562,14 @@ impl MobBuilder {
                                 profile,
                                 tool_bundles,
                                 tool_handle.clone(),
+                                default_ext,
+                                crate::build::MobToolAccessContext::None,
                             )?,
                             context: None,
                             labels: Some(entry.labels.clone()),
                             additional_instructions: None,
                             shell_env: None,
+                            mob_tool_access_context: crate::build::MobToolAccessContext::None,
                         },
                         expected_session_id: &session_id,
                         resumed_session: stored_session,
@@ -560,6 +616,7 @@ impl MobBuilder {
                 .profiles
                 .get(&entry.profile)
                 .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+            let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
                 profile_name: &entry.profile,
@@ -570,11 +627,14 @@ impl MobBuilder {
                     profile,
                     tool_bundles,
                     tool_handle.clone(),
+                    default_ext_fresh,
+                    crate::build::MobToolAccessContext::None,
                 )?,
                 context: None,
                 labels: None,
                 additional_instructions: None,
                 shell_env: None,
+                mob_tool_access_context: crate::build::MobToolAccessContext::None,
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -770,6 +830,7 @@ impl MobBuilder {
         runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
@@ -811,6 +872,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         )
     }
 
@@ -824,6 +886,7 @@ impl MobBuilder {
         runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
@@ -945,7 +1008,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
-            autonomous_host_loops: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             next_spawn_ticket: 0,
             pending_spawns: PendingSpawnLineage::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
@@ -956,6 +1019,7 @@ impl MobBuilder {
             task_board_service,
             spawn_policy,
             lifecycle_authority,
+            default_external_tools_provider,
         };
         tokio::spawn(actor.run(command_rx));
 

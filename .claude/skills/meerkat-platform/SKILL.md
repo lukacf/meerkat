@@ -32,7 +32,7 @@ Default persistent backend:
 
 - New persistent realms default to `sqlite` when sqlite support is compiled.
 - `sqlite` is the normal same-realm multi-process backend.
-- `redb` remains explicit for single-owner embedded workflows.
+- `redb` remains explicit for single-owner embedded session workflows.
 - `jsonl` remains explicit for inspectable file-backed persistence.
 
 Default realm behavior:
@@ -48,6 +48,19 @@ rkat-rpc --realm team-alpha
 rkat-rest --realm team-alpha
 rkat-mcp --realm team-alpha
 ```
+
+## Runtime-backed vs standalone
+
+Meerkat uses an explicit runtime-binding contract:
+
+- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+- standalone/testing/embedded paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly
+
+Use this mental model when helping users:
+
+- **runtime-backed**: CLI, REST, RPC, MCP server, long-lived mob/member surfaces, keep-alive, comms drain, runtime wake/recovery
+- **standalone/embedded**: direct in-memory substrate, WASM embedded sessions, examples/tests that intentionally do not want runtime-owned semantics
 
 ## Surfaces
 
@@ -72,6 +85,9 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
 - Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
+- Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The redb-backed mob store has been removed.
+- Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
+- Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage sub-agents through implicit session-owned mobs.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
 
 ### Mob lifecycle (standard/default usage)
@@ -86,8 +102,7 @@ rkat resume <session_id> "retire worker-2 and add worker-4"
 Where needed, direct lifecycle commands are available as operational compatibility surface:
 
 ```bash
-rkat mob prefabs
-rkat mob create --prefab <name> | --definition <path>
+rkat mob create --definition <path>
 rkat mob list
 rkat mob status <mob_id>
 rkat mob spawn <mob_id> <profile> <meerkat_id>
@@ -150,6 +165,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 
 **Architecture:**
 - Routes through `EphemeralSessionService<FactoryAgentBuilder>` → `AgentFactory::build_agent()` with override-first resource injection
+- Uses explicit standalone runtime mode (`RuntimeBuildMode::StandaloneEphemeral`) for embedded sessions rather than relying on runtime-backed bindings
 - `MobMcpState` handles all mob lifecycle operations (same state manager as native MCP mob surface)
 - `tokio_with_wasm` provides the async runtime (single-threaded, JS event loop backed)
 - `reqwest` uses browser `fetch` on wasm32
@@ -161,7 +177,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 - Agent loop (streaming, retries, error recovery, budget enforcement)
 - All three LLM providers (Anthropic, OpenAI, Gemini) via browser fetch
 - Session lifecycle (EphemeralSessionService)
-- Mob orchestration (MobBuilder, MobActor, FlowEngine, in-memory storage)
+- Mob orchestration (MobBuilder, MobActor, FlowEngine, FlowFrameEngine, in-memory storage)
 - Comms (inproc — InprocRegistry, Ed25519 signing, peer discovery)
 - Tool dispatch (task tools, utility builtins like `wait`/`datetime`/`apply_patch`, comms tools, skill tools — no shell)
 - Skills (embedded + memory sources from mobpack)
@@ -200,7 +216,10 @@ Flow model highlights:
 - branching via `branch` + `condition`,
 - dispatch mode (`one_to_one`, `fan_out`, `fan_in`),
 - topology policy enforcement (`strict|permissive` + role rules including `"*"` wildcard),
-- persisted run snapshots (`MobRun`) with `step_ledger` and `failure_ledger`.
+- persisted run snapshots (`MobRun`) with `step_ledger` and `failure_ledger`,
+- frame-based execution via `FlowSpec.root: FrameSpec` (v2 flows),
+- `repeat_until` loop nodes with `until` condition, `max_iterations` guard, and nested `body: FrameSpec`,
+- `FlowFrameEngine` drives frame execution; `FlowFrameMachine` owns frame-local state; `LoopIterationMachine` owns loop body/evaluate lifecycle.
 
 Operational notes:
 
@@ -235,8 +254,7 @@ git diff | rkat run "Review these changes" --enable-builtins
 cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
 # Live streaming: --keep-alive --stdin reads stdin line-by-line as events
 tail -f app.log | rkat run --keep-alive --stdin "Monitor and alert on anomalies"
-rkat mob prefabs
-rkat mob create --prefab coding_swarm
+rkat mob create --definition ./mobs/coding-swarm.toml
 rkat mob list
 ```
 
@@ -396,6 +414,24 @@ Sessions are realm-scoped and surface-neutral. Visibility depends on `realm_id` 
 
 Real-time events include `text_delta`, tool lifecycle events, hook events, and terminal run events.
 
+### Background completion delivery (CompletionFeed)
+
+Background shell job completions, mob member terminals, and async external tool results are delivered through the `CompletionFeed` seam. The feed is a monotonic append-only event log owned by the runtime epoch. Consumers (agent boundary, idle wake, wait tool) read through cursor-based `list_since()`.
+
+Key types: `CompletionFeed` trait (meerkat-core), `CompletionEntry`, `CompletionSeq`, `CompletionBatch`. Runtime implementation: `RuntimeCompletionFeed` in meerkat-runtime.
+
+The agent boundary injects `[BG_JOB]` system notices at the `CallingLlm` boundary for each new terminal entry. The runtime loop's idle wake fires on `wait_for_advance()` to inject continuation turns for quiescent sessions.
+
+Background shell jobs (started by the shell tool with `&` or via the `background` parameter) are tracked through the `OpsLifecycleRegistry` as detached operations. When a background job completes, the `CompletionFeed` delivers a `BackgroundJobCompleted` event. The agent receives a `[SYSTEM NOTICE][BG_JOB]` message containing the job name, ID, exit status, and output at the next `CallingLlm` boundary. Idle keep-alive sessions are woken via `DetachedWakeState` to process these completions.
+
+### Durable runtime epoch recovery
+
+Runtime epoch state (ops lifecycle, completion feed entries, consumer cursors) can be durably persisted via `PersistedOpsSnapshot`. On process restart with a persistent `RuntimeStore`, the epoch is recovered with the same `RuntimeEpochId`, preserving completion entries and cursor positions. Without a store, the epoch rotates (fresh state, conversation resumed only).
+
+Recovery contract: bounded-loss, no invisible completions, possible duplicate notices. Terminal transitions are persisted via a bounded persistence channel; the loss window is the time between channel send and store commit.
+
+Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Recovery seam: `RuntimeSessionAdapter::recover_or_create_ops_state()`.
+
 ### Skills
 
 Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`; non-workspace realms use realm runtime roots.
@@ -421,6 +457,8 @@ Use mobs for all multi-agent orchestration. Mobs support `MemberLaunchMode::Fork
 ### Inter-agent comms
 
 Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; Meerkat uses realm namespace for isolation.
+
+**Peer handling_mode override**: `PeerInput` with `Message`, `Request`, or no convention supports an explicit `handling_mode` field (`Queue` or `Steer`) that overrides kind-based policy defaults. `ResponseProgress` and `ResponseTerminal` reject the field at runtime admission. Built-in comms bridges leave it `None` (kind-based policy). The override is available on RPC `comms/send`, REST, and MCP `meerkat_comms_send` surfaces.
 
 **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` configures request intents that are injected into session context without triggering an LLM turn. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
 

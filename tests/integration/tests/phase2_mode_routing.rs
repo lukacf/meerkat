@@ -19,17 +19,29 @@ use meerkat_core::types::{
 };
 use meerkat_core::{InteractionId, PlainEventSource, Provider};
 use meerkat_mob::{
-    MeerkatId, MobBackendKind, MobBuilder, MobId, MobRuntimeMode, MobSessionService, MobStorage,
-    Prefab, ProfileName,
+    MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobId, MobRuntimeMode, MobSessionService,
+    MobStorage, ProfileName,
 };
 use tokio::sync::{Notify, RwLock};
 
-#[derive(Default)]
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, ()>>,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
     start_turn_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+}
+
+impl Default for MockSessionService {
+    fn default() -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            keep_alive_notifiers: RwLock::new(HashMap::new()),
+            start_turn_calls: AtomicU64::new(0),
+            inject_calls: Arc::new(AtomicU64::new(0)),
+            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        }
+    }
 }
 
 struct MockInjector {
@@ -245,15 +257,46 @@ impl MobSessionService for MockSessionService {
         true
     }
 
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        Some(self.runtime_adapter.clone())
+    }
+
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
         true
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        <Self as SessionService>::start_turn(self, session_id, req).await?;
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
     }
 }
 
 #[tokio::test]
 async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let service = Arc::new(MockSessionService::default());
-    let mut definition = Prefab::CodingSwarm.definition();
+    let mut definition = MobDefinition::from_toml(
+        "[mob]\nid = \"phase2-routing\"\norchestrator = \"lead\"\n\n[profiles.lead]\nmodel = \"claude-opus-4-6\"\nexternal_addressable = true\n\n[profiles.lead.tools]\nbuiltins = true\ncomms = true\nmob = true\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
+    )
+    .expect("phase2 mob definition");
     definition.id = MobId::from("phase2-routing");
     definition.backend.default = MobBackendKind::Session;
     definition.wiring.auto_wire_orchestrator = false;

@@ -7,7 +7,7 @@
 //! - Sequential stage processing with mobs
 //! - Spawning stage-specific workers
 //! - Running turns on individual pipeline stages
-//! - The pipeline prefab pattern
+//! - Defining a pipeline mob with flows, topology, and limits
 //!
 //! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
 //! Production pipelines use the runtime-backed path.
@@ -22,9 +22,95 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, Prefab, ProfileName,
+    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
     validate_definition,
 };
+
+const PIPELINE_TOML: &str = r#"
+[mob]
+id = "pipeline"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-6"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Drive staged pipeline execution: advance stages sequentially, collect handoff artifacts."
+
+[skills.worker]
+source = "inline"
+content = "Execute your stage deterministically and emit handoff artifacts."
+
+[flows.pipeline]
+description = "pipeline flow"
+
+[flows.pipeline.steps.start]
+role = "lead"
+message = "go"
+dispatch_mode = "one_to_one"
+depends_on_mode = "all"
+
+[flows.pipeline.steps.branch_a]
+role = "worker"
+message = "a"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "a" }
+
+[flows.pipeline.steps.branch_b]
+role = "worker"
+message = "b"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "b" }
+
+[flows.pipeline.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["branch_a", "branch_b"]
+depends_on_mode = "any"
+collection_policy = { type = "quorum", n = 1 }
+timeout_ms = 1000
+expected_schema_ref = "schemas/join.json"
+
+[topology]
+mode = "strict"
+rules = [{ from_role = "lead", to_role = "worker", allowed = true }]
+
+[supervisor]
+role = "lead"
+escalation_threshold = 2
+
+[limits]
+max_flow_duration_ms = 30000
+max_step_retries = 1
+max_orphaned_turns = 8
+"#;
 
 /// Format a mob event kind into a short human-readable label.
 fn event_label(kind: &MobEventKind) -> &'static str {
@@ -52,9 +138,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    // ── Part 1: Explore the pipeline prefab ──────────────────────────────────
-    println!("=== Mob: Pipeline (Prefab) ===\n");
-    println!("{}\n", Prefab::Pipeline.toml_template());
+    // ── Part 1: Explore the pipeline definition ──────────────────────────────
+    println!("=== Mob: Pipeline ===\n");
+    println!("{PIPELINE_TOML}\n");
 
     // ── Part 2: Custom CI/CD pipeline definition (TOML) ──────────────────────
 

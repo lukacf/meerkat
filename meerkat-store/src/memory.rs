@@ -1,6 +1,6 @@
 //! In-memory session store (for testing)
 
-use crate::{SessionFilter, SessionStore, StoreError};
+use crate::{SessionFilter, SessionStore, SessionStoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::collections::HashMap;
@@ -34,18 +34,18 @@ impl Default for MemoryStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for MemoryStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         let mut sessions = self.sessions.write().await;
         sessions.insert(session.id().clone(), session.clone());
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         let sessions = self.sessions.read().await;
         Ok(sessions.get(id).cloned())
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         let sessions = self.sessions.read().await;
         let mut metas: Vec<SessionMeta> = sessions
             .values()
@@ -75,7 +75,7 @@ impl SessionStore for MemoryStore {
         Ok(metas.into_iter().skip(offset).take(limit).collect())
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         let mut sessions = self.sessions.write().await;
         sessions.remove(id);
         Ok(())

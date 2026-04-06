@@ -25,7 +25,8 @@ pub struct StoredEvent {
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// Append-only event log.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait EventStore: Send + Sync {
     /// Append events to the log for a session.
     ///

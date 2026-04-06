@@ -24,7 +24,7 @@ impl Pack for AdvisorPack {
 
         let mut profiles = BTreeMap::new();
         profiles.insert(ProfileName::from("advisor"),
-            turn_driven_profile(resolve_model(overrides, "advisor", "gpt-5.3-codex"), "advisor-skill", "Technical advisor", pp));
+            turn_driven_profile(resolve_model(overrides, "advisor", "gpt-5.4"), "advisor-skill", "Technical advisor", pp));
 
         let mut skills = BTreeMap::new();
         skills.insert("advisor-skill".into(), SkillSource::Inline { content: include_str!("../../skills/advisor.md").into() });
@@ -33,7 +33,7 @@ impl Pack for AdvisorPack {
         steps.insert(StepId::from("respond"), flow_step("advisor", format!("{task}{ctx}"), &[], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Single-agent advisory opinion".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Single-agent advisory opinion".into()), steps, root: None });
 
         mob_definition("advisor", profiles, skills, flows, identity_spawn_policy(&["advisor"]))
     }

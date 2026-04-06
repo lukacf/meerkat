@@ -161,7 +161,11 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .await?
         .ok_or("session not found")?;
     let metadata = session.session_metadata().ok_or("metadata missing")?;
-    assert!(metadata.tooling.builtins, "builtins should be recorded");
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "builtins should be recorded"
+    );
 
     let original_model = metadata.model.clone();
     let original_max_tokens = metadata.max_tokens;

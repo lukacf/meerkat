@@ -33,10 +33,10 @@ impl Pack for RctPack {
         let agents: Vec<(&str, &str, &str, &str, ToolConfig)> = vec![
             // 6 agents, 6 distinct models — every agent sees the code differently
             ("orchestrator",       "rct-orchestrator-skill", "RCT pipeline orchestrator",      "claude-opus-4-6",        tools_with_shell.clone()),
-            ("implementer",        "rct-implementer-skill",  "Implementation agent",            "gpt-5.3-codex",         tools_with_shell.clone()),
+            ("implementer",        "rct-implementer-skill",  "Implementation agent",            "gpt-5.4",               tools_with_shell.clone()),
             ("rct_guardian",       "rct-guardian-skill",     "RCT Guardian reviewer",           "gemini-3.1-pro-preview", tools_with_shell.clone()),
             ("integration_sheriff","rct-sheriff-skill",      "Integration Sheriff reviewer",    "gpt-5.2",               tools_with_shell.clone()),
-            ("spec_auditor",       "rct-auditor-skill",      "Spec Auditor reviewer",           "gemini-3-flash-preview", tools_with_shell.clone()),
+            ("spec_auditor",       "rct-auditor-skill",      "Spec Auditor reviewer",           "gemini-3.1-flash-lite-preview",  tools_with_shell.clone()),
             ("aggregator",         "rct-aggregator-skill",   "Gate verdict aggregator",         "claude-sonnet-4-6",      tools_comms_only),
         ];
 
@@ -82,7 +82,7 @@ impl Pack for RctPack {
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec {
-            description: Some("RCT: plan → implement → parallel gate review → aggregate".into()), steps });
+            description: Some("RCT: plan → implement → parallel gate review → aggregate".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("rct", profiles, skills, flows, identity_spawn_policy(&names))

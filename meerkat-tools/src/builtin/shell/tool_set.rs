@@ -3,9 +3,7 @@
 //! This module provides [`ShellToolSet`] which bundles all shell tools
 //! with a shared [`JobManager`] instance.
 
-use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use super::config::ShellConfig;
 use super::job_cancel_tool::ShellJobCancelTool;
@@ -47,27 +45,6 @@ impl ShellToolSet {
             job_cancel: ShellJobCancelTool::new(Arc::clone(&job_manager)),
             job_manager,
         }
-    }
-
-    /// Create a new ShellToolSet with an event channel
-    ///
-    /// This method creates an mpsc channel and wires the sender to the JobManager.
-    /// Returns the ShellToolSet and the receiver for shell job completion events.
-    ///
-    /// Use this when you need to receive background job completion events.
-    pub fn with_event_channel(config: ShellConfig) -> (Self, mpsc::Receiver<Value>) {
-        let (tx, rx) = mpsc::channel(32);
-        let job_manager = Arc::new(JobManager::new(config.clone()).with_event_sender(tx));
-
-        let tool_set = Self {
-            shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),
-            job_status: ShellJobStatusTool::new(Arc::clone(&job_manager)),
-            jobs_list: ShellJobsListTool::new(Arc::clone(&job_manager)),
-            job_cancel: ShellJobCancelTool::new(Arc::clone(&job_manager)),
-            job_manager,
-        };
-
-        (tool_set, rx)
     }
 
     /// Get references to all tools as a vector
@@ -237,48 +214,5 @@ mod tests {
         assert_eq!(tools[1].name(), "shell_job_status");
         assert_eq!(tools[2].name(), "shell_jobs");
         assert_eq!(tools[3].name(), "shell_job_cancel");
-    }
-
-    // ==================== ShellToolSet::with_event_channel Tests ====================
-
-    #[test]
-    fn test_shell_tool_set_with_event_channel() {
-        let config = ShellConfig::default();
-        let (tool_set, _rx) = ShellToolSet::with_event_channel(config);
-
-        // Should have all tools
-        assert_eq!(tool_set.tools().len(), 4);
-
-        // Job manager should have event sender configured
-        // (this is verified by the fact that JobManager was constructed with with_event_sender)
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "integration-real-tests")]
-    #[ignore = "integration-real: spawns shell processes"]
-    async fn integration_real_shell_tool_set_event_channel_receives_events() {
-        use std::time::Duration;
-
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        config.shell = "sh".to_string(); // Use sh for portability
-
-        let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
-
-        // Spawn a quick job
-        let _job_id = tool_set
-            .job_manager
-            .spawn_job("echo done", None, 30)
-            .await
-            .unwrap();
-
-        // Wait for event
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("Should receive event within timeout")
-            .expect("Channel should not be closed");
-
-        // Verify event structure
-        assert_eq!(event["type"], "shell_job_completed");
     }
 }

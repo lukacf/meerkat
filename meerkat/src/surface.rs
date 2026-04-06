@@ -3,13 +3,27 @@
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
 mod request_execution;
+mod schedule_host;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
+pub use meerkat_core::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    has_build_only_turn_overrides, has_materialization_overrides,
+    session_allows_first_turn_build_overrides,
+};
 pub use request_execution::{
     PreparedSurfaceSession, RequestAlreadyExists, RequestAsyncAction, RequestContext,
     RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
     request_action,
+};
+pub use schedule_host::{
+    AcceptedScheduledInput, NoopScheduleMobHost, ScheduleHostHandle, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    accepted_scheduled_input_from_runtime_outcome, async_completion_dispatch,
+    build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};

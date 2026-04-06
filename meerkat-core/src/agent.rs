@@ -21,6 +21,7 @@ use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::event::ExternalToolDelta;
 use crate::hooks::HookEngine;
+use crate::ops_lifecycle::{OperationKind, OperationStatus, OperationTerminalOutcome};
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
@@ -33,6 +34,7 @@ use crate::types::{
     ToolDef, Usage,
 };
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -135,6 +137,78 @@ pub struct ExternalToolUpdate {
     pub notices: Vec<ExternalToolDelta>,
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
+    /// Detached background operation completions since last poll.
+    pub background_completions: Vec<DetachedOpCompletion>,
+}
+
+/// Completion notice for a detached background operation, projected from
+/// canonical ops-lifecycle terminal state plus dispatcher-owned display metadata.
+///
+/// This is a rebuildable projection (INV-003), not authoritative state.
+/// Terminal class and timing come from `OperationLifecycleSnapshot` (INV-001).
+/// Shell-projected detail is supplementary display only (INV-002).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedOpCompletion {
+    /// App-facing job identifier (the control noun for surfaces).
+    pub job_id: String,
+    /// Operation kind from canonical ops-lifecycle.
+    pub kind: OperationKind,
+    /// Terminal status from canonical ops-lifecycle.
+    pub status: OperationStatus,
+    /// Terminal outcome from canonical ops-lifecycle.
+    pub terminal_outcome: Option<OperationTerminalOutcome>,
+    /// Canonical display label from ops-lifecycle snapshot.
+    pub display_name: String,
+    /// Dispatcher-projected summary (exit code, output tail). Display only.
+    pub detail: String,
+    /// Monotonic elapsed millis from ops-lifecycle snapshot.
+    pub elapsed_ms: Option<u64>,
+}
+
+/// Dispatcher binding capabilities — what optional bindings this dispatcher supports.
+///
+/// Returned by [`AgentToolDispatcher::capabilities`]. Replaces individual
+/// `supports_*` boolean methods with a single structured query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatcherCapabilities {
+    /// Whether `bind_wait_interrupt` is implemented.
+    pub wait_interrupt: bool,
+    /// Whether `bind_ops_lifecycle` is implemented.
+    pub ops_lifecycle: bool,
+    /// Whether `bind_completion_feed` is implemented.
+    pub completion_feed: bool,
+}
+
+/// Result of a dispatcher binding operation.
+///
+/// Distinguishes "binding was applied" from "binding was skipped" so callers
+/// can decide whether to wire downstream side effects (e.g. bridge tasks).
+///
+/// **Semantics (decision 11 — supported/best-effort/rejected):**
+/// - `Ok(Bound(d))` = **supported** — binding succeeded, side effects should be wired
+/// - `Ok(Skipped(d))` = **best-effort** — inner shared or incompatible, dispatcher unchanged
+/// - `Err(SharedOwnership)` = **rejected** — outer wrapper is shared, caught by factory pre-check
+/// - `Err(Unsupported)` = **rejected** — type doesn't support this binding, caught by `capabilities()`
+pub enum BindOutcome {
+    /// Binding was applied. The dispatcher was rebound.
+    Bound(Arc<dyn AgentToolDispatcher>),
+    /// Binding was skipped — inner dispatcher was shared or unsupported.
+    /// The returned dispatcher is unchanged but safe to use.
+    Skipped(Arc<dyn AgentToolDispatcher>),
+}
+
+impl BindOutcome {
+    /// Extract the dispatcher, regardless of bind status.
+    pub fn into_dispatcher(self) -> Arc<dyn AgentToolDispatcher> {
+        match self {
+            Self::Bound(d) | Self::Skipped(d) => d,
+        }
+    }
+
+    /// Whether the binding was actually applied.
+    pub fn was_bound(&self) -> bool {
+        matches!(self, Self::Bound(_))
+    }
 }
 
 /// Trait for tool dispatchers
@@ -162,11 +236,16 @@ pub trait AgentToolDispatcher: Send + Sync {
         ExternalToolUpdate::default()
     }
 
+    /// Query which optional bindings this dispatcher supports.
+    fn capabilities(&self) -> DispatcherCapabilities {
+        DispatcherCapabilities::default()
+    }
+
     /// Bind a wait-interrupt receiver into this dispatcher, returning a rebound dispatcher.
     ///
     /// The consuming `Arc<Self>` receiver is required because some dispatchers
     /// (e.g. `CompositeDispatcher`) hold non-Clone state. The factory calls
-    /// this once before comms gateway composition, transferring ownership.
+    /// this once after final composition, transferring ownership.
     ///
     /// Default returns `Err(Unsupported)`. Dispatchers that contain a `WaitTool`
     /// (e.g. `CompositeDispatcher`) override this to swap in an interrupt-aware
@@ -175,17 +254,8 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn bind_wait_interrupt(
         self: Arc<Self>,
         _rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
-    }
-
-    /// Whether this dispatcher supports wait interrupt binding.
-    ///
-    /// Non-consuming probe that callers check before calling the consuming
-    /// `bind_wait_interrupt()`. Default: `false`. Dispatchers that contain a
-    /// `WaitTool` (e.g. `CompositeDispatcher`) override this to return `true`.
-    fn supports_wait_interrupt(&self) -> bool {
-        false
     }
 
     /// Bind a session-canonical ops registry into this dispatcher.
@@ -196,13 +266,31 @@ pub trait AgentToolDispatcher: Send + Sync {
         self: Arc<Self>,
         _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         _owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         Err(OpsLifecycleBindError::Unsupported)
     }
 
-    /// Whether this dispatcher supports ops lifecycle binding.
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        false
+    /// Return the completion enrichment provider, if available.
+    ///
+    /// Dispatchers with shell job management return a provider that maps
+    /// operation IDs to display details (job ID, status detail string).
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        None
+    }
+
+    /// Bind a completion feed into this dispatcher's WaitTool (feed-only, no comms).
+    ///
+    /// Called by the factory when no comms runtime is available but a completion
+    /// feed exists. The WaitTool will race sleep against feed advance without
+    /// a comms interrupt channel. Default returns `Err(Unsupported)`.
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        _feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        _baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 }
 
@@ -268,40 +356,112 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.poll_external_updates().await
     }
 
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        let rebound_inner = owned.inner.bind_wait_interrupt(rx)?;
-        Ok(Arc::new(FilteredToolDispatcher {
-            inner: rebound_inner,
-            allowed_tools: owned.allowed_tools,
-            filtered_tools: owned.filtered_tools,
-        }))
-    }
-
-    fn supports_wait_interrupt(&self) -> bool {
-        self.inner.supports_wait_interrupt()
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_wait_interrupt(rx)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            // Can't use outcome after into_dispatcher, reconstruct:
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        let rebound_inner = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
-        Ok(Arc::new(FilteredToolDispatcher {
-            inner: rebound_inner,
-            allowed_tools: owned.allowed_tools,
-            filtered_tools: owned.filtered_tools,
-        }))
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.inner.supports_ops_lifecycle_binding()
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_completion_feed(feed, baseline)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        self.inner.completion_enrichment()
     }
 }
 
@@ -584,6 +744,18 @@ where
     /// When set, the agent loop waits on the exact turn-local operation IDs
     /// registered in `turn_authority.pending_op_refs()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    /// Optional completion feed for cursor-based completion delivery.
+    pub(crate) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
+    /// Shared epoch cursor state for runtime-backed cursor writeback.
+    pub(crate) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
+    /// Local cursor into the completion feed — only the agent boundary advances this.
+    pub(crate) applied_cursor: crate::completion_feed::CompletionSeq,
+    /// Shared baseline for the wait tool's interrupt check.
+    /// Stamped to `applied_cursor` before each tool dispatch.
+    pub(crate) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Optional enrichment provider for completion display details.
+    pub(crate) completion_enrichment:
+        Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).
@@ -761,5 +933,50 @@ mod tests {
             Ok(_) => panic!("expected SharedOwnership error, got Ok"),
             Err(e) => panic!("expected SharedOwnership, got {e:?}"),
         }
+    }
+
+    /// UNIT-001: OperationStatus::is_terminal() returns true for all terminal
+    /// variants and false for non-terminal ones.
+    #[test]
+    fn unit_001_terminal_status_values() {
+        use crate::ops_lifecycle::OperationStatus;
+        assert!(OperationStatus::Completed.is_terminal());
+        assert!(OperationStatus::Failed.is_terminal());
+        assert!(OperationStatus::Cancelled.is_terminal());
+        assert!(OperationStatus::Aborted.is_terminal());
+        assert!(OperationStatus::Retired.is_terminal());
+        assert!(OperationStatus::Terminated.is_terminal());
+        assert!(!OperationStatus::Running.is_terminal());
+        assert!(!OperationStatus::Provisioning.is_terminal());
+        assert!(!OperationStatus::Retiring.is_terminal());
+        assert!(!OperationStatus::Absent.is_terminal());
+    }
+
+    /// UNIT-002: DetachedOpCompletion serializes without operation_id.
+    /// The app-facing control noun is job_id (CONTRACT-003).
+    #[test]
+    fn unit_002_detached_op_completion_has_no_operation_id() {
+        use crate::agent::DetachedOpCompletion;
+        use crate::ops_lifecycle::{OperationKind, OperationStatus};
+
+        let completion = DetachedOpCompletion {
+            job_id: "j_test".into(),
+            kind: OperationKind::BackgroundToolOp,
+            status: OperationStatus::Completed,
+            terminal_outcome: None,
+            display_name: "test cmd".into(),
+            detail: "ok".into(),
+            elapsed_ms: None,
+        };
+        #[allow(clippy::unwrap_used)]
+        let json = serde_json::to_value(&completion).unwrap();
+        assert!(
+            json.get("operation_id").is_none(),
+            "operation_id must not appear in serialized DetachedOpCompletion (CONTRACT-003)"
+        );
+        assert!(
+            json.get("job_id").is_some(),
+            "job_id must be the app-facing control noun"
+        );
     }
 }

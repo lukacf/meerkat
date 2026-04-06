@@ -4,16 +4,18 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::convert::TryFrom;
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat_contracts::{MobCreateParams, MobCreateResult};
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
+use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::{
-    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
-    MobRuntimeMode, Prefab, RunId, SpawnMemberSpec,
+    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
+    MobRuntimeMode, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -32,75 +34,6 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
     Ok(MobId::from(raw))
 }
 
-#[derive(Debug, Serialize)]
-struct MobPrefabEntry {
-    key: String,
-    toml_template: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MobPrefabsResult {
-    prefabs: Vec<MobPrefabEntry>,
-}
-
-/// Handle `mob/prefabs` — list built-in mob prefab templates.
-pub async fn handle_prefabs(id: Option<RpcId>) -> RpcResponse {
-    let prefabs = Prefab::all()
-        .into_iter()
-        .map(|prefab| MobPrefabEntry {
-            key: prefab.key().to_string(),
-            toml_template: prefab.toml_template().to_string(),
-        })
-        .collect();
-    RpcResponse::success(id, MobPrefabsResult { prefabs })
-}
-
-#[derive(Debug, Serialize)]
-struct MobToolsResult {
-    tools: Vec<serde_json::Value>,
-}
-
-/// Handle `mob/tools` — list callable mob lifecycle tools.
-pub async fn handle_tools(id: Option<RpcId>) -> RpcResponse {
-    RpcResponse::success(
-        id,
-        MobToolsResult {
-            tools: meerkat_mob_mcp::tools_list(),
-        },
-    )
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MobCallParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: serde_json::Value,
-}
-
-/// Handle `mob/call` — call a mob lifecycle tool by name with JSON args.
-pub async fn handle_call(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobCallParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    match meerkat_mob_mcp::handle_tools_call(state, &params.name, &params.arguments).await {
-        Ok(value) => RpcResponse::success(id, value),
-        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.message),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MobCreateParams {
-    #[serde(default)]
-    pub prefab: Option<String>,
-    #[serde(default)]
-    pub definition: Option<MobDefinition>,
-}
-
 pub async fn handle_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -111,24 +44,20 @@ pub async fn handle_create(
         Err(resp) => return resp.with_id(id),
     };
 
-    let result = match (params.prefab.as_deref(), params.definition) {
-        (Some(prefab_key), None) => match Prefab::from_key(prefab_key) {
-            Some(prefab) => state.mob_create_prefab(prefab).await,
-            None => {
-                return invalid_params(id, format!("Unknown prefab: {prefab_key}"));
-            }
-        },
-        (None, Some(definition)) => state.mob_create_definition(definition).await,
-        (Some(_), Some(_)) => {
-            return invalid_params(id, "Provide either prefab or definition, not both");
-        }
-        (None, None) => {
-            return invalid_params(id, "Provide either prefab or definition");
-        }
+    let definition = match meerkat_mob_mcp::decode_public_mob_definition(params.definition) {
+        Ok(definition) => definition,
+        Err(error) => return invalid_params(id, format!("invalid mob definition: {error}")),
     };
 
+    let result = state.mob_create_definition(definition).await;
+
     match result {
-        Ok(mob_id) => RpcResponse::success(id, serde_json::json!({"mob_id": mob_id})),
+        Ok(mob_id) => RpcResponse::success(
+            id,
+            MobCreateResult {
+                mob_id: mob_id.to_string(),
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -558,46 +487,6 @@ pub async fn handle_lifecycle(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MobSendParams {
-    pub mob_id: String,
-    pub meerkat_id: String,
-    pub content: ContentInput,
-    #[serde(default)]
-    pub handling_mode: HandlingMode,
-    #[serde(default)]
-    pub render_metadata: Option<RenderMetadata>,
-}
-
-pub async fn handle_send(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobSendParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_member_send(
-            &mob_id,
-            MeerkatId::from(params.meerkat_id.as_str()),
-            params.content,
-            params.handling_mode,
-            params.render_metadata,
-        )
-        .await
-    {
-        Ok(receipt) => RpcResponse::success(id, serde_json::json!(receipt)),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct MobAppendSystemContextParams {
     pub mob_id: String,
     pub meerkat_id: String,
@@ -606,6 +495,50 @@ pub struct MobAppendSystemContextParams {
     pub source: Option<String>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+}
+
+pub type MobMemberSendParams = meerkat_contracts::MobMemberSendParams;
+pub type MobMemberSendResult = meerkat_contracts::MobMemberSendResult;
+
+pub async fn handle_member_send(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberSendParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let meerkat_id = MeerkatId::from(params.meerkat_id.as_str());
+    let content = match ContentInput::try_from(params.content) {
+        Ok(content) => content,
+        Err(error) => return invalid_params(id, error),
+    };
+    match state
+        .mob_member_send(
+            &mob_id,
+            meerkat_id.clone(),
+            content,
+            params.handling_mode.into(),
+            params.render_metadata.map(Into::into),
+        )
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            MobMemberSendResult {
+                mob_id: mob_id.to_string(),
+                member_id: receipt.member_id.to_string(),
+                session_id: receipt.session_id,
+                handling_mode: receipt.handling_mode.into(),
+            },
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
 }
 
 pub async fn handle_append_system_context(
@@ -1031,31 +964,6 @@ mod tests {
     use super::*;
     use meerkat_core::types::SessionId;
 
-    #[tokio::test]
-    async fn handle_prefabs_returns_expected_shape() -> Result<(), Box<dyn std::error::Error>> {
-        let resp = handle_prefabs(Some(RpcId::Num(7))).await;
-        assert!(resp.error.is_none());
-        assert_eq!(resp.id, Some(RpcId::Num(7)));
-        let result = resp.result.as_ref();
-        assert!(result.is_some(), "result payload should exist");
-        let Some(raw) = result else {
-            return Ok(());
-        };
-        let value: serde_json::Value = serde_json::from_str(raw.get())?;
-        let prefabs = value["prefabs"].as_array();
-        assert!(prefabs.is_some(), "prefabs should be an array");
-        let Some(prefabs) = prefabs else {
-            return Ok(());
-        };
-        assert!(prefabs.iter().all(|entry| entry["key"].is_string()));
-        assert!(
-            prefabs
-                .iter()
-                .all(|entry| entry["toml_template"].is_string())
-        );
-        Ok(())
-    }
-
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1090,33 +998,6 @@ mod tests {
     }
 
     #[test]
-    fn mob_send_params_accept_canonical_content_field() -> Result<(), Box<dyn std::error::Error>> {
-        let value = serde_json::json!({
-            "mob_id": "mob-1",
-            "meerkat_id": "worker-1",
-            "content": "hello from canonical caller"
-        });
-        let params: MobSendParams = serde_json::from_value(value)?;
-        assert_eq!(
-            params.content,
-            ContentInput::Text("hello from canonical caller".into())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn mob_send_params_reject_legacy_message_field() {
-        let value = serde_json::json!({
-            "mob_id": "mob-1",
-            "meerkat_id": "worker-1",
-            "message": "legacy hello"
-        });
-        let err = serde_json::from_value::<MobSendParams>(value)
-            .expect_err("legacy message field must be rejected");
-        assert!(err.to_string().contains("unknown field `message`"));
-    }
-
-    #[test]
     fn mob_wire_params_accept_canonical_member_and_peer_fields()
     -> Result<(), Box<dyn std::error::Error>> {
         let value = serde_json::json!({
@@ -1134,6 +1015,64 @@ mod tests {
             meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))
         );
         Ok(())
+    }
+
+    #[test]
+    fn mob_create_params_reject_reserved_owner_session_id() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "owner_session_id": "session-123",
+                "profiles": {
+                    "worker": { "model": "claude-sonnet-4-6" }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("reserved owner_session_id must be rejected");
+        assert!(err.to_string().contains("unknown field `owner_session_id`"));
+    }
+
+    #[test]
+    fn mob_create_params_reject_reserved_internal_lifecycle_flags() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "is_implicit": true,
+                "session_cleanup_policy": "destroy_on_owner_archive",
+                "profiles": {
+                    "worker": { "model": "claude-sonnet-4-6" }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("reserved lifecycle fields must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `is_implicit`")
+                || message.contains("unknown field `session_cleanup_policy`"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mob_create_params_reject_internal_profile_tool_bundles() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": {
+                            "rust_bundles": ["internal-only"]
+                        }
+                    }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("internal rust bundle fields must be rejected");
+        assert!(err.to_string().contains("unknown field `rust_bundles`"));
     }
 
     #[test]

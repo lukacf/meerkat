@@ -11,6 +11,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `surface_delta_notifies_runtime_control`: `external_tool_surface`.`EmitExternalToolDelta` -> `runtime_control`.`ExternalToolDeltaReceived` [Immediate]
 - `turn_boundary_applies_surface_changes`: `turn_execution`.`BoundaryApplied` -> `external_tool_surface`.`ApplyBoundary` [Immediate]
 
+## Target Selectors
+- `(none)`
+
+## Driver
+- `(none)`
+
+## Transaction Plans
+- `(none)`
+
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, surface_boundary)`
 

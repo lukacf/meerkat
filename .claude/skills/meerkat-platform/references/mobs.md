@@ -71,7 +71,7 @@ Primary crates:
 ### Core Rust types
 
 - `MobDefinition`
-- `MobStorage`
+- `MobStorage` (SQLite persistent via `SqliteMobStores`, in-memory for tests/WASM)
 - `MobBuilder`
 - `MobHandle`
 - `MobSessionService`
@@ -116,7 +116,7 @@ async fn run_mob(
     session_service: Arc<dyn MobSessionService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let definition = MobDefinition::from_toml(definition_toml)?;
-    let storage = MobStorage::redb("./mob.redb")?;
+    let storage = MobStorage::persistent("./mob.db")?; // SQLite/WAL-backed
 
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(session_service)
@@ -150,12 +150,33 @@ async fn run_mob(
 ### Rust example: high-level in-memory mob state helper
 
 ```rust
-use meerkat_mob::{MeerkatId, Prefab, ProfileName};
+use meerkat_mob::{MeerkatId, MobDefinition, ProfileName};
 use meerkat_mob_mcp::MobMcpState;
 
 async fn in_memory() -> Result<(), Box<dyn std::error::Error>> {
     let state = MobMcpState::new_in_memory();
-    let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
+    let definition = MobDefinition::from_toml(r#"
+[mob]
+id = "my-mob"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+
+[profiles.worker]
+model = "claude-sonnet-4-6"
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+"#)?;
+    let mob_id = state.mob_create_definition(definition).await?;
 
     state
         .mob_spawn(
@@ -344,6 +365,8 @@ await client.close();
 
 Flows add DAG orchestration to mobs.
 
+### v1 flows (flat step DAG)
+
 Flow essentials:
 
 - `depends_on` + `depends_on_mode` (`all`/`any`)
@@ -352,12 +375,58 @@ Flow essentials:
 - optional `condition` and `branch`
 - persisted `step_ledger` and `failure_ledger`
 
-Operational flow controls:
+### v2 flows (frame-based execution with loops)
+
+v2 flows carry `FlowSpec.root: FrameSpec` as the execution root. When `root` is present, the `FlowFrameEngine` drives execution instead of flat topological-sort dispatch.
+
+Key types:
+
+- `FrameSpec` — a set of `FlowNodeSpec` nodes forming a dependency graph within a frame
+- `FlowNodeSpec` — either `Step(FrameStepSpec)` or `RepeatUntil(RepeatUntilSpec)`
+- `RepeatUntilSpec` — loop with `loop_id`, `depends_on`, `body: FrameSpec`, `until: ConditionExpr`, `max_iterations: u32`
+
+Execution model:
+
+- `FlowFrameMachine` owns per-frame state (node readiness, completion tracking)
+- `LoopIterationMachine` owns loop body/evaluate lifecycle
+- `FlowRunMachine` owns scheduler grants (`GrantNodeSlot`, `GrantBodyFrameStart`), frame-step projection, and terminalization
+- Frame-step outcomes route back through `FlowRunMachine`; direct mutation from executor code is prohibited
+- Recovery handles ready-frame / pending-body-frame drift and returns typed incompatibility for pre-v2 active runs
+
+Definition example:
+
+```toml
+[flows.release_flow]
+description = "Iterative release check"
+
+[flows.release_flow.root]
+nodes.check_quality = { type = "repeat_until", loop_id = "quality_loop", body = { nodes = { run_tests = { type = "step", role = "tester", message = "Run tests" } } }, until = "all_pass", max_iterations = 5, depends_on = [] }
+nodes.ship = { type = "step", role = "lead", message = "Ship it", depends_on = ["check_quality"] }
+```
+
+### Operational flow controls
 
 - list flows
 - run flow
 - check flow status
 - cancel flow
+
+### Agent-facing delegation tools
+
+Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`):
+
+| Tool | Purpose |
+|------|---------|
+| `delegate` | Quick helper spawn -- creates implicit mob on first use, spawns member, auto-wires comms |
+| `mob_create` | Create a mob from a definition |
+| `mob_destroy` | Destroy a mob and archive all members |
+| `mob_spawn_member` | Spawn a member into any mob |
+| `mob_retire_member` | Archive a member and its session |
+| `mob_check_member` | Check a member's execution status and output |
+| `mob_list_members` | List members of a mob |
+| `mob_list` | List all mobs |
+
+These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime; ambient mob enablement alone does not surface operator tools on resume.
 
 ## Practical guidance
 

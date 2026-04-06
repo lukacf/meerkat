@@ -187,6 +187,7 @@ mod tests {
                 "flags": ["a", "b"]
             }),
             step_outputs,
+            loop_outputs: indexmap::IndexMap::new(),
         }
     }
 

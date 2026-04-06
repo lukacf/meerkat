@@ -791,6 +791,12 @@ async fn initialize_methods_list_complete() {
     let resp = read_response(&mut reader).await;
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
 
+    assert_eq!(
+        resp["result"]["contract_version"].as_str(),
+        Some("0.5.1"),
+        "initialize must report the current contract version"
+    );
+
     let methods = resp["result"]["methods"]
         .as_array()
         .expect("methods should be array");
@@ -836,7 +842,6 @@ async fn initialize_methods_list_complete() {
     #[cfg(feature = "mob")]
     {
         let expected_mob = [
-            "mob/prefabs",
             "mob/create",
             "mob/list",
             "mob/status",
@@ -848,8 +853,8 @@ async fn initialize_methods_list_complete() {
             "mob/wire",
             "mob/unwire",
             "mob/members",
-            "mob/send",
             "mob/events",
+            "mob/member_send",
             "mob/append_system_context",
             "mob/flows",
             "mob/flow_run",
@@ -859,8 +864,6 @@ async fn initialize_methods_list_complete() {
             "mob/fork_helper",
             "mob/force_cancel",
             "mob/member_status",
-            "mob/tools",
-            "mob/call",
             "mob/stream_open",
             "mob/stream_close",
         ];
@@ -906,13 +909,20 @@ async fn notification_catalog_lists_live_stream_notifications() {
 async fn mob_create_status_list_lifecycle() {
     let (mut writer, mut reader, handle) = spawn_test_server();
 
-    // mob/create using a prefab (avoids manual definition wiring)
     let create_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "mob/create",
         "params": {
-            "prefab": "coding_swarm"
+            "definition": {
+                "id": "test_mob",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }
         }
     });
     send_request(&mut writer, &create_req).await;
@@ -980,6 +990,100 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["ok"], true);
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 16. mob_create_rejects_missing_definition (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_missing_definition() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // Sending an empty params object — definition field is required at the
+    // serde level, so parse_params should fail and return an error response.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {}
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create without definition must return an error, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 17. mob_create_rejects_invalid_definition (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_invalid_definition() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // A definition with no profiles fails validate_definition() with
+    // DiagnosticCode::EmptyProfiles before the mob is created.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "bad_mob",
+                "profiles": {}
+            }
+        }
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create with empty profiles must return an error, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_reserved_internal_fields() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "reserved-mob",
+                "owner_session_id": "session-123",
+                "is_implicit": true,
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6"
+                    }
+                }
+            }
+        }
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create with reserved internal fields must return an error, got: {resp}"
+    );
 
     drop(writer);
     handle.await.unwrap().unwrap();

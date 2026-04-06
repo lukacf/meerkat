@@ -8,7 +8,7 @@
 //! - `MobDefinition` — declaring agents, profiles, and wiring
 //! - `MobBuilder` — creating and starting a mob runtime
 //! - `MobHandle` — spawning agents and running turns
-//! - Prefab templates — ready-made mob configurations
+//! - Parsing mob definitions from TOML
 //! - The coding swarm pattern (lead + workers)
 //!
 //! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
@@ -23,9 +23,50 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, Prefab, ProfileName,
+    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
     validate_definition,
 };
+
+const CODING_SWARM_TOML: &str = r#"
+[mob]
+id = "coding_swarm"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-6"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Lead a coding swarm: coordinate workers, assign tasks, synthesize results."
+
+[skills.worker]
+source = "inline"
+content = "Implement assigned code tasks and report concise diffs."
+"#;
 
 /// Format a mob event kind into a short human-readable label.
 fn event_label(kind: &MobEventKind) -> &'static str {
@@ -53,10 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    // ── Part 1: Explore the coding swarm prefab ──────────────────────────────
+    // ── Part 1: Explore the coding swarm definition ──────────────────────────
     println!("=== Mob: Coding Swarm ===\n");
 
-    let definition = Prefab::CodingSwarm.definition();
+    let definition = MobDefinition::from_toml(CODING_SWARM_TOML)?;
 
     println!("Mob ID: {}", definition.id);
     println!("Profiles:");
@@ -169,8 +210,8 @@ content = "Implement Rust services, APIs, and data models."
     let config = Config::default();
     let session_service = Arc::new(build_ephemeral_service(factory, config, 16));
 
-    // Create the mob from the CodingSwarm prefab.
-    let prefab_def = Prefab::CodingSwarm.definition();
+    // Create the mob from the coding swarm definition.
+    let prefab_def = MobDefinition::from_toml(CODING_SWARM_TOML)?;
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(prefab_def, storage)
         .with_session_service(session_service)

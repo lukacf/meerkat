@@ -1,7 +1,7 @@
 {
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.5.0"
+    "version": "0.5.1"
   },
   "openapi": "3.0.0",
   "paths": {
@@ -44,21 +44,6 @@
     "/input/{session_id}/{input_id}": {
       "get": {
         "summary": "Get a runtime input state"
-      }
-    },
-    "/mob/call": {
-      "post": {
-        "summary": "Invoke a mob tool call"
-      }
-    },
-    "/mob/prefabs": {
-      "get": {
-        "summary": "List mob prefabs"
-      }
-    },
-    "/mob/tools": {
-      "get": {
-        "summary": "List mob tools"
       }
     },
     "/mob/{id}/events": {
@@ -114,6 +99,50 @@
     "/runtime/{id}/state": {
       "get": {
         "summary": "Get runtime state"
+      }
+    },
+    "/schedule/call": {
+      "post": {
+        "summary": "Invoke a schedule tool"
+      }
+    },
+    "/schedule/tools": {
+      "get": {
+        "summary": "List schedule tools"
+      }
+    },
+    "/schedules": {
+      "get": {
+        "summary": "List schedules"
+      },
+      "post": {
+        "summary": "Create schedule"
+      }
+    },
+    "/schedules/{id}": {
+      "delete": {
+        "summary": "Delete schedule"
+      },
+      "get": {
+        "summary": "Get schedule"
+      },
+      "patch": {
+        "summary": "Update schedule"
+      }
+    },
+    "/schedules/{id}/occurrences": {
+      "get": {
+        "summary": "List schedule occurrences"
+      }
+    },
+    "/schedules/{id}/pause": {
+      "post": {
+        "summary": "Pause schedule"
+      }
+    },
+    "/schedules/{id}/resume": {
+      "post": {
+        "summary": "Resume schedule"
       }
     },
     "/sessions": {

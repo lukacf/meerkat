@@ -40,9 +40,9 @@ pub mod build;
 pub mod definition;
 pub mod error;
 pub mod event;
+mod generated;
 pub mod ids;
 pub mod launch;
-pub mod prefab;
 pub mod profile;
 pub mod roster;
 pub mod run;
@@ -59,15 +59,19 @@ pub use backend::MobBackendKind;
 pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
-pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+pub use ids::{
+    BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName,
+    RunId, StepId, TaskId,
+};
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
-pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
 pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
 pub use run::{
-    FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
-    StepRunStatus,
+    FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,
+    LoopIterationLedgerEntry, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
+pub use runtime::RestoreIncompatible;
+pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
@@ -76,19 +80,29 @@ pub use runtime::{
     MobSessionService, MobState, MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy,
     SpawnSpec,
 };
+pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore,
+    MobSpecStore, MobStoreError,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use store::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
+pub use store::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
+
+/// Closure called at each member spawn to get a fresh snapshot of external tools.
+///
+/// Returns `None` when no external tools are registered yet (e.g. before SDK
+/// has called `tools/register`). The mob layer calls this lazily per-spawn so
+/// tools registered after mob creation are picked up.
+pub type ExternalToolsProvider = std::sync::Arc<
+    dyn Fn() -> Option<std::sync::Arc<dyn meerkat_core::agent::AgentToolDispatcher>> + Send + Sync,
+>;
 
 #[cfg(test)]
 mod tests;

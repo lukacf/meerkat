@@ -68,7 +68,7 @@ mod app {
             "tools/list" => json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "tools": meerkat_mob_mcp::tools_list() }
+                "result": { "tools": meerkat_mob_mcp::public_tools_list() }
             }),
             "tools/call" => {
                 let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -77,8 +77,12 @@ mod app {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                match meerkat_mob_mcp::handle_tools_call(state, name, &arguments).await {
-                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                match meerkat_mob_mcp::handle_public_tools_call(state, name, &arguments).await {
+                    Ok(result) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": meerkat_mob_mcp::wrap_public_tool_payload(result)
+                    }),
                     Err(err) => {
                         let mut e = json!({"code": err.code, "message": err.message});
                         if let Some(data) = err.data {

@@ -48,6 +48,7 @@ fn make_progress_input(label: &str) -> Input {
         }),
         body: format!("progress-{label}"),
         blocks: None,
+        handling_mode: None,
     })
 }
 
@@ -88,6 +89,7 @@ impl CoreExecutor for RecordingExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: self.run_result.clone(),
         })
     }

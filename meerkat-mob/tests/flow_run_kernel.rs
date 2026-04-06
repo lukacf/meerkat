@@ -43,6 +43,7 @@ fn owner_test_config() -> FlowRunConfig {
         FlowSpec {
             description: Some("owner test flow".into()),
             steps,
+            root: None,
         },
     );
 
@@ -96,9 +97,13 @@ fn owner_test_config() -> FlowRunConfig {
             max_step_retries: Some(1),
             max_orphaned_turns: Some(8),
             cancel_grace_timeout_ms: None,
+            ..Default::default()
         }),
         spawn_policy: None,
         event_router: None,
+        owner_session_id: None,
+        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
+        is_implicit: false,
     };
 
     FlowRunConfig::from_definition(FlowId::from("demo"), &definition).expect("flow config")

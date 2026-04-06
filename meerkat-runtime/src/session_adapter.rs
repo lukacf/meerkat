@@ -41,6 +41,14 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
 };
 
+/// Error type for [`RuntimeSessionAdapter::prepare_bindings`].
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeBindingsError {
+    /// Session was not found after registration (should not happen in practice).
+    #[error("session {0} not found in runtime adapter after registration")]
+    SessionNotFound(SessionId),
+}
+
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
 
@@ -79,6 +87,16 @@ impl DriverEntry {
             DriverEntry::Ephemeral(d) => d.is_idle_or_attached(),
             DriverEntry::Persistent(d) => d.is_idle_or_attached(),
         }
+    }
+
+    /// Whether this session is quiescent for detached-wake purposes.
+    ///
+    /// A session is quiescent when it is idle/attached (not running) AND has
+    /// no non-terminal inputs in its ledger. Queued-only inputs intentionally
+    /// block quiescence — `accept_input_without_wake` stages work without
+    /// waking, so detached-wake must not race with pending queue processing.
+    pub(crate) fn is_quiescent_for_detached_wake(&self) -> bool {
+        self.is_idle_or_attached() && self.as_driver().active_input_ids().is_empty()
     }
 
     /// Attach an executor (Idle → Attached).
@@ -225,10 +243,17 @@ struct RuntimeSessionEntry {
     driver: SharedDriver,
     /// Shared async-operation lifecycle registry for this runtime/session.
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+    /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
+    epoch_id: meerkat_core::RuntimeEpochId,
+    /// Shared consumer cursor state for the epoch.
+    cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
     /// Runtime-loop capabilities. Presence means a loop is attached.
     attachment: Option<RuntimeLoopAttachment>,
+    /// Detached-wake state for background op completions.
+    /// Shared with the runtime loop which selects on the Notify directly.
+    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -269,6 +294,9 @@ impl RuntimeSessionEntry {
     fn clear_dead_attachment(&mut self) -> bool {
         if self.attachment.is_some() && !self.attachment_is_live() {
             self.attachment = None;
+            // Clear detached wake state — it will be re-created on
+            // re-registration along with the new runtime loop.
+            self.detached_wake = None;
             return true;
         }
         false
@@ -380,6 +408,22 @@ impl RuntimeSessionAdapter {
         }
     }
 
+    /// Create a persistent adapter with a RuntimeStore but no blob store.
+    ///
+    /// The driver will fall back to ephemeral mode for sessions (no durable
+    /// boundary commits), but ops lifecycle recovery from the store still works.
+    /// Primarily useful for tests that need to verify recovery without needing
+    /// a full blob store.
+    pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            mode: RuntimeMode::V9Compliant,
+            store: Some(store),
+            blob_store: None,
+            comms_drain_slots: RwLock::new(HashMap::new()),
+        }
+    }
+
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
@@ -399,6 +443,75 @@ impl RuntimeSessionAdapter {
         }
     }
 
+    /// Recover or create fresh ops lifecycle state for a session.
+    ///
+    /// This is the single canonical recovery seam. Both `register_session()`
+    /// and `ensure_session_with_executor()`'s cold path call this to create
+    /// epoch-local state. If a durable store is available, attempts to load
+    /// the persisted snapshot; otherwise creates fresh state with a new epoch.
+    async fn recover_or_create_ops_state(
+        &self,
+        session_id: &SessionId,
+    ) -> (
+        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        meerkat_core::RuntimeEpochId,
+        Arc<meerkat_core::EpochCursorState>,
+    ) {
+        if let Some(ref store) = self.store {
+            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
+            match store.load_ops_lifecycle(&runtime_id).await {
+                Ok(Some(snapshot)) => {
+                    let recovered_epoch = snapshot.epoch_id.clone();
+                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
+                        snapshot.cursors.agent_applied_cursor,
+                        snapshot.cursors.runtime_observed_seq,
+                        snapshot.cursors.runtime_last_injected_seq,
+                    );
+                    let recovered_ops_count = snapshot.completion_entries.len();
+                    let registry =
+                        crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+                    tracing::info!(
+                        %session_id,
+                        epoch_id = %recovered_epoch,
+                        recovered_ops = recovered_ops_count,
+                        "ops lifecycle recovered from durable store (same epoch)"
+                    );
+                    (
+                        Arc::new(registry),
+                        recovered_epoch,
+                        Arc::new(recovered_cursors),
+                    )
+                }
+                Ok(None) => {
+                    tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
+                    (
+                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                        meerkat_core::RuntimeEpochId::new(),
+                        Arc::new(meerkat_core::EpochCursorState::new()),
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %err,
+                        "failed to load ops lifecycle; epoch rotated"
+                    );
+                    (
+                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                        meerkat_core::RuntimeEpochId::new(),
+                        Arc::new(meerkat_core::EpochCursorState::new()),
+                    )
+                }
+            }
+        } else {
+            (
+                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                meerkat_core::RuntimeEpochId::new(),
+                Arc::new(meerkat_core::EpochCursorState::new()),
+            )
+        }
+    }
+
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
@@ -415,11 +528,18 @@ impl RuntimeSessionAdapter {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return;
         }
+
+        let (ops_lifecycle, epoch_id, cursor_state) =
+            self.recover_or_create_ops_state(&session_id).await;
+
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
-            ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            ops_lifecycle,
+            epoch_id,
+            cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
+            detached_wake: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -472,51 +592,65 @@ impl RuntimeSessionAdapter {
                     entry.has_attachment(),
                     entry.driver.clone(),
                     entry.completions.clone(),
+                    entry.ops_lifecycle.clone(),
                 )
             })
         };
 
-        let (driver, completions) = if let Some((has_attachment, driver, completions)) = existing {
-            if has_attachment {
-                return;
-            }
-            (driver, completions)
-        } else {
-            let mut recovered_entry = self.make_driver(&session_id);
-            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-                tracing::error!(
-                    %session_id,
-                    error = %err,
-                    "failed to recover runtime driver during registration"
-                );
-                return;
-            }
-
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&session_id) {
-                entry.clear_dead_attachment();
-                if entry.has_attachment() {
+        let (driver, completions, ops_lifecycle) =
+            if let Some((has_attachment, driver, completions, ops_lifecycle)) = existing {
+                if has_attachment {
                     return;
                 }
-                (entry.driver.clone(), entry.completions.clone())
+                (driver, completions, ops_lifecycle)
             } else {
-                let driver = Arc::new(Mutex::new(recovered_entry));
-                let completions =
-                    Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                sessions.insert(
-                    session_id.clone(),
-                    RuntimeSessionEntry {
-                        driver: driver.clone(),
-                        ops_lifecycle: Arc::new(
-                            crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new(),
-                        ),
-                        completions: completions.clone(),
-                        attachment: None,
-                    },
-                );
-                (driver, completions)
-            }
-        };
+                let mut recovered_entry = self.make_driver(&session_id);
+                if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to recover runtime driver during registration"
+                    );
+                    return;
+                }
+
+                // Recover ops state OUTSIDE the sessions lock to avoid blocking
+                // other adapter operations behind potentially slow disk I/O.
+                let (recovered_ops, recovered_epoch, recovered_cursors) =
+                    self.recover_or_create_ops_state(&session_id).await;
+
+                // Double-check under the lock — another task may have inserted
+                // the entry while we were recovering.
+                let mut sessions = self.sessions.write().await;
+                if let Some(entry) = sessions.get_mut(&session_id) {
+                    entry.clear_dead_attachment();
+                    if entry.has_attachment() {
+                        return;
+                    }
+                    (
+                        entry.driver.clone(),
+                        entry.completions.clone(),
+                        entry.ops_lifecycle.clone(),
+                    )
+                } else {
+                    let driver = Arc::new(Mutex::new(recovered_entry));
+                    let completions =
+                        Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
+                    sessions.insert(
+                        session_id.clone(),
+                        RuntimeSessionEntry {
+                            driver: driver.clone(),
+                            ops_lifecycle: recovered_ops.clone(),
+                            epoch_id: recovered_epoch,
+                            cursor_state: recovered_cursors,
+                            completions: completions.clone(),
+                            attachment: None,
+                            detached_wake: None,
+                        },
+                    );
+                    (driver, completions, recovered_ops)
+                }
+            };
 
         let should_wake = {
             let mut driver_guard = driver.lock().await;
@@ -565,8 +699,62 @@ impl RuntimeSessionAdapter {
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
 
+        // Wire detached-op wake state: the ops lifecycle registry will set
+        // `pending = true` and fire `notify` when a BackgroundToolOp reaches
+        // terminal. The waker task (spawned after attachment below) then injects
+        // a continuation through the canonical ingress seam.
+        let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
+        ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
+
+        // Wire persistence channel if a durable store is available.
+        if let Some(ref store) = self.store {
+            let (persist_tx, mut persist_rx) =
+                crate::tokio::sync::mpsc::channel::<crate::ops_lifecycle::PersistedOpsSnapshot>(16);
+            let entry_epoch_id = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(&session_id)
+                    .map(|e| e.epoch_id.clone())
+                    .unwrap_or_else(meerkat_core::RuntimeEpochId::new)
+            };
+            let entry_cursor = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .get(&session_id)
+                    .map(|e| Arc::clone(&e.cursor_state))
+                    .unwrap_or_else(|| Arc::new(meerkat_core::EpochCursorState::new()))
+            };
+            ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
+
+            // Spawn persistence task
+            let store_clone = Arc::clone(store);
+            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
+            crate::tokio::spawn(async move {
+                while let Some(snapshot) = persist_rx.recv().await {
+                    if let Err(e) = store_clone
+                        .persist_ops_lifecycle(&runtime_id, &snapshot)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to persist ops lifecycle snapshot"
+                        );
+                    }
+                }
+            });
+        }
+
+        // Get the completion feed from the registry for feed-based idle wake.
+        let completion_feed = ops_lifecycle.completion_feed_handle();
+
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
+        let entry_cursor_state = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .map(|e| Arc::clone(&e.cursor_state))
+        };
         let mut pending_loop_handle =
             Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
                 driver.clone(),
@@ -574,6 +762,9 @@ impl RuntimeSessionAdapter {
                 wake_rx,
                 control_rx,
                 Some(completions.clone()),
+                Some(Arc::clone(&detached_wake_state)),
+                Some(completion_feed),
+                entry_cursor_state,
             ));
 
         let (published, detach_after_abort) = {
@@ -596,6 +787,7 @@ impl RuntimeSessionAdapter {
                         match pending_loop_handle.take() {
                             Some(loop_handle) => {
                                 entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                entry.detached_wake = Some(Arc::clone(&detached_wake_state));
                                 (true, false)
                             }
                             None => {
@@ -1039,6 +1231,33 @@ impl RuntimeSessionAdapter {
             .map(|e| Arc::clone(&e.ops_lifecycle))
     }
 
+    /// Prepare canonical runtime bindings for a session.
+    ///
+    /// This is the single canonical helper that replaces the hand-rolled
+    /// `register_session()` + `ops_lifecycle_registry()` + manual threading
+    /// dance. All runtime-backed surfaces should call this instead.
+    ///
+    /// The method is idempotent: if the session is already registered, it
+    /// returns bindings from the existing entry. The epoch_id is stable
+    /// across repeated calls for the same session.
+    pub async fn prepare_bindings(
+        &self,
+        session_id: SessionId,
+    ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
+        self.register_session(session_id.clone()).await;
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .ok_or(RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
+        Ok(meerkat_core::SessionRuntimeBindings {
+            session_id,
+            epoch_id: entry.epoch_id.clone(),
+            ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
+                as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+            cursor_state: Arc::clone(&entry.cursor_state),
+        })
+    }
+
     /// Manage the comms drain lifecycle for a session based on keep_alive intent.
     ///
     /// When `keep_alive` is true, spawns a drain if one is not already running.
@@ -1241,11 +1460,21 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         };
 
         // Signal the RuntimeLoop if wake or immediate processing was requested.
-        if (should_wake || should_process)
-            && let Some(ref wake_tx) = wake_tx
-        {
-            // Non-blocking: if the channel is full, the loop is already processing
-            let _ = wake_tx.try_send(());
+        if should_wake || should_process {
+            match wake_tx {
+                Some(ref wake_tx) => {
+                    // Non-blocking: if the channel is full, the loop is already processing
+                    let _ = wake_tx.try_send(());
+                }
+                None => {
+                    tracing::warn!(
+                        %session_id,
+                        "input accepted but runtime loop is not attached — \
+                         wake signal dropped, input will remain queued until \
+                         a loop is re-attached"
+                    );
+                }
+            }
         }
 
         Ok(outcome)

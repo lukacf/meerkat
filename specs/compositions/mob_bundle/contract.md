@@ -55,6 +55,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `mob_ops_peer_ready_tracks_wiring`: `ops_lifecycle`.`ExposeOperationPeer` -> `mob_wiring_anchor`.`OperationPeerTrusted` [Immediate]
 - `mob_ops_terminal_tracks_member_lifecycle`: `ops_lifecycle`.`NotifyOpWatcher` -> `mob_member_lifecycle_anchor`.`MemberTerminalized` [Immediate]
 
+## Target Selectors
+- `(none)`
+
+## Driver
+- `(none)`
+
+## Transaction Plans
+- `(none)`
+
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
 

@@ -994,6 +994,29 @@
         "type": "object"
       },
       {
+        "description": "An interaction reached an external callback boundary and is waiting for\ntool results before the session can continue.",
+        "properties": {
+          "args": true,
+          "interaction_id": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "interaction_callback_pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "interaction_id",
+          "tool_name",
+          "args"
+        ],
+        "type": "object"
+      },
+      {
         "description": "An interaction failed (terminal event for tap subscribers).",
         "properties": {
           "error": {
@@ -1045,6 +1068,35 @@
         "required": [
           "type",
           "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A background shell job completed (or failed/cancelled/timed out).",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "const": "background_job_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "job_id",
+          "display_name",
+          "status",
+          "detail"
         ],
         "type": "object"
       }
@@ -1743,6 +1795,29 @@
             "type": "object"
           },
           {
+            "description": "An interaction reached an external callback boundary and is waiting for\ntool results before the session can continue.",
+            "properties": {
+              "args": true,
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "interaction_callback_pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "tool_name",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
             "description": "An interaction failed (terminal event for tap subscribers).",
             "properties": {
               "error": {
@@ -1794,6 +1869,35 @@
             "required": [
               "type",
               "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background shell job completed (or failed/cancelled/timed out).",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "const": "background_job_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "display_name",
+              "status",
+              "detail"
             ],
             "type": "object"
           }

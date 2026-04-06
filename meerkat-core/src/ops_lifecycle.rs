@@ -100,6 +100,25 @@ impl OperationStatus {
     pub fn allows_terminalization(self) -> bool {
         matches!(self, Self::Provisioning | Self::Running | Self::Retiring)
     }
+
+    /// Stable string representation for app-facing surfaces.
+    ///
+    /// Unlike `Debug` format, this is an explicit mapping that won't
+    /// produce uncontrolled strings when new variants are added.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Provisioning => "provisioning",
+            Self::Running => "running",
+            Self::Retiring => "retiring",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+            Self::Cancelled => "cancelled",
+            Self::Retired => "retired",
+            Self::Terminated => "terminated",
+        }
+    }
 }
 
 /// Public snapshot of one operation's lifecycle state.
@@ -270,6 +289,17 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         &self,
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         Err(OpsLifecycleError::Unsupported("collect_completed".into()))
+    }
+
+    /// Return the canonical completion feed, if this registry supports it.
+    ///
+    /// Runtime-backed registries return a feed handle that consumers (agent
+    /// boundary, idle wake, wait tool) use for cursor-based completion delivery.
+    /// Returns `None` for registries that don't support the feed protocol.
+    fn completion_feed(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::completion_feed::CompletionFeed>> {
+        None
     }
 
     /// Register an authority-owned barrier wait and await its completion.

@@ -55,11 +55,11 @@ import {
 import { DeferredSession, Session } from "./session.js";
 import {
   Mob,
+  type MemberDeliveryReceipt,
+  type MemberSendOptions,
   type MobKickoffMemberSnapshot,
   type MobKickoffWaitOptions,
-  type MobHandlingMode,
   type MobPeerTarget,
-  type MobRenderMetadata,
 } from "./mob.js";
 import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
@@ -454,7 +454,6 @@ export class MeerkatClient {
       return (
         this._methods.has("mob/create")
         || this._methods.has("mob/list")
-        || this._methods.has("mob/call")
       );
     }
     return this._capabilities.some(
@@ -557,30 +556,6 @@ export class MeerkatClient {
     };
   }
 
-  async listMobPrefabs(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request("mob/prefabs", {});
-    return (result.prefabs as Array<Record<string, unknown>>) ?? [];
-  }
-
-  async list_mob_prefabs(): Promise<Array<Record<string, unknown>>> {
-    return this.listMobPrefabs();
-  }
-
-  async listMobTools(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request("mob/tools", {});
-    return (result.tools as Array<Record<string, unknown>>) ?? [];
-  }
-
-  async callMobTool(
-    name: string,
-    argumentsPayload?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("mob/call", {
-      name,
-      arguments: argumentsPayload ?? {},
-    });
-  }
-
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
     return this.openEventSubscription(
       "session/stream_open",
@@ -656,6 +631,39 @@ export class MeerkatClient {
           : undefined
         : undefined,
     }));
+  }
+
+  async sendMobMemberContent(
+    mobId: string,
+    meerkatId: string,
+    content: string | ContentBlock[],
+    options?: MemberSendOptions,
+  ): Promise<MemberDeliveryReceipt> {
+    const result = await this.request("mob/member_send", {
+      mob_id: mobId,
+      meerkat_id: meerkatId,
+      content,
+      handling_mode: options?.handlingMode,
+      render_metadata: options?.renderMetadata,
+    });
+    const sessionId = result.session_id;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/member_send response: missing session_id",
+      );
+    }
+    return {
+      memberId:
+        typeof result.member_id === "string" && result.member_id.length > 0
+          ? result.member_id
+          : meerkatId,
+      sessionId,
+      handlingMode:
+        result.handling_mode === "steer" || result.handling_mode === "queue"
+          ? result.handling_mode
+          : (options?.handlingMode ?? "queue"),
+    };
   }
 
   async spawnMobMember(
@@ -908,38 +916,6 @@ export class MeerkatClient {
 
   async mobLifecycle(mobId: string, action: 'stop' | 'resume' | 'complete' | 'reset' | 'destroy'): Promise<void> {
     await this.request("mob/lifecycle", { mob_id: mobId, action });
-  }
-
-  async sendMobMemberContent(
-    mobId: string,
-    meerkatId: string,
-    content: string | ContentBlock[],
-    options?: {
-      handlingMode?: MobHandlingMode;
-      renderMetadata?: MobRenderMetadata;
-    },
-  ): Promise<{ memberId: string; sessionId: string; handlingMode: MobHandlingMode }> {
-    const result = await this.request("mob/send", {
-      mob_id: mobId,
-      meerkat_id: meerkatId,
-      content,
-      handling_mode: options?.handlingMode ?? "queue",
-      render_metadata: options?.renderMetadata,
-    });
-    const sessionId = result.session_id;
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/send response: missing session_id",
-      );
-    }
-    return {
-      memberId: String(result.member_id ?? meerkatId),
-      sessionId,
-      handlingMode: String(
-        result.handling_mode ?? options?.handlingMode ?? "queue",
-      ) as MobHandlingMode,
-    };
   }
 
   async appendMobSystemContext(

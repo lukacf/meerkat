@@ -4,24 +4,29 @@ use super::{
     comms_drain_lifecycle::comms_drain_lifecycle_machine,
     compositions::{
         comms_drain_lifecycle_composition, continuation_runtime_bundle_composition,
-        external_tool_bundle_composition, mob_bundle_composition, ops_peer_bundle_composition,
-        ops_runtime_bundle_composition, peer_runtime_bundle_composition,
-        runtime_pipeline_composition, surface_event_runtime_bundle_composition,
+        external_tool_bundle_composition, flow_frame_loop_composition, mob_bundle_composition,
+        ops_peer_bundle_composition, ops_runtime_bundle_composition,
+        peer_runtime_bundle_composition, runtime_pipeline_composition,
+        surface_event_runtime_bundle_composition,
     },
     external_tool_surface::external_tool_surface_machine,
+    flow_frame::flow_frame_machine,
     flow_run::flow_run_machine,
     input_lifecycle::input_lifecycle_machine,
+    loop_iteration::loop_iteration_machine,
     mob_helper_result_anchor::mob_helper_result_anchor_machine,
     mob_lifecycle::mob_lifecycle_machine,
     mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine,
     mob_orchestrator::mob_orchestrator_machine,
     mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine,
     mob_wiring_anchor::mob_wiring_anchor_machine,
+    occurrence_lifecycle::occurrence_lifecycle_machine,
     ops_lifecycle::ops_lifecycle_machine,
     peer_comms::peer_comms_machine,
     peer_directory_reachability::peer_directory_reachability_machine,
     runtime_control::runtime_control_machine,
     runtime_ingress::runtime_ingress_machine,
+    schedule_lifecycle::schedule_lifecycle_machine,
     turn_execution::turn_execution_machine,
 };
 
@@ -235,6 +240,79 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "cancel-and-watch",
                     "async operation cancellation resolves watcher semantics exactly once",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &schedule_lifecycle_machine(),
+            &[
+                anchor(
+                    "schedule_authority",
+                    "meerkat-schedule/src/authority.rs",
+                    "schedule lifecycle authority that owns revision, pause/resume, and delete semantics",
+                ),
+                anchor(
+                    "schedule_service",
+                    "meerkat-schedule/src/service.rs",
+                    "schedule service precursor for revision supersession and rolling planning",
+                ),
+                anchor(
+                    "schedule_schema",
+                    "meerkat-machine-schema/src/catalog/schedule_lifecycle.rs",
+                    "formal ScheduleLifecycleMachine schema",
+                ),
+            ],
+            &[
+                scenario(
+                    "schedule-revision-supersede",
+                    "revision-affecting updates bump revision and explicitly supersede pending future occurrences",
+                ),
+                scenario(
+                    "schedule-pause-resume",
+                    "pause freezes claiming and resume re-enables planning without bumping revision",
+                ),
+                scenario(
+                    "schedule-delete",
+                    "delete terminalizes the schedule while preserving occurrence history",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &occurrence_lifecycle_machine(),
+            &[
+                anchor(
+                    "occurrence_authority",
+                    "meerkat-schedule/src/authority.rs",
+                    "occurrence lifecycle authority that owns claim, dispatch, lease expiry, and terminal outcomes",
+                ),
+                anchor(
+                    "schedule_driver",
+                    "meerkat-schedule/src/driver.rs",
+                    "mechanical scheduler driver precursor for due claims, probes, dispatch, and feedback",
+                ),
+                anchor(
+                    "schedule_store",
+                    "meerkat-schedule/src/store.rs",
+                    "durable claim-time and occurrence state precursor",
+                ),
+                anchor(
+                    "occurrence_schema",
+                    "meerkat-machine-schema/src/catalog/occurrence_lifecycle.rs",
+                    "formal OccurrenceLifecycleMachine schema",
+                ),
+            ],
+            &[
+                scenario(
+                    "occurrence-claim-dispatch-complete",
+                    "occurrences claim, dispatch, and reach a terminal outcome with attempt ownership preserved",
+                ),
+                scenario(
+                    "occurrence-supersede",
+                    "pending occurrences supersede when a newer schedule revision invalidates them",
+                ),
+                scenario(
+                    "occurrence-lease-expiry",
+                    "live claimed work returns to pending when a lease expires before completion",
                 ),
             ],
         ),
@@ -742,6 +820,30 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
             ],
         ),
+        machine_manifest_from_schema(
+            &flow_frame_machine(),
+            &[anchor(
+                "flow_frame_schema",
+                "meerkat-machine-schema/src/catalog/flow_frame.rs",
+                "formal FlowFrameMachine schema (Phase 0 stub)",
+            )],
+            &[scenario(
+                "start-run-terminalize",
+                "frame starts, admits nodes, and terminalizes (Phase 1 complete)",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &loop_iteration_machine(),
+            &[anchor(
+                "loop_iteration_schema",
+                "meerkat-machine-schema/src/catalog/loop_iteration.rs",
+                "formal LoopIterationMachine schema (Phase 0 stub)",
+            )],
+            &[scenario(
+                "start-iterate-complete",
+                "loop starts, body frames execute, until condition terminates it (Phase 1 complete)",
+            )],
+        ),
     ]
 }
 
@@ -1068,6 +1170,41 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             ],
         ),
         composition_manifest_from_schema(
+            &flow_frame_loop_composition(),
+            &[
+                anchor(
+                    "flow_frame_engine",
+                    "meerkat-mob/src/runtime/flow_frame_engine.rs",
+                    "async host that executes generated frame/loop driver plans and external step/until work",
+                ),
+                anchor(
+                    "flow_frame_loop_driver",
+                    "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+                    "generated composition driver that owns frame/loop route closure and transaction bundle selection",
+                ),
+                anchor(
+                    "loop_until_protocol",
+                    "meerkat-mob/src/generated/protocol_flow_loop_until_evaluation.rs",
+                    "generated until-evaluation handoff helper for loop completion feedback",
+                ),
+                anchor(
+                    "loop_iteration_authority",
+                    "meerkat-mob/src/runtime/loop_iteration_authority.rs",
+                    "loop iteration authority that closes until-evaluation feedback against persisted loop snapshots",
+                ),
+            ],
+            &[
+                scenario(
+                    "body-frame-terminal-routing",
+                    "body-frame terminal effects advance loop lifecycle and project the loop terminal outcome back into the parent frame node",
+                ),
+                scenario(
+                    "until-evaluation-feedback",
+                    "EvaluateUntilCondition is realized by runtime-owned condition evaluation and closed by typed feedback",
+                ),
+            ],
+        ),
+        composition_manifest_from_schema(
             &comms_drain_lifecycle_composition(),
             &[
                 anchor(
@@ -1368,6 +1505,32 @@ fn machine_scenario_ids(machine: &str, item_name: &str, all_scenarios: &[String]
             } else {
                 hints.extend(["spawn", "run", "exit"]);
             }
+        }
+        "ScheduleLifecycleMachine" => {
+            if normalized.contains("pause") || normalized.contains("resume") {
+                return select_exact_scenarios(all_scenarios, &["schedule-pause-resume"]);
+            } else if normalized.contains("delete") {
+                return select_exact_scenarios(all_scenarios, &["schedule-delete"]);
+            } else if normalized.contains("planningwindow") {
+                return select_exact_scenarios(
+                    all_scenarios,
+                    &["schedule-revision-supersede", "schedule-pause-resume"],
+                );
+            } else if normalized.contains("supersede") {
+                return select_exact_scenarios(
+                    all_scenarios,
+                    &["schedule-revision-supersede", "schedule-delete"],
+                );
+            }
+            return select_exact_scenarios(all_scenarios, &["schedule-revision-supersede"]);
+        }
+        "OccurrenceLifecycleMachine" => {
+            if normalized.contains("supersede") {
+                return select_exact_scenarios(all_scenarios, &["occurrence-supersede"]);
+            } else if normalized.contains("leaseexpired") {
+                return select_exact_scenarios(all_scenarios, &["occurrence-lease-expiry"]);
+            }
+            return select_exact_scenarios(all_scenarios, &["occurrence-claim-dispatch-complete"]);
         }
         _ => {}
     }

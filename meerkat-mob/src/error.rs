@@ -122,9 +122,25 @@ pub enum MobError {
     #[error("comms error: {0}")]
     CommsError(#[from] meerkat_core::comms::SendError),
 
+    /// A runtime-backed member turn reached an external callback boundary.
+    #[error("callback pending for session {session_id} on tool '{tool_name}'")]
+    CallbackPending {
+        session_id: meerkat_core::types::SessionId,
+        tool_name: String,
+        args: serde_json::Value,
+    },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Operation is not yet implemented for the given storage backend.
+    ///
+    /// Callers can match on this to fall back gracefully (e.g., refuse
+    /// frame-aware flows when the selected persistence backend does not expose
+    /// the required CAS seams yet).
+    #[error("not yet implemented: {0}")]
+    NotYetImplemented(String),
 }
 
 fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
@@ -138,6 +154,23 @@ fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
 impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
     fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Self::StorageError(error)
+    }
+}
+
+impl From<crate::store::MobStoreError> for MobError {
+    fn from(error: crate::store::MobStoreError) -> Self {
+        match error {
+            crate::store::MobStoreError::SpecRevisionConflict {
+                mob_id,
+                expected,
+                actual,
+            } => Self::SpecRevisionConflict {
+                mob_id,
+                expected,
+                actual,
+            },
+            other => Self::StorageError(Box::new(other)),
+        }
     }
 }
 
@@ -270,6 +303,7 @@ mod tests {
             MobError::SessionError(meerkat_core::service::SessionError::PersistenceDisabled),
             MobError::CommsError(meerkat_core::comms::SendError::PeerOffline),
             MobError::Internal("i".to_string()),
+            MobError::NotYetImplemented("storage cas".to_string()),
         ];
     }
 }

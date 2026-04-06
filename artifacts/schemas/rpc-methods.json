@@ -47,6 +47,65 @@
       "name": "session/stream_close"
     },
     {
+      "description": "Create a schedule",
+      "name": "schedule/create",
+      "params_type": "CreateScheduleRequest",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "Get one schedule",
+      "name": "schedule/get",
+      "params_type": "ScheduleIdParams",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "List schedules",
+      "name": "schedule/list",
+      "params_type": "ListSchedulesParams",
+      "result_type": "ScheduleListResult"
+    },
+    {
+      "description": "Update a schedule",
+      "name": "schedule/update",
+      "params_type": "UpdateScheduleParams",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "Pause a schedule",
+      "name": "schedule/pause",
+      "params_type": "ScheduleIdParams",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "Resume a schedule",
+      "name": "schedule/resume",
+      "params_type": "ScheduleIdParams",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "Delete a schedule",
+      "name": "schedule/delete",
+      "params_type": "ScheduleIdParams",
+      "result_type": "Schedule"
+    },
+    {
+      "description": "List schedule occurrences",
+      "name": "schedule/occurrences",
+      "params_type": "ScheduleIdParams",
+      "result_type": "ScheduleOccurrencesResult"
+    },
+    {
+      "description": "List schedule transport tools",
+      "name": "schedule/tools",
+      "result_type": "ScheduleToolsResult"
+    },
+    {
+      "description": "Call a schedule transport tool",
+      "name": "schedule/call",
+      "params_type": "ScheduleToolCallParams",
+      "result_type": "Value"
+    },
+    {
       "description": "Start a new turn on existing session",
       "name": "turn/start"
     },
@@ -124,12 +183,10 @@
       "result_type": "InputListResult"
     },
     {
-      "description": "List available mob prefabs",
-      "name": "mob/prefabs"
-    },
-    {
-      "description": "Create a mob from a prefab or definition",
-      "name": "mob/create"
+      "description": "Create a mob from a definition",
+      "name": "mob/create",
+      "params_type": "MobCreateParams",
+      "result_type": "MobCreateResult"
     },
     {
       "description": "List active mobs",
@@ -176,14 +233,14 @@
       "name": "mob/members"
     },
     {
-      "description": "Deliver content to a mob member",
-      "name": "mob/send",
-      "params_type": "MobSendParams",
-      "result_type": "MobSendResult"
-    },
-    {
       "description": "Read mob event history",
       "name": "mob/events"
+    },
+    {
+      "description": "Deliver ordinary content to a specific mob member via the host control plane",
+      "name": "mob/member_send",
+      "params_type": "MobMemberSendParams",
+      "result_type": "MobMemberSendResult"
     },
     {
       "description": "Append system context for a mob member",
@@ -220,14 +277,6 @@
     {
       "description": "Get live status for a mob member",
       "name": "mob/member_status"
-    },
-    {
-      "description": "List available mob tools",
-      "name": "mob/tools"
-    },
-    {
-      "description": "Call a mob tool",
-      "name": "mob/call"
     },
     {
       "description": "Open a mob event stream",

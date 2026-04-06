@@ -1164,6 +1164,9 @@ mod tests {
                         ),
                         ("escalation_threshold".into(), KernelValue::U64(0)),
                         ("max_step_retries".into(), KernelValue::U64(0)),
+                        ("max_active_nodes".into(), KernelValue::U64(0)),
+                        ("max_active_frames".into(), KernelValue::U64(0)),
+                        ("max_frame_depth".into(), KernelValue::U64(0)),
                     ]),
                 },
             )
@@ -1279,6 +1282,9 @@ mod tests {
                 ),
                 ("escalation_threshold".into(), KernelValue::U64(0)),
                 ("max_step_retries".into(), KernelValue::U64(0)),
+                ("max_active_nodes".into(), KernelValue::U64(0)),
+                ("max_active_frames".into(), KernelValue::U64(0)),
+                ("max_frame_depth".into(), KernelValue::U64(0)),
             ]),
         }
     }
@@ -1595,6 +1601,9 @@ mod tests {
                         ),
                         ("escalation_threshold".into(), KernelValue::U64(1)),
                         ("max_step_retries".into(), KernelValue::U64(0)),
+                        ("max_active_nodes".into(), KernelValue::U64(0)),
+                        ("max_active_frames".into(), KernelValue::U64(0)),
+                        ("max_frame_depth".into(), KernelValue::U64(0)),
                     ]),
                 },
             )
@@ -1745,6 +1754,9 @@ mod tests {
                         ),
                         ("escalation_threshold".into(), KernelValue::U64(0)),
                         ("max_step_retries".into(), KernelValue::U64(0)),
+                        ("max_active_nodes".into(), KernelValue::U64(0)),
+                        ("max_active_frames".into(), KernelValue::U64(0)),
+                        ("max_frame_depth".into(), KernelValue::U64(0)),
                     ]),
                 },
             )

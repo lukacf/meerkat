@@ -178,6 +178,7 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                 }],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![disposition(
             "RuntimeBridgeSnapshotUpdated",
             EffectDisposition::Local,

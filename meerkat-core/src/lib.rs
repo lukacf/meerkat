@@ -21,6 +21,7 @@ pub mod checkpoint;
 pub mod comms;
 pub mod comms_drain_lifecycle_authority;
 pub mod compact;
+pub mod completion_feed;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
@@ -47,9 +48,12 @@ pub mod prompt;
 pub mod provider;
 pub mod retry;
 pub mod runtime_bootstrap;
+pub mod runtime_epoch;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_recovery;
+pub mod session_store;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
@@ -63,8 +67,8 @@ pub mod wait_interrupt;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
-    LlmStreamResult,
+    BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
@@ -86,6 +90,10 @@ pub use compact::{
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;
 
+pub use completion_feed::{
+    CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,
+    CompletionFeed, CompletionSeq,
+};
 pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
@@ -113,7 +121,9 @@ pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
     EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send,
 };
-pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
+pub use gateway::{
+    Availability, AvailabilityCheck, DynamicToolComposite, ToolGateway, ToolGatewayBuilder,
+};
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
@@ -154,22 +164,35 @@ pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
     RuntimeBootstrapError, default_state_root, derive_workspace_realm_id, generate_realm_id,
 };
+pub use runtime_epoch::{
+    EpochCursorSnapshot, EpochCursorState, RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
+};
 pub use schema::{
     CompiledSchema, MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning,
 };
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, SessionBuildOptions, SessionControlError, SessionError,
-    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
-    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
+    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
 };
 pub use session::{
-    PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
-    SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
-    SystemContextStageError,
+    DeferredFirstTurnPhase, PendingDeferredPrompt, PendingSystemContextAppend,
+    PendingToolResultsMessage, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
+    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
+    SessionSystemContextState, SessionTooling, SystemContextStageError, ToolCategoryOverride,
 };
+pub use session_recovery::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    has_build_only_turn_overrides, has_materialization_overrides,
+    session_allows_first_turn_build_overrides,
+};
+pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,

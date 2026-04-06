@@ -200,32 +200,48 @@ async fn integration_real_shell_background_spawn() {
     let _ = job_manager.cancel_job(&job_id).await;
 }
 
-/// E2E: Agent receives completion event after background job finishes
+/// E2E: Background job reaches terminal state and is retrievable via status
+///
+/// Note: drain_completed() is tested in-crate by CHOKE-001-IT in
+/// meerkat-tools/src/builtin/shell/job_manager.rs. This test verifies
+/// the public job status API reflects completion.
 #[tokio::test]
 #[ignore = "integration-real: spawns shell processes"]
 async fn integration_real_shell_background_completion() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
+    let job_manager = JobManager::new(config);
 
     // Spawn a quick job
-    let job_id = tool_set
-        .job_manager
+    let job_id = job_manager
         .spawn_job("echo 'done'", None, 30)
         .await
         .expect("Should spawn job");
 
-    // Wait for completion event
-    let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .expect("Should receive event within timeout")
-        .expect("Channel should not be closed");
+    // Wait for the job to complete
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = job_manager.get_status(&job_id).await;
+            if status
+                .as_ref()
+                .is_some_and(|j| matches!(j.status, JobStatus::Completed { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Job should complete within timeout");
 
-    // Verify event structure
-    assert_eq!(event["type"], "shell_job_completed");
-    assert_eq!(event["job_id"], job_id.0);
-    assert!(event["result"].is_object());
-    assert_eq!(event["result"]["status"], "completed");
+    let job = job_manager
+        .get_status(&job_id)
+        .await
+        .expect("Job should exist");
+    assert!(
+        matches!(job.status, JobStatus::Completed { .. }),
+        "Job should be completed"
+    );
 }
 
 /// E2E: Agent can cancel running background job
@@ -562,29 +578,47 @@ async fn integration_real_job_manager_basic_sh() {
     );
 }
 
-/// E2E: Event channel receives completion events with sh
+/// E2E: Background job status is retrievable after completion with sh
+///
+/// Note: drain_completed() is tested in-crate by CHOKE-001-IT. This test
+/// verifies the public job status API with sh shell.
 #[tokio::test]
 #[ignore = "integration-real: spawns shell processes"]
-async fn integration_real_event_channel_sh() {
+async fn integration_real_job_status_after_completion_sh() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let (tool_set, mut rx) = ShellToolSet::with_event_channel(config);
+    let job_manager = JobManager::new(config);
 
     // Spawn a quick job
-    let _job_id = tool_set
-        .job_manager
+    let job_id = job_manager
         .spawn_job("echo test", None, 30)
         .await
         .expect("Should spawn job");
 
-    // Wait for completion event
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .expect("Should receive event")
-        .expect("Channel should not be closed");
+    // Wait for the job to complete
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = job_manager.get_status(&job_id).await;
+            if status
+                .as_ref()
+                .is_some_and(|j| matches!(j.status, JobStatus::Completed { .. }))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Job should complete within timeout");
 
-    assert_eq!(event["type"], "shell_job_completed");
-    assert!(event["result"].is_object());
+    let job = job_manager
+        .get_status(&job_id)
+        .await
+        .expect("Job should exist");
+    assert!(
+        matches!(job.status, JobStatus::Completed { .. }),
+        "Job should be completed"
+    );
 }
 
 // ============================================================================

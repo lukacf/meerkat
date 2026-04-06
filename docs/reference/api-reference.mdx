@@ -26,6 +26,8 @@ This page is a quick-lookup index. For settled 0.5 session/runtime semantics, se
 | `AgentError` | `meerkat_core` | Error types (LLM, tool, budget, hook, cancellation) |
 | `BudgetLimits` | `meerkat_core` | Resource constraints (tokens, duration, tool calls) |
 | `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
+| `RuntimeBuildMode` | `meerkat_core` | Explicit runtime ownership mode (`SessionOwned` vs `StandaloneEphemeral`) |
+| `SessionRuntimeBindings` | `meerkat_core` | Runtime-backed session bindings (`session_id`, `epoch_id`, ops lifecycle, cursor state) |
 | `MobRun` | `meerkat_mob` | Persisted flow run aggregate |
 | `MobRunStatus` | `meerkat_mob` | Flow run lifecycle (`pending`, `running`, `completed`, `failed`, `canceled`) |
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
@@ -46,6 +48,16 @@ This page is a quick-lookup index. For settled 0.5 session/runtime semantics, se
 | `SkillSource` | `meerkat_core::skills` | Skill discovery from various sources | [Skills guide](/guides/skills) |
 | `HookEngine` | `meerkat_core` | Hook pipeline execution | [Hooks guide](/guides/hooks) |
 | `FlowTurnExecutor` | `meerkat_mob` | Runtime boundary between flow engine and dispatch/turn transport | [Mobs](/guides/mobs) |
+
+## Runtime-backed build seam
+
+For runtime-backed Rust surfaces, the canonical path is:
+
+1. `RuntimeSessionAdapter::prepare_bindings(session_id)`
+2. `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+3. `SessionService::create_session(...)`
+
+For standalone/testing/embedded paths, prefer `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 
 ## Mobs (Rust SDK)
 
@@ -112,7 +124,7 @@ async fn orchestrate(
     session_service: Arc<dyn MobSessionService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let definition = MobDefinition::from_toml(definition_toml)?;
-    let storage = MobStorage::redb("./mob.redb")?;
+    let storage = MobStorage::persistent("./mob.db")?;
 
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(session_service)
@@ -139,9 +151,9 @@ async fn orchestrate(
 }
 ```
 
-### Cross-surface mob integration (`meerkat-mob-mcp`)
+### Agent-Side Mob Integration (`meerkat-mob-mcp`)
 
-Mob capability for non-Rust-SDK surfaces is exposed by composing:
+Agent-side mob capability is exposed by composing:
 
 - `meerkat_mob_mcp::MobMcpState`
 - `meerkat_mob_mcp::MobMcpDispatcher`
@@ -167,7 +179,19 @@ fn with_mob_tools(session_service: Arc<dyn MobSessionService>) -> SessionBuildOp
 }
 ```
 
-This is the shared mechanism used by session-driven surfaces (MCP/REST/RPC and SDKs) to provide `mob_*` tool capability.
+This is the in-session mechanism for granting `mob_*` tools to the agent.
+Public host surfaces use typed control planes instead:
+
+- JSON-RPC / SDKs: typed `mob/*` methods
+- Public MCP hosts: typed `meerkat_mob_*` tools
+
+For mob-only MCP hosts, `meerkat-mob-mcp` also exposes:
+
+- `meerkat_mob_mcp::public_tools_list`
+- `meerkat_mob_mcp::handle_public_tools_call`
+
+Those helpers are for public host control-plane tools. `MobMcpDispatcher`
+remains the agent-side `mob_*` tool surface.
 
 For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), see [Mobs](/guides/mobs).
 

@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_schema::catalog::{
-    flow_run_machine, mob_bundle_composition, mob_lifecycle_machine, mob_orchestrator_machine,
-    ops_lifecycle_machine, ops_runtime_bundle_composition, peer_comms_machine,
-    peer_directory_reachability_machine, peer_runtime_bundle_composition, runtime_control_machine,
-    runtime_ingress_machine, runtime_pipeline_composition, turn_execution_machine,
+    flow_frame_machine, flow_run_machine, loop_iteration_machine, mob_bundle_composition,
+    mob_lifecycle_machine, mob_orchestrator_machine, ops_lifecycle_machine,
+    ops_runtime_bundle_composition, peer_comms_machine, peer_directory_reachability_machine,
+    peer_runtime_bundle_composition, runtime_control_machine, runtime_ingress_machine,
+    runtime_pipeline_composition, turn_execution_machine,
 };
 use meerkat_machine_schema::{
     CompositionSchemaError, EffectDisposition, FeedbackFieldBinding, FeedbackFieldSource,
@@ -90,6 +91,16 @@ fn canonical_machine_registry_is_individually_valid() {
 #[test]
 fn validates_flow_run_machine_definition() {
     assert_eq!(flow_run_machine().validate(), Ok(()));
+}
+
+#[test]
+fn validates_flow_frame_machine_definition() {
+    assert_eq!(flow_frame_machine().validate(), Ok(()));
+}
+
+#[test]
+fn validates_loop_iteration_machine_definition() {
+    assert_eq!(loop_iteration_machine().validate(), Ok(()));
 }
 
 #[test]
@@ -370,6 +381,7 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
                 fields: IndexMap::new(),
             }],
         }],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Handoff".into(),
             disposition: EffectDisposition::Routed {
@@ -416,6 +428,7 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![],
     };
 
@@ -450,6 +463,9 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
             input_variant: "Go".into(),
         }],
         routes: vec![], // deliberately empty — should fail
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -518,6 +534,7 @@ fn handoff_protocol_accepted_on_local_effect() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "DoSomething".into(),
             disposition: EffectDisposition::Local,
@@ -575,6 +592,7 @@ fn handoff_protocol_accepted_on_external_effect() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Notify".into(),
             disposition: EffectDisposition::External,
@@ -629,6 +647,7 @@ fn handoff_protocol_rejected_on_routed_effect() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Route".into(),
             disposition: EffectDisposition::Routed {
@@ -672,6 +691,9 @@ fn actor_kind_owner_accepted_in_composition() {
         handoff_protocols: vec![],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -707,6 +729,9 @@ fn machine_instance_with_owner_actor_rejected() {
         handoff_protocols: vec![],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -796,6 +821,7 @@ fn handoff_protocol_valid_round_trip() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "RequestWork".into(),
             disposition: EffectDisposition::External,
@@ -834,6 +860,9 @@ fn handoff_protocol_valid_round_trip() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -891,6 +920,9 @@ fn handoff_protocol_unknown_producer() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -950,6 +982,9 @@ fn handoff_protocol_actor_not_owner() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -1009,6 +1044,9 @@ fn handoff_protocol_unknown_feedback_machine() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -1078,6 +1116,7 @@ fn handoff_protocol_unknown_effect_cross_schema() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "RealEffect".into(),
             disposition: EffectDisposition::External,
@@ -1116,6 +1155,9 @@ fn handoff_protocol_unknown_effect_cross_schema() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -1189,6 +1231,7 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Work".into(),
             disposition: EffectDisposition::External,
@@ -1227,6 +1270,9 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -1295,6 +1341,7 @@ fn closed_world_rejects_missing_handoff_protocol() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Work".into(),
             disposition: EffectDisposition::External,
@@ -1316,6 +1363,9 @@ fn closed_world_rejects_missing_handoff_protocol() {
         handoff_protocols: vec![], // deliberately empty — should fail
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],
@@ -1405,6 +1455,7 @@ fn closed_world_accepts_handoff_protocol_present() {
         derived: vec![],
         invariants: vec![],
         transitions: vec![],
+        ci_step_limit: None,
         effect_dispositions: vec![EffectDispositionRule {
             effect_variant: "Work".into(),
             disposition: EffectDisposition::External,
@@ -1443,6 +1494,9 @@ fn closed_world_accepts_handoff_protocol_present() {
         }],
         entry_inputs: vec![],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![],

@@ -17,9 +17,9 @@
 //!   CompleteOperation, FailOperation, CancelOperation, RetireRequested,
 //!   RetireCompleted, CollectTerminal, OwnerTerminated, BeginWaitAll,
 //!   CancelWaitAll
-//! - 8 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
+//! - 9 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
 //!   RetainTerminalRecord, EvictCompletedRecord, WaitAllSatisfied,
-//!   CollectCompletedResult, ConcurrencyLimitExceeded
+//!   CollectCompletedResult, ConcurrencyLimitExceeded, CompletionProduced
 
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::ops_lifecycle::{
@@ -118,6 +118,15 @@ pub(crate) enum OpsLifecycleEffect {
     },
     /// Evict a completed operation from retention.
     EvictCompletedRecord { operation_id: OperationId },
+    /// A completion was produced with a monotonic sequence number.
+    ///
+    /// Emitted alongside `RetainTerminalRecord` whenever an operation reaches
+    /// terminal status. The shell writes this entry into the feed buffer.
+    CompletionProduced {
+        seq: meerkat_core::completion_feed::CompletionSeq,
+        operation_id: OperationId,
+        kind: OperationKind,
+    },
     /// All specified operations have reached terminal status.
     ///
     /// Handoff protocol: `ops_barrier_satisfaction` — the shell routes this
@@ -168,8 +177,8 @@ pub(crate) struct OpsLifecycleTransition {
 ///
 /// This is exclusively owned by the authority. Shell code may read via
 /// accessor methods but cannot mutate directly.
-#[derive(Debug, Clone)]
-pub(crate) struct OperationCanonicalState {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OperationCanonicalState {
     /// Current lifecycle status.
     status: OperationStatus,
     /// Kind of operation (needed for peer_ready guard).
@@ -247,8 +256,8 @@ impl OperationCanonicalState {
 ///
 /// Tracks per-operation state plus registry-level bookkeeping (completed
 /// ordering, concurrency limits). Only mutated through the sealed authority.
-#[derive(Debug, Clone)]
-struct RegistryCanonicalState {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegistryCanonicalState {
     /// Per-operation canonical state, keyed by OperationId.
     operations: std::collections::HashMap<OperationId, OperationCanonicalState>,
     /// FIFO ordering of completed operation IDs for bounded eviction.
@@ -263,9 +272,26 @@ struct RegistryCanonicalState {
     wait_request_id: Option<WaitRequestId>,
     /// Operation IDs tracked by the active barrier wait.
     wait_operation_ids: Vec<OperationId>,
+    /// Monotonic sequence counter for completion feed entries.
+    next_completion_seq: meerkat_core::completion_feed::CompletionSeq,
 }
 
 impl RegistryCanonicalState {
+    /// Maximum completed operations to retain.
+    pub fn max_completed(&self) -> usize {
+        self.max_completed
+    }
+
+    /// Maximum concurrent non-terminal operations (None = unlimited).
+    pub fn max_concurrent(&self) -> Option<usize> {
+        self.max_concurrent
+    }
+
+    /// Number of operations in the canonical state.
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
         Self {
             operations: std::collections::HashMap::new(),
@@ -275,6 +301,7 @@ impl RegistryCanonicalState {
             active_count: 0,
             wait_request_id: None,
             wait_operation_ids: Vec::new(),
+            next_completion_seq: 0,
         }
     }
 }
@@ -325,6 +352,25 @@ impl OpsLifecycleAuthority {
         Self {
             state: RegistryCanonicalState::new(max_completed, max_concurrent),
         }
+    }
+
+    /// Recover from persisted canonical state.
+    ///
+    /// Strips non-terminal operations (only terminals survive recovery).
+    /// Clears ephemeral wait state (oneshot channels can't survive restart).
+    pub(crate) fn from_recovered(mut state: RegistryCanonicalState) -> Self {
+        state.wait_request_id = None;
+        state.wait_operation_ids.clear();
+        state
+            .operations
+            .retain(|_, op| op.terminal_outcome.is_some());
+        state.active_count = 0;
+        Self { state }
+    }
+
+    /// Read-only access to canonical state for serialization.
+    pub(crate) fn canonical_state(&self) -> &RegistryCanonicalState {
+        &self.state
     }
 
     /// Get canonical state for an operation (read-only).
@@ -548,6 +594,10 @@ impl OpsLifecycleAuthority {
             });
         }
 
+        let kind = op.kind;
+        let seq = self.state.next_completion_seq + 1;
+        self.state.next_completion_seq = seq;
+
         let mut effects = vec![
             OpsLifecycleEffect::SubmitOpEvent {
                 operation_id: operation_id.clone(),
@@ -560,6 +610,11 @@ impl OpsLifecycleAuthority {
             OpsLifecycleEffect::RetainTerminalRecord {
                 operation_id: operation_id.clone(),
                 terminal_outcome: terminal_outcome.clone(),
+            },
+            OpsLifecycleEffect::CompletionProduced {
+                seq,
+                operation_id: operation_id.clone(),
+                kind,
             },
         ];
 
@@ -914,6 +969,10 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
 
                 for id in &to_terminate {
                     if let Some(op) = self.state.operations.get_mut(id) {
+                        let kind = op.kind;
+                        let seq = self.state.next_completion_seq + 1;
+                        self.state.next_completion_seq = seq;
+
                         let outcome = OperationTerminalOutcome::Terminated {
                             reason: String::new(),
                         };
@@ -928,6 +987,11 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
                         effects.push(OpsLifecycleEffect::RetainTerminalRecord {
                             operation_id: id.clone(),
                             terminal_outcome: outcome,
+                        });
+                        effects.push(OpsLifecycleEffect::CompletionProduced {
+                            seq,
+                            operation_id: id.clone(),
+                            kind,
                         });
                     }
                     self.state.completed_order.push_back(id.clone());

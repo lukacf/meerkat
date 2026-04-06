@@ -1,7 +1,7 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.5.0
+// Contract version: 0.5.1
 
-export const CONTRACT_VERSION = "0.5.0";
+export const CONTRACT_VERSION = "0.5.1";
 
 export interface WireUsage {
   input_tokens: number;
@@ -111,14 +111,6 @@ export interface McpReloadParams {
   session_id: string;
 }
 
-export interface MobSendParams {
-  content: WireContentInput;
-  handling_mode?: WireHandlingMode;
-  meerkat_id: string;
-  mob_id: string;
-  render_metadata?: WireRenderMetadata;
-}
-
 export interface MobWireParams {
   member: string;
   mob_id: string;
@@ -193,12 +185,6 @@ export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applie
 export interface WireRenderMetadata {
   class: WireRenderClass;
   salience?: WireRenderSalience;
-}
-
-export interface MobSendResult {
-  handling_mode: WireHandlingMode;
-  member_id: string;
-  session_id: string;
 }
 
 export interface WireTrustedPeerSpec {

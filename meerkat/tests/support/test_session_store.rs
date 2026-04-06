@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
-use meerkat_store::{SessionFilter, SessionStore, StoreError};
+use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -17,7 +17,7 @@ impl TestSessionStore {
 
 #[async_trait]
 impl SessionStore for TestSessionStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         self.sessions
             .write()
             .await
@@ -25,11 +25,11 @@ impl SessionStore for TestSessionStore {
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         Ok(self.sessions.read().await.get(id).cloned())
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         let mut sessions: Vec<_> = self
             .sessions
             .read()
@@ -50,7 +50,7 @@ impl SessionStore for TestSessionStore {
         Ok(sessions.into_iter().skip(offset).take(limit).collect())
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         self.sessions.write().await.remove(id);
         Ok(())
     }

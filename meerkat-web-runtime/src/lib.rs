@@ -1280,6 +1280,7 @@ fn build_direct_session_request(
 
         skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_config.to_session_build_options()),
         labels: config.labels.clone(),
     })

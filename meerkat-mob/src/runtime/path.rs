@@ -8,6 +8,7 @@ use serde_json::Value;
 /// Supported roots:
 /// - `params`
 /// - `steps.<step_id>[.output].<path...>`
+/// - `loops.<loop_id>.iterations.<n>.steps.<step_id>[.<path...>]`
 pub fn resolve_context_path<'a>(ctx: &'a FlowContext, path: &str) -> Option<&'a Value> {
     if path == "params" {
         return Some(&ctx.activation_params);
@@ -26,6 +27,25 @@ pub fn resolve_context_path<'a>(ctx: &'a FlowContext, path: &str) -> Option<&'a 
                 let _ = parts.next();
             }
             walk_json(output, parts)
+        }
+        "loops" => {
+            let loop_id = parts.next()?;
+            let history = ctx.loop_outputs.get(loop_id)?;
+            match parts.next()? {
+                "iterations" => {
+                    let n: usize = parts.next()?.parse().ok()?;
+                    let iter_outputs = history.iterations.get(n)?;
+                    match parts.next()? {
+                        "steps" => {
+                            let step_id = parts.next()?;
+                            let output = iter_outputs.get(step_id)?;
+                            walk_json(output, parts)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -69,6 +89,7 @@ mod tests {
             run_id: RunId::new(),
             activation_params: serde_json::json!({"region":"us"}),
             step_outputs,
+            loop_outputs: indexmap::IndexMap::new(),
         };
 
         assert_eq!(

@@ -6,6 +6,7 @@ use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
 use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome,
@@ -15,6 +16,43 @@ use std::sync::Arc;
 
 mod sealed {
     pub trait Sealed {}
+}
+
+#[derive(Debug, Clone)]
+pub struct FrameStepProjectionEffects {
+    pub step_status: crate::run::StepRunStatus,
+    pub persist_output: bool,
+    pub append_failure_ledger: bool,
+    pub escalate_supervisor: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FrameStepProjectionRequest {
+    pub step_status: crate::run::StepRunStatus,
+    pub append_failure_ledger: bool,
+}
+
+impl FrameStepProjectionRequest {
+    pub fn completed() -> Self {
+        Self {
+            step_status: crate::run::StepRunStatus::Completed,
+            append_failure_ledger: false,
+        }
+    }
+
+    pub fn skipped() -> Self {
+        Self {
+            step_status: crate::run::StepRunStatus::Skipped,
+            append_failure_ledger: false,
+        }
+    }
+
+    pub fn failed(append_failure_ledger: bool) -> Self {
+        Self {
+            step_status: crate::run::StepRunStatus::Failed,
+            append_failure_ledger,
+        }
+    }
 }
 
 /// Sealed mutator trait for FlowRun state transitions.
@@ -209,6 +247,19 @@ impl FlowRunKernel {
         KernelValue::String(step_id.to_string())
     }
 
+    fn step_status_value(status: &crate::run::StepRunStatus) -> KernelValue {
+        KernelValue::NamedVariant {
+            enum_name: "StepRunStatus".into(),
+            variant: match status {
+                crate::run::StepRunStatus::Dispatched => "Dispatched".into(),
+                crate::run::StepRunStatus::Completed => "Completed".into(),
+                crate::run::StepRunStatus::Failed => "Failed".into(),
+                crate::run::StepRunStatus::Skipped => "Skipped".into(),
+                crate::run::StepRunStatus::Canceled => "Canceled".into(),
+            },
+        }
+    }
+
     fn target_id_value(target_id: &str) -> KernelValue {
         KernelValue::String(target_id.to_string())
     }
@@ -233,6 +284,65 @@ impl FlowRunKernel {
 
     pub async fn snapshot(&self, run_id: &RunId) -> Result<MobRun, MobError> {
         self.require_run(run_id).await
+    }
+
+    pub async fn project_frame_step_status(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        request: FrameStepProjectionRequest,
+    ) -> Result<Option<FrameStepProjectionEffects>, MobError> {
+        let FrameStepProjectionRequest {
+            step_status,
+            append_failure_ledger: requested_failure_ledger_append,
+        } = request;
+        if !matches!(
+            step_status,
+            crate::run::StepRunStatus::Completed
+                | crate::run::StepRunStatus::Skipped
+                | crate::run::StepRunStatus::Failed
+        ) {
+            return Err(MobError::Internal(format!(
+                "project_frame_step_status does not support non-terminal status {step_status:?} \
+                 for step '{step_id}' in run '{run_id}'"
+            )));
+        }
+
+        let current_status = self.step_status(run_id, step_id).await?;
+        if current_status == Some(step_status.clone()) {
+            return Ok(None);
+        }
+
+        let effects = self
+            .cas_with_retry(
+                run_id,
+                "ProjectFrameStepStatus",
+                BTreeMap::from([
+                    ("step_id".to_string(), Self::step_id_value(step_id)),
+                    (
+                        "step_status".to_string(),
+                        Self::step_status_value(&step_status),
+                    ),
+                    (
+                        "append_failure_ledger".to_string(),
+                        KernelValue::Bool(requested_failure_ledger_append),
+                    ),
+                ]),
+            )
+            .await?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "project_frame_step_status: transition returned no effects for run '{run_id}' \
+                     step '{step_id}'"
+                ))
+            })?;
+
+        Ok(Some(FrameStepProjectionEffects {
+            step_status: step_status.clone(),
+            persist_output: matches!(step_status, crate::run::StepRunStatus::Completed),
+            append_failure_ledger: has_step_effect(&effects, "AppendFailureLedger", step_id)?,
+            escalate_supervisor: has_step_effect(&effects, "EscalateSupervisor", step_id)?,
+        }))
     }
 
     pub async fn step_branch_blocked(
@@ -294,6 +404,69 @@ impl FlowRunKernel {
             .collect()
     }
 
+    /// Project canonical terminal step statuses from the frame execution seam and
+    /// then terminalize the run as Completed.
+    ///
+    /// Used by the frame-based flow path after `FlowFrameMachine` has fully
+    /// completed. `step_statuses` is the typed terminal truth surfaced by the frame
+    /// executor for every step it observed in the frame subtree. Any tracked step
+    /// not present in `step_statuses` is treated as skipped.
+    pub async fn terminalize_completed_from_frame(
+        &self,
+        run_id: &RunId,
+        flow_id: FlowId,
+        step_statuses: &IndexMap<StepId, crate::run::StepRunStatus>,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        for (step_id, status) in step_statuses {
+            if !matches!(
+                status,
+                crate::run::StepRunStatus::Completed | crate::run::StepRunStatus::Skipped
+            ) {
+                return Err(MobError::Internal(format!(
+                    "terminalize_completed_from_frame received non-completed terminal status \
+                     {status:?} for step '{step_id}' in run '{run_id}'"
+                )));
+            }
+        }
+
+        for step_id in self.ordered_steps(run_id).await? {
+            let status = step_statuses
+                .get(&step_id)
+                .cloned()
+                .unwrap_or(crate::run::StepRunStatus::Skipped);
+            match status {
+                crate::run::StepRunStatus::Completed => {
+                    let _ = self
+                        .project_frame_step_status(
+                            run_id,
+                            &step_id,
+                            FrameStepProjectionRequest::completed(),
+                        )
+                        .await?;
+                }
+                crate::run::StepRunStatus::Skipped => {
+                    let _ = self
+                        .project_frame_step_status(
+                            run_id,
+                            &step_id,
+                            FrameStepProjectionRequest::skipped(),
+                        )
+                        .await?;
+                }
+                other => {
+                    return Err(MobError::Internal(format!(
+                        "terminalize_completed_from_frame cannot project status {other:?} \
+                         for step '{step_id}' in run '{run_id}'"
+                    )));
+                }
+            }
+        }
+
+        // Now all steps are terminal — terminalize the run.
+        self.terminalize(run_id.clone(), flow_id, TerminalizationTarget::Completed)
+            .await
+    }
+
     pub async fn collection_satisfied(
         &self,
         run_id: &RunId,
@@ -345,6 +518,20 @@ impl FlowRunKernel {
             }),
             other => Err(MobError::Internal(format!(
                 "flow_run failure_count missing or invalid for {run_id}: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn consecutive_failure_count(&self, run_id: &RunId) -> Result<u32, MobError> {
+        let run = self.require_run(run_id).await?;
+        match run.flow_state.fields.get("consecutive_failure_count") {
+            Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
+                MobError::Internal(format!(
+                    "flow_run consecutive_failure_count out of range for {run_id}"
+                ))
+            }),
+            other => Err(MobError::Internal(format!(
+                "flow_run consecutive_failure_count missing or invalid for {run_id}: {other:?}"
             ))),
         }
     }
@@ -577,6 +764,7 @@ impl FlowRunMutator for FlowRunKernel {
                 &next_state,
             )
             .await
+            .map_err(MobError::from)
     }
 
     async fn dispatch_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
@@ -689,6 +877,7 @@ impl FlowRunMutator for FlowRunKernel {
         self.run_store
             .cas_flow_state(run_id, &run.flow_state, &next_state)
             .await
+            .map_err(MobError::from)
     }
 
     async fn record_target_success(
@@ -861,6 +1050,33 @@ fn parse_step_run_status(
     }
 }
 
+fn has_step_effect(
+    effects: &[KernelEffect],
+    variant: &str,
+    step_id: &StepId,
+) -> Result<bool, MobError> {
+    let expected = step_id.to_string();
+    for effect in effects {
+        if effect.variant != variant {
+            continue;
+        }
+        match effect.fields.get("step_id") {
+            Some(KernelValue::String(candidate)) if candidate == &expected => return Ok(true),
+            Some(other) => {
+                return Err(MobError::Internal(format!(
+                    "flow_run effect `{variant}` carried invalid step_id payload: {other:?}"
+                )));
+            }
+            None => {
+                return Err(MobError::Internal(format!(
+                    "flow_run effect `{variant}` missing step_id payload"
+                )));
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,6 +1141,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -978,6 +1195,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1035,6 +1253,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1149,6 +1368,7 @@ mod tests {
                             output_format: crate::definition::StepOutputFormat::Json,
                         },
                     )]),
+                    root: None,
                 },
                 topology: None,
                 supervisor: None,
@@ -1225,6 +1445,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1313,6 +1534,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1406,6 +1628,7 @@ mod tests {
                         },
                     ),
                 ]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1522,6 +1745,7 @@ mod tests {
                         },
                     ),
                 ]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1612,6 +1836,7 @@ mod tests {
                         },
                     ),
                 ]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1687,6 +1912,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: Some(crate::definition::SupervisorSpec {
@@ -1729,6 +1955,239 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flow_run_kernel_projects_frame_failed_step_with_machine_owned_escalation() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel = FlowRunKernel::new(MobId::from("mob-frame-escalation"), run_store, events);
+        let step_id = crate::ids::StepId::from("step-1");
+        let config = FlowRunConfig {
+            flow_id: FlowId::from("demo"),
+            flow_spec: crate::definition::FlowSpec {
+                description: None,
+                steps: indexmap::IndexMap::from([(
+                    step_id.clone(),
+                    crate::definition::FlowStepSpec {
+                        role: crate::ids::ProfileName::from("worker"),
+                        message: meerkat_core::types::ContentInput::from("do it"),
+                        depends_on: Vec::new(),
+                        dispatch_mode: crate::definition::DispatchMode::FanOut,
+                        collection_policy: crate::definition::CollectionPolicy::All,
+                        condition: None,
+                        timeout_ms: None,
+                        expected_schema_ref: None,
+                        branch: None,
+                        depends_on_mode: crate::definition::DependencyMode::All,
+                        allowed_tools: None,
+                        blocked_tools: None,
+                        output_format: crate::definition::StepOutputFormat::Json,
+                    },
+                )]),
+                root: None,
+            },
+            topology: None,
+            supervisor: Some(crate::definition::SupervisorSpec {
+                role: crate::ids::ProfileName::from("supervisor"),
+                escalation_threshold: 1,
+            }),
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let run_id = kernel
+            .create_pending_run(&config, serde_json::json!({}))
+            .await
+            .expect("create pending run");
+        kernel.start_run(&run_id).await.expect("start run");
+
+        let effects = kernel
+            .project_frame_step_status(&run_id, &step_id, FrameStepProjectionRequest::failed(true))
+            .await
+            .expect("project frame failed step")
+            .expect("projection should mutate flow state");
+        assert_eq!(effects.step_status, crate::run::StepRunStatus::Failed);
+        assert!(effects.append_failure_ledger);
+        assert!(effects.escalate_supervisor);
+        assert_eq!(
+            kernel.failure_count(&run_id).await.expect("failure count"),
+            1
+        );
+        assert_eq!(
+            kernel
+                .consecutive_failure_count(&run_id)
+                .await
+                .expect("consecutive failure count"),
+            1
+        );
+        assert_eq!(
+            kernel
+                .step_status(&run_id, &step_id)
+                .await
+                .expect("step status"),
+            Some(crate::run::StepRunStatus::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn flow_run_kernel_frame_projection_uses_consecutive_failures_and_respects_ledger_flag() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel = FlowRunKernel::new(
+            MobId::from("mob-frame-consecutive-failures"),
+            run_store,
+            events,
+        );
+        let step_ids = [
+            crate::ids::StepId::from("step-1"),
+            crate::ids::StepId::from("step-2"),
+            crate::ids::StepId::from("step-3"),
+        ];
+        let config = FlowRunConfig {
+            flow_id: FlowId::from("demo"),
+            flow_spec: crate::definition::FlowSpec {
+                description: None,
+                steps: indexmap::IndexMap::from([
+                    (
+                        step_ids[0].clone(),
+                        crate::definition::FlowStepSpec {
+                            role: crate::ids::ProfileName::from("worker"),
+                            message: meerkat_core::types::ContentInput::from("one"),
+                            depends_on: Vec::new(),
+                            dispatch_mode: crate::definition::DispatchMode::FanOut,
+                            collection_policy: crate::definition::CollectionPolicy::All,
+                            condition: None,
+                            timeout_ms: None,
+                            expected_schema_ref: None,
+                            branch: None,
+                            depends_on_mode: crate::definition::DependencyMode::All,
+                            allowed_tools: None,
+                            blocked_tools: None,
+                            output_format: crate::definition::StepOutputFormat::Json,
+                        },
+                    ),
+                    (
+                        step_ids[1].clone(),
+                        crate::definition::FlowStepSpec {
+                            role: crate::ids::ProfileName::from("worker"),
+                            message: meerkat_core::types::ContentInput::from("two"),
+                            depends_on: Vec::new(),
+                            dispatch_mode: crate::definition::DispatchMode::FanOut,
+                            collection_policy: crate::definition::CollectionPolicy::All,
+                            condition: None,
+                            timeout_ms: None,
+                            expected_schema_ref: None,
+                            branch: None,
+                            depends_on_mode: crate::definition::DependencyMode::All,
+                            allowed_tools: None,
+                            blocked_tools: None,
+                            output_format: crate::definition::StepOutputFormat::Json,
+                        },
+                    ),
+                    (
+                        step_ids[2].clone(),
+                        crate::definition::FlowStepSpec {
+                            role: crate::ids::ProfileName::from("worker"),
+                            message: meerkat_core::types::ContentInput::from("three"),
+                            depends_on: Vec::new(),
+                            dispatch_mode: crate::definition::DispatchMode::FanOut,
+                            collection_policy: crate::definition::CollectionPolicy::All,
+                            condition: None,
+                            timeout_ms: None,
+                            expected_schema_ref: None,
+                            branch: None,
+                            depends_on_mode: crate::definition::DependencyMode::All,
+                            allowed_tools: None,
+                            blocked_tools: None,
+                            output_format: crate::definition::StepOutputFormat::Json,
+                        },
+                    ),
+                ]),
+                root: None,
+            },
+            topology: None,
+            supervisor: Some(crate::definition::SupervisorSpec {
+                role: crate::ids::ProfileName::from("supervisor"),
+                escalation_threshold: 2,
+            }),
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let run_id = kernel
+            .create_pending_run(&config, serde_json::json!({}))
+            .await
+            .expect("create pending run");
+        kernel.start_run(&run_id).await.expect("start run");
+
+        let first_failure = kernel
+            .project_frame_step_status(
+                &run_id,
+                &step_ids[0],
+                FrameStepProjectionRequest::failed(false),
+            )
+            .await
+            .expect("project first failure")
+            .expect("first projection should mutate flow state");
+        assert!(!first_failure.append_failure_ledger);
+        assert!(
+            !first_failure.escalate_supervisor,
+            "first failure should not cross escalation threshold"
+        );
+        assert_eq!(
+            kernel
+                .consecutive_failure_count(&run_id)
+                .await
+                .expect("consecutive count after first failure"),
+            1
+        );
+
+        let success = kernel
+            .project_frame_step_status(
+                &run_id,
+                &step_ids[1],
+                FrameStepProjectionRequest::completed(),
+            )
+            .await
+            .expect("project success")
+            .expect("success projection should mutate flow state");
+        assert_eq!(success.step_status, crate::run::StepRunStatus::Completed);
+        assert!(success.persist_output);
+        assert_eq!(
+            kernel
+                .consecutive_failure_count(&run_id)
+                .await
+                .expect("consecutive count after success"),
+            0,
+            "successful frame projection must reset consecutive failure state"
+        );
+
+        let second_failure = kernel
+            .project_frame_step_status(
+                &run_id,
+                &step_ids[2],
+                FrameStepProjectionRequest::failed(true),
+            )
+            .await
+            .expect("project second failure")
+            .expect("second failure projection should mutate flow state");
+        assert!(second_failure.append_failure_ledger);
+        assert!(
+            !second_failure.escalate_supervisor,
+            "non-consecutive second failure must not escalate at threshold=2"
+        );
+        assert_eq!(
+            kernel.failure_count(&run_id).await.expect("failure count"),
+            2
+        );
+        assert_eq!(
+            kernel
+                .consecutive_failure_count(&run_id)
+                .await
+                .expect("consecutive count after second failure"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn flow_run_kernel_emits_target_projection_effects() {
         let run_store = Arc::new(InMemoryMobRunStore::new());
         let events = Arc::new(InMemoryMobEventStore::new());
@@ -1755,6 +2214,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -1871,6 +2331,7 @@ mod tests {
                         output_format: crate::definition::StepOutputFormat::Json,
                     },
                 )]),
+                root: None,
             },
             topology: None,
             supervisor: None,

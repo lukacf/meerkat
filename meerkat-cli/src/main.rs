@@ -14,8 +14,9 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, ResumeOverrideMask, SessionBuildOptions, SessionError, SessionQuery,
-    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, ResumeOverrideMask, SessionBuildOptions,
+    SessionError, SessionQuery, SessionService, SessionServiceCommsExt, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
@@ -23,7 +24,7 @@ use meerkat_core::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    Session, SessionTooling,
+    Session,
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
@@ -48,7 +49,6 @@ use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -250,13 +250,44 @@ fn accumulate_anyhow_error(slot: &mut Option<anyhow::Error>, err: anyhow::Error)
     }
 }
 
-fn completion_outcome_to_result(
+#[derive(Debug, Clone, PartialEq)]
+struct CliCallbackPending {
+    session_id: SessionId,
+    session_ref: String,
+    session_created: bool,
+    resumable: bool,
+    tool_name: String,
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+enum CliRuntimeTurnResult {
+    Completed(meerkat_core::types::RunResult),
+    CallbackPending(CliCallbackPending),
+}
+
+fn completion_outcome_to_cli_runtime_turn_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
-) -> anyhow::Result<meerkat_core::types::RunResult> {
+    session_id: &SessionId,
+    realm_id: &str,
+    session_created: bool,
+) -> anyhow::Result<CliRuntimeTurnResult> {
     match outcome {
-        meerkat_runtime::completion::CompletionOutcome::Completed(result) => Ok(result),
+        meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
+            Ok(CliRuntimeTurnResult::Completed(result))
+        }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
+        }
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+            Ok(CliRuntimeTurnResult::CallbackPending(CliCallbackPending {
+                session_id: session_id.clone(),
+                session_ref: format_session_ref(realm_id, session_id),
+                session_created,
+                resumable: true,
+                tool_name,
+                args,
+            }))
         }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
@@ -265,6 +296,49 @@ fn completion_outcome_to_result(
             Err(anyhow::anyhow!("runtime terminated: {reason}"))
         }
     }
+}
+
+fn callback_pending_json_value(pending: &CliCallbackPending) -> serde_json::Value {
+    serde_json::json!({
+        "status": "pending_tool_call",
+        "session_id": pending.session_id.to_string(),
+        "session_ref": pending.session_ref.clone(),
+        "session_created": pending.session_created,
+        "resumable": pending.resumable,
+        "pending_tool_calls": [{
+            "tool_name": pending.tool_name.clone(),
+            "args": pending.args.clone(),
+        }],
+    })
+}
+
+fn print_cli_callback_pending(
+    pending: &CliCallbackPending,
+    output: Option<&str>,
+) -> anyhow::Result<()> {
+    if output.is_some_and(|value| value.eq_ignore_ascii_case("json")) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&callback_pending_json_value(pending))?
+        );
+        return Ok(());
+    }
+
+    let session_state = if pending.session_created {
+        "Session created"
+    } else {
+        "Session resumed"
+    };
+    eprintln!("{session_state}; waiting for external tool results.");
+    eprintln!(
+        "[Session: {} | Ref: {} | Resumable: {}]",
+        short_session_id(&pending.session_id),
+        pending.session_ref,
+        if pending.resumable { "yes" } else { "no" }
+    );
+    eprintln!("[Pending tool: {} {}]", pending.tool_name, pending.args);
+    eprintln!("Provide the tool result, then resume the session using the session ref above.");
+    Ok(())
 }
 
 async fn finalize_cli_runtime_backed_turn<T, F>(
@@ -661,6 +735,16 @@ enum Commands {
         #[arg(long, short = 'v')]
         verbose: bool,
 
+        /// Keep the session alive after the initial turn completes.
+        ///
+        /// The agent stays running and wakes on background job completions,
+        /// comms messages, or stdin events. Without this flag, the session
+        /// exits after the agent's response.
+        ///
+        /// Implied by `--stdin lines` (line-mode stdin requires keep-alive).
+        #[arg(long)]
+        keep_alive: bool,
+
         /// How stdin should be handled
         #[arg(long, value_enum, default_value = "auto")]
         stdin: StdinMode,
@@ -878,16 +962,36 @@ enum ConfigCommands {
     Get {
         #[arg(long, default_value = "toml")]
         format: ConfigFormat,
+        /// Include the monotonic config generation in the output envelope/header
+        #[arg(long)]
+        with_generation: bool,
     },
     /// Replace the config with the provided content
     Set {
         /// Path to a TOML or JSON config file
-        file: PathBuf,
+        #[arg(value_name = "FILE", required_unless_present_any = ["json", "toml_payload"])]
+        file: Option<PathBuf>,
+        /// Raw JSON config payload
+        #[arg(long, conflicts_with = "toml_payload")]
+        json: Option<String>,
+        /// Raw TOML config payload
+        #[arg(long = "toml", conflicts_with = "json")]
+        toml_payload: Option<String>,
+        /// Reject the write unless the current generation matches
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
     },
     /// Apply a JSON merge patch to the config
     Patch {
-        /// Raw JSON patch payload or path to a JSON file
-        value: String,
+        /// Path to a JSON patch file
+        #[arg(value_name = "FILE", required_unless_present = "json")]
+        file: Option<PathBuf>,
+        /// Raw JSON patch payload
+        #[arg(long, conflicts_with = "file")]
+        json: Option<String>,
+        /// Reject the write unless the current generation matches
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
     },
 }
 
@@ -1344,6 +1448,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             yolo,
             wait_for_mcp,
             verbose,
+            keep_alive,
             stdin,
             line_format,
         } => {
@@ -1374,6 +1479,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 yolo,
                 wait_for_mcp,
                 verbose,
+                keep_alive,
                 stdin,
                 line_format,
                 &cli_scope,
@@ -1478,11 +1584,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get { format } => handle_config_get(format, false, &cli_scope).await,
-            ConfigCommands::Set { file } => {
-                handle_config_set(Some(file), None, None, None, &cli_scope).await
-            }
-            ConfigCommands::Patch { value } => handle_config_patch_value(&value, &cli_scope).await,
+            ConfigCommands::Get {
+                format,
+                with_generation,
+            } => handle_config_get(format, with_generation, &cli_scope).await,
+            ConfigCommands::Set {
+                file,
+                json,
+                toml_payload,
+                expected_generation,
+            } => handle_config_set(file, json, toml_payload, expected_generation, &cli_scope).await,
+            ConfigCommands::Patch {
+                file,
+                json,
+                expected_generation,
+            } => handle_config_patch(file, json, expected_generation, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models { command } => match command {
@@ -1538,6 +1654,7 @@ async fn handle_run_command(
     yolo: bool,
     wait_for_mcp: bool,
     verbose: bool,
+    keep_alive: bool,
     stdin: StdinMode,
     line_format: LineFormat,
     scope: &RuntimeScope,
@@ -1602,7 +1719,7 @@ async fn handle_run_command(
                 tooling.mob,
                 wait_for_mcp,
                 verbose,
-                matches!(stdin, StdinMode::Lines),
+                keep_alive || matches!(stdin, StdinMode::Lines),
                 matches!(stdin, StdinMode::Lines),
                 line_format,
                 &config,
@@ -1936,15 +2053,6 @@ async fn handle_config_patch(
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
     println!("generation={}", snapshot.generation);
     Ok(())
-}
-
-async fn handle_config_patch_value(value: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let path = PathBuf::from(value);
-    if path.exists() {
-        handle_config_patch(Some(path), None, None, scope).await
-    } else {
-        handle_config_patch(None, Some(value.to_string()), None, scope).await
-    }
 }
 
 async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
@@ -2588,23 +2696,25 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 }
             })?;
 
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                run_id,
-                boundary: match &primitive {
-                    meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
-                        staged.boundary
-                    }
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary: match &primitive {
+                        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
+                            staged,
+                        ) => staged.boundary,
+                        _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                    },
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
                 },
-                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            run_result: Some(result),
-        })
+                None,
+                result,
+            ),
+        )
     }
 
     async fn control(
@@ -2818,22 +2928,13 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     }
 }
 
-#[cfg(test)]
-fn create_run_mob_external_tools(
-    session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
-) -> Arc<dyn AgentToolDispatcher> {
-    let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(RunMobSessionService::new(session_service));
-    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
-    Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(state))
-}
-
 struct RunMobToolsContext {
     state: Arc<meerkat_mob_mcp::MobMcpState>,
     known_mob_ids: std::collections::BTreeSet<String>,
 }
 
 impl RunMobToolsContext {
+    #[cfg(test)]
     fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
         Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(self.state.clone()))
     }
@@ -2882,6 +2983,7 @@ async fn prepare_run_mob_tools(
         session_service,
         None,
         None,
+        None,
         std::collections::BTreeMap::new(),
     )
     .await?;
@@ -2892,10 +2994,12 @@ async fn prepare_run_mob_tools(
     })
 }
 
+#[cfg(test)]
 fn compose_external_tool_dispatchers(
     primary: Option<Arc<dyn AgentToolDispatcher>>,
     secondary: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> anyhow::Result<Option<Arc<dyn AgentToolDispatcher>>> {
+    use std::collections::HashSet;
     match (primary, secondary) {
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
@@ -3263,15 +3367,15 @@ async fn run_agent(
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools =
-        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
-            Ok(tools) => tools,
-            Err(err) => {
-                shutdown_mcp(&mcp_adapter).await;
-                return Err(err);
-            }
-        };
+    // Mob tools now flow through mob_tools (factory pattern), not external_tools.
+    // Only MCP tools remain as external_tools.
+    let external_tools = mcp_external_tools;
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
+        run_mob_tools.as_ref().map(|ctx| {
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+                Arc::clone(&ctx.state),
+            )) as Arc<dyn meerkat_core::service::MobToolsFactory>
+        });
 
     let parsed_app_context = app_context
         .as_deref()
@@ -3282,19 +3386,14 @@ async fn run_agent(
     let output_pipeline =
         CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
-    // Create ephemeral runtime adapter for single-authority execution.
+    // Create ephemeral runtime adapter and prepare epoch-local bindings.
     let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    // Pre-register session so we can obtain the canonical ops lifecycle registry
-    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
-    runtime_adapter.register_session(session_id.clone()).await;
-    let ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = runtime_adapter
-        .ops_lifecycle_registry(&session_id)
+    let bindings = runtime_adapter
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(provider.as_core()),
         output_schema,
         structured_output_retries,
@@ -3305,11 +3404,13 @@ async fn run_agent(
         budget_limits: Some(limits),
         provider_params,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: None,
-        override_builtins: None,
-        override_shell: None,
-        override_memory: if enable_memory { Some(true) } else { None },
-        override_mob: Some(effective_mob),
+        override_builtins: Some(enable_builtins),
+        override_shell: Some(enable_shell),
+        override_memory: Some(enable_memory),
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills,
         realm_id: Some(scope.locator.realm_id.clone()),
         instance_id: scope.instance_id.clone(),
@@ -3326,11 +3427,13 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        ops_lifecycle_override: ops_lifecycle,
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: mob_tools_factory,
     };
+    build.apply_generated_create_only_mob_operator_access(Some(effective_mob));
 
     let parsed_labels = if labels.is_empty() {
         None
@@ -3358,6 +3461,7 @@ async fn run_agent(
         },
         // Always defer — the runtime adapter handles execution.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: parsed_labels,
     };
@@ -3443,19 +3547,35 @@ async fn run_agent(
         }
 
         match handle {
-            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            Some(handle) => completion_outcome_to_cli_runtime_turn_result(
+                handle.wait().await,
+                &session_id,
+                &scope.locator.realm_id,
+                true,
+            ),
             None => {
                 eprintln!("Warning: duplicate input — already processed");
-                Ok(create_result)
+                Ok(CliRuntimeTurnResult::Completed(create_result))
             }
         }
     }
     .await;
 
+    // In keep-alive mode, block until Ctrl+C after the initial turn completes.
+    // The runtime adapter, comms drain, and detached wake will inject new turns
+    // automatically. Without this, the process exits after the first turn.
+    if keep_alive && matches!(&turn_result, Ok(CliRuntimeTurnResult::Completed(_))) {
+        eprintln!("Keep-alive: initial turn complete, waiting for events (Ctrl+C to exit)...");
+        // Block until SIGINT/SIGTERM. The runtime loop, comms drain, and
+        // detached wake tasks continue running in background tokio tasks.
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow::anyhow!("signal wait failed: {e}"))?;
+        eprintln!("\nShutting down...");
+    }
+
     let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
-        // The initial turn is complete — abort the comms drain so the CLI can
-        // return. run_agent is a one-shot command; persistent keep-alive draining
-        // is only appropriate for interactive sessions (chat).
+        // Abort the comms drain so the CLI can exit cleanly.
         #[cfg(feature = "comms")]
         {
             runtime_adapter.abort_comms_drain(&session_id).await;
@@ -3482,58 +3602,63 @@ async fn run_agent(
     .await?;
 
     // Output the result
-    match output {
-        "json" => {
-            let json = serde_json::json!({
-                "text": result.text,
-                "session_id": result.session_id.to_string(),
-                "session_ref": format_session_ref(&scope.locator.realm_id, &result.session_id),
-                "turns": result.turns,
-                "tool_calls": result.tool_calls,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                },
-                "structured_output": result.structured_output,
-                "schema_warnings": result.schema_warnings,
-                "skill_diagnostics": result.skill_diagnostics,
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-        _ => {
-            // If we already streamed the output, don't print it again
-            if !stream {
-                println!("{}", result.text);
+    match result {
+        CliRuntimeTurnResult::Completed(result) => match output {
+            "json" => {
+                let json = serde_json::json!({
+                    "text": result.text,
+                    "session_id": result.session_id.to_string(),
+                    "session_ref": format_session_ref(&scope.locator.realm_id, &result.session_id),
+                    "turns": result.turns,
+                    "tool_calls": result.tool_calls,
+                    "usage": {
+                        "input_tokens": result.usage.input_tokens,
+                        "output_tokens": result.usage.output_tokens,
+                    },
+                    "structured_output": result.structured_output,
+                    "schema_warnings": result.schema_warnings,
+                    "skill_diagnostics": result.skill_diagnostics,
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
             }
-            eprintln!(
-                "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
-                short_session_id(&result.session_id),
-                result.turns,
-                result.usage.input_tokens,
-                result.usage.output_tokens
-            );
-            if let Some(warnings) = &result.schema_warnings
-                && !warnings.is_empty()
-            {
-                eprintln!("\n[Schema warnings]");
-                for warning in warnings {
+            _ => {
+                // If we already streamed the output, don't print it again
+                if !stream {
+                    println!("{}", result.text);
+                }
+                eprintln!(
+                    "\n[Session: {} | Turns: {} | Tokens: {} in / {} out]",
+                    short_session_id(&result.session_id),
+                    result.turns,
+                    result.usage.input_tokens,
+                    result.usage.output_tokens
+                );
+                if let Some(warnings) = &result.schema_warnings
+                    && !warnings.is_empty()
+                {
+                    eprintln!("\n[Schema warnings]");
+                    for warning in warnings {
+                        eprintln!(
+                            "- {:?} {}: {}",
+                            warning.provider, warning.path, warning.message
+                        );
+                    }
+                }
+                if let Some(diag) = &result.skill_diagnostics
+                    && diag.source_health.state != meerkat_core::skills::SourceHealthState::Healthy
+                {
                     eprintln!(
-                        "- {:?} {}: {}",
-                        warning.provider, warning.path, warning.message
+                        "\n[Skill source health: {:?} | invalid_ratio: {:.3} | streak: {} | quarantined: {}]",
+                        diag.source_health.state,
+                        diag.source_health.invalid_ratio,
+                        diag.source_health.failure_streak,
+                        diag.quarantined.len()
                     );
                 }
             }
-            if let Some(diag) = &result.skill_diagnostics
-                && diag.source_health.state != meerkat_core::skills::SourceHealthState::Healthy
-            {
-                eprintln!(
-                    "\n[Skill source health: {:?} | invalid_ratio: {:.3} | streak: {} | quarantined: {}]",
-                    diag.source_health.state,
-                    diag.source_health.invalid_ratio,
-                    diag.source_health.failure_streak,
-                    diag.quarantined.len()
-                );
-            }
+        },
+        CliRuntimeTurnResult::CallbackPending(pending) => {
+            print_cli_callback_pending(&pending, Some(output))?;
         }
     }
 
@@ -3664,14 +3789,7 @@ async fn resume_session_with_llm_override(
     let tooling = stored_metadata
         .as_ref()
         .map(|meta| meta.tooling.clone())
-        .unwrap_or(SessionTooling {
-            builtins: config.tools.builtins_enabled,
-            shell: config.tools.shell_enabled,
-            comms: config.tools.comms_enabled,
-            mob: config.tools.mob_enabled,
-            memory: false,
-            active_skills: None,
-        });
+        .unwrap_or_default();
     let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
     let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let comms_name = stored_metadata
@@ -3719,8 +3837,8 @@ async fn resume_session_with_llm_override(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
         )
         .project_root(project_root)
-        .builtins(tooling.builtins)
-        .shell(tooling.shell);
+        .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
+        .shell(tooling.shell.resolve(config.tools.shell_enabled));
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3729,7 +3847,7 @@ async fn resume_session_with_llm_override(
     }
 
     #[cfg(feature = "comms")]
-    let factory = factory.comms(tooling.comms || keep_alive);
+    let factory = factory.comms(tooling.comms.resolve(config.tools.comms_enabled) || keep_alive);
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
@@ -3746,7 +3864,7 @@ async fn resume_session_with_llm_override(
     ));
 
     log_stage("compose_external_tool_dispatchers");
-    let mut run_mob_tools = if tooling.mob {
+    let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
         log_stage("get_or_create_mob_persistent_service");
         let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
         let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
@@ -3758,15 +3876,15 @@ async fn resume_session_with_llm_override(
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools =
-        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
-            Ok(tools) => tools,
-            Err(err) => {
-                shutdown_mcp(&mcp_adapter).await;
-                return Err(err);
-            }
-        };
+    // Mob tools now flow through mob_tools (factory pattern), not external_tools.
+    // Only MCP tools remain as external_tools.
+    let external_tools = mcp_external_tools;
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
+        run_mob_tools.as_ref().map(|ctx| {
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+                Arc::clone(&ctx.state),
+            )) as Arc<dyn meerkat_core::service::MobToolsFactory>
+        });
 
     let output_pipeline = CliOutputPipeline::new(
         stream,
@@ -3781,17 +3899,13 @@ async fn resume_session_with_llm_override(
         }],
     )?;
 
-    // Pre-register session on the adapter so we can obtain the canonical ops
-    // lifecycle registry for the build options.
-    resume_adapter.register_session(session_id.clone()).await;
-    let resume_ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = resume_adapter
-        .ops_lifecycle_registry(&session_id)
+    // Prepare epoch-local bindings for the resumed session.
+    let resume_bindings = resume_adapter
+        .prepare_bindings(session_id.clone())
         .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(provider_core),
         output_schema: None,
         structured_output_retries: 2,
@@ -3801,11 +3915,13 @@ async fn resume_session_with_llm_override(
         budget_limits: budget_override,
         provider_params: merged_provider_params,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        override_builtins: None,
-        override_shell: None,
-        override_memory: None,
-        override_mob: Some(tooling.mob),
+        override_builtins: tooling.builtins.to_override(),
+        override_shell: tooling.shell.to_override(),
+        override_memory: tooling.memory.to_override(),
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
         realm_id: stored_metadata
@@ -3828,14 +3944,22 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        ops_lifecycle_override: resume_ops_lifecycle,
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
         resume_override_mask: ResumeOverrideMask {
             provider_params: provider_params_override,
             ..Default::default()
         },
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: mob_tools_factory,
     };
+    build.apply_persisted_mob_operator_access(
+        tooling.mob.to_override(),
+        build
+            .resume_session
+            .as_ref()
+            .and_then(Session::mob_tool_authority_context),
+    );
 
     let turn_result = async {
         // Route through SessionService::create_session() with the resumed session
@@ -3858,6 +3982,7 @@ async fn resume_session_with_llm_override(
                 },
                 // Always defer — runtime adapter handles execution.
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: None,
             })
@@ -3911,10 +4036,15 @@ async fn resume_session_with_llm_override(
         }
 
         match handle {
-            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            Some(handle) => completion_outcome_to_cli_runtime_turn_result(
+                handle.wait().await,
+                &session_id,
+                &scope.locator.realm_id,
+                false,
+            ),
             None => {
                 eprintln!("Warning: duplicate input — already processed");
-                Ok(create_result)
+                Ok(CliRuntimeTurnResult::Completed(create_result))
             }
         }
     }
@@ -3946,17 +4076,24 @@ async fn resume_session_with_llm_override(
 
     // Output the result
     log_stage("print_result");
-    if !stream {
-        println!("{}", result.text);
+    match result {
+        CliRuntimeTurnResult::Completed(result) => {
+            if !stream {
+                println!("{}", result.text);
+            }
+            eprintln!(
+                "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
+                result.session_id,
+                format_session_ref(&scope.locator.realm_id, &result.session_id),
+                result.turns,
+                result.usage.input_tokens,
+                result.usage.output_tokens
+            );
+        }
+        CliRuntimeTurnResult::CallbackPending(pending) => {
+            print_cli_callback_pending(&pending, None)?;
+        }
     }
-    eprintln!(
-        "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
-        result.session_id,
-        format_session_ref(&scope.locator.realm_id, &result.session_id),
-        result.turns,
-        result.usage.input_tokens,
-        result.usage.output_tokens
-    );
     log_stage("done");
 
     Ok(())
@@ -4422,12 +4559,32 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
 
-    service
-        .archive(&session_id)
+    // Archive and clean up any session-owned mobs.
+    if config.tools.mob_enabled
+        && let Ok(mob_persistent) =
+            get_or_create_mob_persistent_service(scope, config.clone()).await
+        && let Ok((state, _registry)) = hydrate_mob_state(
+            scope,
+            Arc::new(MobCliSessionService::new(mob_persistent))
+                as Arc<dyn meerkat_mob::MobSessionService>,
+            None,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+    {
+        meerkat_mob_mcp::archive_session_with_mob_cleanup(&service, &state, &session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+    } else {
+        service
+            .archive(&session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+    }
 
     println!("Deleted session: {session_id}");
     println!(
@@ -5071,6 +5228,7 @@ async fn hydrate_mob_state(
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     default_llm_client_provider: Option<LlmClientProvider>,
+    external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
     let registry = load_mob_registry(scope).await?;
@@ -5080,7 +5238,8 @@ async fn hydrate_mob_state(
             session_service.clone(),
             runtime_adapter.clone(),
         )
-        .with_default_llm_client_provider(default_llm_client_provider),
+        .with_default_llm_client_provider(default_llm_client_provider)
+        .with_external_tools_provider(external_tools_provider.clone()),
     );
     for (mob_id, handle) in &seeded_handles {
         state
@@ -5136,6 +5295,7 @@ async fn hydrate_mob_state(
 
         let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(session_service.clone())
+            .with_default_external_tools_provider(external_tools_provider.clone())
             .notify_orchestrator_on_resume(false);
         if let Some(adapter) = runtime_adapter.clone() {
             builder = builder.with_runtime_adapter(adapter);
@@ -5287,6 +5447,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     let (state, mut registry) = hydrate_mob_state(
         scope,
         session_service,
+        None,
         None,
         None,
         std::collections::BTreeMap::new(),
@@ -6342,7 +6503,7 @@ async fn run_rpc_surface<R, W>(
 ) -> anyhow::Result<String>
 where
     R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: meerkat_rpc::transport::TransportWriter,
 {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let session_store = persistence.session_store();
@@ -6406,13 +6567,50 @@ where
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_config_runtime(config_runtime);
 
+    // Capture the builder's mob tools slot so we can set the factory AFTER
+    // hydration (using the same MobMcpState that the router will use for cleanup).
+    let mob_tools_slot = Arc::clone(&runtime.builder_mob_tools_slot);
+
+    // Set realm context before Arc-wrapping (requires &mut self).
+    // The mob_id is known from the definition before the handle is created.
+    let deployed_mob_id = archive.definition.id.to_string();
+    runtime.set_realm_context(
+        Some(scope.locator.realm_id.clone()),
+        scope
+            .instance_id
+            .clone()
+            .or_else(|| Some(format!("mobpack:{deployed_mob_id}"))),
+        Some(manifest.backend.as_str().to_string()),
+    );
+    let runtime = Arc::new(runtime);
+
+    // Pre-initialize the callback channel so the ExternalToolsProvider closure
+    // can read callback_request_tx() during mob creation and resume.
+    let callback_rx = runtime.init_callback_channel();
+
+    let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
+        let runtime = runtime.clone();
+        move || {
+            let tx = runtime.callback_request_tx()?;
+            Some(Arc::new(
+                meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::new(
+                    runtime.registered_tools(),
+                    tx,
+                    runtime.callback_id_counter(),
+                    vec![],
+                ),
+            ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
+        }
+    }));
+
     let mut builder = meerkat_mob::MobBuilder::from_mobpack(
         archive.definition.clone(),
         archive.skills.clone(),
         meerkat_mob::MobStorage::in_memory(),
     )
     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-    .with_session_service(session_service.clone());
+    .with_session_service(session_service.clone())
+    .with_default_external_tools_provider(external_tools_provider.clone());
     builder = builder.with_runtime_adapter(runtime_adapter.clone());
     let handle = builder
         .create()
@@ -6432,7 +6630,6 @@ where
         }
     }
 
-    let deployed_mob_id = handle.mob_id().to_string();
     persist_mob_handle_snapshot(
         scope,
         session_service.clone(),
@@ -6440,16 +6637,6 @@ where
         Some(archive.definition.clone()),
     )
     .await?;
-
-    runtime.set_realm_context(
-        Some(scope.locator.realm_id.clone()),
-        scope
-            .instance_id
-            .clone()
-            .or_else(|| Some(format!("mobpack:{deployed_mob_id}"))),
-        Some(manifest.backend.as_str().to_string()),
-    );
-    let runtime = Arc::new(runtime);
 
     let default_llm_client_provider = Some(Arc::new({
         let runtime = runtime.clone();
@@ -6462,9 +6649,20 @@ where
         session_service,
         Some(runtime_adapter),
         default_llm_client_provider,
+        external_tools_provider,
         seeded_handles,
     )
     .await?;
+
+    // Set mob tools factory using the SAME hydrated state the router will use.
+    // This ensures agent-created mobs (via delegate/mob_create) live in the
+    // same registry that archive cleanup scans.
+    *mob_tools_slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
+    )
+        as Arc<dyn meerkat_core::service::MobToolsFactory>);
 
     let mut server = meerkat_rpc::server::RpcServer::new_with_skill_runtime_and_mob_state(
         reader,
@@ -6473,6 +6671,7 @@ where
         config_store,
         skill_runtime,
         mob_state,
+        callback_rx,
     );
     server
         .run()
@@ -6745,6 +6944,43 @@ mod tests {
             err.to_string()
                 .contains("turn abandoned: synthetic failure"),
             "failure-path finalizer should return the original turn error"
+        );
+    }
+
+    #[test]
+    fn completion_outcome_to_cli_runtime_turn_result_surfaces_callback_pending_payload() {
+        let session_id = SessionId::new();
+        let result = completion_outcome_to_cli_runtime_turn_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            },
+            &session_id,
+            "test-realm",
+            true,
+        )
+        .expect("callback pending should surface as resumable CLI metadata");
+
+        assert!(
+            matches!(result, CliRuntimeTurnResult::CallbackPending(_)),
+            "expected callback pending CLI turn result"
+        );
+        let CliRuntimeTurnResult::CallbackPending(pending) = result else {
+            return;
+        };
+
+        assert_eq!(pending.session_id, session_id);
+        assert_eq!(
+            pending.session_ref,
+            format_session_ref("test-realm", &session_id)
+        );
+        assert!(pending.session_created);
+        assert!(pending.resumable);
+        assert_eq!(pending.tool_name, "external_mock");
+        assert_eq!(pending.args, serde_json::json!({ "value": "browser" }));
+        assert_eq!(
+            callback_pending_json_value(&pending)["status"],
+            "pending_tool_call"
         );
     }
 
@@ -7107,6 +7343,10 @@ mod tests {
             true
         }
 
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+        }
+
         async fn session_belongs_to_mob(
             &self,
             _session_id: &SessionId,
@@ -7361,6 +7601,59 @@ mod tests {
                 assert_eq!(block_tools, vec!["shell"]);
             }
             _ => unreachable!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_keep_alive_is_independent_of_stdin_lines() {
+        // Regression: --keep-alive must be a separate flag from --stdin lines.
+        // They are distinct concerns: keep-alive is runtime behavior (stay alive,
+        // wake on events), stdin lines is an input mode. You can have either
+        // without the other.
+
+        // --keep-alive without --stdin lines
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive"])
+            .expect("--keep-alive should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(keep_alive, "--keep-alive flag must be true");
+                assert!(
+                    matches!(stdin, StdinMode::Auto),
+                    "stdin must default to auto when --stdin is not specified"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // --stdin lines without --keep-alive
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--stdin", "lines"])
+            .expect("--stdin lines should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(
+                    !keep_alive,
+                    "--keep-alive must not be implicitly set by --stdin lines at the arg level"
+                );
+                assert!(matches!(stdin, StdinMode::Lines));
+            }
+            _ => unreachable!(),
+        }
+
+        // Both together
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive", "--stdin", "lines"])
+            .expect("both flags should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(keep_alive);
+                assert!(matches!(stdin, StdinMode::Lines));
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -9105,7 +9398,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             composed.tools().iter().map(|t| t.name.clone()).collect();
         assert!(names.contains("mob_create"));
         assert!(names.contains("meerkat_spawn"));
-        assert!(names.contains("meerkat_message"));
     }
 
     #[tokio::test]
@@ -9137,15 +9429,17 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     #[tokio::test]
     async fn test_run_session_build_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(true);
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .mob(true);
         let service = Arc::new(build_cli_service(factory, Config::default()));
 
-        let external_tools = compose_external_tool_dispatchers(
-            None,
-            Some(create_run_mob_external_tools(service.clone())),
-        )
-        .expect("external tool composition should succeed")
-        .expect("mob tools should be present");
+        // Create mob tools factory (new pattern: factory instead of external_tools)
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(RunMobSessionService::new(service.clone()));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
+        let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> =
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(mob_state));
 
         let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
@@ -9154,13 +9448,14 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             captured_system_prompt.clone(),
         ));
 
-        let build = SessionBuildOptions {
-            external_tools: Some(external_tools),
+        let mut build = SessionBuildOptions {
+            mob_tools: Some(mob_factory),
             llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                 llm_override,
             )),
             ..SessionBuildOptions::default()
         };
+        build.apply_generated_create_only_mob_operator_access(Some(true));
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -9172,6 +9467,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };
@@ -9188,9 +9484,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .cloned()
             .collect();
 
+        // Agent mob tools use different tool names than MobMcpDispatcher
+        assert!(names.contains("delegate"));
         assert!(names.contains("mob_create"));
         assert!(names.contains("mob_list"));
-        assert!(names.contains("meerkat_spawn"));
 
         let system_prompt = captured_system_prompt
             .lock()
@@ -9199,6 +9496,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .expect("system prompt must be captured");
         assert!(system_prompt.contains("mob_list"));
         assert!(system_prompt.contains("mob_create"));
+        assert!(system_prompt.contains("delegate"));
     }
 
     async fn call_tool_json(
@@ -9241,7 +9539,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher_a,
             "t-create",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]
@@ -9313,7 +9611,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher,
             "t-create-runtime",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -9361,7 +9659,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher,
             "t-create",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]
@@ -9845,6 +10143,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
             flow_state: Default::default(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: Default::default(),
+            loop_iteration_outputs: Default::default(),
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");
@@ -9882,6 +10186,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 4,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: Default::default(),
                         },
                     ),
                     (
@@ -9897,6 +10207,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 4,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: Default::default(),
                         },
                     ),
                 ]),

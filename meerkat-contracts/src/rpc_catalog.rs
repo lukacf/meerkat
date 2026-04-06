@@ -91,6 +91,65 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::basic("session/stream_open", "Open a session event stream"),
         RpcMethodDescriptor::basic("session/stream_close", "Close a session event stream"),
+        RpcMethodDescriptor::typed(
+            "schedule/create",
+            "Create a schedule",
+            "CreateScheduleRequest",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/get",
+            "Get one schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/list",
+            "List schedules",
+            "ListSchedulesParams",
+            "ScheduleListResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/update",
+            "Update a schedule",
+            "UpdateScheduleParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/pause",
+            "Pause a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/resume",
+            "Resume a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/delete",
+            "Delete a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/occurrences",
+            "List schedule occurrences",
+            "ScheduleIdParams",
+            "ScheduleOccurrencesResult",
+        ),
+        RpcMethodDescriptor::result_only(
+            "schedule/tools",
+            "List schedule transport tools",
+            "ScheduleToolsResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/call",
+            "Call a schedule transport tool",
+            "ScheduleToolCallParams",
+            "Value",
+        ),
         RpcMethodDescriptor::basic("turn/start", "Start a new turn on existing session"),
         RpcMethodDescriptor::basic("turn/interrupt", "Cancel in-flight turn"),
         RpcMethodDescriptor::basic("config/get", "Read config"),
@@ -150,8 +209,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.mob_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic("mob/prefabs", "List available mob prefabs"),
-            RpcMethodDescriptor::basic("mob/create", "Create a mob from a prefab or definition"),
+            RpcMethodDescriptor::typed(
+                "mob/create",
+                "Create a mob from a definition",
+                "MobCreateParams",
+                "MobCreateResult",
+            ),
             RpcMethodDescriptor::basic("mob/list", "List active mobs"),
             RpcMethodDescriptor::basic("mob/status", "Get mob lifecycle status"),
             RpcMethodDescriptor::basic("mob/lifecycle", "Apply a mob lifecycle action"),
@@ -172,13 +235,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobUnwireResult",
             ),
             RpcMethodDescriptor::basic("mob/members", "List members in a mob roster"),
-            RpcMethodDescriptor::typed(
-                "mob/send",
-                "Deliver content to a mob member",
-                "MobSendParams",
-                "MobSendResult",
-            ),
             RpcMethodDescriptor::basic("mob/events", "Read mob event history"),
+            RpcMethodDescriptor::typed(
+                "mob/member_send",
+                "Deliver ordinary content to a specific mob member via the host control plane",
+                "MobMemberSendParams",
+                "MobMemberSendResult",
+            ),
             RpcMethodDescriptor::basic(
                 "mob/append_system_context",
                 "Append system context for a mob member",
@@ -197,8 +260,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
-            RpcMethodDescriptor::basic("mob/tools", "List available mob tools"),
-            RpcMethodDescriptor::basic("mob/call", "Call a mob tool"),
             RpcMethodDescriptor::basic("mob/stream_open", "Open a mob event stream"),
             RpcMethodDescriptor::basic("mob/stream_close", "Close a mob event stream"),
         ]);
@@ -305,6 +366,10 @@ mod tests {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         assert!(methods.iter().any(|m| m == "session/inject_context"));
         assert!(methods.iter().any(|m| m == "mob/events"));
+        assert!(methods.iter().any(|m| m == "mob/member_send"));
+        assert!(methods.iter().any(|m| m == "schedule/list"));
+        assert!(methods.iter().any(|m| m == "schedule/occurrences"));
+        assert!(methods.iter().any(|m| m == "schedule/call"));
     }
 
     #[test]

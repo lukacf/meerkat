@@ -79,7 +79,7 @@ fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputSt
             .get("idempotency_key")
             .and_then(|value| value.as_str())
             .map(str::to_owned),
-        attempt_count: state.attempt_count,
+        attempt_count: state.attempt_count(),
         recovery_count: state.recovery_count,
         history,
         reconstruction_source: json

@@ -17,6 +17,7 @@ use tokio_with_wasm::alias::sync::Mutex;
 use super::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::InputState;
+use crate::ops_lifecycle::PersistedOpsSnapshot;
 use crate::runtime_state::RuntimeState;
 
 /// Receipt key: (runtime_id, run_id, sequence).
@@ -38,6 +39,8 @@ struct Inner {
     sessions: HashMap<String, Vec<u8>>,
     /// Persisted runtime state.
     runtime_states: HashMap<String, RuntimeState>,
+    /// Persisted ops lifecycle snapshots.
+    ops_lifecycle_snapshots: HashMap<String, PersistedOpsSnapshot>,
 }
 
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`.
@@ -247,6 +250,26 @@ impl RuntimeStore for InMemoryRuntimeStore {
         }
 
         Ok(())
+    }
+
+    async fn persist_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &PersistedOpsSnapshot,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .ops_lifecycle_snapshots
+            .insert(runtime_id.0.clone(), snapshot.clone());
+        Ok(())
+    }
+
+    async fn load_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<PersistedOpsSnapshot>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        Ok(inner.ops_lifecycle_snapshots.get(&runtime_id.0).cloned())
     }
 }
 

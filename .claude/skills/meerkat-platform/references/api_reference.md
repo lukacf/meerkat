@@ -65,7 +65,7 @@ rkat realms current|list|show
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
 rkat models catalog [--json]
-rkat mob prefabs|create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
+rkat mob create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities
 rkat-rpc
@@ -92,7 +92,6 @@ rkat mob flow-status <MOB_ID> <RUN_ID>
 Primary CLI mob usage is tool-driven from `run`/`resume` prompts using `mob_*` tools.
 Mob lifecycle (non-flow) commands remain available as explicit operational/compatibility controls:
 
-- `prefabs`
 - `create`
 - `list`
 - `status`
@@ -149,7 +148,6 @@ Core endpoints:
 - `POST /sessions/{id}/mcp/reload` — stage live MCP server reload (feature-gated)
 - `POST /comms/send` (feature-gated)
 - `GET /comms/peers` (feature-gated)
-- `GET /mob/prefabs` — list mob prefab templates (feature-gated)
 - `GET /mob/tools` — list mob tools (feature-gated)
 - `POST /mob/call` — invoke a mob tool (feature-gated)
 - `GET /mob/{id}/events` — SSE stream for mob events (feature-gated)
@@ -211,13 +209,14 @@ Core methods:
 - `mcp/add` — stage live MCP server add for a session
 - `mcp/remove` — stage live MCP server remove
 - `mcp/reload` — stage live MCP server reload
-- `mob/prefabs` — list built-in mob prefab templates (feature-gated)
 - `session/stream_open` / `session/stream_close` — standalone session event streaming
 - `mob/create`, `mob/list`, `mob/status`, `mob/members` — explicit mob lifecycle/state methods (feature-gated)
 - `mob/spawn`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/lifecycle`, `mob/send` — explicit mob control methods (feature-gated)
 - `mob/events`, `mob/stream_open` / `mob/stream_close` — mob/member observation (feature-gated)
 - `mob/append_system_context`, `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` — advanced mob runtime methods (feature-gated)
 - `mob/tools` / `mob/call` — compatibility and escape-hatch mob tool access (feature-gated)
+- `mob/spawn_helper`, `mob/fork_helper` — convenience mob helpers (feature-gated)
+- `mob/force_cancel` — force-cancel a mob member's in-flight turn (feature-gated)
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
 
@@ -261,7 +260,6 @@ Core tools:
 
 Mob tools (feature-gated):
 
-- `meerkat_mob_prefabs` — list prefab templates
 - `mob_create`, `mob_list`, `mob_lifecycle`, etc. — mob lifecycle tools (via `meerkat-mob-mcp`)
 - `meerkat_mob_event_stream_open` / `meerkat_mob_event_stream_read` / `meerkat_mob_event_stream_close`
 
@@ -436,6 +434,33 @@ let mut agent = factory.build_agent(build, &config).await?;
 `AgentBuildConfig` also carries:
 - `silent_comms_intents: Vec<String>` — intents injected silently (no LLM turn)
 - `preload_skills: Option<Vec<SkillId>>` — skills to inject at session creation
+- `runtime_build_mode: RuntimeBuildMode` — required, determines ops lifecycle ownership
+
+### Runtime build mode
+
+All runtime-backed surfaces (CLI, RPC, REST, MCP) must use `SessionOwned` bindings. Standalone/test/WASM surfaces use `StandaloneEphemeral`.
+
+```rust
+use meerkat::{RuntimeBuildMode, SessionRuntimeBindings};
+use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
+
+// Runtime-backed surface: prepare bindings from the adapter
+let adapter = RuntimeSessionAdapter::persistent(store, blob_store);
+let bindings = adapter.prepare_bindings(session_id.clone()).await?;
+let build = SessionBuildOptions {
+    runtime_build_mode: RuntimeBuildMode::SessionOwned(bindings),
+    ..Default::default()
+};
+
+// Standalone/test/WASM: explicit opt-in (also the Default)
+let build = SessionBuildOptions {
+    runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+    ..Default::default()
+};
+```
+
+`prepare_bindings()` is the single canonical helper: it registers the session, mints the epoch, and returns `SessionRuntimeBindings { session_id, epoch_id, ops_lifecycle, cursor_state }`. The factory validates `bindings.session_id == session.id()` on `SessionOwned` builds.
 
 Skill introspection (standalone, no session required):
 
@@ -461,6 +486,9 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 ## Flow spec essentials (mob definition)
 
 Flow declarations live under `[flows.<flow_id>]`.
+
+### v1: flat step declarations
+
 Step declarations live under `[flows.<flow_id>.steps.<step_id>]`.
 
 Key step fields:
@@ -476,8 +504,38 @@ Key step fields:
 - `timeout_ms`
 - `expected_schema_ref` (optional)
 
-Topology contract:
+### v2: frame-based execution root
+
+When `[flows.<flow_id>].root` is present, the flow uses frame-based execution via `FlowFrameEngine`.
+
+Frame root declaration: `[flows.<flow_id>.root]` with `nodes` map of `FlowNodeSpec` entries.
+
+Node types:
+
+- `type = "step"` — a single step within a frame
+- `type = "repeat_until"` — a loop node with `loop_id`, `body` (nested `FrameSpec`), `until` (condition expression), `max_iterations`, and `depends_on`
+
+v2 flows still support flat `steps` for backward compatibility; when `root` is present it takes precedence.
+
+### Topology contract
 
 - `[topology] mode = "strict"|"permissive"`
 - `rules = [{ from_role = "...", to_role = "...", allowed = true|false }]`
 - wildcard `"*"` role matching is supported.
+
+### Agent-facing delegation tools
+
+`AgentMobToolSurface` provides 8 agent-internal mob tools:
+
+| Tool | Purpose |
+|------|---------|
+| `delegate` | Quick helper spawn (implicit mob, auto-wire) |
+| `mob_create` | Create a mob from a definition |
+| `mob_destroy` | Destroy a mob and archive all members |
+| `mob_spawn_member` | Spawn a member into any mob |
+| `mob_retire_member` | Archive a member and its session |
+| `mob_check_member` | Check a member's execution status and output |
+| `mob_list_members` | List members of a mob |
+| `mob_list` | List all mobs |
+
+These tools are composed via `MobToolsFactory` late-binding. Operator capabilities are runtime-injected.

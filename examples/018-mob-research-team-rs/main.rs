@@ -5,7 +5,7 @@
 //! findings into a cohesive report.
 //!
 //! ## What you'll learn
-//! - The research team prefab pattern
+//! - Defining a research team from TOML
 //! - Custom profiles with specialized skills
 //! - Spawning multiple agents from a definition
 //!
@@ -23,9 +23,50 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, Prefab, ProfileName,
+    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
     validate_definition,
 };
+
+const RESEARCH_TEAM_TOML: &str = r#"
+[mob]
+id = "research_team"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-6"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Run structured research: coordinate workers, synthesize findings into a cohesive report."
+
+[skills.worker]
+source = "inline"
+content = "Gather evidence and return sourced summaries for assigned research questions."
+"#;
 
 /// Format a mob event kind into a short human-readable label.
 fn event_label(kind: &MobEventKind) -> &'static str {
@@ -53,13 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    // ── Part 1: Explore the research team prefab ─────────────────────────────
-    println!("=== Mob: Research Team (Prefab) ===\n");
+    // ── Part 1: Explore the research team definition ─────────────────────────
+    println!("=== Mob: Research Team ===\n");
 
-    let prefab = Prefab::ResearchTeam;
-    let prefab_def = prefab.definition();
+    let prefab_def = MobDefinition::from_toml(RESEARCH_TEAM_TOML)?;
 
-    println!("Prefab ID: {}", prefab_def.id);
+    println!("Mob ID: {}", prefab_def.id);
     println!("Profiles:");
     for (name, profile) in &prefab_def.profiles {
         println!(

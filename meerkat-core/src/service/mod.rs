@@ -7,7 +7,6 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -23,6 +22,7 @@ use crate::{EventStream, StreamError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -32,7 +32,21 @@ pub enum InitialTurnPolicy {
     /// Run the initial turn immediately as part of session creation.
     RunImmediately,
     /// Register the session and return without running an initial turn.
+    ///
+    /// `CreateSessionRequest::deferred_prompt_policy` determines whether the
+    /// create-time prompt is discarded or staged for the first later turn.
     Defer,
+}
+
+/// How a deferred create request treats its create-time prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredPromptPolicy {
+    /// Register the session only; the caller will supply the first runtime input separately.
+    #[default]
+    Discard,
+    /// Persist the create-time prompt and merge it into the first later turn.
+    Stage,
 }
 
 /// Errors returned by `SessionService` methods.
@@ -148,6 +162,8 @@ pub struct CreateSessionRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
     pub initial_turn: InitialTurnPolicy,
+    /// How to treat `prompt` when `initial_turn == Defer`.
+    pub deferred_prompt_policy: DeferredPromptPolicy,
     /// Optional extended build options for factory-backed builders.
     pub build: Option<SessionBuildOptions>,
     /// Optional key-value labels attached at session creation.
@@ -167,6 +183,9 @@ pub struct SessionBuildOptions {
     pub budget_limits: Option<BudgetLimits>,
     pub provider_params: Option<serde_json::Value>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Serializable tool definitions used to reconstruct recoverable
+    /// surface-owned dispatchers during session resume/rebuild.
+    pub recoverable_tool_defs: Option<Vec<crate::ToolDef>>,
     /// Blob store used to externalize durable image content and hydrate refs
     /// back to bytes at execution seams.
     pub blob_store_override: Option<Arc<dyn crate::BlobStore>>,
@@ -174,12 +193,8 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// Canonical async-op registry for the owning session.
-    ///
-    /// Runtime-backed surfaces should provide the real per-session registry
-    /// from the runtime adapter rather than letting deeper layers allocate a
-    /// fresh local registry.
-    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
+    // NOTE: ops_lifecycle_override was removed in Phase 3.
+    // Use runtime_build_mode instead.
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
@@ -231,6 +246,255 @@ pub struct SessionBuildOptions {
     /// supplied by the caller. Resumed metadata then fills only the
     /// non-explicit fields.
     pub resume_override_mask: ResumeOverrideMask,
+    /// Late-binding mob tool factory, called inside `build_agent()` with
+    /// session-scoped args to produce the mob tool dispatcher.
+    ///
+    /// Surfaces that enable mob tools pass an `Arc<dyn MobToolsFactory>` here.
+    /// The factory calls [`MobToolsFactory::build_mob_tools`] during agent
+    /// construction with the session ID, ops lifecycle registry, and optional
+    /// comms runtime — then composes the result into the tool gateway.
+    pub mob_tools: Option<Arc<dyn MobToolsFactory>>,
+    /// Runtime build mode — determines how the factory resolves the ops lifecycle
+    /// registry and completion feed.
+    ///
+    /// - `SessionOwned(bindings)`: runtime-backed build with epoch-owned
+    ///   bindings. Factory validates `bindings.session_id == session.id()`.
+    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
+    ///   Suitable for WASM, tests, embedded, and standalone surfaces.
+    pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
+    /// Runtime-injected mob operator authority context.
+    ///
+    /// This is the only source of mob operator tool authority. Tool visibility
+    /// may depend on this context being present, but dispatch-time
+    /// authorization must still re-check the typed create/scope fields on
+    /// every operator call.
+    pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
+}
+
+/// Opaque principal token carried through mob tool authority and provenance.
+///
+/// `meerkat-mob` may store or compare this token as an opaque blob, but it
+/// must not decode token structure, branch on token contents, or expand scope
+/// from it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OpaquePrincipalToken(String);
+
+impl OpaquePrincipalToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn generated() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for OpaquePrincipalToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Runtime-supplied caller provenance carried alongside mob tool authority.
+///
+/// This is informational/projection-only data. It is not a second authority
+/// source and must never be used for policy expansion inside `meerkat-mob`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MobToolCallerProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_session_id: Option<crate::SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_mob_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_member_id: Option<String>,
+}
+
+impl MobToolCallerProvenance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_session_id(mut self, session_id: crate::SessionId) -> Self {
+        self.caller_session_id = Some(session_id);
+        self
+    }
+
+    pub fn with_mob_id(mut self, mob_id: impl Into<String>) -> Self {
+        self.caller_mob_id = Some(mob_id.into());
+        self
+    }
+
+    pub fn with_member_id(mut self, member_id: impl Into<String>) -> Self {
+        self.caller_member_id = Some(member_id.into());
+        self
+    }
+
+    pub fn caller_session_id(&self) -> Option<&crate::SessionId> {
+        self.caller_session_id.as_ref()
+    }
+
+    pub fn caller_mob_id(&self) -> Option<&str> {
+        self.caller_mob_id.as_deref()
+    }
+
+    pub fn caller_member_id(&self) -> Option<&str> {
+        self.caller_member_id.as_deref()
+    }
+}
+
+/// Typed mob operator authority injected by the host/runtime.
+///
+/// This is capability-oriented only. It is not an identity or ownership
+/// model, and it must never be inferred from mob membership, session shape,
+/// `owner_session_id`, or profile flags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobToolAuthorityContext {
+    principal_token: OpaquePrincipalToken,
+    can_create_mobs: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    managed_mob_scope: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_provenance: Option<MobToolCallerProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audit_invocation_id: Option<String>,
+}
+
+impl MobToolAuthorityContext {
+    pub fn new(principal_token: OpaquePrincipalToken, can_create_mobs: bool) -> Self {
+        Self {
+            principal_token,
+            can_create_mobs,
+            managed_mob_scope: BTreeSet::new(),
+            caller_provenance: None,
+            audit_invocation_id: None,
+        }
+    }
+
+    pub fn create_only_generated() -> Self {
+        Self::new(OpaquePrincipalToken::generated(), true)
+    }
+
+    pub fn principal_token(&self) -> &OpaquePrincipalToken {
+        &self.principal_token
+    }
+
+    pub fn can_create_mobs(&self) -> bool {
+        self.can_create_mobs
+    }
+
+    pub fn managed_mob_scope(&self) -> &BTreeSet<String> {
+        &self.managed_mob_scope
+    }
+
+    pub fn caller_provenance(&self) -> Option<&MobToolCallerProvenance> {
+        self.caller_provenance.as_ref()
+    }
+
+    pub fn audit_invocation_id(&self) -> Option<&str> {
+        self.audit_invocation_id.as_deref()
+    }
+
+    pub fn can_manage_mob(&self, mob_id: &str) -> bool {
+        self.managed_mob_scope.contains(mob_id)
+    }
+
+    pub fn grant_manage_mob(mut self, mob_id: impl Into<String>) -> Self {
+        self.managed_mob_scope.insert(mob_id.into());
+        self
+    }
+
+    pub fn with_managed_mob_scope<I, S>(mut self, mob_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.managed_mob_scope = mob_ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_caller_provenance(mut self, caller_provenance: MobToolCallerProvenance) -> Self {
+        self.caller_provenance = Some(caller_provenance);
+        self
+    }
+
+    pub fn with_audit_invocation_id(mut self, audit_invocation_id: impl Into<String>) -> Self {
+        self.audit_invocation_id = Some(audit_invocation_id.into());
+        self
+    }
+}
+
+/// Shared host/runtime policy for explicit mob-operator enablement.
+///
+/// When a host/runtime build seam explicitly enables mob operator tools for a
+/// session, the default authority shape is create-only. Existing-mob scope
+/// must still be injected separately and explicitly.
+pub fn generated_create_only_mob_operator_authority(
+    enable_mob: Option<bool>,
+) -> Option<MobToolAuthorityContext> {
+    enable_mob
+        .filter(|enabled| *enabled)
+        .map(|_| MobToolAuthorityContext::create_only_generated())
+}
+
+/// Shared build-seam rule for mob operator access rehydration.
+///
+/// Explicit disable clears authority. Otherwise, persisted typed authority
+/// wins; if none exists, explicit mob enablement falls back to generated
+/// create-only authority.
+pub fn resolve_mob_operator_access(
+    enable_mob: Option<bool>,
+    persisted_authority_context: Option<MobToolAuthorityContext>,
+) -> (Option<bool>, Option<MobToolAuthorityContext>) {
+    if matches!(enable_mob, Some(false)) {
+        return (Some(false), None);
+    }
+
+    let authority_context = persisted_authority_context
+        .or_else(|| generated_create_only_mob_operator_authority(enable_mob));
+    let override_mob = if authority_context.is_some() {
+        Some(true)
+    } else {
+        enable_mob
+    };
+
+    (override_mob, authority_context)
+}
+
+/// Session-scoped arguments passed to [`MobToolsFactory::build_mob_tools`].
+pub struct MobToolsBuildArgs {
+    /// Session ID of the agent being built.
+    pub session_id: crate::SessionId,
+    /// Model name of the owning agent — inherited by implicit mob helpers.
+    pub model: String,
+    /// Runtime-injected mob operator authority context.
+    ///
+    /// Tool visibility may depend on this context being present, but operator
+    /// dispatch must still re-check the typed create/scope fields on every
+    /// call.
+    pub authority_context: Option<MobToolAuthorityContext>,
+    /// Comms name of the owning agent (for building TrustedPeerSpec).
+    pub comms_name: Option<String>,
+    /// Optional comms runtime for auto-wiring spawned members.
+    pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,
+}
+
+/// Factory trait for late-binding mob tool construction.
+///
+/// Implementations capture surface-specific state (e.g. `MobMcpState`) and
+/// receive session-scoped arguments from `build_agent()` at construction time.
+/// This avoids a cyclic dependency between the facade crate and `meerkat-mob-mcp`.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobToolsFactory: Send + Sync {
+    /// Build a mob tool dispatcher for the given session.
+    async fn build_mob_tools(
+        &self,
+        args: MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Typed explicit-override intent for resumed-session metadata merges.
@@ -253,6 +517,34 @@ pub struct ResumeOverrideMask {
     pub peer_meta: bool,
 }
 
+impl SessionBuildOptions {
+    /// Apply the shared rehydration rule for mob operator access.
+    ///
+    /// This preserves exact persisted authority when available and otherwise
+    /// falls back to generated create-only authority for explicit mob
+    /// enablement.
+    pub fn apply_persisted_mob_operator_access(
+        &mut self,
+        enable_mob: Option<bool>,
+        persisted_authority_context: Option<MobToolAuthorityContext>,
+    ) {
+        let (override_mob, authority_context) =
+            resolve_mob_operator_access(enable_mob, persisted_authority_context);
+        self.override_mob = override_mob;
+        self.mob_tool_authority_context = authority_context;
+    }
+
+    /// Apply the shared host/runtime default for explicit mob operator
+    /// enablement.
+    ///
+    /// This keeps `override_mob` and the generated create-only authority
+    /// context aligned at the composition seam. Existing-mob scope must be
+    /// injected explicitly elsewhere; this helper never infers it.
+    pub fn apply_generated_create_only_mob_operator_access(&mut self, enable_mob: Option<bool>) {
+        self.apply_persisted_mob_operator_access(enable_mob, None);
+    }
+}
+
 impl Default for SessionBuildOptions {
     fn default() -> Self {
         Self {
@@ -266,9 +558,9 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
-            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -287,6 +579,9 @@ impl Default for SessionBuildOptions {
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
+            mob_tools: None,
+            runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
+            mob_tool_authority_context: None,
         }
     }
 }
@@ -304,12 +599,9 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
-            .field(
-                "ops_lifecycle_override",
-                &self.ops_lifecycle_override.is_some(),
-            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
@@ -330,6 +622,13 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
+            .field("mob_tools", &self.mob_tools.is_some())
+            .field("runtime_build_mode", &self.runtime_build_mode)
+            .field(
+                "mob_tool_authority_context",
+                &self.mob_tool_authority_context.is_some(),
+            )
+            .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()
     }
 }
@@ -383,6 +682,18 @@ pub struct AppendSystemContextRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppendSystemContextResult {
     pub status: AppendSystemContextStatus,
+}
+
+/// Request to stage callback tool results for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageToolResultsRequest {
+    pub results: Vec<crate::ToolResult>,
+}
+
+/// Result of staging callback tool results for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageToolResultsResult {
+    pub accepted_result_count: usize,
 }
 
 /// Outcome of an append-system-context request.
@@ -582,6 +893,21 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
+    /// Update the session's canonical mob operator authority context.
+    ///
+    /// This is the only supported seam for widening or narrowing exact mob
+    /// management scope after session creation so recovery and live runtime
+    /// state stay aligned.
+    async fn update_session_mob_authority_context(
+        &self,
+        _id: &SessionId,
+        _authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "update_session_mob_authority_context".to_string(),
+        ))
+    }
+
     /// Whether a live in-memory session bridge currently exists for `id`.
     ///
     /// This is intentionally distinct from `list()` / `SessionSummary`:
@@ -678,6 +1004,20 @@ pub trait SessionServiceControlExt: SessionService {
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError>;
+
+    /// Stage callback tool results for application on the next turn seam.
+    ///
+    /// Implementations must persist the staged results durably before a live
+    /// session can observe them so a failed call never leaves hidden pending
+    /// transcript mutations behind.
+    async fn stage_tool_results(
+        &self,
+        id: &SessionId,
+        req: StageToolResultsRequest,
+    ) -> Result<StageToolResultsResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported("stage_tool_results".to_string()))
+    }
 }
 
 /// Optional history-read extension for `SessionService`.

@@ -48,6 +48,7 @@ fn make_peer_terminal(body: &str) -> Input {
         }),
         body: body.into(),
         blocks: None,
+        handling_mode: None,
     })
 }
 
@@ -72,6 +73,7 @@ fn make_peer_progress() -> Input {
         }),
         body: "working...".into(),
         blocks: None,
+        handling_mode: None,
     })
 }
 
@@ -618,4 +620,107 @@ async fn destroy_with_queued_inputs_abandons_all() {
     assert_eq!(abandoned, 2);
     assert!(driver.runtime_state().is_terminal());
     assert!(driver.active_input_ids().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Peer handling_mode driver integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = Input::Peer(PeerInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(PeerConvention::ResponseProgress {
+            request_id: "req-1".into(),
+            phase: ResponseProgressPhase::InProgress,
+        }),
+        body: "working".into(),
+        blocks: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+    });
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(
+        outcome.is_rejected(),
+        "ResponseProgress with handling_mode must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn accept_peer_response_terminal_with_handling_mode_returns_rejected() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = Input::Peer(PeerInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(PeerConvention::ResponseTerminal {
+            request_id: "req-1".into(),
+            status: ResponseTerminalStatus::Completed,
+        }),
+        body: "done".into(),
+        blocks: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(
+        outcome.is_rejected(),
+        "ResponseTerminal with handling_mode must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = Input::Peer(PeerInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(PeerConvention::Message),
+        body: "hi".into(),
+        blocks: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(
+        outcome.is_accepted(),
+        "Message with handling_mode=Steer must be accepted"
+    );
+    if let meerkat_runtime::AcceptOutcome::Accepted { policy, .. } = outcome {
+        assert_eq!(
+            policy.routing_disposition,
+            meerkat_runtime::RoutingDisposition::Steer
+        );
+    }
 }

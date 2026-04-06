@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod mob;
 pub mod models;
 pub mod runtime;
+pub mod schedule;
 pub mod session;
 pub mod skills;
 pub mod turn;

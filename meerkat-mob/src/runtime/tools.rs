@@ -1,8 +1,105 @@
 use super::*;
 use meerkat_core::SessionId;
-use meerkat_core::agent::OpsLifecycleBindError;
+use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use meerkat_core::service::MobToolAuthorityContext;
+use std::collections::HashSet;
+
+// ---------------------------------------------------------------------------
+// NameFilteredDispatcher
+// ---------------------------------------------------------------------------
+
+use meerkat_core::DynamicToolComposite;
+
+// ---------------------------------------------------------------------------
+// NameFilteredDispatcher
+// ---------------------------------------------------------------------------
+
+/// Wraps an inner dispatcher and hides tools whose names collide with
+/// profile-declared tools. Profile tools always win on name collision.
+pub(crate) struct NameFilteredDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    excluded: HashSet<String>,
+}
+
+impl NameFilteredDispatcher {
+    pub(crate) fn new(inner: Arc<dyn AgentToolDispatcher>, excluded: HashSet<String>) -> Self {
+        Self { inner, excluded }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for NameFilteredDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.inner
+            .tools()
+            .iter()
+            .filter(|t| !self.excluded.contains(&t.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if self.excluded.contains(call.name) {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        let outcome = owned.inner.bind_wait_interrupt(rx)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapper = Arc::new(NameFilteredDispatcher {
+            inner,
+            excluded: owned.excluded,
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapper = Arc::new(NameFilteredDispatcher {
+            inner,
+            excluded: owned.excluded,
+        });
+        Ok(if bound {
+            BindOutcome::Bound(wrapper)
+        } else {
+            BindOutcome::Skipped(wrapper)
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
@@ -12,14 +109,20 @@ pub(super) fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     mob_handle: MobHandle,
+    default_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    mob_tool_access_context: crate::build::MobToolAccessContext,
 ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
     let mut dispatchers: Vec<Arc<dyn AgentToolDispatcher>> = Vec::new();
 
-    if profile.tools.mob || profile.tools.mob_tasks {
-        dispatchers.push(Arc::new(MobToolDispatcher::new(
+    if let crate::build::MobToolAccessContext::InjectedAuthority(authority_context) =
+        mob_tool_access_context
+        && (profile.tools.mob || profile.tools.mob_tasks)
+    {
+        dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
             profile.tools.mob,
             profile.tools.mob_tasks,
+            authority_context,
         )));
     }
 
@@ -32,6 +135,31 @@ pub(super) fn compose_external_tools_for_profile(
         dispatchers.push(dispatcher);
     }
 
+    // Compose default external tools (e.g. callback tools from SDK) with
+    // name-collision filtering: profile-declared tools always win.
+    //
+    // The dispatcher is always included even if it currently reports 0 tools,
+    // because it may be dynamic (e.g. CallbackToolDispatcher backed by a shared
+    // registry that gets populated later via tools/register). Dropping it here
+    // would permanently disconnect the session from late-registered tools.
+    if let Some(ext) = default_external_tools {
+        let profile_names: HashSet<String> = dispatchers
+            .iter()
+            .flat_map(|d| d.tools().iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+            .collect();
+        let collisions: HashSet<String> = ext
+            .tools()
+            .iter()
+            .filter(|t| profile_names.contains(&t.name))
+            .map(|t| t.name.clone())
+            .collect();
+        if collisions.is_empty() {
+            dispatchers.push(ext);
+        } else {
+            dispatchers.push(Arc::new(NameFilteredDispatcher::new(ext, collisions)));
+        }
+    }
+
     if dispatchers.is_empty() {
         return Ok(None);
     }
@@ -39,25 +167,29 @@ pub(super) fn compose_external_tools_for_profile(
         return Ok(dispatchers.pop());
     }
 
-    let mut gateway_builder = ToolGatewayBuilder::new();
-    for dispatcher in dispatchers {
-        gateway_builder = gateway_builder.add_dispatcher(dispatcher);
-    }
-    let gateway = gateway_builder
-        .build()
-        .map_err(|e| MobError::Internal(format!("failed to compose tool bundles: {e}")))?;
-    Ok(Some(Arc::new(gateway)))
+    // Use DynamicToolComposite instead of ToolGateway so that child
+    // dispatchers that support dynamic tool lists (e.g. CallbackToolDispatcher
+    // backed by a live registered_tools list) have their additions visible
+    // at each tools()/dispatch() call. ToolGateway caches the tool list at
+    // construction time which would freeze dynamic dispatchers.
+    Ok(Some(Arc::new(DynamicToolComposite::new(dispatchers))))
 }
 
-struct MobToolDispatcher {
+struct MobOperatorToolDispatcher {
     handle: MobHandle,
+    authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
     owner_session_id: Option<SessionId>,
     ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
-impl MobToolDispatcher {
-    fn new(handle: MobHandle, enable_mob: bool, enable_mob_tasks: bool) -> Self {
+impl MobOperatorToolDispatcher {
+    fn new(
+        handle: MobHandle,
+        enable_mob: bool,
+        enable_mob_tasks: bool,
+        authority_context: MobToolAuthorityContext,
+    ) -> Self {
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
         if enable_mob {
             defs.push(tool_def(
@@ -265,10 +397,19 @@ impl MobToolDispatcher {
 
         Self {
             handle,
+            authority_context,
             tools: defs.into(),
             owner_session_id: None,
             ops_registry: None,
         }
+    }
+
+    fn ensure_current_mob_scope(&self, tool_name: &str) -> Result<(), ToolError> {
+        let mob_id = self.handle.definition().id.as_str();
+        if self.authority_context.can_manage_mob(mob_id) {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
     }
 
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
@@ -293,6 +434,21 @@ impl MobToolDispatcher {
             result: ToolResult::new(call.id.to_string(), content, false),
             async_ops,
         })
+    }
+
+    async fn record_successful_operator_action(&self, tool_name: &str) {
+        if let Err(error) = self
+            .handle
+            .record_operator_action_provenance(tool_name, &self.authority_context)
+            .await
+        {
+            tracing::warn!(
+                tool_name,
+                mob_id = %self.handle.definition().id,
+                error = %error,
+                "operator provenance projection append failed"
+            );
+        }
     }
 }
 
@@ -418,7 +574,7 @@ struct FlowStatusArgs {
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl AgentToolDispatcher for MobToolDispatcher {
+impl AgentToolDispatcher for MobOperatorToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tools)
     }
@@ -427,6 +583,9 @@ impl AgentToolDispatcher for MobToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if self.tools.iter().any(|tool| tool.name == call.name) {
+            self.ensure_current_mob_scope(call.name)?;
+        }
         match call.name {
             TOOL_SPAWN_MEERKAT => {
                 let args: SpawnMeerkatArgs = call
@@ -491,6 +650,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         )
                     }
                 };
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, result, async_ops)
             }
             TOOL_SPAWN_MANY_MEERKATS => {
@@ -579,6 +739,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         (results, Vec::new())
                     }
                 };
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
             TOOL_RETIRE_MEERKAT => {
@@ -589,6 +750,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .retire(MeerkatId::from(args.meerkat_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_WIRE_PEERS => {
@@ -599,6 +761,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .wire(MeerkatId::from(args.a), MeerkatId::from(args.b))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_UNWIRE_PEERS => {
@@ -609,6 +772,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .unwire(MeerkatId::from(args.a), MeerkatId::from(args.b))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_LIST_MEERKATS => {
@@ -647,6 +811,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .run_flow(FlowId::from(args.flow_id), args.params)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({ "run_id": run_id }))
             }
             TOOL_MOB_FLOW_STATUS => {
@@ -674,6 +839,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .cancel_flow(run_id)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_MOB_TASK_CREATE => {
@@ -685,6 +851,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .task_create(args.subject, args.description, args.blocked_by)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true, "task_id": task_id}))
             }
             TOOL_MOB_TASK_LIST => {
@@ -703,6 +870,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .task_update(args.task_id, args.status, args.owner.map(MeerkatId::from))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_MOB_TASK_GET => {
@@ -724,6 +892,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .force_cancel_member(MeerkatId::from(args.meerkat_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
+                self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_MEERKAT_STATUS => {
@@ -741,25 +910,29 @@ impl AgentToolDispatcher for MobToolDispatcher {
         }
     }
 
+    fn capabilities(&self) -> DispatcherCapabilities {
+        DispatcherCapabilities {
+            ops_lifecycle: true,
+            ..DispatcherCapabilities::default()
+        }
+    }
+
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
             return Err(OpsLifecycleBindError::SharedOwnership);
         }
         let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        Ok(Arc::new(Self {
+        Ok(BindOutcome::Bound(Arc::new(Self {
             handle: this.handle,
+            authority_context: this.authority_context,
             tools: this.tools,
             owner_session_id: Some(owner_session_id),
             ops_registry: Some(registry),
-        }))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        true
+        })))
     }
 }
 

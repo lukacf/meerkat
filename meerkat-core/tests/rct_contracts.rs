@@ -89,11 +89,11 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         provider: meerkat_core::Provider::Anthropic,
         provider_params: None,
         tooling: meerkat_core::SessionTooling {
-            builtins: true,
-            shell: true,
-            comms: false,
-            mob: false,
-            memory: false,
+            builtins: meerkat_core::ToolCategoryOverride::Enable,
+            shell: meerkat_core::ToolCategoryOverride::Enable,
+            comms: meerkat_core::ToolCategoryOverride::Disable,
+            mob: meerkat_core::ToolCategoryOverride::Disable,
+            memory: meerkat_core::ToolCategoryOverride::Disable,
             active_skills: None,
         },
         keep_alive: true,
@@ -110,7 +110,10 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(parsed.model, "claude-test");
     assert_eq!(parsed.max_tokens, 1234);
     assert_eq!(parsed.provider, meerkat_core::Provider::Anthropic);
-    assert!(parsed.tooling.shell);
+    assert_eq!(
+        parsed.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Enable
+    );
     assert_eq!(parsed.comms_name.as_deref(), Some("agent-a"));
     Ok(())
 }
@@ -269,6 +272,110 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     assert_eq!(decoded.max_tokens, 999);
     assert_eq!(decoded.provider, meerkat_core::Provider::OpenAI);
     Ok(())
+}
+
+/// Regression: old persisted sessions have bool tooling fields.
+/// `true` must deserialize as `Enable`, `false` as `Inherit` (not Disable),
+/// and missing fields default to `Inherit`.
+#[test]
+fn test_tool_category_override_backward_compat_serde() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::ToolCategoryOverride;
+
+    // Old-format JSON with bool fields
+    let old_json = serde_json::json!({
+        "builtins": true,
+        "shell": false,
+        "comms": true,
+        "mob": false,
+        "memory": false
+    });
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(old_json)?;
+    assert_eq!(tooling.builtins, ToolCategoryOverride::Enable);
+    assert_eq!(tooling.shell, ToolCategoryOverride::Inherit); // false → Inherit, not Disable
+    assert_eq!(tooling.comms, ToolCategoryOverride::Enable);
+    assert_eq!(tooling.mob, ToolCategoryOverride::Inherit);
+    assert_eq!(tooling.memory, ToolCategoryOverride::Inherit);
+
+    // Old-format JSON with missing fields (pre-mob era)
+    let missing_fields_json = serde_json::json!({
+        "builtins": true,
+        "shell": true,
+        "comms": false
+    });
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(missing_fields_json)?;
+    assert_eq!(tooling.mob, ToolCategoryOverride::Inherit);
+    assert_eq!(tooling.memory, ToolCategoryOverride::Inherit);
+
+    // New-format JSON with string enum values
+    let new_json = serde_json::json!({
+        "builtins": "enable",
+        "shell": "disable",
+        "comms": "inherit",
+        "mob": "enable",
+        "memory": "disable"
+    });
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(new_json)?;
+    assert_eq!(tooling.builtins, ToolCategoryOverride::Enable);
+    assert_eq!(tooling.shell, ToolCategoryOverride::Disable);
+    assert_eq!(tooling.comms, ToolCategoryOverride::Inherit);
+    assert_eq!(tooling.mob, ToolCategoryOverride::Enable);
+    assert_eq!(tooling.memory, ToolCategoryOverride::Disable);
+
+    // New format round-trips correctly
+    let serialized = serde_json::to_value(&tooling)?;
+    let round_tripped: meerkat_core::SessionTooling = serde_json::from_value(serialized)?;
+    assert_eq!(round_tripped, tooling);
+    Ok(())
+}
+
+/// Regression: ToolCategoryOverride.resolve() and .to_override() semantics.
+#[test]
+fn test_tool_category_override_resolution() {
+    use meerkat_core::ToolCategoryOverride;
+
+    // resolve() against runtime default
+    assert!(ToolCategoryOverride::Enable.resolve(false));
+    assert!(!ToolCategoryOverride::Disable.resolve(true));
+    assert!(ToolCategoryOverride::Inherit.resolve(true));
+    assert!(!ToolCategoryOverride::Inherit.resolve(false));
+
+    // to_override() for AgentBuildConfig
+    assert_eq!(ToolCategoryOverride::Enable.to_override(), Some(true));
+    assert_eq!(ToolCategoryOverride::Disable.to_override(), Some(false));
+    assert_eq!(ToolCategoryOverride::Inherit.to_override(), None);
+
+    // from_effective() — collapses Inherit, only for fields without override
+    assert_eq!(
+        ToolCategoryOverride::from_effective(true),
+        ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        ToolCategoryOverride::from_effective(false),
+        ToolCategoryOverride::Disable
+    );
+
+    // from_override() — preserves Inherit for metadata persistence
+    assert_eq!(
+        ToolCategoryOverride::from_override(Some(true)),
+        ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        ToolCategoryOverride::from_override(Some(false)),
+        ToolCategoryOverride::Disable
+    );
+    assert_eq!(
+        ToolCategoryOverride::from_override(None),
+        ToolCategoryOverride::Inherit
+    );
+
+    // Round-trip: to_override -> from_override is identity
+    for v in [
+        ToolCategoryOverride::Inherit,
+        ToolCategoryOverride::Enable,
+        ToolCategoryOverride::Disable,
+    ] {
+        assert_eq!(ToolCategoryOverride::from_override(v.to_override()), v);
+    }
 }
 
 #[tokio::test]

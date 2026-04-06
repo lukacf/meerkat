@@ -26,8 +26,8 @@ impl Pack for BrainstormPack {
         // Intentionally diverse default models for different perspectives
         let agents = [
             ("ideator_a",   "ideator-a-skill",   "Practical ideator",   "gemini-3.1-pro-preview"),
-            ("ideator_b",   "ideator-b-skill",   "Creative ideator",    "gpt-5.2"),
-            ("ideator_c",   "ideator-c-skill",   "Contrarian ideator",  "gemini-3-flash-preview"),
+            ("ideator_b",   "ideator-b-skill",   "Creative ideator",    "gpt-5.4"),
+            ("ideator_c",   "ideator-c-skill",   "Contrarian ideator",  "gemini-3.1-flash-lite-preview"),
             ("synthesizer", "synthesizer-skill",  "Idea synthesizer",    "claude-opus-4-6"),
         ];
 
@@ -54,7 +54,7 @@ impl Pack for BrainstormPack {
             &["ideate_a", "ideate_b", "ideate_c"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Multi-perspective brainstorm".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Multi-perspective brainstorm".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("brainstorm", profiles, skills, flows, identity_spawn_policy(&names))

@@ -118,6 +118,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
             event_tx: Some(event_tx),
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,
             labels: None,
         })

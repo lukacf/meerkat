@@ -88,7 +88,11 @@ impl FlowTerminalizationAuthority {
             .await
         {
             return self
-                .record_terminal_event_append_failure(&run_id, event_name, append_error)
+                .record_terminal_event_append_failure(
+                    &run_id,
+                    event_name,
+                    MobError::from(append_error),
+                )
                 .await;
         }
 
@@ -143,7 +147,7 @@ mod tests {
     use crate::event::{MobEvent, MobEventKind, NewMobEvent};
     use crate::ids::{FlowId, MobId, RunId, StepId};
     use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
-    use crate::store::{InMemoryMobRunStore, MobEventStore, MobRunStore};
+    use crate::store::{InMemoryMobRunStore, MobEventStore, MobRunStore, MobStoreError};
     use async_trait::async_trait;
     use chrono::Utc;
     use std::collections::HashSet;
@@ -164,11 +168,11 @@ mod tests {
 
     #[async_trait]
     impl MobRunStore for RecordingRunStore {
-        async fn create_run(&self, run: MobRun) -> Result<(), crate::error::MobError> {
+        async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
             self.inner.create_run(run).await
         }
 
-        async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, crate::error::MobError> {
+        async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
             self.inner.get_run(run_id).await
         }
 
@@ -176,7 +180,7 @@ mod tests {
             &self,
             mob_id: &MobId,
             flow_id: Option<&FlowId>,
-        ) -> Result<Vec<MobRun>, crate::error::MobError> {
+        ) -> Result<Vec<MobRun>, MobStoreError> {
             self.inner.list_runs(mob_id, flow_id).await
         }
 
@@ -185,7 +189,7 @@ mod tests {
             run_id: &RunId,
             expected: MobRunStatus,
             next: MobRunStatus,
-        ) -> Result<bool, crate::error::MobError> {
+        ) -> Result<bool, MobStoreError> {
             self.inner.cas_run_status(run_id, expected, next).await
         }
 
@@ -194,7 +198,7 @@ mod tests {
             run_id: &RunId,
             expected: &meerkat_machine_kernels::KernelState,
             next: &meerkat_machine_kernels::KernelState,
-        ) -> Result<bool, crate::error::MobError> {
+        ) -> Result<bool, MobStoreError> {
             self.inner.cas_flow_state(run_id, expected, next).await
         }
 
@@ -205,7 +209,7 @@ mod tests {
             expected_flow_state: &meerkat_machine_kernels::KernelState,
             next_status: MobRunStatus,
             next_flow_state: &meerkat_machine_kernels::KernelState,
-        ) -> Result<bool, crate::error::MobError> {
+        ) -> Result<bool, MobStoreError> {
             self.inner
                 .cas_run_snapshot(
                     run_id,
@@ -221,7 +225,7 @@ mod tests {
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
-        ) -> Result<(), crate::error::MobError> {
+        ) -> Result<(), MobStoreError> {
             self.inner.append_step_entry(run_id, entry).await
         }
 
@@ -229,7 +233,7 @@ mod tests {
             &self,
             run_id: &RunId,
             entry: StepLedgerEntry,
-        ) -> Result<bool, crate::error::MobError> {
+        ) -> Result<bool, MobStoreError> {
             self.inner.append_step_entry_if_absent(run_id, entry).await
         }
 
@@ -238,7 +242,7 @@ mod tests {
             run_id: &RunId,
             step_id: &StepId,
             output: serde_json::Value,
-        ) -> Result<(), crate::error::MobError> {
+        ) -> Result<(), MobStoreError> {
             self.inner.put_step_output(run_id, step_id, output).await
         }
 
@@ -246,8 +250,203 @@ mod tests {
             &self,
             run_id: &RunId,
             entry: FailureLedgerEntry,
-        ) -> Result<(), crate::error::MobError> {
+        ) -> Result<(), MobStoreError> {
             self.inner.append_failure_entry(run_id, entry).await
+        }
+
+        async fn upsert_loop_snapshot(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            snapshot: crate::run::LoopSnapshot,
+            ledger_entry: Option<crate::run::LoopIterationLedgerEntry>,
+        ) -> Result<(), MobStoreError> {
+            self.inner
+                .upsert_loop_snapshot(run_id, loop_instance_id, snapshot, ledger_entry)
+                .await
+        }
+
+        async fn cas_frame_state(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected: Option<&crate::run::FrameSnapshot>,
+            next: crate::run::FrameSnapshot,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_frame_state(run_id, frame_id, expected, next)
+                .await
+        }
+
+        async fn cas_grant_node_slot(
+            &self,
+            run_id: &RunId,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_grant_node_slot(
+                    run_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                )
+                .await
+        }
+
+        async fn cas_complete_step_and_record_output(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            step_output_key: String,
+            step_output: serde_json::Value,
+            loop_context: Option<(&crate::ids::LoopId, u64)>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_step_and_record_output(
+                    run_id,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    step_output_key,
+                    step_output,
+                    loop_context,
+                )
+                .await
+        }
+
+        async fn cas_start_loop(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            initial_loop: crate::run::LoopSnapshot,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_start_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    initial_loop,
+                )
+                .await
+        }
+
+        async fn cas_loop_request_body_frame(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_loop_request_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_grant_body_frame_start(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            initial_frame: crate::run::FrameSnapshot,
+            ledger_entry: crate::run::LoopIterationLedgerEntry,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_grant_body_frame_start(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    initial_frame,
+                    ledger_entry,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_complete_body_frame(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_complete_loop(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
         }
     }
 
@@ -274,10 +473,10 @@ mod tests {
 
     #[async_trait]
     impl MobEventStore for FaultInjectedEventStore {
-        async fn append(&self, event: NewMobEvent) -> Result<MobEvent, crate::error::MobError> {
+        async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
             let kind = Self::kind_label(&event.kind);
             if self.fail_on_kind.read().await.contains(kind) {
-                return Err(crate::error::MobError::Internal(format!(
+                return Err(MobStoreError::Internal(format!(
                     "fault-injected append failure for {kind}"
                 )));
             }
@@ -296,7 +495,7 @@ mod tests {
             &self,
             after_cursor: u64,
             limit: usize,
-        ) -> Result<Vec<MobEvent>, crate::error::MobError> {
+        ) -> Result<Vec<MobEvent>, MobStoreError> {
             let events = self.events.read().await;
             Ok(events
                 .iter()
@@ -306,14 +505,14 @@ mod tests {
                 .collect())
         }
 
-        async fn replay_all(&self) -> Result<Vec<MobEvent>, crate::error::MobError> {
+        async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
             Ok(self.events.read().await.clone())
         }
 
         async fn append_batch(
             &self,
             events: Vec<NewMobEvent>,
-        ) -> Result<Vec<MobEvent>, crate::error::MobError> {
+        ) -> Result<Vec<MobEvent>, MobStoreError> {
             let mut results = Vec::with_capacity(events.len());
             for event in events {
                 results.push(self.append(event).await?);
@@ -321,7 +520,7 @@ mod tests {
             Ok(results)
         }
 
-        async fn clear(&self) -> Result<(), crate::error::MobError> {
+        async fn clear(&self) -> Result<(), MobStoreError> {
             self.events.write().await.clear();
             Ok(())
         }
@@ -339,6 +538,12 @@ mod tests {
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: indexmap::IndexMap::new(),
+            loop_iteration_outputs: std::collections::BTreeMap::new(),
         }
     }
 

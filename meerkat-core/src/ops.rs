@@ -170,7 +170,8 @@ pub enum ForkBudgetPolicy {
 }
 
 /// Tool access control for delegated branches
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolAccessPolicy {
     /// Inherit all tools from parent

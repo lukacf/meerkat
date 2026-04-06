@@ -7,6 +7,7 @@ meerkat-models
 meerkat-machine-schema
 meerkat-machine-kernels
 meerkat-core
+meerkat-schedule
 meerkat-contracts
 meerkat-client
 meerkat-store

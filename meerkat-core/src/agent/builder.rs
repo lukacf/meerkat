@@ -40,11 +40,16 @@ pub struct AgentBuilder {
     pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    pub(super) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
+    pub(super) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub(super) completion_enrichment:
+        Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
+    pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
 }
 
 impl AgentBuilder {
@@ -68,11 +73,15 @@ impl AgentBuilder {
             blob_store: None,
             silent_comms_intents: Vec::new(),
             ops_lifecycle: None,
+            completion_feed: None,
+            interrupt_baseline: None,
+            completion_enrichment: None,
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
+            epoch_cursor_state: None,
         }
     }
 
@@ -245,6 +254,22 @@ impl AgentBuilder {
             system_context_state,
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
+            // Seed from epoch cursor state if available (runtime-backed surfaces),
+            // otherwise fall back to the feed watermark to avoid replaying retained
+            // completions from prior agent lifetimes (stop/resume, live reattach).
+            // Same pattern as runtime_loop.rs line 276. Computed before move.
+            applied_cursor: self
+                .epoch_cursor_state
+                .as_ref()
+                .map(|cs| {
+                    cs.agent_applied_cursor
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .unwrap_or_else(|| self.completion_feed.as_ref().map_or(0, |f| f.watermark())),
+            completion_feed: self.completion_feed,
+            epoch_cursor_state: self.epoch_cursor_state,
+            interrupt_baseline: self.interrupt_baseline,
+            completion_enrichment: self.completion_enrichment,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
@@ -325,6 +350,30 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the completion feed for cursor-based completion delivery.
+    pub fn with_completion_feed(
+        mut self,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+    ) -> Self {
+        self.completion_feed = Some(feed);
+        self
+    }
+
+    /// Set the shared interrupt baseline for the wait tool.
+    pub fn with_interrupt_baseline(mut self, baseline: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.interrupt_baseline = Some(baseline);
+        self
+    }
+
+    /// Set the enrichment provider for completion display details.
+    pub fn with_completion_enrichment(
+        mut self,
+        enrichment: Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>,
+    ) -> Self {
+        self.completion_enrichment = Some(enrichment);
+        self
+    }
+
     /// Set the skill engine for per-turn `/skill-ref` activation.
     pub fn with_skill_engine(mut self, engine: Arc<crate::skills::SkillRuntime>) -> Self {
         self.skill_engine = Some(engine);
@@ -357,6 +406,15 @@ impl AgentBuilder {
         resolver: Arc<dyn ModelOperationalDefaultsResolver>,
     ) -> Self {
         self.model_defaults_resolver = Some(resolver);
+        self
+    }
+
+    /// Set the shared epoch cursor state for runtime-backed cursor writeback.
+    pub fn with_epoch_cursor_state(
+        mut self,
+        state: Arc<crate::runtime_epoch::EpochCursorState>,
+    ) -> Self {
+        self.epoch_cursor_state = Some(state);
         self
     }
 
@@ -582,5 +640,42 @@ mod tests {
             saw_turn_started,
             "tap should receive TurnStarted even without primary event channel"
         );
+    }
+
+    /// Regression: agent builder must seed applied_cursor from the feed's
+    /// current watermark, not from 0. Starting from 0 replays every retained
+    /// completion as new after stop/resume or live reattachment.
+    #[tokio::test]
+    async fn test_builder_seeds_applied_cursor_from_feed_watermark() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        // Feed already has activity at watermark 42.
+        let feed = Arc::new(MockCompletionFeed::with_watermark(42));
+
+        let agent = AgentBuilder::new()
+            .with_completion_feed(feed)
+            .build(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.applied_cursor, 42,
+            "applied_cursor must seed from feed watermark, not 0"
+        );
+    }
+
+    /// Regression: without a feed, applied_cursor must be 0.
+    #[tokio::test]
+    async fn test_builder_applied_cursor_zero_without_feed() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new().build(client, tools, store).await;
+
+        assert_eq!(agent.applied_cursor, 0);
     }
 }

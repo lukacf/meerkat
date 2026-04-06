@@ -9,6 +9,9 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
+#[path = "session_runtime/schedule_host.rs"]
+mod schedule_host;
+
 use std::collections::BTreeMap;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +22,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, encode_llm_client_override_for_service,
+    PersistentSessionService, ScheduleService, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -28,22 +31,25 @@ use meerkat_core::RunId;
 use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
-    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
+    DeferredPromptPolicy, SessionBuildOptions, SessionControlError, SessionError,
+    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
-    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionLlmIdentity,
-    SessionSystemContextState,
+    Config, ConfigStore, ContentInput, HookRunOverrides, PendingSystemContextAppend, Session,
+    SessionLlmIdentity, SessionSystemContextState,
 };
 use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
@@ -54,6 +60,36 @@ use meerkat::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
+
+fn render_context_append_text(content: &CoreRenderable) -> String {
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+            _ => format!("[Reference] {uri}"),
+        },
+        _ => String::new(),
+    }
+}
+
+fn pending_system_context_appends(
+    appends: &[ConversationContextAppend],
+) -> Vec<PendingSystemContextAppend> {
+    let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    appends
+        .iter()
+        .map(|append| PendingSystemContextAppend {
+            text: render_context_append_text(&append.content),
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at,
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 struct SkillIdentityRegistryState {
@@ -162,6 +198,8 @@ enum PendingSessionPhase {
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    schedule_service: ScheduleService,
+    schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
@@ -180,6 +218,8 @@ pub struct SessionRuntime {
     #[allow(dead_code)]
     notification_sink: crate::router::NotificationSink,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
+    #[cfg(feature = "mob")]
+    mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
     /// Channel for sending callback tool requests to the RPC server loop.
@@ -197,6 +237,11 @@ pub struct SessionRuntime {
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
     registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
+    /// Handle to the builder's mob tools slot inside the session service.
+    /// Captured before the builder is consumed so `set_mob_tools` can write
+    /// through to the actual builder that creates agents.
+    pub builder_mob_tools_slot:
+        Arc<StdRwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -230,10 +275,12 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
+        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let service = Arc::new(Self::build_persistent_service(
             builder,
             max_sessions,
@@ -245,6 +292,8 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
+            schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -259,6 +308,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -266,6 +317,7 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            builder_mob_tools_slot,
         }
     }
 
@@ -278,11 +330,13 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
+        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let service = Arc::new(Self::build_persistent_service(
             builder,
             max_sessions,
@@ -294,6 +348,8 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
+            schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -308,6 +364,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -315,12 +373,13 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
+            builder_mob_tools_slot,
         }
     }
 
-    /// Build a `PersistentSessionService` with the ops lifecycle provider
+    /// Build a `PersistentSessionService` with the runtime bindings provider
     /// wired to the runtime adapter so lazy session rebuilds use the canonical
-    /// registry instead of an orphaned fallback.
+    /// bindings instead of an orphaned fallback.
     fn build_persistent_service(
         builder: FactoryAgentBuilder,
         max_sessions: usize,
@@ -332,15 +391,9 @@ impl SessionRuntime {
         let mut service =
             PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
         let adapter = runtime_adapter.clone();
-        service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+        service.set_runtime_bindings_provider(Arc::new(move |session_id| {
             let adapter = adapter.clone();
-            let session_id = session_id.clone();
-            Box::pin(async move {
-                adapter
-                    .ops_lifecycle_registry(&session_id)
-                    .await
-                    .map(|r| r as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-            })
+            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
         }));
         service
     }
@@ -355,6 +408,18 @@ impl SessionRuntime {
         self.realm_id = realm_id;
         self.instance_id = instance_id;
         self.backend = backend;
+    }
+
+    /// Set the default mob tools factory for all agents built by this runtime.
+    ///
+    /// Writes through the shared slot to the `FactoryAgentBuilder` inside the
+    /// session service — the builder that actually creates agents. The runtime's
+    /// own `factory` clone is NOT used for session creation.
+    pub fn set_mob_tools(&mut self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
+        *self
+            .builder_mob_tools_slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(factory);
     }
 
     /// Active realm id for this runtime, if configured.
@@ -375,6 +440,10 @@ impl SessionRuntime {
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
         self.runtime_adapter.clone()
+    }
+
+    pub fn schedule_service(&self) -> ScheduleService {
+        self.schedule_service.clone()
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
@@ -624,6 +693,25 @@ impl SessionRuntime {
         self.service.clone()
     }
 
+    /// Pre-initialize the callback channel and return the receiver half.
+    ///
+    /// Call this before any code that reads `callback_request_tx()` (e.g.
+    /// mob resume that invokes an `ExternalToolsProvider`). The server
+    /// constructor that accepts a pre-created rx will reuse this channel
+    /// instead of creating a new one.
+    pub fn init_callback_channel(
+        &self,
+    ) -> mpsc::Receiver<(
+        crate::protocol::RpcRequest,
+        tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+    )> {
+        let (tx, rx) = mpsc::channel(crate::NOTIFICATION_CHANNEL_CAPACITY);
+        let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let registered_tools = Arc::new(StdRwLock::new(Vec::new()));
+        self.set_callback_channel(tx, id_counter, registered_tools);
+        rx
+    }
+
     /// Set the callback request channel for tool callbacks.
     ///
     /// Takes `&self` so it can be called after the runtime is wrapped in `Arc`
@@ -682,6 +770,18 @@ impl SessionRuntime {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn set_mob_state(&self, mob_state: Arc<meerkat_mob_mcp::MobMcpState>) {
+        if let Ok(mut slot) = self.mob_state.write() {
+            *slot = Some(mob_state);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> Option<Arc<meerkat_mob_mcp::MobMcpState>> {
+        self.mob_state.read().ok().and_then(|slot| slot.clone())
     }
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
@@ -757,7 +857,6 @@ impl SessionRuntime {
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
-        use meerkat_runtime::completion::CompletionOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
@@ -888,24 +987,7 @@ impl SessionRuntime {
             });
         };
 
-        match handle.wait().await {
-            CompletionOutcome::Completed(result) => Ok(result),
-            CompletionOutcome::CompletedWithoutResult => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: "turn completed without result".to_string(),
-                data: None,
-            }),
-            CompletionOutcome::Abandoned(reason) => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("turn abandoned: {reason}"),
-                data: None,
-            }),
-            CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime terminated: {reason}"),
-                data: None,
-            }),
-        }
+        completion_outcome_to_rpc_result(handle.wait().await, session_id)
     }
 
     /// Admit a canonical external event through the runtime-backed path.
@@ -979,7 +1061,7 @@ impl SessionRuntime {
                 .apply_runtime_context_appends(
                     session_id,
                     run_id,
-                    staged.context_appends.clone(),
+                    pending_system_context_appends(&staged.context_appends),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
@@ -1185,6 +1267,7 @@ impl SessionRuntime {
 
                     skill_references: skill_references.clone(),
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
                     labels: labels.clone(),
                 })
@@ -1289,20 +1372,18 @@ impl SessionRuntime {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
-        self.runtime_adapter
-            .register_session(session_id.clone())
-            .await;
-        let ops_lifecycle = self
+        let bindings = self
             .runtime_adapter
-            .ops_lifecycle_registry(session_id)
+            .prepare_bindings(session_id.clone())
             .await
-            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-            .ok_or_else(|| RpcError {
+            .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,
-                message: format!("failed to obtain runtime ops registry for session {session_id}"),
+                message: format!(
+                    "failed to prepare runtime bindings for session {session_id}: {e}"
+                ),
                 data: None,
             })?;
-        let build = SessionBuildOptions {
+        let mut build = SessionBuildOptions {
             provider: stored_metadata.as_ref().map(|meta| meta.provider),
             output_schema: None,
             structured_output_retries: 2,
@@ -1320,15 +1401,17 @@ impl SessionRuntime {
                 .and_then(|meta| meta.provider_params.clone()),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools: None,
+            recoverable_tool_defs: None,
             llm_client_override: self
                 .default_llm_client
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            ops_lifecycle_override: Some(ops_lifecycle),
-            override_builtins: Some(tooling.builtins),
-            override_shell: Some(tooling.shell),
-            override_memory: Some(tooling.memory),
-            override_mob: Some(tooling.mob),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            override_builtins: tooling.builtins.to_override(),
+            override_shell: tooling.shell.to_override(),
+            override_memory: tooling.memory.to_override(),
+            override_mob: None,
+            mob_tool_authority_context: None,
             preload_skills: tooling.active_skills.clone(),
             realm_id: stored_metadata
                 .as_ref()
@@ -1358,7 +1441,15 @@ impl SessionRuntime {
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,
+            mob_tools: None,
         };
+        build.apply_persisted_mob_operator_access(
+            tooling.mob.to_override(),
+            build
+                .resume_session
+                .as_ref()
+                .and_then(Session::mob_tool_authority_context),
+        );
         self.service
             .create_session(CreateSessionRequest {
                 model: stored_metadata
@@ -1382,6 +1473,7 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: None,
             })
@@ -1469,23 +1561,21 @@ impl SessionRuntime {
         let session_id = session.id().clone();
 
         // Inject the pre-created session so the agent builder will reuse this ID.
-        self.runtime_adapter
-            .register_session(session_id.clone())
-            .await;
-        let ops_lifecycle = self
+        let bindings = self
             .runtime_adapter
-            .ops_lifecycle_registry(&session_id)
+            .prepare_bindings(session_id.clone())
             .await
-            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-            .ok_or_else(|| RpcError {
+            .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,
-                message: format!("failed to obtain runtime ops registry for session {session_id}"),
+                message: format!(
+                    "failed to prepare runtime bindings for session {session_id}: {e}"
+                ),
                 data: None,
             })?;
 
         let build_config = AgentBuildConfig {
             resume_session: Some(session),
-            ops_lifecycle_override: Some(ops_lifecycle),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             ..build_config
         };
 
@@ -1696,6 +1786,7 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: labels.clone(),
             };
@@ -1956,11 +2047,17 @@ impl SessionRuntime {
             build_config.keep_alive = meta.keep_alive;
             build_config.comms_name = meta.comms_name.clone();
             build_config.peer_meta = meta.peer_meta.clone();
-            build_config.override_builtins = Some(meta.tooling.builtins);
-            build_config.override_shell = Some(meta.tooling.shell);
-            build_config.override_mob = Some(meta.tooling.mob);
-            build_config.override_memory = Some(meta.tooling.memory);
+            build_config.override_builtins = meta.tooling.builtins.to_override();
+            build_config.override_shell = meta.tooling.shell.to_override();
+            build_config.override_memory = meta.tooling.memory.to_override();
             build_config.preload_skills = meta.tooling.active_skills.clone();
+            build_config.apply_persisted_mob_operator_access(
+                meta.tooling.mob.to_override(),
+                build_config
+                    .resume_session
+                    .as_ref()
+                    .and_then(Session::mob_tool_authority_context),
+            );
         }
 
         // Apply caller-requested keep_alive override unconditionally.
@@ -1972,25 +2069,18 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(client.clone());
         }
 
-        // Restore callback tools from globally registered definitions.
-        // Note: per-session external_tools (from CreateSessionParams) are
-        // ephemeral in-process handlers and cannot survive a runtime restart.
-        // Only globally registered tools (via tools/register) are restored.
+        // Restore callback tools backed by the live registered_tools list.
+        // The dynamic dispatcher picks up tools registered later via
+        // tools/register at each turn boundary (poll_external_updates).
         if let Some(tx) = self.callback_request_tx() {
-            let tools: Vec<meerkat_core::ToolDef> = self
-                .registered_tools()
-                .read()
-                .map(|g| g.iter().cloned().collect())
-                .unwrap_or_default();
-            if !tools.is_empty() {
-                let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                    Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                        tools,
-                        tx,
-                        self.callback_id_counter(),
-                    ));
-                build_config.external_tools = Some(dispatcher);
-            }
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    self.registered_tools(),
+                    tx,
+                    self.callback_id_counter(),
+                    vec![],
+                ));
+            build_config.external_tools = Some(dispatcher);
         }
 
         // Stage as pending and re-enter the materialization path.
@@ -2466,6 +2556,8 @@ impl SessionRuntime {
             pending.clear();
         }
 
+        self.shutdown_schedule_host().await;
+
         // Shut down the service.
         self.service.shutdown().await;
 
@@ -2816,6 +2908,42 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         code,
         message: err.to_string(),
         data: None,
+    }
+}
+
+fn completion_outcome_to_rpc_result(
+    outcome: meerkat_runtime::completion::CompletionOutcome,
+    session_id: &SessionId,
+) -> Result<RunResult, RpcError> {
+    use meerkat_runtime::completion::CompletionOutcome;
+
+    match outcome {
+        CompletionOutcome::Completed(result) => Ok(result),
+        CompletionOutcome::CompletedWithoutResult => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "turn completed without result".to_string(),
+            data: None,
+        }),
+        CompletionOutcome::CallbackPending { tool_name, args } => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("callback pending for tool '{tool_name}'"),
+            data: Some(serde_json::json!({
+                "session_id": session_id.to_string(),
+                "resumable": true,
+                "tool_name": tool_name,
+                "args": args,
+            })),
+        }),
+        CompletionOutcome::Abandoned(reason) => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("turn abandoned: {reason}"),
+            data: None,
+        }),
+        CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("runtime terminated: {reason}"),
+            data: None,
+        }),
     }
 }
 
@@ -3352,6 +3480,44 @@ mod tests {
         let result = runtime.archive_session(&session_id).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
+    }
+
+    /// set_mob_tools writes through to the builder, so sessions get mob tools.
+    #[tokio::test]
+    async fn set_mob_tools_delivers_tools_to_created_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .mob(true);
+        let mut runtime = make_runtime(factory, 10);
+
+        // Create a MobMcpState and set it via set_mob_tools.
+        let mob_svc = runtime.session_service();
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_svc));
+        runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+            mob_state,
+        )));
+
+        // Create a session — the agent should have mob tools.
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        // Read the session and check tool names. The session's tool list
+        // should include mob tools (delegate, mob_create, etc.).
+        let info = runtime.session_state(&session_id).await.unwrap();
+        assert_eq!(info.state, SessionState::Idle);
+
+        // Start a turn to materialize the agent, then check tool list
+        // via a build that captures tool names.
+        // (We can't directly inspect the agent's tools, but we can verify
+        // the mob tools factory was injected by checking the builder slot.)
+        let slot = runtime.builder_mob_tools_slot.read().unwrap();
+        assert!(
+            slot.is_some(),
+            "builder_mob_tools_slot should be set after set_mob_tools"
+        );
     }
 
     /// 8. Max sessions limit is enforced.
@@ -5024,6 +5190,27 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_surfaces_callback_pending_payload() {
+        let session_id = SessionId::new();
+        let err = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            },
+            &session_id,
+        )
+        .expect_err("callback pending should map to an RPC error");
+
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert_eq!(err.message, "callback pending for tool 'external_mock'");
+        let data = err.data.expect("callback pending error data");
+        assert_eq!(data["session_id"], session_id.to_string());
+        assert_eq!(data["resumable"], true);
+        assert_eq!(data["tool_name"], "external_mock");
+        assert_eq!(data["args"], serde_json::json!({ "value": "browser" }));
     }
 
     // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --

@@ -73,9 +73,11 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::SkillsResolved { .. } => "skills_resolved",
         AgentEvent::SkillResolutionFailed { .. } => "skill_resolution_failed",
         AgentEvent::InteractionComplete { .. } => "interaction_complete",
+        AgentEvent::InteractionCallbackPending { .. } => "interaction_callback_pending",
         AgentEvent::InteractionFailed { .. } => "interaction_failed",
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
+        AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
     }
 }
 
@@ -393,6 +395,14 @@ pub enum AgentEvent {
         result: String,
     },
 
+    /// An interaction reached an external callback boundary and is waiting for
+    /// tool results before the session can continue.
+    InteractionCallbackPending {
+        interaction_id: crate::interaction::InteractionId,
+        tool_name: String,
+        args: Value,
+    },
+
     /// An interaction failed (terminal event for tap subscribers).
     InteractionFailed {
         interaction_id: crate::interaction::InteractionId,
@@ -405,6 +415,14 @@ pub enum AgentEvent {
 
     /// Live tool configuration changed for this session.
     ToolConfigChanged { payload: ToolConfigChangedPayload },
+
+    /// A background shell job completed (or failed/cancelled/timed out).
+    BackgroundJobCompleted {
+        job_id: String,
+        display_name: String,
+        status: String,
+        detail: String,
+    },
 }
 
 /// Scope attribution frame for multi-agent streaming.
@@ -604,6 +622,20 @@ pub fn format_verbose_event_with_config(
         AgentEvent::CompactionFailed { error } => {
             Some(format!("  ✗ Compaction failed (continuing): {error}"))
         }
+        AgentEvent::BackgroundJobCompleted {
+            job_id,
+            display_name,
+            status,
+            detail,
+        } => Some(format!(
+            "  BG job {job_id} ({display_name}) {status}: {detail}"
+        )),
+        AgentEvent::InteractionCallbackPending {
+            tool_name, args, ..
+        } => Some(format!(
+            "  ⧖ Callback pending: {tool_name} {}",
+            truncate_preview(&args.to_string(), config.max_tool_args_bytes)
+        )),
         _ => None,
     }
 }
@@ -701,6 +733,11 @@ mod tests {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "agent response".to_string(),
             },
+            AgentEvent::InteractionCallbackPending {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({"value": "browser"}),
+            },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 error: "LLM failure".to_string(),
@@ -716,6 +753,12 @@ mod tests {
                     persisted: false,
                     applied_at_turn: Some(12),
                 },
+            },
+            AgentEvent::BackgroundJobCompleted {
+                job_id: "j_123".to_string(),
+                display_name: "sleep 2".to_string(),
+                status: "completed".to_string(),
+                detail: "exit_code: 0".to_string(),
             },
         ];
 
@@ -873,6 +916,11 @@ mod tests {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 result: "ok".to_string(),
             },
+            AgentEvent::InteractionCallbackPending {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({"value": "browser"}),
+            },
             AgentEvent::InteractionFailed {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
                 error: "failed".to_string(),
@@ -889,6 +937,12 @@ mod tests {
                     applied_at_turn: Some(1),
                 },
             },
+            AgentEvent::BackgroundJobCompleted {
+                job_id: "j_123".to_string(),
+                display_name: "sleep 2".to_string(),
+                status: "completed".to_string(),
+                detail: "exit_code: 0".to_string(),
+            },
         ];
 
         let mut kinds = std::collections::BTreeSet::new();
@@ -901,7 +955,7 @@ mod tests {
             kinds.insert(kind);
         }
         assert!(
-            kinds.len() >= 31,
+            kinds.len() >= 33,
             "expected at least one discriminator per covered event variant"
         );
     }

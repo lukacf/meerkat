@@ -171,6 +171,7 @@ mod content_blocks_serde {
 ///
 /// Deserializes from either `"text"` or `[{type: "text", text: "..."}, ...]`.
 /// Provides `From<String>` and `From<&str>` for ergonomic construction.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ContentInput {
@@ -239,6 +240,7 @@ pub enum HandlingMode {
 /// runtime scheduling. It lets the system consistently frame peer messages,
 /// external events, tool-scope notices, and similar inputs when they are
 /// rendered into model-visible context.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderClass {
@@ -258,6 +260,7 @@ pub enum RenderClass {
 ///
 /// This is intentionally a small closed enum so call sites do not invent
 /// arbitrary free-text urgency language.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderSalience {
@@ -269,6 +272,7 @@ pub enum RenderSalience {
 }
 
 /// Optional rendering metadata carried alongside ordinary work content.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderMetadata {
     pub class: RenderClass,
@@ -448,6 +452,7 @@ impl<'a> Iterator for ToolCallIter<'a> {
 /// completing the agentic work, forcing the LLM to output validated JSON that
 /// conforms to the provided schema. The extraction JSON becomes the final
 /// response text (schema-only) in [`RunResult`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputSchema {
     /// The JSON schema that the output must conform to
@@ -465,6 +470,18 @@ pub struct OutputSchema {
     #[serde(default)]
     pub format: SchemaFormat,
 }
+
+impl PartialEq for OutputSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema == other.schema
+            && self.name == other.name
+            && self.strict == other.strict
+            && self.compat == other.compat
+            && self.format == other.format
+    }
+}
+
+impl Eq for OutputSchema {}
 
 impl OutputSchema {
     /// Create a new output schema

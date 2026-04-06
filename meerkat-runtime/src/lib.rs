@@ -28,6 +28,7 @@ pub mod comms_bridge;
 pub mod comms_drain;
 pub mod completion;
 pub(crate) mod control_plane;
+pub mod detached_wake;
 pub mod driver;
 pub mod durability;
 pub mod identifiers;
@@ -40,6 +41,7 @@ pub mod lifecycle_ops;
 pub mod mob_adapter;
 pub mod ops_lifecycle;
 pub(crate) mod ops_lifecycle_authority;
+pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
@@ -83,7 +85,8 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
-pub use ops_lifecycle::{OpsLifecycleConfig, RuntimeOpsLifecycleRegistry};
+pub use ops_lifecycle::{OpsLifecycleConfig, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
+pub use peer_handling_mode::{PeerHandlingModeError, validate_peer_handling_mode};
 pub use policy::{
     ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, PolicyDecision, QueueMode,
     RoutingDisposition, WakeMode,
@@ -105,7 +108,7 @@ pub use runtime_ingress_authority::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
-pub use session_adapter::RuntimeSessionAdapter;
+pub use session_adapter::{RuntimeBindingsError, RuntimeSessionAdapter};
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,

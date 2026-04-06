@@ -123,6 +123,26 @@ string_newtype!(
     ProfileName
 );
 
+string_newtype!(
+    /// Runtime identifier for a flow execution frame. One per FrameSpec invocation.
+    FrameId
+);
+
+string_newtype!(
+    /// Runtime identifier for one instance of a repeat_until loop.
+    LoopInstanceId
+);
+
+string_newtype!(
+    /// Lexical identifier for a node within a FrameSpec.
+    FlowNodeId
+);
+
+string_newtype!(
+    /// Lexical identifier for a loop definition within a FrameSpec.
+    LoopId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +192,38 @@ mod tests {
         let id = TaskId::from("task-a");
         let encoded = serde_json::to_string(&id).unwrap();
         let decoded: TaskId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_frame_id_roundtrip_json() {
+        let id = FrameId::from("frame-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: FrameId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_loop_instance_id_roundtrip_json() {
+        let id = LoopInstanceId::from("loop-instance-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: LoopInstanceId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_flow_node_id_roundtrip_json() {
+        let id = FlowNodeId::from("node-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: FlowNodeId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_loop_id_roundtrip_json() {
+        let id = LoopId::from("loop-a");
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: LoopId = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, id);
     }
 

@@ -196,6 +196,7 @@ pub fn mob_lifecycle_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             disposition("EmitLifecycleNotice", EffectDisposition::External),
             disposition(

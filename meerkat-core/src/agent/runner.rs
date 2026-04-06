@@ -466,19 +466,20 @@ where
         self.run_inner(user_input, Some(event_tx)).await
     }
 
-    /// Run the agent using the pending user message already in the session.
+    /// Run the agent using the pending continuation boundary already in the session.
     ///
-    /// This is useful when the session has been pre-populated with a user message
-    /// (e.g., via `create_spawn_session` or `create_fork_session`). Unlike `run()`,
-    /// this method does NOT add a new user message — it runs directly from the
-    /// session's current state.
+    /// This is useful when the session has been pre-populated with a continuation
+    /// boundary (for example a deferred first-turn user message or staged callback
+    /// tool results). Unlike `run()`, this method does NOT add a new user message;
+    /// it runs directly from the session's current state.
     ///
-    /// Returns an error if the session doesn't have a pending user message.
+    /// Returns an error if the session doesn't end at a resumable continuation
+    /// boundary (`User` or `ToolResults`).
     pub async fn run_pending(&mut self) -> Result<RunResult, AgentError> {
         self.run_pending_inner(None).await
     }
 
-    /// Run the agent using the pending user message, with event streaming.
+    /// Run the agent using the pending continuation boundary, with event streaming.
     ///
     /// Like `run_pending()`, but emits events to the provided channel.
     pub async fn run_pending_with_events(
@@ -566,9 +567,10 @@ where
     /// Core run-pending implementation shared by `run_pending()` and
     /// `run_pending_with_events()`.
     ///
-    /// Uses the existing pending user message in the session (does NOT push a new one).
-    /// Emits lifecycle events when `event_tx` is provided. Also used by
-    /// the keep-alive continuation path after response injection.
+    /// Uses the existing pending continuation boundary in the session (does NOT
+    /// push a new user message). Emits lifecycle events when `event_tx` is
+    /// provided. Also used by continuation paths after response injection or
+    /// staged callback tool-result admission.
     pub(super) async fn run_pending_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
@@ -577,12 +579,13 @@ where
 
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
             Message::User(u) => Some(u.text_content()),
+            Message::ToolResults { .. } => Some(String::new()),
             _ => None,
         });
 
         let Some(prompt) = pending_prompt else {
             return Err(AgentError::ConfigError(
-                "run_pending requires a pending user message in the session".to_string(),
+                "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
             ));
         };
 

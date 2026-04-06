@@ -14,6 +14,11 @@ pub struct MachineSchema {
     pub invariants: Vec<InvariantSchema>,
     pub transitions: Vec<TransitionSchema>,
     pub effect_dispositions: Vec<EffectDispositionRule>,
+    /// Override the CI step_limit for individual machine TLC verification.
+    /// Machines with many state fields (e.g. FlowRunMachine v2 with scheduler queues)
+    /// may need a lower limit to keep CI verification tractable. `None` uses the
+    /// codegen default (6 for CI, 8 for deep).
+    pub ci_step_limit: Option<u32>,
 }
 
 impl MachineSchema {

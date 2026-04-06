@@ -72,6 +72,7 @@ impl CoreExecutor for ResultExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: Some(make_run_result("runtime ingress ok")),
         })
     }
@@ -107,6 +108,7 @@ impl CoreExecutor for RecordingBatchExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: Some(make_run_result("batched runtime ingress ok")),
         })
     }

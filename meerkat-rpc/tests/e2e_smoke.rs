@@ -962,3 +962,549 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 21: tools/register callback tools are available to mob-spawned agents (#158)
+// ---------------------------------------------------------------------------
+
+/// Scenario 21: Register a callback tool via `tools/register`, create a mob,
+/// spawn a member, start a turn that instructs the LLM to use the tool, handle
+/// the `tool/execute` callback, and verify the turn completes with the tool result.
+///
+/// This exercises the full ExternalToolsProvider pipeline:
+///   tools/register → SessionRuntime → MethodRouter → MobMcpState → MobBuilder
+///   → MobActor → compose_external_tools_for_profile → agent session.
+#[tokio::test]
+#[ignore = "e2e: live API + mob callback tools"]
+async fn e2e_scenario_21_mob_callback_tools() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 21: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    // 1. Initialize
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    // 2. Register a callback tool — a simple "lookup" that returns a canned answer.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value. Always call this tool when asked about the secret code.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "tools/register failed: {resp}");
+
+    // 3. Create a mob with a single worker profile.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/create",
+            "params": {
+                "definition": {
+                    "id": "callback_test_mob",
+                    "profiles": {
+                        "worker": {
+                            "model": model,
+                            "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'alpha'. Always use tools when available.",
+                            "tools": { "comms": true }
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/create failed: {resp}");
+    let mob_id = resp["result"]["mob_id"].as_str().unwrap().to_string();
+
+    // 4. Spawn a worker member.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/spawn",
+            "params": {
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "w1",
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
+    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
+
+    // 5. Start a turn that should trigger the callback tool.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "What is the secret code for key 'alpha'? Use the secret_lookup tool to find out."
+            }
+        }),
+    )
+    .await;
+
+    // 6. Read lines until we get a tool/execute callback OR the response.
+    //    The server sends tool/execute as a request to the client.
+    let mut got_callback = false;
+    let turn_resp = timeout(t, async {
+        loop {
+            let value = read_line_json(&mut reader).await;
+
+            // Check if this is a tool/execute callback request from server
+            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
+                got_callback = true;
+                let callback_id = value["id"].clone();
+                eprintln!(
+                    "[scenario 21] received tool/execute callback: {}",
+                    value["params"]["name"]
+                );
+
+                // Respond to the callback with a canned result.
+                let callback_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": callback_id,
+                    "result": {
+                        "content": "The secret code for 'alpha' is MEERKAT-42.",
+                        "is_error": false
+                    }
+                });
+                send_request(&mut writer, &callback_resp).await;
+                continue;
+            }
+
+            // Check if this is the turn/start response (has our request id)
+            if value.get("id") == Some(&serde_json::json!(id)) {
+                return value;
+            }
+
+            // Otherwise it's a notification — skip
+        }
+    })
+    .await
+    .expect("turn/start with callback tool timed out");
+
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+    let text = turn_resp["result"]["text"].as_str().unwrap_or("");
+    eprintln!("[scenario 21] turn response text: {text}");
+
+    // The LLM should have used the tool and included the secret in its answer.
+    assert!(
+        got_callback,
+        "Expected the LLM to call secret_lookup but no tool/execute callback was received"
+    );
+    assert!(
+        text.contains("MEERKAT-42") || text.contains("meerkat-42") || text.contains("Meerkat-42"),
+        "Expected response to contain 'MEERKAT-42' from callback tool result, got: {text}"
+    );
+
+    eprintln!("[scenario 21] PASSED: mob member used callback tool and got result");
+
+    // Clean up
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 22: Transport backpressure under notification flood (#157)
+// ---------------------------------------------------------------------------
+
+/// Scenario 22: Create multiple sessions that generate events concurrently,
+/// verify the server doesn't crash and all responses are received.
+///
+/// Uses a small duplex buffer to simulate a slow pipe consumer. The
+/// `BlockingWriter` fix ensures writes block instead of returning WouldBlock.
+/// With the old `tokio::io::stdout()` approach, this would crash.
+#[tokio::test]
+#[ignore = "e2e: live API + transport backpressure"]
+async fn e2e_scenario_22_transport_backpressure() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 22: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+
+    // Use a SMALL duplex buffer to increase backpressure on the writer.
+    // Normal tests use 64KB; we use 256 bytes to provoke stalls.
+    let temp = tempfile::tempdir().unwrap();
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let config = Config::default();
+    let store =
+        Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
+    let runtime_store =
+        Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(store.database()).unwrap())
+            as Arc<dyn meerkat_runtime::RuntimeStore>;
+    let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(temp.path().join("blobs")));
+    let mut runtime = SessionRuntime::new(
+        factory,
+        config,
+        10,
+        meerkat::PersistenceBundle::new(
+            store as Arc<dyn meerkat::SessionStore>,
+            Some(runtime_store),
+            blob_store,
+        ),
+        meerkat_rpc::router::NotificationSink::noop(),
+    );
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(Config::default()));
+    runtime.default_llm_client = Some(client);
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
+
+    // Small buffer: 256 bytes — a single JSON response is ~200-500 bytes,
+    // so the pipe will fill almost immediately under concurrent writes.
+    let (server_reader, mut client_writer) = tokio::io::duplex(256);
+    let (client_reader, server_writer) = tokio::io::duplex(256);
+
+    let server_handle = tokio::spawn(async move {
+        let _temp = temp;
+        let reader = BufReader::new(server_reader);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        server.run().await
+    });
+
+    let mut client_reader = BufReader::new(client_reader);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    // 1. Initialize
+    let id = next_id();
+    send_request(
+        &mut client_writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut client_reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    // 2. Create 3 sessions concurrently — each generates streaming events.
+    //    The small buffer means the server must handle backpressure correctly.
+    let mut session_ids = Vec::new();
+    for i in 0..3 {
+        let id = next_id();
+        send_request(
+            &mut client_writer,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/create",
+                "params": {
+                    "prompt": format!("Reply with exactly one word: 'pong{i}'."),
+                    "model": model
+                }
+            }),
+        )
+        .await;
+    }
+
+    // 3. Drain all responses + notifications. With the old non-blocking stdout,
+    //    this would crash with WouldBlock. With BlockingWriter, writes stall
+    //    until we drain here.
+    let mut responses_received = 0;
+    let drain_result = timeout(t, async {
+        loop {
+            let value = read_line_json(&mut client_reader).await;
+            if let Some(id) = value.get("id") {
+                responses_received += 1;
+                if value["error"].is_null()
+                    && let Some(sid) = value["result"]["session_id"].as_str()
+                {
+                    session_ids.push(sid.to_string());
+                }
+                eprintln!(
+                    "[scenario 22] response #{responses_received} (id={id}): error={}",
+                    !value["error"].is_null()
+                );
+                if responses_received >= 3 {
+                    break;
+                }
+            }
+            // else: notification, keep draining
+        }
+    })
+    .await;
+
+    assert!(
+        drain_result.is_ok(),
+        "Timed out waiting for 3 responses — server may have crashed under backpressure"
+    );
+    assert_eq!(
+        responses_received, 3,
+        "Expected 3 session/create responses, got {responses_received}"
+    );
+    eprintln!(
+        "[scenario 22] PASSED: all {responses_received} responses received under backpressure (buffer=256 bytes)"
+    );
+
+    // Clean up
+    drop(client_writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 23: Late tools/register on already-spawned mob members (#158)
+// ---------------------------------------------------------------------------
+
+/// Scenario 23: Spawn a mob member, THEN register callback tools, THEN start a
+/// turn and verify the already-materialized member can use the late-registered tool.
+///
+/// This proves post-spawn dynamic tool pickup: the `CallbackToolDispatcher` is
+/// backed by the shared `registered_tools` list and picks up additions via
+/// `poll_external_updates` at the next turn boundary.
+///
+/// The member is spawned with `initial_turn: "deferred"` to avoid the
+/// `autonomous_host` loop racing the first turn against `tools/register`.
+/// A separate explicit `turn/start` drives the LLM call after tools are
+/// registered. `runtime_mode: "turn_driven"` ensures no background loop starts.
+#[tokio::test]
+#[ignore = "e2e: live API + post-spawn dynamic tool pickup"]
+async fn e2e_scenario_23_late_register_on_existing_member() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 23: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    // 1. Initialize
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    // 2. Create mob.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/create",
+            "params": {
+                "definition": {
+                    "id": "late_register_mob",
+                    "profiles": {
+                        "worker": {
+                            "model": model,
+                            "runtime_mode": "turn_driven",
+                            "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'beta'. Always use tools when available.",
+                            "tools": { "comms": true }
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/create failed: {resp}");
+    let mob_id = resp["result"]["mob_id"].as_str().unwrap().to_string();
+
+    // 3. Spawn member BEFORE registering tools.
+    //    turn_driven mode prevents autonomous loop from racing.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/spawn",
+            "params": {
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "w1",
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
+    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
+
+    // 4. Register the callback tool AFTER the member already exists.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value. Always call this tool when asked about the secret code.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "tools/register failed: {resp}");
+
+    // 5. Start a turn on the already-materialized member.
+    //    The dynamic dispatcher should pick up the late-registered tool.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "What is the secret code for key 'beta'? Use the secret_lookup tool to find out."
+            }
+        }),
+    )
+    .await;
+
+    // 5. Handle tool/execute callback and collect response.
+    let mut got_callback = false;
+    let turn_resp = timeout(t, async {
+        loop {
+            let value = read_line_json(&mut reader).await;
+
+            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
+                got_callback = true;
+                let callback_id = value["id"].clone();
+                eprintln!(
+                    "[scenario 23] received tool/execute callback: {}",
+                    value["params"]["name"]
+                );
+                let callback_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": callback_id,
+                    "result": {
+                        "content": "The secret code for 'beta' is KESTREL-99.",
+                        "is_error": false
+                    }
+                });
+                send_request(&mut writer, &callback_resp).await;
+                continue;
+            }
+
+            if value.get("id") == Some(&serde_json::json!(id)) {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("turn/start with late-registered callback tool timed out");
+
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+    let text = turn_resp["result"]["text"].as_str().unwrap_or("");
+    eprintln!("[scenario 23] turn response text: {text}");
+
+    assert!(
+        got_callback,
+        "Expected the LLM to call secret_lookup but no tool/execute callback was received — \
+         the late-registered tool was not picked up by the already-spawned member"
+    );
+    assert!(
+        text.contains("KESTREL-99") || text.contains("kestrel-99") || text.contains("Kestrel-99"),
+        "Expected response to contain 'KESTREL-99' from late-registered callback tool, got: {text}"
+    );
+
+    eprintln!("[scenario 23] PASSED: late-registered tool picked up by already-spawned member");
+
+    // Clean up
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}

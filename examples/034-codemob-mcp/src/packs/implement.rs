@@ -44,7 +44,7 @@ impl Pack for ImplementPack {
             provider_params: pp.cloned(),
         });
         profiles.insert(ProfileName::from("reviewer"), Profile {
-            model: resolve_model(overrides, "reviewer", "gpt-5.3-codex"),
+            model: resolve_model(overrides, "reviewer", "gpt-5.4"),
             skills: vec!["gate-reviewer-skill".to_string()],
             tools: tools.clone(),
             peer_description: "Quality gate reviewer — approves or requests revision".to_string(),
@@ -84,6 +84,7 @@ impl Pack for ImplementPack {
             limits: None,
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
         }
     }
 }

@@ -67,6 +67,9 @@ fn build_state(
         config_store,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::default(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,
@@ -84,6 +87,7 @@ fn build_state(
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        schedule_host: Arc::default(),
         request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
             std::time::Duration::from_secs(5),
         )),
@@ -320,8 +324,17 @@ async fn resume_preserves_tooling_flags() {
         .expect("load")
         .expect("session exists");
     let metadata = session.session_metadata().expect("metadata present");
-    assert!(metadata.tooling.builtins, "builtins should be preserved");
-    assert!(metadata.tooling.shell, "shell should be preserved");
+    // No explicit override was set → Inherit (follows factory default)
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Inherit,
+        "builtins should be Inherit (no explicit override)"
+    );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Inherit,
+        "shell should be Inherit (no explicit override)"
+    );
 }
 
 #[tokio::test]

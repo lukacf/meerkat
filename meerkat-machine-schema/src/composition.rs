@@ -11,6 +11,9 @@ pub struct CompositionSchema {
     pub handoff_protocols: Vec<EffectHandoffProtocol>,
     pub entry_inputs: Vec<EntryInput>,
     pub routes: Vec<Route>,
+    pub route_target_selectors: Vec<RouteTargetSelector>,
+    pub driver: Option<CompositionDriverRustBinding>,
+    pub transaction_plans: Vec<CompositionTransactionPlan>,
     pub actor_priorities: Vec<ActorPriority>,
     pub scheduler_rules: Vec<SchedulerRule>,
     pub invariants: Vec<CompositionInvariant>,
@@ -150,6 +153,51 @@ pub enum ProtocolHelperReturnShape {
     Obligations,
 }
 
+/// Explicit Rust binding metadata for generated composition drivers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionDriverRustBinding {
+    /// Output file path relative to the repo root.
+    pub module_path: String,
+    /// Primary generated driver type name.
+    pub driver_type: String,
+    /// Generated store-plan enum type name.
+    pub store_plan_type: String,
+    /// Generated follow-up work enum type name.
+    pub work_type: String,
+    /// Generated decision type name.
+    pub decision_type: String,
+    /// `use ...;` lines inserted at the top of the generated driver module.
+    pub required_imports: Vec<String>,
+}
+
+/// Declares how a routed effect selects its concrete target machine instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteTargetSelector {
+    /// Route name this selector applies to.
+    pub route_name: String,
+    /// Logical selector field on the destination side.
+    pub selector_field: String,
+    /// Source of the selector value.
+    pub source: RouteBindingSource,
+}
+
+/// Describes an atomic persistence bundle for a composition-owned driver plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionTransactionPlan {
+    /// Stable transaction-plan name.
+    pub name: String,
+    /// Host/runtime trigger or entrypoint that requests this plan.
+    pub trigger: String,
+    /// Human-readable explanation of the bundle.
+    pub description: String,
+    /// Existing store primitive that realizes the plan atomically.
+    pub store_primitive: String,
+    /// Deterministic routes included in the bundle.
+    pub route_names: Vec<String>,
+    /// Handoff protocols explicitly closed or emitted by the bundle.
+    pub protocol_names: Vec<String>,
+}
+
 /// Determines when a handoff obligation is considered closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClosurePolicy {
@@ -274,6 +322,16 @@ impl CompositionSchema {
         let route_names =
             unique_names(self.routes.iter().map(|route| route.name.as_str()), "route")?;
         let actor_ids = unique_names(self.actors.iter().map(|actor| actor.name.as_str()), "actor")?;
+        let _ = unique_names(
+            self.route_target_selectors
+                .iter()
+                .map(|selector| selector.route_name.as_str()),
+            "route target selector",
+        )?;
+        let _ = unique_names(
+            self.transaction_plans.iter().map(|plan| plan.name.as_str()),
+            "transaction plan",
+        )?;
 
         // Every MachineInstance.actor must reference an ActorSchema with kind Machine.
         for machine in &self.machines {
@@ -436,6 +494,76 @@ impl CompositionSchema {
                     .map(|binding| binding.to_field.as_str()),
                 "route binding target",
             )?;
+        }
+
+        for selector in &self.route_target_selectors {
+            if !route_names.contains(selector.route_name.as_str()) {
+                return Err(CompositionSchemaError::UnknownRouteTargetSelectorRoute {
+                    route: selector.route_name.clone(),
+                });
+            }
+            if selector.selector_field.is_empty() {
+                return Err(CompositionSchemaError::InvalidRouteTargetSelector {
+                    route: selector.route_name.clone(),
+                    detail: "selector_field must not be empty".into(),
+                });
+            }
+        }
+
+        if let Some(driver) = &self.driver {
+            if driver.module_path.is_empty() {
+                return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                    composition: self.name.clone(),
+                    detail: "module_path must not be empty".into(),
+                });
+            }
+            if driver.driver_type.is_empty()
+                || driver.store_plan_type.is_empty()
+                || driver.work_type.is_empty()
+                || driver.decision_type.is_empty()
+            {
+                return Err(CompositionSchemaError::InvalidCompositionDriverBinding {
+                    composition: self.name.clone(),
+                    detail: "driver_type, store_plan_type, work_type, and decision_type must not be empty"
+                        .into(),
+                });
+            }
+        }
+
+        let protocol_names = self
+            .handoff_protocols
+            .iter()
+            .map(|protocol| protocol.name.as_str())
+            .collect::<IndexSet<_>>();
+        for plan in &self.transaction_plans {
+            if plan.trigger.is_empty() {
+                return Err(CompositionSchemaError::InvalidTransactionPlan {
+                    plan: plan.name.clone(),
+                    detail: "trigger must not be empty".into(),
+                });
+            }
+            if plan.store_primitive.is_empty() {
+                return Err(CompositionSchemaError::InvalidTransactionPlan {
+                    plan: plan.name.clone(),
+                    detail: "store_primitive must not be empty".into(),
+                });
+            }
+            for route_name in &plan.route_names {
+                if !route_names.contains(route_name.as_str()) {
+                    return Err(CompositionSchemaError::UnknownTransactionPlanRoute {
+                        plan: plan.name.clone(),
+                        route: route_name.clone(),
+                    });
+                }
+            }
+            for protocol_name in &plan.protocol_names {
+                if !protocol_names.contains(protocol_name.as_str()) {
+                    return Err(CompositionSchemaError::UnknownTransactionPlanProtocol {
+                        plan: plan.name.clone(),
+                        protocol: protocol_name.clone(),
+                    });
+                }
+            }
         }
 
         for entry_input in &self.entry_inputs {
@@ -1575,6 +1703,29 @@ pub enum CompositionSchemaError {
         scope: String,
         domain: String,
     },
+    UnknownRouteTargetSelectorRoute {
+        route: String,
+    },
+    InvalidRouteTargetSelector {
+        route: String,
+        detail: String,
+    },
+    InvalidCompositionDriverBinding {
+        composition: String,
+        detail: String,
+    },
+    InvalidTransactionPlan {
+        plan: String,
+        detail: String,
+    },
+    UnknownTransactionPlanRoute {
+        plan: String,
+        route: String,
+    },
+    UnknownTransactionPlanProtocol {
+        plan: String,
+        protocol: String,
+    },
     MissingRoutedEffect {
         from_instance: String,
         effect_variant: String,
@@ -1862,6 +2013,31 @@ impl fmt::Display for CompositionSchemaError {
             Self::InvalidNamedDomainCardinality { scope, domain } => write!(
                 f,
                 "invalid composition {scope} domain cardinality for `{domain}` (must be >= 1)"
+            ),
+            Self::UnknownRouteTargetSelectorRoute { route } => write!(
+                f,
+                "route target selector references unknown route `{route}`"
+            ),
+            Self::InvalidRouteTargetSelector { route, detail } => {
+                write!(f, "invalid route target selector for `{route}`: {detail}")
+            }
+            Self::InvalidCompositionDriverBinding {
+                composition,
+                detail,
+            } => write!(
+                f,
+                "invalid composition driver binding for `{composition}`: {detail}"
+            ),
+            Self::InvalidTransactionPlan { plan, detail } => {
+                write!(f, "invalid transaction plan `{plan}`: {detail}")
+            }
+            Self::UnknownTransactionPlanRoute { plan, route } => write!(
+                f,
+                "transaction plan `{plan}` references unknown route `{route}`"
+            ),
+            Self::UnknownTransactionPlanProtocol { plan, protocol } => write!(
+                f,
+                "transaction plan `{plan}` references unknown protocol `{protocol}`"
             ),
             Self::MissingRoutedEffect {
                 from_instance,

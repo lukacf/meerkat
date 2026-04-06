@@ -220,6 +220,7 @@ pub fn mob_helper_result_anchor_machine() -> MachineSchema {
                 }],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![disposition(
             "HelperResultSnapshotUpdated",
             EffectDisposition::Local,

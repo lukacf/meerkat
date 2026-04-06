@@ -5,25 +5,166 @@
 //! layer owns I/O concerns: watcher channels, timestamps, peer handles, and
 //! snapshot assembly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
+
+use meerkat_core::completion_feed::{
+    CompletionBatch, CompletionEntry, CompletionFeed, CompletionSeq,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
-    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationLifecycleSnapshot,
-    OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
-    WaitAllSatisfied,
+    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationKind,
+    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationResult,
+    OperationSpec, OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
+    WaitAllResult, WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ops_lifecycle_authority::{
     OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
 };
+
+// ---------------------------------------------------------------------------
+// Serializable snapshot for persistence
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of the ops lifecycle registry state.
+///
+/// Captured on terminal transitions for durable persistence. Contains
+/// canonical authority state, operation specs, persisted completion feed
+/// entries, and consumer cursor values.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedOpsSnapshot {
+    /// Epoch identity at capture time.
+    pub epoch_id: meerkat_core::RuntimeEpochId,
+    /// Canonical machine-owned authority state.
+    pub authority_state: crate::ops_lifecycle_authority::RegistryCanonicalState,
+    /// Per-operation specs for shell record reconstruction.
+    pub operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec>,
+    /// Persisted completion feed entries (actual contents, not reconstructed).
+    pub completion_entries: Vec<CompletionEntry>,
+    /// Consumer cursor snapshot at capture time.
+    pub cursors: meerkat_core::EpochCursorSnapshot,
+}
+
+// ---------------------------------------------------------------------------
+// Concrete completion feed buffer
+// ---------------------------------------------------------------------------
+
+/// Shared inner state of the completion feed buffer.
+///
+/// Protected by the registry's `RwLock<ShellState>` for writes, and by its
+/// own `RwLock` for reads by external consumers (agent, wait tool, idle wake).
+#[derive(Debug)]
+struct FeedBufferInner {
+    entries: VecDeque<CompletionEntry>,
+    watermark: CompletionSeq,
+    max_retained: usize,
+}
+
+/// Shared completion feed buffer owned by the runtime registry.
+///
+/// The registry writes entries under its own write lock. External consumers
+/// read through the [`RuntimeCompletionFeed`] handle.
+#[derive(Debug)]
+struct FeedBuffer {
+    inner: RwLock<FeedBufferInner>,
+    /// Atomic mirror of watermark for lock-free `watermark()` reads.
+    watermark_atomic: AtomicU64,
+    /// Notifies all waiters when new entries are appended.
+    notify: tokio::sync::Notify,
+}
+
+impl FeedBuffer {
+    fn new(max_retained: usize) -> Self {
+        Self {
+            inner: RwLock::new(FeedBufferInner {
+                entries: VecDeque::new(),
+                watermark: 0,
+                max_retained,
+            }),
+            watermark_atomic: AtomicU64::new(0),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn push(&self, entry: CompletionEntry) {
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seq = entry.seq;
+        inner.entries.push_back(entry);
+        inner.watermark = seq;
+
+        // Evict oldest if over capacity.
+        while inner.entries.len() > inner.max_retained {
+            inner.entries.pop_front();
+        }
+
+        drop(inner);
+
+        self.watermark_atomic.store(seq, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Read-only handle to the runtime completion feed.
+///
+/// Implements [`CompletionFeed`] for external consumers. Obtained via
+/// [`RuntimeOpsLifecycleRegistry::completion_feed()`].
+#[derive(Debug, Clone)]
+pub struct RuntimeCompletionFeed {
+    buffer: Arc<FeedBuffer>,
+}
+
+impl CompletionFeed for RuntimeCompletionFeed {
+    fn watermark(&self) -> CompletionSeq {
+        self.buffer.watermark_atomic.load(Ordering::Acquire)
+    }
+
+    fn list_since(&self, after_seq: CompletionSeq) -> CompletionBatch {
+        let inner = self
+            .buffer
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries: Vec<CompletionEntry> = inner
+            .entries
+            .iter()
+            .filter(|e| e.seq > after_seq)
+            .cloned()
+            .collect();
+        let watermark = inner.watermark;
+        CompletionBatch { entries, watermark }
+    }
+
+    fn wait_for_advance(
+        &self,
+        after_seq: CompletionSeq,
+    ) -> std::pin::Pin<Box<dyn Future<Output = CompletionSeq> + Send + '_>> {
+        Box::pin(async move {
+            loop {
+                // Register the waiter BEFORE reading the watermark.
+                // notify_waiters() in push() only wakes already-registered
+                // listeners — if we read first and push() lands between the
+                // read and notified().await, the wake is lost.
+                let notified = self.buffer.notify.notified();
+                let current = self.buffer.watermark_atomic.load(Ordering::Acquire);
+                if current > after_seq {
+                    return current;
+                }
+                notified.await;
+            }
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shell-only per-operation record (not part of canonical machine state)
@@ -101,6 +242,18 @@ struct ShellState {
     authority: OpsLifecycleAuthority,
     records: HashMap<OperationId, ShellRecord>,
     pending_wait: Option<PendingWaitState>,
+    /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
+    /// sets pending and fires the Notify so the waker task can inject a
+    /// continuation into the quiescent session.
+    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
+    /// Shared feed buffer for completion events.
+    feed_buffer: Arc<FeedBuffer>,
+    /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
+    persist_tx: Option<crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>>,
+    /// Epoch ID for persistence snapshots.
+    persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
+    /// Shared cursor state for persistence snapshots.
+    persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
 }
 
 impl ShellState {
@@ -109,6 +262,15 @@ impl ShellState {
             authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
             records: HashMap::new(),
             pending_wait: None,
+            detached_wake: None,
+            // Feed buffer is larger than authority retention to absorb bursts.
+            // Entries are only evicted by buffer capacity, not by consumer cursor,
+            // so the buffer must be large enough that consumers drain before
+            // the oldest entry is evicted.
+            feed_buffer: Arc::new(FeedBuffer::new(max_completed.saturating_mul(4).max(1024))),
+            persist_tx: None,
+            persist_epoch_id: None,
+            persist_cursor_state: None,
         }
     }
 
@@ -169,6 +331,16 @@ impl ShellState {
                         shell.mark_completed();
                         self.authority.watchers_drained(operation_id, watcher_count);
                     }
+                    // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
+                    if let Some(ref wake) = self.detached_wake
+                        && self
+                            .authority
+                            .operation(operation_id)
+                            .is_some_and(|op| op.kind() == OperationKind::BackgroundToolOp)
+                    {
+                        wake.pending.store(true, Ordering::Release);
+                        wake.notify.notify_one(); // wake the waker task directly
+                    }
                 }
                 OpsLifecycleEffect::ExposeOperationPeer { .. } => {
                     // Peer handle is stored in shell record by the calling method
@@ -181,6 +353,48 @@ impl ShellState {
                 OpsLifecycleEffect::EvictCompletedRecord { operation_id } => {
                     self.records.remove(operation_id);
                     self.authority.remove_operation(operation_id);
+                }
+                OpsLifecycleEffect::CompletionProduced {
+                    seq,
+                    operation_id,
+                    kind,
+                } => {
+                    // Build a CompletionEntry from authority + shell data and
+                    // push to the shared feed buffer.
+                    let (display_name, terminal_outcome, completed_at_ms) =
+                        if let Some(canonical) = self.authority.operation(operation_id) {
+                            let outcome = canonical.terminal_outcome().cloned().unwrap_or(
+                                OperationTerminalOutcome::Terminated {
+                                    reason: "missing outcome".into(),
+                                },
+                            );
+                            let completed_ms = self.records.get(operation_id).and_then(|r| {
+                                r.completed_at.map(|i| r.epoch_millis_for_instant(i))
+                            });
+                            let name = self
+                                .records
+                                .get(operation_id)
+                                .map(|r| r.spec.display_name.clone())
+                                .unwrap_or_default();
+                            (name, outcome, completed_ms)
+                        } else {
+                            (
+                                String::new(),
+                                OperationTerminalOutcome::Terminated {
+                                    reason: "unknown operation".into(),
+                                },
+                                None,
+                            )
+                        };
+
+                    self.feed_buffer.push(CompletionEntry {
+                        seq: *seq,
+                        operation_id: operation_id.clone(),
+                        kind: *kind,
+                        display_name,
+                        terminal_outcome,
+                        completed_at_ms,
+                    });
                 }
                 OpsLifecycleEffect::SubmitOpEvent { .. } => {
                     // Future: emit observability events. Currently a no-op.
@@ -201,6 +415,49 @@ impl ShellState {
                     }
                 }
             }
+        }
+    }
+
+    /// Queue a persistence snapshot if a persistence channel is wired.
+    ///
+    /// Called after terminal transitions. Captures authority + entries + cursors
+    /// under the write lock (caller already holds it) and queues to the channel.
+    fn maybe_persist(&self) {
+        let (tx, epoch_id, cursor_state) = match (
+            &self.persist_tx,
+            &self.persist_epoch_id,
+            &self.persist_cursor_state,
+        ) {
+            (Some(tx), Some(epoch_id), Some(cs)) => (tx, epoch_id, cs),
+            _ => return,
+        };
+
+        let operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec> =
+            self.records
+                .iter()
+                .map(|(id, record)| (id.clone(), record.spec.clone()))
+                .collect();
+
+        let completion_entries = {
+            let inner = self
+                .feed_buffer
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.entries.iter().cloned().collect()
+        };
+
+        let snapshot = PersistedOpsSnapshot {
+            epoch_id: epoch_id.clone(),
+            authority_state: self.authority.canonical_state().clone(),
+            operation_specs,
+            completion_entries,
+            cursors: cursor_state.snapshot(),
+        };
+
+        // Non-blocking send — bounded-loss is the acknowledged contract.
+        if tx.try_send(snapshot).is_err() {
+            tracing::warn!("ops lifecycle persistence channel full or closed; snapshot dropped");
         }
     }
 
@@ -290,6 +547,141 @@ impl RuntimeOpsLifecycleRegistry {
         Self {
             state: RwLock::new(ShellState::new(config.max_completed, config.max_concurrent)),
         }
+    }
+
+    /// Wire a persistence channel for durable snapshot writes.
+    ///
+    /// After this call, terminal transitions (complete/fail/cancel/abort)
+    /// capture a snapshot and queue it to the channel. A dedicated
+    /// persistence task should drain the channel and write to the store.
+    pub fn set_persistence_channel(
+        &self,
+        tx: crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        cursor_state: Arc<meerkat_core::EpochCursorState>,
+    ) {
+        if let Ok(mut state) = self.state.write() {
+            state.persist_tx = Some(tx);
+            state.persist_epoch_id = Some(epoch_id);
+            state.persist_cursor_state = Some(cursor_state);
+        }
+    }
+
+    /// Wire the detached-wake state so that `execute_effects` arms pending
+    /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
+    pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
+        if let Ok(mut state) = self.state.write() {
+            state.detached_wake = Some(wake);
+        }
+    }
+
+    /// Recover from a persisted snapshot.
+    ///
+    /// Rebuilds the authority (stripping non-terminal ops), creates fresh
+    /// shell records from specs, and seeds the feed buffer with persisted
+    /// completion entries.
+    pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Self {
+        let authority = OpsLifecycleAuthority::from_recovered(snapshot.authority_state);
+
+        // Seed the feed buffer from persisted entries
+        let max_retained = authority
+            .canonical_state()
+            .max_completed()
+            .max(256)
+            .saturating_mul(4)
+            .max(1024);
+        let feed_buffer = Arc::new(FeedBuffer::new(max_retained));
+        for entry in &snapshot.completion_entries {
+            feed_buffer.push(entry.clone());
+        }
+
+        // Rebuild shell records from specs (fresh timestamps, no watchers)
+        let mut records = HashMap::new();
+        for (op_id, spec) in &snapshot.operation_specs {
+            // Only rebuild records for operations still in the authority
+            if authority.operation(op_id).is_some() {
+                records.insert(
+                    op_id.clone(),
+                    ShellRecord {
+                        spec: spec.clone(),
+                        peer_handle: None,
+                        watchers: Vec::new(),
+                        created_at: Instant::now(),
+                        started_at: None,
+                        completed_at: None,
+                        created_at_wall: SystemTime::now(),
+                    },
+                );
+            }
+        }
+
+        let state = ShellState {
+            authority,
+            records,
+            pending_wait: None,
+            detached_wake: None,
+            feed_buffer,
+            persist_tx: None,
+            persist_epoch_id: None,
+            persist_cursor_state: None,
+        };
+
+        Self {
+            state: RwLock::new(state),
+        }
+    }
+
+    /// Capture a serializable snapshot of the current state for persistence.
+    ///
+    /// Includes authority state, operation specs, completion entries, and
+    /// cursor values. Cursor values may be stale relative to the agent's
+    /// true position (monotonic staleness, not atomicity).
+    pub fn capture_persistence_snapshot(
+        &self,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        cursor_state: &meerkat_core::EpochCursorState,
+    ) -> PersistedOpsSnapshot {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec> =
+            state
+                .records
+                .iter()
+                .map(|(id, record)| (id.clone(), record.spec.clone()))
+                .collect();
+
+        let completion_entries = {
+            let inner = state
+                .feed_buffer
+                .inner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.entries.iter().cloned().collect()
+        };
+
+        let cursors = cursor_state.snapshot();
+
+        PersistedOpsSnapshot {
+            epoch_id,
+            authority_state: state.authority.canonical_state().clone(),
+            operation_specs,
+            completion_entries,
+            cursors,
+        }
+    }
+
+    /// Return a read handle to the completion feed.
+    pub fn completion_feed_handle(&self) -> Arc<dyn CompletionFeed> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::new(RuntimeCompletionFeed {
+            buffer: Arc::clone(&state.feed_buffer),
+        })
     }
 
     fn read_state(&self) -> Result<RwLockReadGuard<'_, ShellState>, OpsLifecycleError> {
@@ -533,6 +925,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Completed(result));
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -549,6 +942,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -570,6 +964,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Aborted { reason });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -590,6 +985,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .patch_terminal_outcome(id, OperationTerminalOutcome::Cancelled { reason });
 
         state.execute_effects(&transition.effects);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -675,6 +1071,10 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         Ok(collected)
+    }
+
+    fn completion_feed(&self) -> Option<Arc<dyn CompletionFeed>> {
+        Some(self.completion_feed_handle())
     }
 
     fn wait_all(

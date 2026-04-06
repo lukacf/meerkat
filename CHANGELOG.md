@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Typed `handling_mode` override on `PeerInput` for actionable peer conventions (Message, Request). ResponseProgress and ResponseTerminal are validated to reject the field at runtime admission. Built-in comms bridges are unchanged (default to kind-based policy).
+- `handling_mode` field on MCP `meerkat_comms_send` tool for parity with RPC/REST.
+
 ## [0.5.0] - 2026-03-26
 
 Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime ownership around generated authorities and runtime-backed session services, removes a wide set of legacy public-surface residue, brings persistent session and mob recovery much closer to truthful replay, and adds a realm blob store for image content.

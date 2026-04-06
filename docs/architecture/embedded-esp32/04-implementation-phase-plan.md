@@ -8,7 +8,7 @@ This file derives the implementation order from the traced requirements, not fro
 | --- | --- | --- | --- | --- |
 | Phase 0 | Close single-node target contracts and Meerkat-model assumptions on real hardware before architecture changes commit the project to bad assumptions. | `REQ-001`, `REQ-002`, `REQ-003`, `REQ-013`, `REQ-014`, `CHOKE-001` | Hardware, credentials, and internal probe harness can be executed | All Phase-0-owned High-criticality rows are closed |
 | Phase 1 | Perform architecture prep and seam extraction without introducing embedded-specific shadow logic. | `REQ-004`, `REQ-005`, `REQ-006`, `REQ-015`, `CHOKE-002` | Phase 0 passed | Shared transport, persistent-service decoupling, host-tool glue, and real minimal-profile feature gating exist and are test-backed |
-| Phase 2 | Assemble the real embedded surface and ESP backend through the canonical runtime-backed path. | `REQ-007`, `REQ-008`, `REQ-009`, `CHOKE-003` | Phase 1 passed | Embedded runtime path, ESP backend, and embedded profile are all green |
+| Phase 2 | Assemble the real embedded surface and ESP backend through the canonical runtime-backed path, targeting ESP32-P4+C6 as the primary production board. | `REQ-007`, `REQ-008`, `REQ-009`, `REQ-016`, `CHOKE-003` | Phase 1 passed and P4+C6 boards available | Embedded runtime path, ESP backend, embedded profile, and P4+C6 re-validation are all green |
 | Phase 3 | Deliver authoritative user-facing examples that are also full E2E smoke tests, including swarm viability closure on the real embedded stack. | `REQ-010`, `REQ-011`, `E2E-001`, `E2E-002`, `E2E-003`, `E2E-004`, `E2E-005`, `CHOKE-004`, `CHOKE-005` | Phase 2 passed | Examples 036 and 037 pass host-sim and hardware smoke, and the swarm rows are closed |
 | Final closure | Remove all provisional state from the required scope and freeze artifacts. | `REQ-012` plus every remaining `UNEXECUTED` row | Phase 3 passed | Full RTM and matrix are closed; freeze checklist passes |
 
@@ -112,6 +112,7 @@ Fix the accidental coupling that blocks embedded support while keeping the exist
 - Shared provider transport seam in `meerkat-client`
 - Real persistent-session orchestration decoupled from accidental target/backend coupling
 - Target-aware async trait and feature-graph cleanup where session or store seams currently assume desktop-style `Send` or `redb` ownership
+- Owning-crate ESP wake and completion semantics in `meerkat-runtime`, including the real `espidf` wake-delivery behavior proven in Phase 0
 - Shared host-tool callback glue, reusable outside the browser runtime
 - Owning-crate runtime shaping for ESP-target comms wait or completion behavior, rather than a probe-only drain shim
 - Hooks, tools, and skills made genuinely optional in the facade and transitive feature graph for minimal and embedded profiles
@@ -123,6 +124,7 @@ Fix the accidental coupling that blocks embedded support while keeping the exist
 - `PersistentSessionService` can be used without implying `redb` as the only durable story, and the same service can compile for the ESP target with non-desktop backend choices.
 - Host-tool callback behavior is preserved outside browser-only code.
 - A minimal embedded-facing Meerkat build can compile without hooks, tools, and skills unless explicitly enabled.
+- The owning runtime path preserves the Phase 0 first-turn fix on `espidf` without relying on probe-local wake shims or validator-only sequencing hacks.
 - Architecture review shows no shadow loops, no shadow stores, and no duplicated provider logic.
 
 ### Real-entrypoint proof
@@ -163,18 +165,23 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - `ASSUMP-005`
 - `ASSUMP-006`
 - `ASSUMP-009`
+- `ASSUMP-013`
+- `REQ-016`
 
 ### Required outputs
 
+- P4+C6 re-validation report (C6 Wi-Fi path, Tokio re-probe, memory re-measure) before hardware smoke begins
 - `meerkat-embedded-runtime` for any real shared surface glue extracted in Phase 1
 - `meerkat-esp-runtime`
 - Embedded profile definitions and deterministic unsupported-capability behavior
 - ESP storage, bootstrap, transport, and host-tool bindings behind existing seams
 - Explicit ESP baseline policy for PSRAM, flash geometry and partition sizing, pthread stack sizing, and watchdog-compatible scheduling
 - Explicit embedded policy for when the Meerkat lane may stream provider responses versus when the embedded profile must stay on the current non-streaming ESP conversation shape
+- Explicit embedded scripting-tool policy using the shared host-tool callback contract, with MicroPython treated as a proven on-device tool pattern rather than a separate runtime
 
 ### Behavioral done-when
 
+- The P4+C6 re-validation has passed: C6 Wi-Fi path works, Tokio runtime behavior is characterized on RISC-V, and the memory envelope is measured. `ASSUMP-013` is `LIVE_VALIDATED`.
 - The embedded surface bootstraps through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
 - The ESP backend satisfies the surface through transport, persistence, and host-tool bindings instead of direct semantic shortcuts.
 - The embedded profile is explicit and test-backed.
@@ -183,7 +190,9 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - The embedded baseline accounts explicitly for PSRAM-backed heap, pthread stack policy, and watchdog-friendly execution rather than leaving them as probe-only tweaks.
 - The embedded baseline also owns the real board flash-size and partition-layout policy instead of inheriting a too-small default image envelope from generic ESP templates.
 - The embedded runtime path preserves the owning `meerkat-runtime` comms-drain behavior proven in Phase 0 instead of reintroducing a surface-local or probe-local drain implementation.
+- The embedded runtime path also preserves the owning `RuntimeSessionAdapter` wake behavior proven on ESP in Phase 0 instead of reintroducing opportunistic wake delivery that can lose the first peer-triggered turn.
 - The embedded profile does not silently assume ESP-side Meerkat streaming is safe just because direct provider streaming was proven separately in Phase 0 or host-side Meerkat streaming later passed in the split rerun.
+- The embedded profile explicitly distinguishes memory-backed persistent-session orchestration, which is proven, from restart durability, which is not yet closed.
 - Example 036 explicitly tests that peer-chat turns continue to route through the standard `send` tool path under the recommended prompts, so a missed tool call is caught as a failing runtime behavior rather than disappearing into a hung smoke run.
 - Example 036 also exercises the host-side persistent-session path, not just the device-side one, because Phase 0 proved that both sides can stay on the standard runtime-backed path in the bounded peer-chat baseline.
 
@@ -240,11 +249,13 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 ### Behavioral done-when
 
 - Example 036 proves the recommended single-node persistent event-agent pattern.
+- Example 036 also proves repeated embedded scripting-tool calls over the standard host-tool callback contract as part of the recommended single-node pattern.
 - Example 037 proves the recommended multi-node triangulation and self-organization pattern through either metric convergence or the predeclared topology-only fallback.
 - Example 036 documents or demonstrates the best available low-friction redeploy workflow for the chosen stack.
 - Example 037 produces a user-facing topology artifact from the same run data used for validation.
 - Both examples follow the repo-local rebuild pattern and the self-contained real-surface pattern.
 - Both examples run in build-only, host-sim, and hardware smoke modes.
+- Example 036 smoke explicitly checks repeated tool completions, transcript continuity, clean `DISMISS` teardown, and no first-turn stall after reset.
 - If `ASSUMP-010` is rejected on the real Phase 3 stack, the program records a required-scope stop for Example 037 instead of inventing a replacement multi-node pattern.
 
 ### Real-entrypoint proof

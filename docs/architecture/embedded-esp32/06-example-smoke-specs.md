@@ -111,7 +111,7 @@ The recommended single-node embedded pattern: a persistent event-driven field ag
 
 ### Purpose
 
-The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes, let them discover each other, exchange local telemetry such as Wi-Fi signal observations, self-organize into a relative-position estimate when the telemetry supports it, and otherwise fall back to a confidence-scored topology or adjacency artifact that is still useful to an operator.
+The recommended multi-node embedded pattern: flash a small set of ESP32 boards, using P4+C6 as the primary target and S3 as fallback, let them discover each other, exchange local telemetry such as Wi-Fi signal observations, self-organize into a relative-position estimate when the telemetry supports it, and otherwise fall back to a confidence-scored topology or adjacency artifact that is still useful to an operator.
 
 ### Inherited patterns
 

@@ -208,7 +208,7 @@ Use the standard handoff format plus a “phase-1 seam map” that names the new
 
 ### Goal
 
-Add the embedded surface and ESP backend through the canonical runtime-backed path.
+Add the embedded surface and ESP backend through the canonical runtime-backed path, targeting ESP32-P4+C6 as the primary production board.
 
 ### Required inputs
 
@@ -216,30 +216,34 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 - Shared transport seam
 - Shared host-tool glue
 - Persistent-session decoupling
+- ESP32-P4+C6 boards available
 
 ### Exact tasks
 
-1. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell, but only with real shared surface glue extracted in Phase 1.
-2. Add `meerkat-esp-runtime` as the ESP binding crate.
-3. Wire the embedded surface through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
-4. Implement the ESP transport against the shared transport seam, including the chosen TLS backend and sync/async bridge.
-5. Implement storage and runtime persistence through the existing store traits.
-6. Bind host-tool callbacks to the shared callback contract.
-7. Define the embedded profile and its deterministic unsupported-capability behavior.
-8. Add host-sim and unit tests before hardware smoke.
+1. Run P4+C6 re-validation: boot, C6 Wi-Fi, time sync, provider HTTPS, Tokio runtime re-probe, memory envelope measurement, and `ring`/`rustls` compilation check. Update `ASSUMP-013` with results.
+2. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell, but only with real shared surface glue extracted in Phase 1.
+3. Add `meerkat-esp-runtime` as the ESP binding crate, targeting P4+C6 as primary and S3 as secondary.
+4. Wire the embedded surface through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
+5. Implement the ESP transport against the shared transport seam, including the chosen TLS backend and sync/async bridge. On P4, evaluate whether `rustls` can be used directly instead of the mbedtls path required on S3.
+6. Implement storage and runtime persistence through the existing store traits.
+7. Bind host-tool callbacks to the shared callback contract.
+8. Define the embedded profile and its deterministic unsupported-capability behavior.
+9. Add host-sim and unit tests before hardware smoke.
 
 ### TDD order
 
-1. Write failing embedded-surface API tests on host-sim.
-2. Make the embedded surface route through the canonical factory/runtime path.
-3. Write failing ESP transport and stream-bridge tests and get them green.
-4. Write failing persistence and recovery tests and get them green in host-sim.
-5. Write failing host-tool tests on the embedded surface and get them green.
-6. Add unsupported-capability tests and get them green.
-7. Run host-sim smoke through the single-node public example.
+1. Run P4+C6 re-validation and get `ASSUMP-013` to `LIVE_VALIDATED` before proceeding.
+2. Write failing embedded-surface API tests on host-sim.
+3. Make the embedded surface route through the canonical factory/runtime path.
+4. Write failing ESP transport and stream-bridge tests and get them green.
+5. Write failing persistence and recovery tests and get them green in host-sim.
+6. Write failing host-tool tests on the embedded surface and get them green.
+7. Add unsupported-capability tests and get them green.
+8. Run host-sim smoke through the single-node public example.
 
 ### Verification commands
 
+- `./scripts/live_smoke/esp32-contract-probe/run --mode p4-revalidation --hardware`
 - `cargo test -p meerkat-embedded-runtime -- --nocapture`
 - `cargo test -p meerkat-esp-runtime -- --nocapture`
 - `./examples/036-esp32-event-agent-sh/examples.sh --mode host-sim`
@@ -247,6 +251,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 ### Evidence bundle requirements
 
+- P4+C6 re-validation report with comparative S3 vs P4 metrics
 - Embedded runtime test logs
 - ESP backend test logs
 - Host-sim smoke artifacts
@@ -254,6 +259,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 ### Gate blockers
 
+- P4+C6 re-validation not yet passed (`ASSUMP-013` still open)
 - Embedded surface bypasses the runtime-backed path
 - ESP backend talks directly to providers outside the shared transport seam
 - Unsupported capabilities disappear silently instead of failing deterministically
@@ -261,7 +267,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 ### Reviewer instructions
 
 - Architecture reviewer: verify `INV-001`, `INV-002`, and `CONTRACT-002`.
-- Platform reviewer: verify the ESP backend lives behind transport and store seams.
+- Platform reviewer: verify the P4+C6 re-validation passed and the ESP backend lives behind transport and store seams. Confirm S3 remains a buildable secondary target.
 - Verification reviewer: verify host-sim coverage arrives before hardware smoke.
 
 ### Handoff

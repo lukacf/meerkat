@@ -61,6 +61,12 @@ The strongest proof artifacts from the successful Phase 0 runs are:
 - [artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/serial.log](../../../artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/serial.log)
 - [artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/host.log](../../../artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/host.log)
 - [artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/summary.json](../../../artifacts/embedded-esp32/phase-0/comms-orchestrator/20260404-233011/summary.json)
+- [artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/serial.log](../../../artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/serial.log)
+- [artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/host.log](../../../artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/host.log)
+- [artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/summary.json](../../../artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/summary.json)
+- [artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/serial.log](../../../artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/serial.log)
+- [artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/host.log](../../../artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/host.log)
+- [artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/summary.json](../../../artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/summary.json)
 
 The single-node harness wrapper did not persist `summary.json` for the first passing run before the monitor process was terminated, so that serial transcript remains the source of truth for the original closure. The later comms-extension run did persist a full summary bundle.
 
@@ -145,6 +151,36 @@ The earlier owning-runtime long-run comms artifact at [20260404-234826](../../..
 - final internal heap after pass: `110739`
 - final PSRAM-capable heap after pass: `8165248`
 
+### Embedded MicroPython tool rerun
+
+Phase 0 was later extended to prove an on-device scripting tool through the existing host-tool callback path rather than through a host-side escape hatch.
+
+The strongest MicroPython validation artifact is [micropython-serial-validate/20260406-132019](../../../artifacts/embedded-esp32/phase-0/micropython-serial-validate/20260406-132019/summary.json). That run proved:
+
+- the ESP firmware initialized embedded MicroPython on-device
+- the ESP-side Meerkat called `micropython_exec` in response to host-side instructions over normal Meerkat comms
+- repeated `MKT:MICROPY:REQUESTED` and `MKT:MICROPY:COMPLETED is_error=false` markers were emitted
+- the host still closed with `MKT:HOST_MEERKAT:PASS`
+- the device still closed with `MKT:COMMS:PASS`
+
+This matters because it proves the existing host-tool callback contract is strong enough to carry non-trivial embedded execution tools without inventing a second scripting runtime surface.
+
+One important nuance from the validation logs: bare expressions such as `2+3` do not automatically produce a textual result unless printed or explicitly captured. Printed forms like `print(len('zap'))` are the correct stable smoke shape for repeated scripted-tool validation.
+
+### Rebasing proof on top of `main`
+
+Phase 0 eventually had to survive a rebase onto the live `main` branch. The strongest rebased proof artifact is [rebase-proof-fullsync-20260406-150254](../../../artifacts/embedded-esp32/phase-0/rebase-proof-fullsync-20260406-150254/summary.json).
+
+That run proved all of the following simultaneously on the rebased tree:
+
+- rebased ESP firmware booted, reached Wi-Fi, time sync, and `MKT:COMMS:READY`
+- rebased Mac-side Meerkat connected over the normal comms path
+- the ESP executed repeated on-device `micropython_exec` calls initiated by host-side instructions
+- the same run captured both `host_pass: true` and `device_comms_pass: true`
+- `micropy_calls` reached `18`
+
+This is the strongest current proof because it closes the “works only on the spike branch” objection. The current rebased branch carries the same core runtime and tool-path behavior on real hardware.
+
 Phase 0 also reran the same repaired image from a fresh board reset and got a second clean pass at [manual-comms-verify-20260405-083253](../../../artifacts/embedded-esp32/phase-0/manual-comms-verify-20260405-083253/summary.json). That rerun is important because it is a reproducibility check, not just a single golden trace:
 
 - host transcript pass at `17` transcript lines
@@ -166,6 +202,8 @@ These two runs are important because they validate the same real board image aft
 - `MKT:COMMS:PASS ...`
 - live LCD transcript rendering on the board
 - clean device shutdown ending in `main_task: Returned from app_main()`
+
+The first-turn-freeze fix itself belongs in the owning runtime path. On `espidf`, changing `RuntimeSessionAdapter` wake delivery from opportunistic `try_send()` to awaited `send()` removed the intermittent state where the first peer message showed on the device but the runtime never progressed into the provider turn. That fix survived the later MicroPython validation and the rebased full proof.
 
 The later instrumented run also emitted `MKT:RUNTIME_LOOP:*` markers that proved the owning runtime loop received the wake signal, batched inputs, started the run, and entered `executor.apply(...)` on-device instead of stalling after the first inbound peer message.
 

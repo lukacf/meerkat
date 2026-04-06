@@ -1038,7 +1038,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
     let send_after_respawn_err = rpc_call(
         &mut surface,
         11,
-        "mob/send",
+        "mob/member_send",
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",

@@ -672,7 +672,7 @@ pub fn spawn_event_logger(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builtin-tools"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

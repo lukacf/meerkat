@@ -3,6 +3,7 @@
 //! Implements the LlmClient trait for Anthropic's Claude API.
 
 use crate::error::LlmError;
+use crate::transport::{ReqwestTransportClient, TransportClient, TransportRequest};
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -10,6 +11,7 @@ use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default connect timeout
@@ -26,7 +28,7 @@ const SSE_BUFFER_CAPACITY: usize = 4096;
 pub struct AnthropicClient {
     api_key: String,
     base_url: String,
-    http: reqwest::Client,
+    transport: Arc<dyn TransportClient>,
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
@@ -82,6 +84,31 @@ impl AnthropicClientBuilder {
         let connect_timeout = self.connect_timeout;
         let request_timeout = self.request_timeout;
         let pool_idle_timeout = self.pool_idle_timeout;
+        let transport = AnthropicClient::build_transport(
+            &base_url,
+            connect_timeout,
+            request_timeout,
+            pool_idle_timeout,
+        )?;
+
+        Ok(AnthropicClient {
+            api_key: self.api_key,
+            base_url,
+            transport,
+            connect_timeout,
+            request_timeout,
+            pool_idle_timeout,
+        })
+    }
+}
+
+impl AnthropicClient {
+    fn build_transport(
+        base_url: &str,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        pool_idle_timeout: Duration,
+    ) -> Result<Arc<dyn TransportClient>, LlmError> {
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
             .connect_timeout(connect_timeout)
@@ -91,20 +118,10 @@ impl AnthropicClientBuilder {
             .tcp_keepalive(Duration::from_secs(30));
         #[cfg(target_arch = "wasm32")]
         let builder = reqwest::Client::builder();
-        let http = crate::http::build_http_client_for_base_url(builder, &base_url)?;
-
-        Ok(AnthropicClient {
-            api_key: self.api_key,
-            base_url,
-            http,
-            connect_timeout,
-            request_timeout,
-            pool_idle_timeout,
-        })
+        let http = crate::http::build_http_client_for_base_url(builder, base_url)?;
+        Ok(Arc::new(ReqwestTransportClient::new(http)))
     }
-}
 
-impl AnthropicClient {
     /// Create a new Anthropic client with the given API key and default HTTP settings
     pub fn new(api_key: String) -> Result<Self, LlmError> {
         AnthropicClientBuilder::new(api_key).build()
@@ -125,20 +142,32 @@ impl AnthropicClient {
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let builder = reqwest::Client::builder()
-            .connect_timeout(self.connect_timeout)
-            .timeout(self.request_timeout)
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .pool_max_idle_per_host(4)
-            .tcp_keepalive(Duration::from_secs(30));
-        #[cfg(target_arch = "wasm32")]
-        let builder = reqwest::Client::builder();
-        if let Ok(http) = crate::http::build_http_client_for_base_url(builder, &url) {
-            self.http = http;
+        if let Ok(transport) = Self::build_transport(
+            &url,
+            self.connect_timeout,
+            self.request_timeout,
+            self.pool_idle_timeout,
+        ) {
+            self.transport = transport;
         }
         self.base_url = url;
         self
+    }
+
+    #[cfg(test)]
+    fn with_transport_for_test(
+        api_key: String,
+        base_url: String,
+        transport: Arc<dyn TransportClient>,
+    ) -> Self {
+        Self {
+            api_key,
+            base_url,
+            transport,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
+        }
     }
 
     /// Build request body for Anthropic API
@@ -522,6 +551,69 @@ impl AnthropicClient {
             _ => StopReason::EndTurn,
         }
     }
+
+    fn collect_beta_headers(request: &LlmRequest, body: &Value) -> Vec<&'static str> {
+        let mut betas = Vec::new();
+
+        let thinking_type = body
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(|t| t.as_str());
+        if thinking_type == Some("enabled") {
+            betas.push("interleaved-thinking-2025-05-14");
+        }
+
+        if body
+            .get("output_config")
+            .and_then(|c| c.get("format"))
+            .is_some()
+        {
+            betas.push("structured-outputs-2025-11-13");
+        }
+
+        if let Some(ref params) = request.provider_params
+            && params.get("context").and_then(|v| v.as_str()) == Some("1m")
+        {
+            betas.push("context-1m-2025-08-07");
+        }
+
+        if body.get("context_management").is_some() {
+            betas.push("compact-2026-01-12");
+        }
+
+        betas
+    }
+
+    fn build_transport_request(
+        &self,
+        request: &LlmRequest,
+        body: &Value,
+    ) -> Result<TransportRequest, LlmError> {
+        let body_bytes = serde_json::to_vec(body).map_err(|err| LlmError::InvalidRequest {
+            message: format!("failed to encode Anthropic request body: {err}"),
+        })?;
+
+        let mut transport_request = TransportRequest::new(
+            reqwest::Method::POST,
+            format!("{}/v1/messages", self.base_url),
+        )
+        .header("x-api-key", self.api_key.clone())
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json");
+
+        let betas = Self::collect_beta_headers(request, body);
+        if !betas.is_empty() {
+            transport_request = transport_request.header("anthropic-beta", betas.join(","));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            transport_request =
+                transport_request.header("anthropic-dangerous-direct-browser-access", "true");
+        }
+
+        Ok(transport_request.body(body_bytes))
+    }
 }
 
 /// Recursively add `additionalProperties: false` to all object schemas that
@@ -580,67 +672,20 @@ impl LlmClient for AnthropicClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
-
-            // Collect beta headers based on request features
-            let mut betas = Vec::new();
-
-            // Legacy thinking (type: "enabled") requires interleaved-thinking header
-            // Adaptive thinking (Opus 4.6) does NOT need this header
-            let thinking_type = body.get("thinking")
-                .and_then(|t| t.get("type"))
-                .and_then(|t| t.as_str());
-            if thinking_type == Some("enabled") {
-                betas.push("interleaved-thinking-2025-05-14");
-            }
-
-            // Structured output format requires beta header
-            if body.get("output_config").and_then(|c| c.get("format")).is_some() {
-                betas.push("structured-outputs-2025-11-13");
-            }
-
-            // 1M context window (opt-in via provider_params)
-            if let Some(ref params) = request.provider_params
-                && params.get("context").and_then(|v| v.as_str()) == Some("1m")
-            {
-                betas.push("context-1m-2025-08-07");
-            }
-
-            // Compaction API (beta)
-            if body.get("context_management").is_some() {
-                betas.push("compact-2026-01-12");
-            }
-
-            let mut req = self.http
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json");
-
-            if !betas.is_empty() {
-                req = req.header("anthropic-beta", betas.join(","));
-            }
-
-            // On wasm32 (browser), Anthropic requires this header for CORS
-            #[cfg(target_arch = "wasm32")]
-            {
-                req = req.header("anthropic-dangerous-direct-browser-access", "true");
-            }
-
-            let response = req
-                .json(&body)
-                .send()
+            let transport_request = self.build_transport_request(request, &body)?;
+            let response = self
+                .transport
+                .execute(transport_request)
                 .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                .map_err(LlmError::from_transport_error)?;
 
-            let status_code = response.status().as_u16();
+            let status_code = response.status;
             let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
+                Ok(response.into_body())
             } else {
-                let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
+                let headers = response.headers.clone();
+                let text = response.into_text().await.unwrap_or_default();
+                Err(LlmError::from_transport_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
@@ -897,7 +942,7 @@ impl LlmClient for AnthropicClient {
             }
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                let chunk = chunk.map_err(LlmError::from_transport_error)?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(newline_pos) = buffer.find('\n') {
@@ -1004,10 +1049,59 @@ struct AnthropicUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::transport::{TransportHeaders, TransportResponse};
+    use crate::transport::{
+        TransportByteStream, TransportClient, TransportError, TransportHeaders, TransportRequest,
+        TransportResponse,
+    };
+    use futures::StreamExt;
     use meerkat_core::{
         AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
     };
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct FakeTransport {
+        requests: Arc<Mutex<Vec<TransportRequest>>>,
+        responses: Arc<Mutex<VecDeque<Result<TransportResponse, TransportError>>>>,
+    }
+
+    impl FakeTransport {
+        fn new(responses: Vec<Result<TransportResponse, TransportError>>) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(responses.into())),
+            }
+        }
+
+        fn take_requests(&self) -> Vec<TransportRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl TransportClient for FakeTransport {
+        async fn execute(
+            &self,
+            request: TransportRequest,
+        ) -> Result<TransportResponse, TransportError> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fake transport response missing")
+        }
+    }
+
+    fn transport_stream(chunks: Vec<Result<&'static str, TransportError>>) -> TransportByteStream {
+        Box::pin(futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.map(|value| value.as_bytes().to_vec())),
+        ))
+    }
 
     // =========================================================================
     // Thinking block SSE parsing tests (spec section 3.5)
@@ -1100,6 +1194,106 @@ mod tests {
         assert!(text.contains("\"type\":\"content_block_delta\""));
         assert!(text.contains("Hello from Anthropic"));
         assert!(text.contains("\"stop_reason\":\"end_turn\""));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_anthropic_streams_and_captures_request_shape() {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            transport_stream(vec![
+                Ok(
+                    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n",
+                ),
+                Ok(
+                    "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n",
+                ),
+                Ok(
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello fr",
+                ),
+                Ok("om Anthropic\"}}\n"),
+                Ok(
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n",
+                ),
+            ]),
+        ))]));
+        let client = AnthropicClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://anthropic.example".to_string(),
+            fake_transport.clone(),
+        );
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::TextDelta { delta, .. }) if delta == "Hello from Anthropic"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn
+                }
+            })
+        )));
+
+        let requests = fake_transport.take_requests();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0];
+        assert_eq!(sent.url, "https://anthropic.example/v1/messages");
+        assert_eq!(sent.headers.get("x-api-key"), Some("test-key"));
+        assert_eq!(sent.headers.get("anthropic-version"), Some("2023-06-01"));
+        assert_eq!(sent.headers.get("content-type"), Some("application/json"));
+        let body: Value =
+            serde_json::from_slice(&sent.body).expect("anthropic body should be JSON");
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_anthropic_maps_non_2xx_response() {
+        let mut headers = TransportHeaders::default();
+        headers.insert("retry-after", "3");
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            429,
+            headers,
+            transport_stream(vec![Ok("rate limited")]),
+        ))]));
+        let client = AnthropicClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://anthropic.example".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "claude-sonnet-4-20250514",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let first = client
+            .stream(&request)
+            .next()
+            .await
+            .expect("expected first stream item")
+            .expect("transport failures should be normalized into Done events");
+
+        assert!(matches!(
+            first,
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::RateLimited {
+                        retry_after_ms: Some(3000)
+                    }
+                }
+            }
+        ));
     }
 
     // =========================================================================

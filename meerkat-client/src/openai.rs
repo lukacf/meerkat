@@ -5,7 +5,7 @@
 
 use crate::BlockAssembler;
 use crate::error::LlmError;
-use crate::transport::{ReqwestTransportClient, TransportClient, TransportError, TransportRequest};
+use crate::transport::{ReqwestTransportClient, TransportClient, TransportRequest};
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -334,14 +334,6 @@ impl OpenAiClient {
         .header("Content-Type", "application/json")
         .body(body))
     }
-
-    fn map_transport_error(error: TransportError) -> LlmError {
-        match error {
-            TransportError::Timeout { duration_ms } => LlmError::NetworkTimeout { duration_ms },
-            TransportError::ConnectionReset => LlmError::ConnectionReset,
-            TransportError::Other { message } => LlmError::Unknown { message },
-        }
-    }
 }
 
 /// OpenAI strict JSON schema mode requires `additionalProperties: false` on
@@ -385,7 +377,7 @@ impl LlmClient for OpenAiClient {
                 .transport
                 .execute(transport_request)
                 .await
-                .map_err(Self::map_transport_error)?;
+                .map_err(LlmError::from_transport_error)?;
 
             let status_code = response.status;
             let stream_result = if (200..=299).contains(&status_code) {
@@ -405,7 +397,7 @@ impl LlmClient for OpenAiClient {
             let mut done_emitted = false;
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(Self::map_transport_error)?;
+                let chunk = chunk.map_err(LlmError::from_transport_error)?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(newline_pos) = buffer.find('\n') {

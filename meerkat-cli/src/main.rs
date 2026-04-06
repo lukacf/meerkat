@@ -2548,6 +2548,27 @@ fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
     meerkat::surface::resolve_keep_alive(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
+fn resolve_session_comms_name(
+    session_id: &SessionId,
+    keep_alive: bool,
+    explicit_name: Option<String>,
+    disabled: bool,
+) -> Option<String> {
+    #[cfg(feature = "comms")]
+    {
+        if disabled {
+            return None;
+        }
+        explicit_name.or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
+    }
+
+    #[cfg(not(feature = "comms"))]
+    {
+        let _ = (session_id, keep_alive, explicit_name, disabled);
+        None
+    }
+}
+
 /// Load MCP tools as an external tool dispatcher for session build options.
 async fn load_mcp_external_tools(
     scope: &RuntimeScope,
@@ -3253,17 +3274,13 @@ async fn run_agent(
         session_id: session_id.to_string(),
     }];
 
-    // Resolve comms_name for the factory.
-    // When keep_alive is requested and no explicit name is provided, derive one
-    // from the session_id so the factory's comms_name requirement is satisfied.
-    let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
-        comms_overrides
-            .name
-            .clone()
-            .or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
-    } else {
-        None
-    };
+    // Resolve comms_name for the factory
+    let comms_name = resolve_session_comms_name(
+        &session_id,
+        keep_alive,
+        comms_overrides.name.clone(),
+        comms_overrides.disabled,
+    );
 
     // Build factory with appropriate flags
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
@@ -3770,9 +3787,14 @@ async fn resume_session_with_llm_override(
         .unwrap_or_default();
     let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
     let keep_alive = resolve_keep_alive(keep_alive_requested)?;
-    let comms_name = stored_metadata
-        .as_ref()
-        .and_then(|meta| meta.comms_name.clone());
+    let comms_name = resolve_session_comms_name(
+        &session_id,
+        keep_alive,
+        stored_metadata
+            .as_ref()
+            .and_then(|meta| meta.comms_name.clone()),
+        false,
+    );
 
     let model = stored_metadata
         .as_ref()
@@ -7926,6 +7948,28 @@ mod tests {
     fn test_resolve_keep_alive_roundtrip() {
         assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
         assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
+    }
+
+    #[test]
+    fn test_resolve_session_comms_name_defaults_for_keep_alive() {
+        let session_id = SessionId::new();
+        let resolved = resolve_session_comms_name(&session_id, true, None, false);
+        assert_eq!(resolved, Some(format!("cli/{session_id}")));
+    }
+
+    #[test]
+    fn test_resolve_session_comms_name_prefers_explicit_override() {
+        let session_id = SessionId::new();
+        let resolved =
+            resolve_session_comms_name(&session_id, true, Some("cli-override".to_string()), false);
+        assert_eq!(resolved.as_deref(), Some("cli-override"));
+    }
+
+    #[test]
+    fn test_resolve_session_comms_name_respects_disabled_flag() {
+        let session_id = SessionId::new();
+        let resolved = resolve_session_comms_name(&session_id, true, None, true);
+        assert_eq!(resolved, None);
     }
 
     #[test]

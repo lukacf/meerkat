@@ -8,6 +8,7 @@ use meerkat::*;
 use schemars::JsonSchema;
 #[cfg(feature = "mcp")]
 use std::collections::HashMap;
+#[cfg(feature = "builtin-tools")]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ mod llm_normalization {
         None
     }
 
+    #[cfg(feature = "anthropic")]
     #[tokio::test]
     #[ignore = "lane:e2e-live"]
     async fn e2e_anthropic_normalizes_to_llm_event() {
@@ -207,6 +209,7 @@ mod llm_normalization {
 }
 
 /// CP-TOOL-DISCOVERY, CP-TOOL-DISPATCH: Tool validation and execution
+#[cfg(feature = "builtin-tools")]
 mod tool_dispatch {
     use super::*;
 
@@ -1072,6 +1075,7 @@ mod combined {
         assert_eq!(parsed.result_shape, spec.result_shape);
     }
 
+    #[cfg(feature = "builtin-tools")]
     #[test]
     fn test_llm_request_with_tools() {
         let tools = vec![

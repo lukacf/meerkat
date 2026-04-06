@@ -118,6 +118,16 @@ impl LlmError {
         Self::from_http_status(status, message, retry_after_ms)
     }
 
+    pub(crate) fn from_transport_error(error: crate::transport::TransportError) -> Self {
+        match error {
+            crate::transport::TransportError::Timeout { duration_ms } => {
+                Self::NetworkTimeout { duration_ms }
+            }
+            crate::transport::TransportError::ConnectionReset => Self::ConnectionReset,
+            crate::transport::TransportError::Other { message } => Self::Unknown { message },
+        }
+    }
+
     pub fn parse_retry_after(value: &str) -> Option<u64> {
         if let Ok(secs) = value.trim().parse::<u64>() {
             return Some(secs * 1000);

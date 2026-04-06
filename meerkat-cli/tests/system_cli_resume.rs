@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use meerkat::{Config, SessionId, open_realm_persistence_in};
+use meerkat::{Config, SessionId};
+use meerkat_core::{default_state_root, derive_workspace_realm_id};
 use meerkat_store::RealmOrigin;
 use tempfile::TempDir;
 
@@ -91,11 +92,7 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
 
 async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = std::env::var("TEST_PROJECT_DIR")?;
-    let data_dir = std::env::var("TEST_DATA_DIR")?;
-    let home_dir = std::env::var("HOME")?;
     let project_dir = std::path::PathBuf::from(project_dir);
-    let data_dir = std::path::PathBuf::from(data_dir);
-    let home_dir = std::path::PathBuf::from(home_dir);
 
     // Change to project dir so .rkat is found
     std::env::set_current_dir(&project_dir)?;
@@ -138,53 +135,35 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .ok_or("session_id missing in response")?
         .to_string();
 
-    let session_ref = parsed["session_ref"]
-        .as_str()
-        .ok_or("session_ref missing in response")?;
-    let realm_id = session_ref
-        .split_once(':')
-        .map(|(realm_id, _)| realm_id)
-        .ok_or("session_ref missing realm prefix")?;
-    let realm_show = Command::new(&rkat)
-        .current_dir(&project_dir)
-        .env("HOME", &home_dir)
-        .env("XDG_DATA_HOME", &data_dir)
-        .args(["realms", "show", realm_id])
-        .output()
-        .await?;
-    if !realm_show.status.success() {
-        return Err(format!(
-            "rkat realm show failed: {}",
-            String::from_utf8_lossy(&realm_show.stderr)
+    let state_root = default_state_root();
+    let realm_id = derive_workspace_realm_id(&project_dir);
+    let (original_model, original_max_tokens, original_tooling, original_provider) = {
+        let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+            &state_root,
+            &realm_id,
+            None,
+            Some(RealmOrigin::Workspace),
         )
-        .into());
-    }
-    let realm_show_stdout = String::from_utf8_lossy(&realm_show.stdout);
-    let realms_root = realm_show_stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("state_root: "))
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| format!("state_root missing in realm show output: {realm_show_stdout}"))?;
-    let (_manifest, persistence) =
-        open_realm_persistence_in(&realms_root, realm_id, None, Some(RealmOrigin::Workspace))
-            .await?;
-    let store = persistence.session_store();
+        .await?;
+        let session = persistence
+            .session_store()
+            .load(&SessionId::parse(&session_id)?)
+            .await?
+            .ok_or("session not found")?;
+        let metadata = session.session_metadata().ok_or("metadata missing")?;
+        assert_eq!(
+            metadata.tooling.builtins,
+            meerkat_core::ToolCategoryOverride::Enable,
+            "builtins should be recorded"
+        );
 
-    let session = store
-        .load(&SessionId::parse(&session_id)?)
-        .await?
-        .ok_or("session not found")?;
-    let metadata = session.session_metadata().ok_or("metadata missing")?;
-    assert_eq!(
-        metadata.tooling.builtins,
-        meerkat_core::ToolCategoryOverride::Enable,
-        "builtins should be recorded"
-    );
-
-    let original_model = metadata.model.clone();
-    let original_max_tokens = metadata.max_tokens;
-    let original_tooling = metadata.tooling.clone();
-    let original_provider = metadata.provider;
+        (
+            metadata.model.clone(),
+            metadata.max_tokens,
+            metadata.tooling.clone(),
+            metadata.provider,
+        )
+    };
 
     let mut config_alt = config.clone();
     config_alt.agent.model = "gpt-4o-mini".into();
@@ -210,7 +189,15 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .into());
     }
 
-    let session = store
+    let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+        &state_root,
+        &realm_id,
+        None,
+        Some(RealmOrigin::Workspace),
+    )
+    .await?;
+    let session = persistence
+        .session_store()
         .load(&SessionId::parse(&session_id)?)
         .await?
         .ok_or("session not found after resume")?;

@@ -3,6 +3,7 @@
 //! Implements the LlmClient trait for Google's Gemini API.
 
 use crate::error::LlmError;
+use crate::transport::{ReqwestTransportClient, TransportClient, TransportRequest};
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -11,15 +12,23 @@ use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, Sto
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Client for Google Gemini API
 pub struct GeminiClient {
     api_key: String,
     base_url: String,
-    http: reqwest::Client,
+    transport: Arc<dyn TransportClient>,
 }
 
 impl GeminiClient {
+    fn build_transport(base_url: &str) -> Arc<dyn TransportClient> {
+        let http =
+            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), base_url)
+                .unwrap_or_else(|_| reqwest::Client::new());
+        Arc::new(ReqwestTransportClient::new(http))
+    }
+
     /// Create a new Gemini client with the given API key
     pub fn new(api_key: String) -> Self {
         Self::new_with_base_url(
@@ -30,25 +39,31 @@ impl GeminiClient {
 
     /// Create a new Gemini client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
-        let http =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
-                .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             api_key,
+            transport: Self::build_transport(&base_url),
             base_url,
-            http,
         }
     }
 
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
-        if let Ok(http) =
-            crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &url)
-        {
-            self.http = http;
-        }
+        self.transport = Self::build_transport(&url);
         self.base_url = url;
         self
+    }
+
+    #[cfg(test)]
+    fn with_transport_for_test(
+        api_key: String,
+        base_url: String,
+        transport: Arc<dyn TransportClient>,
+    ) -> Self {
+        Self {
+            api_key,
+            base_url,
+            transport,
+        }
     }
 
     /// Create from environment variable GEMINI_API_KEY
@@ -332,6 +347,26 @@ impl GeminiClient {
         }
 
         Ok(body)
+    }
+
+    fn build_transport_request(
+        &self,
+        request: &LlmRequest,
+        body: &Value,
+    ) -> Result<TransportRequest, LlmError> {
+        let body = serde_json::to_vec(body).map_err(|err| LlmError::InvalidRequest {
+            message: format!("failed to encode Gemini request body: {err}"),
+        })?;
+        Ok(TransportRequest::new(
+            reqwest::Method::POST,
+            format!(
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                self.base_url, request.model
+            ),
+        )
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", self.api_key.clone())
+        .body(body))
     }
 
     /// Parse streaming response line
@@ -843,36 +878,28 @@ impl LlmClient for GeminiClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
-            let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
-                self.base_url, request.model
-            );
-
-            let response = self.http
-                .post(url)
-                .header("Content-Type", "application/json")
-                .header("x-goog-api-key", &self.api_key)
-                .json(&body)
-                .send()
+            let transport_request = self.build_transport_request(request, &body)?;
+            let response = self
+                .transport
+                .execute(transport_request)
                 .await
-                .map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
+                .map_err(LlmError::from_transport_error)?;
 
-            let status_code = response.status().as_u16();
+            let status_code = response.status;
             let stream_result = if (200..=299).contains(&status_code) {
-                Ok(response.bytes_stream())
+                Ok(response.into_body())
             } else {
-                let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_response(status_code, text, &headers))
+                let headers = response.headers.clone();
+                let text = response.into_text().await.unwrap_or_default();
+                Err(LlmError::from_transport_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(512);
             let mut tool_call_index: u32 = 0;
+            let mut saw_stream_tool_call = false;
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                let chunk = chunk.map_err(LlmError::from_transport_error)?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(newline_pos) = buffer.find('\n') {
@@ -900,6 +927,7 @@ impl LlmClient for GeminiClient {
 
                         if let Some(candidates) = resp.candidates {
                             for cand in candidates {
+                                let mut candidate_had_tool_call = false;
                                 if let Some(content) = cand.content {
                                     // Not collapsed: inner loop processes heterogeneous part types
                                     // (text, function_call, function_response) independently.
@@ -921,6 +949,8 @@ impl LlmClient for GeminiClient {
                                                 );
                                             }
                                             if let Some(fc) = part.function_call {
+                                                candidate_had_tool_call = true;
+                                                saw_stream_tool_call = true;
                                                 let id = format!("fc_{tool_call_index}");
                                                 tool_call_index += 1;
                                                 yield LlmEvent::ToolCallComplete {
@@ -940,6 +970,10 @@ impl LlmClient for GeminiClient {
                                         "SAFETY" | "RECITATION" => StopReason::ContentFilter,
                                         // Gemini uses various names for tool calls
                                         "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                                        // Some Gemini models emit STOP even when the functionCall
+                                        // arrived in this or an earlier chunk. The streamed
+                                        // tool-call content is authoritative in that case.
+                                        "STOP" if candidate_had_tool_call || saw_stream_tool_call => StopReason::ToolUse,
                                         // "STOP" and any unrecognized reason default to EndTurn
                                         _ => StopReason::EndTurn,
                                     };
@@ -1019,9 +1053,59 @@ struct GeminiUsage {
 )]
 mod tests {
     use super::*;
+    use crate::transport::{
+        TransportByteStream, TransportClient, TransportError, TransportHeaders, TransportRequest,
+        TransportResponse,
+    };
+    use futures::StreamExt;
     use meerkat_core::{
         AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
     };
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct FakeTransport {
+        requests: Arc<Mutex<Vec<TransportRequest>>>,
+        responses: Arc<Mutex<VecDeque<Result<TransportResponse, TransportError>>>>,
+    }
+
+    impl FakeTransport {
+        fn new(responses: Vec<Result<TransportResponse, TransportError>>) -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(responses.into())),
+            }
+        }
+
+        fn take_requests(&self) -> Vec<TransportRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl TransportClient for FakeTransport {
+        async fn execute(
+            &self,
+            request: TransportRequest,
+        ) -> Result<TransportResponse, TransportError> {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("fake transport response missing")
+        }
+    }
+
+    fn transport_stream(chunks: Vec<Result<&'static str, TransportError>>) -> TransportByteStream {
+        Box::pin(futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.map(|value| value.as_bytes().to_vec())),
+        ))
+    }
 
     fn assert_no_const_or_type_arrays(value: &Value) {
         match value {
@@ -1047,6 +1131,183 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_gemini_streams_and_captures_request_shape() {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            transport_stream(vec![
+                Ok("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello fr"),
+                Ok(
+                    "om Gemini\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2}}\n",
+                ),
+            ]),
+        ))]));
+        let client = GeminiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://gemini.example".to_string(),
+            fake_transport.clone(),
+        );
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::TextDelta { delta, .. }) if delta == "Hello from Gemini"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn
+                }
+            })
+        )));
+
+        let requests = fake_transport.take_requests();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0];
+        assert_eq!(
+            sent.url,
+            "https://gemini.example/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(sent.headers.get("x-goog-api-key"), Some("test-key"));
+        assert_eq!(sent.headers.get("content-type"), Some("application/json"));
+        let body: Value = serde_json::from_slice(&sent.body).expect("gemini body should be JSON");
+        assert!(body.get("contents").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_gemini_infers_tool_use_when_function_call_finishes_with_stop()
+    {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            transport_stream(vec![Ok(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"Tokyo\"}}}]},\"finishReason\":\"STOP\"}]}\n",
+            )]),
+        ))]));
+        let client = GeminiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://gemini.example".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text(
+                "Use the get_weather tool with city Tokyo. Do not answer from memory.".to_string(),
+            ))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::ToolCallComplete { name, args, .. })
+                if name == "get_weather" && args["city"] == "Tokyo"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::ToolUse
+                }
+            })
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_gemini_infers_tool_use_when_stop_arrives_in_later_chunk() {
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            200,
+            TransportHeaders::default(),
+            transport_stream(vec![
+                Ok(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"Tokyo\"}}}]}}]}\n",
+                ),
+                Ok("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n"),
+            ]),
+        ))]));
+        let client = GeminiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://gemini.example".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text(
+                "Call the get_weather tool exactly once with {\"city\":\"Tokyo\"}.".to_string(),
+            ))],
+        );
+
+        let events = client
+            .stream(&request)
+            .collect::<Vec<Result<LlmEvent, LlmError>>>()
+            .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::ToolCallComplete { name, args, .. })
+                if name == "get_weather" && args["city"] == "Tokyo"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::ToolUse
+                }
+            })
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_transport_contract_gemini_maps_non_2xx_response() {
+        let mut headers = TransportHeaders::default();
+        headers.insert("retry-after", "1");
+        let fake_transport = Arc::new(FakeTransport::new(vec![Ok(TransportResponse::new(
+            429,
+            headers,
+            transport_stream(vec![Ok("rate limited")]),
+        ))]));
+        let client = GeminiClient::with_transport_for_test(
+            "test-key".to_string(),
+            "https://gemini.example".to_string(),
+            fake_transport,
+        );
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let first = client
+            .stream(&request)
+            .next()
+            .await
+            .expect("expected first stream item")
+            .expect("transport failures should be normalized into Done events");
+
+        assert!(matches!(
+            first,
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::RateLimited {
+                        retry_after_ms: Some(1000)
+                    }
+                }
+            }
+        ));
     }
 
     #[test]

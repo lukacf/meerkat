@@ -69,14 +69,15 @@ Close the Phase-0-owned external and repo-model assumptions on real hardware bef
 2. Implement a `host-core-check` mode that proves the dossier's Meerkat-side reading by emitting explicit pass or fail markers for three checks: canonical build path (`FactoryAgentBuilder -> SessionService -> AgentFactory::build_agent()`), provider-model expectations (shared request shaping plus incremental stream parsing on the current host path), and runtime-authority expectations (keep-alive, external-event admission, and cancellation owned by `RuntimeSessionAdapter` rather than direct surface shortcuts). This mode may wrap targeted tests or a purpose-built host harness, but it does not count as satisfied by running an unrelated broad workspace test suite without these explicit checks.
 3. Implement a `single-node` mode that can boot, connect to Wi-Fi, sync time, hit a provider endpoint, and stream output.
 4. Implement a `single-node-rust-stack` mode that boots the planned Rust stack on real hardware and records one-turn resource and scheduler evidence.
-5. Discover and validate the required backend APIs from the host before the first target flash that depends on them.
-6. Verify any board-specific APIs against actual installed headers or library source before committing the probe implementation.
-7. Add stable serial markers for `host-core-check` (`MKT:HOST_CORE:FACTORY_OK`, `MKT:HOST_CORE:PROVIDER_OK`, `MKT:HOST_CORE:RUNTIME_OK`, `MKT:HOST_CORE:PASS`), plus boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, Rust-stack pass/fail, and overall pass/fail.
-8. Add a small host-sim parser that fails when required markers are missing or arrive in the wrong order.
-9. Run the probe modes on real hardware and capture metrics and logs.
-10. Establish OTA or another low-friction redeploy path after the first successful Wi-Fi-enabled flash if the probe stack supports it.
-11. Execute negative controls and verify deterministic failure markers.
-12. Update the external contract matrix with verdicts and artifact paths.
+5. Add a Meerkat-footprint baseline mode that measures the current pre-fix smallest-runnable agent shapes, including the current facade-linked baseline and the most direct core-agent baseline available without Phase 1 fixes.
+6. Discover and validate the required backend APIs from the host before the first target flash that depends on them.
+7. Verify any board-specific APIs against actual installed headers or library source before committing the probe implementation.
+8. Add stable serial markers for `host-core-check` (`MKT:HOST_CORE:FACTORY_OK`, `MKT:HOST_CORE:PROVIDER_OK`, `MKT:HOST_CORE:RUNTIME_OK`, `MKT:HOST_CORE:PASS`), plus boot, Wi-Fi, time, TLS, provider stream start, provider stream completion, Rust-stack pass/fail, Meerkat baseline pass/fail, and overall pass/fail.
+9. Add a small host-sim parser that fails when required markers are missing or arrive in the wrong order.
+10. Run the probe modes on real hardware and capture metrics and logs.
+11. Establish OTA or another low-friction redeploy path after the first successful Wi-Fi-enabled flash if the probe stack supports it.
+12. Execute negative controls and verify deterministic failure markers.
+13. Update the external contract matrix with verdicts and artifact paths.
 
 ### TDD order
 
@@ -87,9 +88,10 @@ Close the Phase-0-owned external and repo-model assumptions on real hardware bef
 5. Add TLS and provider reachability and get the parser green.
 6. Add streamed output markers and get the parser green.
 7. Add Rust-stack viability markers and get the parser green.
-8. Add memory and timing capture and assert thresholds.
-9. Add OTA bootstrap or equivalent redeploy simplification if supported.
-10. Add negative controls and assert deterministic failure markers.
+8. Add Meerkat baseline-shape measurement and comparison markers and get the parser green.
+9. Add memory and timing capture and assert thresholds.
+10. Add OTA bootstrap or equivalent redeploy simplification if supported.
+11. Add negative controls and assert deterministic failure markers.
 
 ### Verification commands
 
@@ -99,6 +101,7 @@ These command names are part of the deliverable contract for the phase and must 
 - `./scripts/live_smoke/esp32-contract-probe/run --mode single-node --host-sim`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode single-node --hardware`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode single-node-rust-stack --hardware`
+- `./scripts/live_smoke/esp32-contract-probe/run --mode meerkat-baseline --hardware`
 - `./scripts/live_smoke/esp32-contract-probe/run --mode negative`
 
 ### Evidence bundle requirements
@@ -107,6 +110,7 @@ These command names are part of the deliverable contract for the phase and must 
 - Parsed marker report
 - Host-core-check marker report tied to `INV-002`, `CONTRACT-001`, and `CONTRACT-002`
 - Memory, stack, and latency measurements
+- Pre-fix Meerkat baseline comparison report for facade-linked versus direct-core agent shapes
 - Toolchain bootstrap log
 - Rust-stack feasibility report
 - Board identity and environment summary
@@ -119,6 +123,7 @@ These command names are part of the deliverable contract for the phase and must 
 - Streamed reads not working incrementally
 - Memory envelope already outside the intended profile
 - The planned Rust stack is still unresolved on real hardware
+- The probe has evidence that the current executor/runtime hypothesis itself crashes on target and no replacement experiment has been recorded
 - A physical blocker is preventing progress and no escalation has been issued
 
 ### Reviewer instructions
@@ -149,8 +154,10 @@ Perform seam extraction and coupling cleanup without introducing embedded-specif
 2. Port one provider end-to-end through the transport contract while keeping request construction and stream parsing shared.
 3. Split persistent-session orchestration from accidental `redb` and target gating in `meerkat-session`.
 4. Extract or add shared host-tool callback glue outside the browser-only runtime code.
-5. Add tests that prove the canonical factory/runtime/session ownership still holds.
-6. Add grep- or review-based checks for duplicated provider logic and duplicated runtime/session logic.
+5. Make hooks, tools, and skills genuinely optional in the facade and transitive feature graph.
+6. Add tests that prove the canonical factory/runtime/session ownership still holds.
+7. Add grep- or review-based checks for duplicated provider logic and duplicated runtime/session logic.
+8. Add compile and cargo-tree proofs that a minimal embedded-facing build no longer hard-links hooks, tools, or skills.
 
 ### TDD order
 
@@ -160,13 +167,16 @@ Perform seam extraction and coupling cleanup without introducing embedded-specif
 4. Decouple the persistent service and get those tests green.
 5. Write failing host-tool callback contract tests.
 6. Extract shared glue and get the callback tests green.
-7. Run an architecture review against `INV-001` and `INV-002`.
+7. Write failing minimal-profile feature-graph tests.
+8. Decouple hooks, tools, and skills and get those tests green.
+9. Run an architecture review against `INV-001`, `INV-002`, and `CONTRACT-007`.
 
 ### Verification commands
 
 - `cargo test -p meerkat-client transport_contract -- --nocapture`
 - `cargo test -p meerkat-session persistent_service_contract -- --nocapture`
 - `cargo test -p meerkat-web-runtime host_tool_contract -- --nocapture`
+- `cargo check -p meerkat --no-default-features --features openai`
 - `cargo test -p meerkat -- --nocapture`
 
 ### Evidence bundle requirements
@@ -174,6 +184,7 @@ Perform seam extraction and coupling cleanup without introducing embedded-specif
 - Green transport-contract tests
 - Green persistent-service tests
 - Green host-tool contract tests
+- Green minimal-profile compile and feature-graph proofs
 - Review note proving no duplicated provider or runtime logic
 
 ### Gate blockers
@@ -181,6 +192,7 @@ Perform seam extraction and coupling cleanup without introducing embedded-specif
 - Any provider parser or request builder duplicated for embedded
 - Persistent-session orchestration still implying a single backend story
 - Host-tool callback behavior still trapped inside browser-only code
+- Hooks, tools, or skills still hard-linked into the claimed minimal embedded-facing build graph
 
 ### Reviewer instructions
 
@@ -196,7 +208,7 @@ Use the standard handoff format plus a “phase-1 seam map” that names the new
 
 ### Goal
 
-Add the embedded surface and ESP backend through the canonical runtime-backed path.
+Add the embedded surface and ESP backend through the canonical runtime-backed path, targeting ESP32-P4+C6 as the primary production board.
 
 ### Required inputs
 
@@ -204,30 +216,34 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 - Shared transport seam
 - Shared host-tool glue
 - Persistent-session decoupling
+- ESP32-P4+C6 boards available
 
 ### Exact tasks
 
-1. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell, but only with real shared surface glue extracted in Phase 1.
-2. Add `meerkat-esp-runtime` as the ESP binding crate.
-3. Wire the embedded surface through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
-4. Implement the ESP transport against the shared transport seam, including the chosen TLS backend and sync/async bridge.
-5. Implement storage and runtime persistence through the existing store traits.
-6. Bind host-tool callbacks to the shared callback contract.
-7. Define the embedded profile and its deterministic unsupported-capability behavior.
-8. Add host-sim and unit tests before hardware smoke.
+1. Run P4+C6 re-validation: boot, C6 Wi-Fi, time sync, provider HTTPS, Tokio runtime re-probe, memory envelope measurement, and `ring`/`rustls` compilation check. Update `ASSUMP-013` with results.
+2. Add `meerkat-embedded-runtime` as the platform-neutral embedded surface shell, but only with real shared surface glue extracted in Phase 1.
+3. Add `meerkat-esp-runtime` as the ESP binding crate, targeting P4+C6 as primary and S3 as secondary.
+4. Wire the embedded surface through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
+5. Implement the ESP transport against the shared transport seam, including the chosen TLS backend and sync/async bridge. On P4, evaluate whether `rustls` can be used directly instead of the mbedtls path required on S3.
+6. Implement storage and runtime persistence through the existing store traits.
+7. Bind host-tool callbacks to the shared callback contract.
+8. Define the embedded profile and its deterministic unsupported-capability behavior.
+9. Add host-sim and unit tests before hardware smoke.
 
 ### TDD order
 
-1. Write failing embedded-surface API tests on host-sim.
-2. Make the embedded surface route through the canonical factory/runtime path.
-3. Write failing ESP transport and stream-bridge tests and get them green.
-4. Write failing persistence and recovery tests and get them green in host-sim.
-5. Write failing host-tool tests on the embedded surface and get them green.
-6. Add unsupported-capability tests and get them green.
-7. Run host-sim smoke through the single-node public example.
+1. Run P4+C6 re-validation and get `ASSUMP-013` to `LIVE_VALIDATED` before proceeding.
+2. Write failing embedded-surface API tests on host-sim.
+3. Make the embedded surface route through the canonical factory/runtime path.
+4. Write failing ESP transport and stream-bridge tests and get them green.
+5. Write failing persistence and recovery tests and get them green in host-sim.
+6. Write failing host-tool tests on the embedded surface and get them green.
+7. Add unsupported-capability tests and get them green.
+8. Run host-sim smoke through the single-node public example.
 
 ### Verification commands
 
+- `./scripts/live_smoke/esp32-contract-probe/run --mode p4-revalidation --hardware`
 - `cargo test -p meerkat-embedded-runtime -- --nocapture`
 - `cargo test -p meerkat-esp-runtime -- --nocapture`
 - `./examples/036-esp32-event-agent-sh/examples.sh --mode host-sim`
@@ -235,6 +251,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 ### Evidence bundle requirements
 
+- P4+C6 re-validation report with comparative S3 vs P4 metrics
 - Embedded runtime test logs
 - ESP backend test logs
 - Host-sim smoke artifacts
@@ -242,6 +259,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 
 ### Gate blockers
 
+- P4+C6 re-validation not yet passed (`ASSUMP-013` still open)
 - Embedded surface bypasses the runtime-backed path
 - ESP backend talks directly to providers outside the shared transport seam
 - Unsupported capabilities disappear silently instead of failing deterministically
@@ -249,7 +267,7 @@ Add the embedded surface and ESP backend through the canonical runtime-backed pa
 ### Reviewer instructions
 
 - Architecture reviewer: verify `INV-001`, `INV-002`, and `CONTRACT-002`.
-- Platform reviewer: verify the ESP backend lives behind transport and store seams.
+- Platform reviewer: verify the P4+C6 re-validation passed and the ESP backend lives behind transport and store seams. Confirm S3 remains a buildable secondary target.
 - Verification reviewer: verify host-sim coverage arrives before hardware smoke.
 
 ### Handoff

@@ -16,7 +16,7 @@ use crate::types::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
-    SessionLlmIdentity,
+    SessionLlmIdentity, ToolCategoryOverride,
 };
 use crate::{EventStream, StreamError};
 use async_trait::async_trait;
@@ -195,10 +195,10 @@ pub struct SessionBuildOptions {
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
     // NOTE: ops_lifecycle_override was removed in Phase 3.
     // Use runtime_build_mode instead.
-    pub override_builtins: Option<bool>,
-    pub override_shell: Option<bool>,
-    pub override_memory: Option<bool>,
-    pub override_mob: Option<bool>,
+    pub override_builtins: ToolCategoryOverride,
+    pub override_shell: ToolCategoryOverride,
+    pub override_memory: ToolCategoryOverride,
+    pub override_mob: ToolCategoryOverride,
     pub preload_skills: Option<Vec<crate::skills::SkillId>>,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
@@ -433,11 +433,10 @@ impl MobToolAuthorityContext {
 /// session, the default authority shape is create-only. Existing-mob scope
 /// must still be injected separately and explicitly.
 pub fn generated_create_only_mob_operator_authority(
-    enable_mob: Option<bool>,
+    enable_mob: ToolCategoryOverride,
 ) -> Option<MobToolAuthorityContext> {
-    enable_mob
-        .filter(|enabled| *enabled)
-        .map(|_| MobToolAuthorityContext::create_only_generated())
+    matches!(enable_mob, ToolCategoryOverride::Enable)
+        .then(MobToolAuthorityContext::create_only_generated)
 }
 
 /// Shared build-seam rule for mob operator access rehydration.
@@ -446,17 +445,17 @@ pub fn generated_create_only_mob_operator_authority(
 /// wins; if none exists, explicit mob enablement falls back to generated
 /// create-only authority.
 pub fn resolve_mob_operator_access(
-    enable_mob: Option<bool>,
+    enable_mob: ToolCategoryOverride,
     persisted_authority_context: Option<MobToolAuthorityContext>,
-) -> (Option<bool>, Option<MobToolAuthorityContext>) {
-    if matches!(enable_mob, Some(false)) {
-        return (Some(false), None);
+) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
+    if matches!(enable_mob, ToolCategoryOverride::Disable) {
+        return (ToolCategoryOverride::Disable, None);
     }
 
     let authority_context = persisted_authority_context
         .or_else(|| generated_create_only_mob_operator_authority(enable_mob));
     let override_mob = if authority_context.is_some() {
-        Some(true)
+        ToolCategoryOverride::Enable
     } else {
         enable_mob
     };
@@ -507,10 +506,6 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
-    pub override_builtins: bool,
-    pub override_shell: bool,
-    pub override_memory: bool,
-    pub override_mob: bool,
     pub preload_skills: bool,
     pub keep_alive: bool,
     pub comms_name: bool,
@@ -525,7 +520,7 @@ impl SessionBuildOptions {
     /// enablement.
     pub fn apply_persisted_mob_operator_access(
         &mut self,
-        enable_mob: Option<bool>,
+        enable_mob: ToolCategoryOverride,
         persisted_authority_context: Option<MobToolAuthorityContext>,
     ) {
         let (override_mob, authority_context) =
@@ -540,7 +535,10 @@ impl SessionBuildOptions {
     /// This keeps `override_mob` and the generated create-only authority
     /// context aligned at the composition seam. Existing-mob scope must be
     /// injected explicitly elsewhere; this helper never infers it.
-    pub fn apply_generated_create_only_mob_operator_access(&mut self, enable_mob: Option<bool>) {
+    pub fn apply_generated_create_only_mob_operator_access(
+        &mut self,
+        enable_mob: ToolCategoryOverride,
+    ) {
         self.apply_persisted_mob_operator_access(enable_mob, None);
     }
 }
@@ -561,10 +559,10 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
-            override_builtins: None,
-            override_shell: None,
-            override_memory: None,
-            override_mob: None,
+            override_builtins: ToolCategoryOverride::Inherit,
+            override_shell: ToolCategoryOverride::Inherit,
+            override_memory: ToolCategoryOverride::Inherit,
+            override_mob: ToolCategoryOverride::Inherit,
             preload_skills: None,
             realm_id: None,
             instance_id: None,

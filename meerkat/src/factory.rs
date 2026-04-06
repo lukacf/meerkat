@@ -219,16 +219,16 @@ pub struct AgentBuildConfig {
     /// Optional blob store override used for image externalization/hydration.
     pub blob_store_override: Option<Arc<dyn BlobStore>>,
     /// Per-build override for factory-level `enable_builtins`.
-    /// When `Some`, takes precedence over `AgentFactory::enable_builtins`.
-    pub override_builtins: Option<bool>,
+    /// `Inherit` defers to the factory default.
+    pub override_builtins: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_shell`.
-    /// When `Some`, takes precedence over `AgentFactory::enable_shell`.
-    pub override_shell: Option<bool>,
+    /// `Inherit` defers to the factory default.
+    pub override_shell: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_memory`.
-    /// When `Some`, takes precedence over `AgentFactory::enable_memory`.
-    pub override_memory: Option<bool>,
+    /// `Inherit` defers to the factory default.
+    pub override_memory: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_mob`.
-    pub override_mob: Option<bool>,
+    pub override_mob: ToolCategoryOverride,
     /// Runtime-injected mob operator authority context.
     ///
     /// Tool visibility may depend on this context being present, but
@@ -397,10 +397,10 @@ impl AgentBuildConfig {
             external_tools: None,
             recoverable_tool_defs: None,
             blob_store_override: None,
-            override_builtins: None,
-            override_shell: None,
-            override_memory: None,
-            override_mob: None,
+            override_builtins: ToolCategoryOverride::Inherit,
+            override_shell: ToolCategoryOverride::Inherit,
+            override_memory: ToolCategoryOverride::Inherit,
+            override_mob: ToolCategoryOverride::Inherit,
             mob_tool_authority_context: None,
             mob_tools: None,
             preload_skills: None,
@@ -448,7 +448,7 @@ impl AgentBuildConfig {
     /// injected explicitly elsewhere; this helper never infers it.
     pub fn apply_persisted_mob_operator_access(
         &mut self,
-        enable_mob: Option<bool>,
+        enable_mob: ToolCategoryOverride,
         persisted_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
     ) {
         let (override_mob, authority_context) = meerkat_core::service::resolve_mob_operator_access(
@@ -459,7 +459,10 @@ impl AgentBuildConfig {
         self.mob_tool_authority_context = authority_context;
     }
 
-    pub fn apply_generated_create_only_mob_operator_access(&mut self, enable_mob: Option<bool>) {
+    pub fn apply_generated_create_only_mob_operator_access(
+        &mut self,
+        enable_mob: ToolCategoryOverride,
+    ) {
         self.apply_persisted_mob_operator_access(enable_mob, None);
     }
 
@@ -909,17 +912,20 @@ impl AgentFactory {
         if !mask.provider_params {
             build_config.provider_params = metadata.provider_params.clone();
         }
-        if !mask.override_builtins {
-            build_config.override_builtins = metadata.tooling.builtins.to_override();
+        if matches!(
+            build_config.override_builtins,
+            ToolCategoryOverride::Inherit
+        ) {
+            build_config.override_builtins = metadata.tooling.builtins;
         }
-        if !mask.override_shell {
-            build_config.override_shell = metadata.tooling.shell.to_override();
+        if matches!(build_config.override_shell, ToolCategoryOverride::Inherit) {
+            build_config.override_shell = metadata.tooling.shell;
         }
-        if !mask.override_memory {
-            build_config.override_memory = metadata.tooling.memory.to_override();
+        if matches!(build_config.override_memory, ToolCategoryOverride::Inherit) {
+            build_config.override_memory = metadata.tooling.memory;
         }
-        if !mask.override_mob {
-            build_config.override_mob = metadata.tooling.mob.to_override();
+        if matches!(build_config.override_mob, ToolCategoryOverride::Inherit) {
+            build_config.override_mob = metadata.tooling.mob;
             build_config.mob_tool_authority_context = build_config
                 .resume_session
                 .as_ref()
@@ -1218,6 +1224,8 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        let explicit_mob_override =
+            !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config);
 
         // Explicit build-time mob enablement should surface the generated
@@ -1225,11 +1233,11 @@ impl AgentFactory {
         // supplied or recovered. Ambient factory defaults must not do this,
         // and resumed metadata alone must not escalate operator capability.
         if build_config.mob_tool_authority_context.is_none()
-            && matches!(build_config.override_mob, Some(true))
-            && (build_config.resume_session.is_none()
-                || build_config.resume_override_mask.override_mob)
+            && matches!(build_config.override_mob, ToolCategoryOverride::Enable)
+            && (build_config.resume_session.is_none() || explicit_mob_override)
         {
-            build_config.apply_generated_create_only_mob_operator_access(Some(true));
+            build_config
+                .apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
         }
 
         if let Some(value) = build_config.max_inline_peer_notifications
@@ -1355,11 +1363,9 @@ impl AgentFactory {
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
         let persisted_system_prompt = build_config.system_prompt.clone();
         let per_request_prompt = build_config.system_prompt.take();
-        let effective_builtins = build_config
-            .override_builtins
-            .unwrap_or(self.enable_builtins);
+        let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
-        let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
+        let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let session = build_config.resume_session.clone().unwrap_or_default();
         let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
@@ -1580,12 +1586,8 @@ impl AgentFactory {
 
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
-        let effective_mob = if matches!(build_config.override_mob, Some(false)) {
-            false
-        } else {
-            build_config.override_mob.unwrap_or(self.enable_mob)
-                || build_config.mob_tool_authority_context.is_some()
-        };
+        let effective_mob = build_config.override_mob.resolve(self.enable_mob)
+            || build_config.mob_tool_authority_context.is_some();
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -2026,7 +2028,7 @@ impl AgentFactory {
 
         // 12b. Wire memory store + memory_search tool (when feature compiled + enabled)
         #[allow(unused_variables)]
-        let effective_memory = build_config.override_memory.unwrap_or(self.enable_memory);
+        let effective_memory = build_config.override_memory.resolve(self.enable_memory);
         #[cfg(feature = "memory-store-session")]
         if effective_memory {
             let memory_dir = self.store_path.join("memory");
@@ -2140,16 +2142,13 @@ impl AgentFactory {
             metadata.structured_output_retries = build_config.structured_output_retries;
             metadata.provider = provider;
             metadata.provider_params = build_config.provider_params;
-            metadata.tooling.builtins =
-                ToolCategoryOverride::from_override(build_config.override_builtins);
-            metadata.tooling.shell =
-                ToolCategoryOverride::from_override(build_config.override_shell);
+            metadata.tooling.builtins = build_config.override_builtins;
+            metadata.tooling.shell = build_config.override_shell;
             // No override_comms field in AgentBuildConfig — preserve the existing
             // metadata value so explicit Enable/Disable survives across resumes.
             // (metadata.tooling.comms is left unchanged)
-            metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
-            metadata.tooling.memory =
-                ToolCategoryOverride::from_override(build_config.override_memory);
+            metadata.tooling.mob = build_config.override_mob;
+            metadata.tooling.memory = build_config.override_memory;
             if build_config.resume_override_mask.preload_skills {
                 metadata.tooling.active_skills = active_skill_ids;
             }
@@ -2169,11 +2168,11 @@ impl AgentFactory {
                 provider,
                 provider_params: build_config.provider_params,
                 tooling: SessionTooling {
-                    builtins: ToolCategoryOverride::from_override(build_config.override_builtins),
-                    shell: ToolCategoryOverride::from_override(build_config.override_shell),
+                    builtins: build_config.override_builtins,
+                    shell: build_config.override_shell,
                     comms: ToolCategoryOverride::Inherit,
-                    mob: ToolCategoryOverride::from_override(build_config.override_mob),
-                    memory: ToolCategoryOverride::from_override(build_config.override_memory),
+                    mob: build_config.override_mob,
+                    memory: build_config.override_memory,
                     active_skills: active_skill_ids,
                 },
                 keep_alive: build_config.keep_alive,

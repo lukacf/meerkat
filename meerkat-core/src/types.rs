@@ -707,19 +707,41 @@ pub struct SystemMessage {
 pub struct UserMessage {
     #[serde(with = "content_blocks_serde")]
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 impl UserMessage {
     /// Create a text-only user message.
     pub fn text(content: impl Into<String>) -> Self {
+        Self::text_with_render_metadata(content, None)
+    }
+
+    /// Create a text-only user message with optional render metadata.
+    pub fn text_with_render_metadata(
+        content: impl Into<String>,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Self {
         Self {
             content: ContentBlock::text_vec(content.into()),
+            render_metadata,
         }
     }
 
     /// Create a multimodal user message.
     pub fn with_blocks(content: Vec<ContentBlock>) -> Self {
-        Self { content }
+        Self::with_blocks_and_render_metadata(content, None)
+    }
+
+    /// Create a multimodal user message with optional render metadata.
+    pub fn with_blocks_and_render_metadata(
+        content: Vec<ContentBlock>,
+        render_metadata: Option<RenderMetadata>,
+    ) -> Self {
+        Self {
+            content,
+            render_metadata,
+        }
     }
 
     /// Get concatenated text content (text projection for all blocks).

@@ -22,7 +22,7 @@ use meerkat_core::service::{
 use meerkat_core::{
     AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy,
     ConfigRuntimeError, ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider,
-    RealmSelection, RuntimeBootstrap, ToolCallView, format_verbose_event,
+    RealmSelection, RuntimeBootstrap, ToolCallView, ToolCategoryOverride, format_verbose_event,
 };
 use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
@@ -2518,10 +2518,10 @@ async fn handle_meerkat_run(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-        override_builtins: input.enable_builtins,
-        override_shell: enable_shell_override,
-        override_memory: input.enable_memory,
-        override_mob: None,
+        override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
+        override_shell: ToolCategoryOverride::from_override(enable_shell_override),
+        override_memory: ToolCategoryOverride::from_override(input.enable_memory),
+        override_mob: ToolCategoryOverride::Inherit,
         mob_tool_authority_context: None,
         preload_skills,
         realm_id: Some(state.realm_id.clone()),
@@ -2540,10 +2540,6 @@ async fn handle_meerkat_run(
             max_tokens: input.max_tokens.is_some(),
             structured_output_retries: input.structured_output_retries.is_some(),
             provider_params: input.provider_params.is_some(),
-            override_builtins: input.enable_builtins.is_some(),
-            override_shell: enable_shell_override.is_some(),
-            override_memory: input.enable_memory.is_some(),
-            override_mob: input.enable_mob.is_some(),
             preload_skills: input.preload_skills.is_some(),
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
@@ -2553,7 +2549,9 @@ async fn handle_meerkat_run(
         blob_store_override: None,
         mob_tools: None,
     };
-    build.apply_generated_create_only_mob_operator_access(input.enable_mob);
+    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
+        input.enable_mob,
+    ));
 
     let req = CreateSessionRequest {
         model,
@@ -2785,10 +2783,10 @@ async fn handle_meerkat_resume(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
-        override_builtins: enable_builtins_override,
-        override_shell: enable_shell_override,
-        override_memory: input.enable_memory,
-        override_mob: None,
+        override_builtins: ToolCategoryOverride::from_override(enable_builtins_override),
+        override_shell: ToolCategoryOverride::from_override(enable_shell_override),
+        override_memory: ToolCategoryOverride::from_override(input.enable_memory),
+        override_mob: ToolCategoryOverride::Inherit,
         mob_tool_authority_context: None,
         preload_skills,
         peer_meta: input.peer_meta.clone(),
@@ -2818,10 +2816,6 @@ async fn handle_meerkat_resume(
             max_tokens: input.max_tokens.is_some(),
             structured_output_retries: input.structured_output_retries.is_some(),
             provider_params: input.provider_params.is_some(),
-            override_builtins: enable_builtins_override.is_some(),
-            override_shell: enable_shell_override.is_some(),
-            override_memory: input.enable_memory.is_some(),
-            override_mob: input.enable_mob.is_some(),
             preload_skills: input.preload_skills.is_some(),
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
@@ -2830,7 +2824,9 @@ async fn handle_meerkat_resume(
         blob_store_override: None,
         mob_tools: None,
     };
-    build.apply_generated_create_only_mob_operator_access(input.enable_mob);
+    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
+        input.enable_mob,
+    ));
 
     let result = if needs_rebuild {
         let req = CreateSessionRequest {

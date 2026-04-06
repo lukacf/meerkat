@@ -129,7 +129,7 @@ pub async fn handle(
 
     let mut build = SessionBuildOptions {
         resume_session: Some(session),
-        override_shell: input.shell,
+        override_shell: meerkat_core::ToolCategoryOverride::from_override(input.shell),
         additional_instructions,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         ..SessionBuildOptions::default()

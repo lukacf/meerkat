@@ -133,13 +133,16 @@ pub async fn build_agent_config(
     config.silent_comms_intents = vec!["mob.peer_added".into(), "mob.peer_retired".into()];
     config.max_inline_peer_notifications = profile.max_inline_peer_notifications;
 
-    // Map ToolConfig booleans to override flags
-    config.override_builtins = Some(profile.tools.builtins);
-    config.override_shell = Some(profile.tools.shell);
-    config.override_memory = Some(profile.tools.memory);
-    config.override_mob = Some(mob_tool_access_context.authority().is_some());
+    // Map ToolConfig booleans to typed override intent.
+    config.override_builtins =
+        meerkat_core::ToolCategoryOverride::from_effective(profile.tools.builtins);
+    config.override_shell = meerkat_core::ToolCategoryOverride::from_effective(profile.tools.shell);
+    config.override_memory =
+        meerkat_core::ToolCategoryOverride::from_effective(profile.tools.memory);
+    config.override_mob = meerkat_core::ToolCategoryOverride::from_effective(
+        mob_tool_access_context.authority().is_some(),
+    );
     config.mob_tool_authority_context = mob_tool_access_context.authority();
-    config.resume_override_mask.override_mob = true;
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
@@ -226,11 +229,14 @@ fn apply_resumed_session_metadata(
     config.max_tokens = Some(metadata.max_tokens);
     config.provider = Some(metadata.provider);
     config.provider_params = metadata.provider_params.clone();
-    config.override_builtins = metadata.tooling.builtins.to_override();
-    config.override_shell = metadata.tooling.shell.to_override();
-    config.override_memory = metadata.tooling.memory.to_override();
-    if !config.resume_override_mask.override_mob {
-        config.override_mob = metadata.tooling.mob.to_override();
+    config.override_builtins = metadata.tooling.builtins;
+    config.override_shell = metadata.tooling.shell;
+    config.override_memory = metadata.tooling.memory;
+    if matches!(
+        config.override_mob,
+        meerkat_core::ToolCategoryOverride::Inherit
+    ) {
+        config.override_mob = metadata.tooling.mob;
     }
     config.preload_skills = metadata.tooling.active_skills.clone();
     // keep_alive is NOT restored from metadata — mob runtime owns it
@@ -541,11 +547,22 @@ mod tests {
         })
         .await
         .expect("build_agent_config");
-        assert_eq!(config.override_builtins, Some(true));
-        assert_eq!(config.override_shell, Some(true));
-        assert_eq!(config.override_memory, Some(false));
-        assert_eq!(config.override_mob, Some(false));
-        assert!(config.resume_override_mask.override_mob);
+        assert_eq!(
+            config.override_builtins,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_shell,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_memory,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
+        assert_eq!(
+            config.override_mob,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = &def.profiles[&ProfileName::from("worker")];
         let config = build_agent_config(BuildAgentConfigParams {
@@ -563,11 +580,22 @@ mod tests {
         })
         .await
         .expect("build_agent_config");
-        assert_eq!(config.override_builtins, Some(true));
-        assert_eq!(config.override_shell, Some(false));
-        assert_eq!(config.override_memory, Some(false));
-        assert_eq!(config.override_mob, Some(false));
-        assert!(config.resume_override_mask.override_mob);
+        assert_eq!(
+            config.override_builtins,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_shell,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
+        assert_eq!(
+            config.override_memory,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
+        assert_eq!(
+            config.override_mob,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
     }
 
     #[tokio::test]
@@ -590,12 +618,14 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        assert_eq!(config.override_mob, Some(true));
+        assert_eq!(
+            config.override_mob,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         assert!(
             config.mob_tool_authority_context.is_some(),
             "typed injected authority should flow into the build config"
         );
-        assert!(config.resume_override_mask.override_mob);
     }
 
     #[tokio::test]
@@ -652,7 +682,7 @@ mod tests {
 
         assert_eq!(
             config.override_mob,
-            Some(false),
+            meerkat_core::ToolCategoryOverride::Disable,
             "runtime-injected absence of operator capabilities must beat resumed mob metadata"
         );
     }
@@ -870,8 +900,14 @@ mod tests {
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
         assert!(build.peer_meta.is_some());
         assert_eq!(build.realm_id.as_deref(), Some("mob:test-mob"));
-        assert_eq!(build.override_builtins, Some(true));
-        assert_eq!(build.override_shell, Some(true));
+        assert_eq!(
+            build.override_builtins,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            build.override_shell,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
     }
 
     #[tokio::test]
@@ -898,7 +934,10 @@ mod tests {
         assert_eq!(req.model, "claude-sonnet-4-5");
         assert_eq!(req.deferred_prompt_policy, DeferredPromptPolicy::Discard);
         let build = req.build.expect("build options");
-        assert_eq!(build.override_shell, Some(false));
+        assert_eq!(
+            build.override_shell,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
     }
 
     #[tokio::test]

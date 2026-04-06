@@ -9,7 +9,9 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
-use meerkat_core::{BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider};
+use meerkat_core::{
+    BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider, ToolCategoryOverride,
+};
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -282,13 +284,15 @@ pub async fn handle_create(
     build_config.output_schema = output_schema;
     build_config.structured_output_retries = params.structured_output_retries;
     build_config.hooks_override = params.hooks_override.unwrap_or_default();
-    build_config.override_builtins = params.enable_builtins;
-    build_config.override_shell = params.enable_shell;
+    build_config.override_builtins = ToolCategoryOverride::from_override(params.enable_builtins);
+    build_config.override_shell = ToolCategoryOverride::from_override(params.enable_shell);
     build_config.keep_alive = params.keep_alive;
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
-    build_config.override_memory = params.enable_memory;
-    build_config.apply_generated_create_only_mob_operator_access(params.enable_mob);
+    build_config.override_memory = ToolCategoryOverride::from_override(params.enable_memory);
+    build_config.apply_generated_create_only_mob_operator_access(
+        ToolCategoryOverride::from_override(params.enable_mob),
+    );
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.

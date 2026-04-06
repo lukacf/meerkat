@@ -3405,7 +3405,10 @@ mod tests {
         let build = captured_builds
             .last()
             .expect("recovery builder should capture a build");
-        assert_eq!(build.override_mob, Some(true));
+        assert_eq!(
+            build.override_mob,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         let authority = build
             .mob_tool_authority_context
             .as_ref()
@@ -3497,7 +3500,10 @@ mod tests {
         let build = captured_builds
             .last()
             .expect("recovery builder should capture a build");
-        assert_eq!(build.override_mob, Some(true));
+        assert_eq!(
+            build.override_mob,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         assert_eq!(
             build.mob_tool_authority_context,
             Some(expected_authority),
@@ -3573,7 +3579,10 @@ mod tests {
         let build = captured_builds
             .last()
             .expect("recovery builder should capture a build");
-        assert_eq!(build.override_mob, Some(true));
+        assert_eq!(
+            build.override_mob,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         assert_eq!(build.mob_tool_authority_context, Some(expected_authority));
     }
 

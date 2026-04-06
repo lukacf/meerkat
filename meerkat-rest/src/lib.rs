@@ -56,7 +56,7 @@ use meerkat_core::service::{
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
     FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
-    RuntimeBootstrap, agent_event_type, format_verbose_event,
+    RuntimeBootstrap, ToolCategoryOverride, agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -2443,10 +2443,10 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
-        override_builtins: req.enable_builtins,
-        override_shell: req.enable_shell,
-        override_memory: req.enable_memory,
-        override_mob: None,
+        override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
+        override_shell: ToolCategoryOverride::from_override(req.enable_shell),
+        override_memory: ToolCategoryOverride::from_override(req.enable_memory),
+        override_mob: ToolCategoryOverride::Inherit,
         mob_tool_authority_context: None,
         preload_skills: req
             .preload_skills
@@ -2468,10 +2468,6 @@ async fn create_session_inner(
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),
             provider_params: req.provider_params.is_some(),
-            override_builtins: req.enable_builtins.is_some(),
-            override_shell: req.enable_shell.is_some(),
-            override_memory: req.enable_memory.is_some(),
-            override_mob: req.enable_mob.is_some(),
             preload_skills: req.preload_skills.is_some(),
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
@@ -2483,7 +2479,9 @@ async fn create_session_inner(
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
     };
-    build.apply_generated_create_only_mob_operator_access(req.enable_mob);
+    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
+        req.enable_mob,
+    ));
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
@@ -3176,10 +3174,10 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            override_builtins: None,
-            override_shell: None,
-            override_memory: None,
-            override_mob: None,
+            override_builtins: ToolCategoryOverride::Inherit,
+            override_shell: ToolCategoryOverride::Inherit,
+            override_memory: ToolCategoryOverride::Inherit,
+            override_mob: ToolCategoryOverride::Inherit,
             mob_tool_authority_context: None,
             preload_skills: None,
             realm_id: Some(state.realm_id.clone()),
@@ -3208,7 +3206,7 @@ async fn continue_session_inner(
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         };
-        build.apply_generated_create_only_mob_operator_access(None);
+        build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let create_req = SvcCreateSessionRequest {
             model: req
                 .model

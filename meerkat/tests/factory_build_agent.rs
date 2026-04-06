@@ -1287,7 +1287,7 @@ async fn explicit_mob_override_generates_create_only_operator_capabilities() {
     let config = Config::default();
 
     let build_config = AgentBuildConfig {
-        override_mob: Some(true),
+        override_mob: ToolCategoryOverride::Enable,
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
@@ -1337,12 +1337,8 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
         .unwrap();
 
     let build_config = AgentBuildConfig {
-        override_mob: Some(true),
+        override_mob: ToolCategoryOverride::Enable,
         resume_session: Some(session),
-        resume_override_mask: meerkat_core::service::ResumeOverrideMask {
-            override_mob: true,
-            ..Default::default()
-        },
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };

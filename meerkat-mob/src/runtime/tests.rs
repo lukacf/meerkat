@@ -813,21 +813,21 @@ impl SessionService for MockSessionService {
                     .unwrap_or(Provider::Anthropic),
                 provider_params: build.and_then(|b| b.provider_params.clone()),
                 tooling: SessionTooling {
-                    builtins: ToolCategoryOverride::from_effective(
-                        build.and_then(|b| b.override_builtins).unwrap_or(true),
-                    ),
-                    shell: ToolCategoryOverride::from_effective(
-                        build.and_then(|b| b.override_shell).unwrap_or(false),
-                    ),
+                    builtins: build
+                        .map(|b| b.override_builtins)
+                        .unwrap_or(ToolCategoryOverride::from_effective(true)),
+                    shell: build
+                        .map(|b| b.override_shell)
+                        .unwrap_or(ToolCategoryOverride::from_effective(false)),
                     comms: ToolCategoryOverride::from_effective(
                         build.and_then(|b| b.comms_name.as_ref()).is_some(),
                     ),
-                    mob: ToolCategoryOverride::from_effective(
-                        build.and_then(|b| b.override_mob).unwrap_or(false),
-                    ),
-                    memory: ToolCategoryOverride::from_effective(
-                        build.and_then(|b| b.override_memory).unwrap_or(false),
-                    ),
+                    mob: build
+                        .map(|b| b.override_mob)
+                        .unwrap_or(ToolCategoryOverride::from_effective(false)),
+                    memory: build
+                        .map(|b| b.override_memory)
+                        .unwrap_or(ToolCategoryOverride::from_effective(false)),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),

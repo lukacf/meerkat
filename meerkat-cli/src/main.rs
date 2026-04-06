@@ -3406,10 +3406,10 @@ async fn run_agent(
         external_tools,
         recoverable_tool_defs: None,
         llm_client_override: None,
-        override_builtins: Some(enable_builtins),
-        override_shell: Some(enable_shell),
-        override_memory: Some(enable_memory),
-        override_mob: None,
+        override_builtins: meerkat_core::ToolCategoryOverride::from_effective(enable_builtins),
+        override_shell: meerkat_core::ToolCategoryOverride::from_effective(enable_shell),
+        override_memory: meerkat_core::ToolCategoryOverride::from_effective(enable_memory),
+        override_mob: meerkat_core::ToolCategoryOverride::Inherit,
         mob_tool_authority_context: None,
         preload_skills,
         realm_id: Some(scope.locator.realm_id.clone()),
@@ -3433,7 +3433,9 @@ async fn run_agent(
         blob_store_override: None,
         mob_tools: mob_tools_factory,
     };
-    build.apply_generated_create_only_mob_operator_access(Some(effective_mob));
+    build.apply_generated_create_only_mob_operator_access(
+        meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
+    );
 
     let parsed_labels = if labels.is_empty() {
         None
@@ -3917,10 +3919,10 @@ async fn resume_session_with_llm_override(
         external_tools,
         recoverable_tool_defs: None,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        override_builtins: tooling.builtins.to_override(),
-        override_shell: tooling.shell.to_override(),
-        override_memory: tooling.memory.to_override(),
-        override_mob: None,
+        override_builtins: tooling.builtins,
+        override_shell: tooling.shell,
+        override_memory: tooling.memory,
+        override_mob: meerkat_core::ToolCategoryOverride::Inherit,
         mob_tool_authority_context: None,
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
@@ -3954,7 +3956,7 @@ async fn resume_session_with_llm_override(
         mob_tools: mob_tools_factory,
     };
     build.apply_persisted_mob_operator_access(
-        tooling.mob.to_override(),
+        tooling.mob,
         build
             .resume_session
             .as_ref()
@@ -9455,7 +9457,9 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             )),
             ..SessionBuildOptions::default()
         };
-        build.apply_generated_create_only_mob_operator_access(Some(true));
+        build.apply_generated_create_only_mob_operator_access(
+            meerkat_core::ToolCategoryOverride::Enable,
+        );
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),

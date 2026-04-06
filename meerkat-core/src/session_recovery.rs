@@ -9,7 +9,7 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, PeerMeta,
-    Provider, Session, SessionDeferredTurnState, ToolDef, skills::SkillId,
+    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef, skills::SkillId,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
@@ -146,10 +146,6 @@ pub fn build_recovered_session(
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
         provider_params: overrides.provider_params.is_some(),
-        override_builtins: overrides.override_builtins.is_some(),
-        override_shell: overrides.override_shell.is_some(),
-        override_memory: overrides.override_memory.is_some(),
-        override_mob: overrides.override_mob.is_some(),
         preload_skills: overrides.preload_skills.is_some(),
         keep_alive: overrides.keep_alive.is_some(),
         comms_name: overrides.comms_name.is_some(),
@@ -211,16 +207,20 @@ pub fn build_recovered_session(
         llm_client_override: context.llm_client_override,
         override_builtins: overrides
             .override_builtins
-            .or_else(|| metadata.tooling.builtins.to_override()),
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.builtins),
         override_shell: overrides
             .override_shell
-            .or_else(|| metadata.tooling.shell.to_override()),
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.shell),
         override_memory: overrides
             .override_memory
-            .or_else(|| metadata.tooling.memory.to_override()),
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.memory),
         override_mob: overrides
             .override_mob
-            .or_else(|| metadata.tooling.mob.to_override()),
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.mob),
         preload_skills: overrides
             .preload_skills
             .clone()
@@ -253,7 +253,8 @@ pub fn build_recovered_session(
     build.apply_persisted_mob_operator_access(
         overrides
             .override_mob
-            .or_else(|| metadata.tooling.mob.to_override()),
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.mob),
         build_state.mob_tool_authority_context,
     );
 
@@ -405,10 +406,10 @@ mod tests {
         assert_eq!(build.backend.as_deref(), Some("sqlite"));
         assert_eq!(build.config_generation, Some(7));
         assert!(build.keep_alive);
-        assert_eq!(build.override_builtins, Some(false));
-        assert_eq!(build.override_shell, Some(true));
-        assert_eq!(build.override_mob, Some(true));
-        assert_eq!(build.override_memory, Some(true));
+        assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_shell, ToolCategoryOverride::Enable);
+        assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
+        assert_eq!(build.override_memory, ToolCategoryOverride::Enable);
         assert_eq!(
             build
                 .mob_tool_authority_context
@@ -515,10 +516,10 @@ mod tests {
                 .and_then(|limits| limits.max_tool_calls),
             Some(5)
         );
-        assert_eq!(build.override_builtins, Some(true));
-        assert_eq!(build.override_shell, Some(false));
-        assert_eq!(build.override_memory, Some(false));
-        assert_eq!(build.override_mob, Some(true));
+        assert_eq!(build.override_builtins, ToolCategoryOverride::Enable);
+        assert_eq!(build.override_shell, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_memory, ToolCategoryOverride::Disable);
+        assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
         assert_eq!(
             build.preload_skills,
             Some(vec![SkillId("override/skill".to_string())])

@@ -35,8 +35,8 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, Core
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask, SessionBuildOptions,
-    SessionError, SessionService, StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
+    StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
 use meerkat_core::{AgentEvent, Config, Session};
@@ -1240,20 +1240,11 @@ async fn setup_session(
     // from the CommsRuntime set via AgentFactory::with_comms_runtime().
     let build_opts = SessionBuildOptions {
         provider: Some(meerkat_core::Provider::from_name(provider)),
-        override_builtins: Some(true),
-        override_shell: Some(true),
-        override_mob: Some(true),
+        override_builtins: meerkat_core::ToolCategoryOverride::Enable,
+        override_shell: meerkat_core::ToolCategoryOverride::Enable,
+        override_mob: meerkat_core::ToolCategoryOverride::Enable,
         resume_session: Some(prepared_session),
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-        // When resuming a persisted session, the old metadata's tool category
-        // overrides would silently replace these explicit values. Mask them so
-        // the current build options win.
-        resume_override_mask: ResumeOverrideMask {
-            override_builtins: true,
-            override_shell: true,
-            override_mob: true,
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2228,8 +2219,7 @@ mod tests {
     use meerkat_core::ops_lifecycle::OperationKind;
     use meerkat_core::Config;
     use meerkat_core::service::{
-        CreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask, SessionBuildOptions,
-        StartTurnRequest,
+        CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
     use meerkat_core::types::{ContentInput, HandlingMode};
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
@@ -2423,9 +2413,9 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture.clone() as Arc<dyn LlmClient>
                 )),
-                override_builtins: Some(true),
-                override_shell: Some(true),
-                override_mob: Some(true),
+                override_builtins: meerkat_core::ToolCategoryOverride::Enable,
+                override_shell: meerkat_core::ToolCategoryOverride::Enable,
+                override_mob: meerkat_core::ToolCategoryOverride::Enable,
                 ..Default::default()
             }),
             labels: None,
@@ -2491,9 +2481,9 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(Arc::new(
                     TestClient::default(),
                 ))),
-                override_builtins: Some(true),
-                override_shell: Some(true),
-                override_mob: Some(true),
+                override_builtins: meerkat_core::ToolCategoryOverride::Enable,
+                override_shell: meerkat_core::ToolCategoryOverride::Enable,
+                override_mob: meerkat_core::ToolCategoryOverride::Enable,
                 ..Default::default()
             }),
             labels: None,
@@ -2701,15 +2691,9 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture2.clone() as Arc<dyn LlmClient>,
                 )),
-                override_builtins: Some(true),
-                override_shell: Some(true),
-                override_mob: Some(true),
-                resume_override_mask: ResumeOverrideMask {
-                    override_builtins: true,
-                    override_shell: true,
-                    override_mob: true,
-                    ..Default::default()
-                },
+                override_builtins: meerkat_core::ToolCategoryOverride::Enable,
+                override_shell: meerkat_core::ToolCategoryOverride::Enable,
+                override_mob: meerkat_core::ToolCategoryOverride::Enable,
                 ..Default::default()
             }),
             labels: None,
@@ -2825,16 +2809,10 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture.clone() as Arc<dyn LlmClient>,
                 )),
-                override_builtins: Some(true),
-                override_shell: Some(true),
-                override_mob: Some(true),
+                override_builtins: meerkat_core::ToolCategoryOverride::Enable,
+                override_shell: meerkat_core::ToolCategoryOverride::Enable,
+                override_mob: meerkat_core::ToolCategoryOverride::Enable,
                 resume_session: Some(loaded),
-                resume_override_mask: ResumeOverrideMask {
-                    override_builtins: true,
-                    override_shell: true,
-                    override_mob: true,
-                    ..Default::default()
-                },
                 ..Default::default()
             }),
             labels: None,

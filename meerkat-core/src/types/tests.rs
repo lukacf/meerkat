@@ -59,6 +59,7 @@ fn test_message_json_schema() {
     let json = serde_json::to_value(&user).unwrap();
     assert_eq!(json["role"], "user");
     assert_eq!(json["content"], "Hello!");
+    assert!(json.get("render_metadata").is_none());
 
     // Assistant message
     let assistant = Message::Assistant(AssistantMessage {
@@ -83,6 +84,22 @@ fn test_message_json_schema() {
     let json = serde_json::to_value(&tool_results).unwrap();
     assert_eq!(json["role"], "tool_results");
     assert!(json["results"].is_array());
+}
+
+#[test]
+fn test_user_message_render_metadata_serialization() {
+    let user = Message::User(UserMessage::text_with_render_metadata(
+        "notice",
+        Some(RenderMetadata {
+            class: RenderClass::ToolScopeNotice,
+            salience: RenderSalience::Normal,
+        }),
+    ));
+
+    let json = serde_json::to_value(&user).unwrap();
+    assert_eq!(json["role"], "user");
+    assert_eq!(json["render_metadata"]["class"], "tool_scope_notice");
+    assert_eq!(json["render_metadata"]["salience"], "normal");
 }
 
 #[test]

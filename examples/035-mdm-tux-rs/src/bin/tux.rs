@@ -826,9 +826,9 @@ async fn build_hive_with_llm_override(
     );
     build.external_tools = Some(tools);
     build.session_store_override = Some(hive_store);
-    build.override_builtins = Some(false);
-    build.override_shell = Some(false);
-    build.override_mob = Some(true);
+    build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+    build.override_shell = meerkat_core::ToolCategoryOverride::Disable;
+    build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
     build.mob_tools = Some(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
         &mob_state,
     ))));

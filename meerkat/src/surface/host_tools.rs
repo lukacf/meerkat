@@ -326,10 +326,10 @@ mod tests {
             args: &args,
         };
 
-        let err = dispatcher
-            .dispatch(call)
-            .await
-            .expect_err("invalid json result");
+        let err = match dispatcher.dispatch(call).await {
+            Ok(_) => panic!("expected invalid json result"),
+            Err(err) => err,
+        };
 
         assert!(
             err.to_string().contains("invalid tool result JSON"),

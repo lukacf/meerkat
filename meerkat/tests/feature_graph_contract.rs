@@ -1,29 +1,33 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::error::Error;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .to_path_buf()
+fn workspace_root() -> Result<PathBuf, Box<dyn Error>> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(parent) = manifest_dir.parent() else {
+        return Err(
+            std::io::Error::other("workspace root not found from CARGO_MANIFEST_DIR").into(),
+        );
+    };
+    Ok(parent.to_path_buf())
 }
 
 fn cargo_bin() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
-fn run_cargo(args: &[&str]) -> std::process::Output {
-    Command::new(cargo_bin())
-        .current_dir(workspace_root())
+fn run_cargo(args: &[&str]) -> Result<std::process::Output, Box<dyn Error>> {
+    Ok(Command::new(cargo_bin())
+        .current_dir(workspace_root()?)
         .args(args)
-        .output()
-        .expect("run cargo")
+        .output()?)
 }
 
 #[test]
-fn feature_graph_contract_minimal_lane_excludes_optional_surface_crates() {
+fn feature_graph_contract_minimal_lane_excludes_optional_surface_crates()
+-> Result<(), Box<dyn Error>> {
     let check = run_cargo(&[
         "check",
         "-p",
@@ -31,7 +35,7 @@ fn feature_graph_contract_minimal_lane_excludes_optional_surface_crates() {
         "--no-default-features",
         "--features",
         "openai",
-    ]);
+    ])?;
     assert!(
         check.status.success(),
         "minimal cargo check failed:\nstdout:\n{}\nstderr:\n{}",
@@ -46,7 +50,7 @@ fn feature_graph_contract_minimal_lane_excludes_optional_surface_crates() {
         "--no-default-features",
         "--features",
         "openai",
-    ]);
+    ])?;
     assert!(
         tree.status.success(),
         "minimal cargo tree failed:\nstdout:\n{}\nstderr:\n{}",
@@ -67,6 +71,7 @@ fn feature_graph_contract_minimal_lane_excludes_optional_surface_crates() {
         !stdout.contains("meerkat-skills v"),
         "minimal lane still resolves meerkat-skills:\n{stdout}"
     );
+    Ok(())
 }
 
 #[test]
@@ -76,8 +81,9 @@ fn feature_graph_contract_tool_error_remains_available_from_facade() {
 }
 
 #[test]
-fn feature_graph_contract_rkat_default_lane_explicitly_requests_hooks_and_builtin_tools() {
-    let tree = run_cargo(&["tree", "-p", "rkat", "-e", "features", "-i", "meerkat"]);
+fn feature_graph_contract_rkat_default_lane_explicitly_requests_hooks_and_builtin_tools()
+-> Result<(), Box<dyn Error>> {
+    let tree = run_cargo(&["tree", "-p", "rkat", "-e", "features", "-i", "meerkat"])?;
     assert!(
         tree.status.success(),
         "rkat feature tree failed:\nstdout:\n{}\nstderr:\n{}",
@@ -94,6 +100,7 @@ fn feature_graph_contract_rkat_default_lane_explicitly_requests_hooks_and_builti
         stdout.contains("rkat feature \"builtin-tools\""),
         "rkat must explicitly request facade builtin tool support instead of relying on transitive unification:\n{stdout}"
     );
+    Ok(())
 }
 
 #[cfg(feature = "builtin-tools")]

@@ -630,6 +630,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                         meerkat_core::types::Message::System(s) => {
                             ("system", format!("[{}B]", s.content.len()))
                         }
+                        meerkat_core::types::Message::SystemNotice(notice) => (
+                            "system_notice",
+                            format!("{:?}: {}", notice.kind, notice.body),
+                        ),
                         meerkat_core::types::Message::User(u) => {
                             let has_img = meerkat_core::has_images(&u.content);
                             let text = meerkat_core::types::text_content(&u.content);

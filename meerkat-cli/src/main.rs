@@ -4486,6 +4486,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                 println!("\n[{}] SYSTEM:", i + 1);
                 println!("  {}", s.content);
             }
+            Message::SystemNotice(notice) => {
+                println!("\n[{}] SYSTEM NOTICE ({:?}):", i + 1, notice.kind);
+                println!("  {}", notice.body);
+            }
             Message::User(u) => {
                 println!("\n[{}] USER:", i + 1);
                 println!("  {}", u.text_content());

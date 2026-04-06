@@ -271,8 +271,8 @@ impl<S: SessionService + 'static> CoreExecutor for ProbeSessionRuntimeExecutor<S
             );
         }
 
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceipt {
                 run_id,
                 boundary: match &primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -283,9 +283,9 @@ impl<S: SessionService + 'static> CoreExecutor for ProbeSessionRuntimeExecutor<S
                 message_count: 0,
                 sequence: 0,
             },
-            session_snapshot: None,
-            run_result: Some(result),
-        })
+            None,
+            result,
+        ))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {

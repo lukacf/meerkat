@@ -21,7 +21,7 @@ use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionService,
 };
 use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolResult};
-use meerkat_core::{AgentBuilder, AgentLlmClient, AgentToolDispatcher, BudgetLimits};
+use meerkat_core::{AgentBuilder, AgentLlmClient, AgentToolDispatcher, BindOutcome, BudgetLimits};
 use meerkat_runtime::comms_drain::spawn_comms_drain_with_observer;
 use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_runtime::input::{Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput};
@@ -444,37 +444,39 @@ impl AgentToolDispatcher for HostSendGuardDispatcher {
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError>
     {
-        match Arc::clone(&self.inner).bind_wait_interrupt(rx) {
-            Ok(inner) => Ok(Arc::new(HostSendGuardDispatcher::new(
-                inner,
-                Arc::clone(&self.inbound_epoch),
-            ))),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn supports_wait_interrupt(&self) -> bool {
-        self.inner.supports_wait_interrupt()
+        let outcome = Arc::clone(&self.inner).bind_wait_interrupt(rx)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
+            inner,
+            Arc::clone(&self.inbound_epoch),
+        ));
+        Ok(if bound {
+            BindOutcome::Bound(wrapped)
+        } else {
+            BindOutcome::Skipped(wrapped)
+        })
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::agent::OpsLifecycleBindError> {
-        match Arc::clone(&self.inner).bind_ops_lifecycle(registry, owner_session_id) {
-            Ok(inner) => Ok(Arc::new(HostSendGuardDispatcher::new(
-                inner,
-                Arc::clone(&self.inbound_epoch),
-            ))),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.inner.supports_ops_lifecycle_binding()
+    ) -> Result<BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
+        let outcome = Arc::clone(&self.inner).bind_ops_lifecycle(registry, owner_session_id)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
+            inner,
+            Arc::clone(&self.inbound_epoch),
+        ));
+        Ok(if bound {
+            BindOutcome::Bound(wrapped)
+        } else {
+            BindOutcome::Skipped(wrapped)
+        })
     }
 }
 
@@ -509,6 +511,7 @@ async fn create_keep_alive_session(
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 keep_alive: true,
                 comms_name: Some("phase0-host".to_string()),

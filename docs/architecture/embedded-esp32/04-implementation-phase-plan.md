@@ -155,11 +155,13 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - `REQ-008`
 - `REQ-009`
 - `INV-003`
+- `INV-007`
 - `CONTRACT-001`
 - `CONTRACT-002`
 - `CONTRACT-003`
 - `CONTRACT-004`
 - `CONTRACT-005`
+- `CONTRACT-008`
 - `E2E-004`
 - `CHOKE-003`
 - `ASSUMP-005`
@@ -174,6 +176,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - `meerkat-embedded-runtime` for any real shared surface glue extracted in Phase 1
 - `meerkat-esp-runtime`
 - Embedded profile definitions and deterministic unsupported-capability behavior
+- Embedded profile capability table that explicitly distinguishes “supported”, “unsupported by profile”, and “deferred until later hardware proof” without introducing a second runtime model
 - ESP storage, bootstrap, transport, and host-tool bindings behind existing seams
 - Explicit ESP baseline policy for PSRAM, flash geometry and partition sizing, pthread stack sizing, and watchdog-compatible scheduling
 - Explicit embedded policy for when the Meerkat lane may stream provider responses versus when the embedded profile must stay on the current non-streaming ESP conversation shape
@@ -185,6 +188,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - The embedded surface bootstraps through `FactoryAgentBuilder`, `PersistentSessionService`, and `RuntimeSessionAdapter`.
 - The ESP backend satisfies the surface through transport, persistence, and host-tool bindings instead of direct semantic shortcuts.
 - The embedded profile is explicit and test-backed.
+- The embedded profile may exclude capabilities such as `meerkat-mob`, background async task execution, or selected long-running tools, but those exclusions are enforced as capability or backend limits on the canonical runtime path rather than by introducing a smaller shadow runtime.
 - The surface can be exercised in host-sim mode before hardware smoke.
 - Host-sim or preflight evidence moves `ASSUMP-005`, `ASSUMP-006`, and `ASSUMP-009` to at least `PROVISIONAL` before Phase 3 attempts real-hardware closure.
 - The embedded baseline accounts explicitly for PSRAM-backed heap, pthread stack policy, and watchdog-friendly execution rather than leaving them as probe-only tweaks.
@@ -193,6 +197,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - The embedded runtime path also preserves the owning `RuntimeSessionAdapter` wake behavior proven on ESP in Phase 0 instead of reintroducing opportunistic wake delivery that can lose the first peer-triggered turn.
 - The embedded profile does not silently assume ESP-side Meerkat streaming is safe just because direct provider streaming was proven separately in Phase 0 or host-side Meerkat streaming later passed in the split rerun.
 - The embedded profile explicitly distinguishes memory-backed persistent-session orchestration, which is proven, from restart durability, which is not yet closed.
+- The embedded profile reduces runtime complexity by shrinking the reachable capability graph, not by rewriting runtime authority. A disabled mob or background-task feature must disappear through profile composition and deterministic unsupported-capability behavior, not through a second embedded-only state machine.
 - Example 036 explicitly tests that peer-chat turns continue to route through the standard `send` tool path under the recommended prompts, so a missed tool call is caught as a failing runtime behavior rather than disappearing into a hung smoke run.
 - Example 036 also exercises the host-side persistent-session path, not just the device-side one, because Phase 0 proved that both sides can stay on the standard runtime-backed path in the bounded peer-chat baseline.
 

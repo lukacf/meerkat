@@ -144,6 +144,8 @@ These are candidate families, not validated recommendations. The point is to kee
 17. The awaited runtime wake fix on `espidf` is not a temporary harness adjustment. It is a proven owning-crate compatibility change that belongs in Phase 1.
 18. The current stable device baseline is explicitly non-streaming for Meerkat provider turns, even though direct provider streaming and host-side Meerkat streaming were both proven separately. Phase 2 should preserve that distinction.
 19. On-device scripting through the standard host-tool callback contract is now a proven embedded pattern. Phase 2 examples should treat repeated tool execution and clean tool teardown as first-class smoke criteria.
+20. Embedded simplification should happen by shrinking the reachable capability graph, not by introducing a second embedded semantic runtime. If hardware limits force out mobs, background task execution, or selected long-running tools, those should become explicit profile exclusions on the canonical runtime path.
+21. This same rule suggests moving the wasm surface toward the canonical runtime direction over time rather than using the current browser-shaped substrate authority as the model for embedded. The long-term DRY win is one semantic runtime with multiple surfaces and profiles.
 
 ## What this file does not close
 

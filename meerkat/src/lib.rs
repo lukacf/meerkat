@@ -98,6 +98,9 @@ pub use meerkat_core::{
     // Retry
     RetryPolicy,
     RunResult,
+    // Runtime epoch types
+    RuntimeBuildMode,
+    RuntimeEpochId,
     SESSION_VERSION,
     SchemaCompat,
     SchemaError,
@@ -109,6 +112,7 @@ pub use meerkat_core::{
     SessionLlmIdentity,
     SessionMeta,
     SessionMetadata,
+    SessionRuntimeBindings,
     SessionTooling,
     SpawnSpec,
     StopReason,
@@ -116,6 +120,8 @@ pub use meerkat_core::{
     SystemMessage,
     ToolAccessPolicy,
     ToolCall,
+    // Tool category override (tri-state for resume upgrade semantics)
+    ToolCategoryOverride,
     ToolDef,
     ToolGateway,
     ToolGatewayBuilder,
@@ -137,7 +143,7 @@ pub use meerkat_core::{
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
 #[cfg(feature = "comms")]
-pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
+pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CommsToolMaterial, CoreCommsConfig};
 #[cfg(feature = "comms")]
 pub use meerkat_core::SessionServiceCommsExt;
 pub use meerkat_core::SessionServiceControlExt;
@@ -151,6 +157,21 @@ pub use meerkat_core::{
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_schedule::{
+    CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
+    DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
+    DisabledScheduleStore, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec,
+    MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence,
+    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
+    OverlapPolicy, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS,
+    SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
+    ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService, ScheduleStore,
+    ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe,
+    ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+    TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call,
+    schedule_tools_list,
+};
 pub use meerkat_tools::ToolError;
 
 // AgentFactory and build_agent types
@@ -177,9 +198,9 @@ pub use service_factory::{FactoryAgent, FactoryAgentBuilder, build_ephemeral_ser
 // Session service
 pub use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
-    SessionView, StartTurnRequest,
+    CreateSessionRequest, MobToolsBuildArgs, MobToolsFactory, SessionControlError, SessionError,
+    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
+    SessionSummary, SessionUsage, SessionView, StartTurnRequest,
 };
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
@@ -199,8 +220,8 @@ pub use meerkat_client::OpenAiClient;
 #[cfg(feature = "gemini")]
 pub use meerkat_client::GeminiClient;
 
-// Re-export store types
-pub use meerkat_store::{SessionFilter, SessionStore, StoreError};
+// Re-export store types (trait + filter + error from core, backend error from meerkat-store)
+pub use meerkat_store::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 
 #[cfg(feature = "jsonl-store")]
 pub use meerkat_store::JsonlStore;
@@ -209,7 +230,11 @@ pub use meerkat_store::JsonlStore;
 pub use meerkat_store::MemoryStore;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::RedbScheduleStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::SqliteScheduleStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteSessionStore;
 
@@ -240,6 +265,8 @@ inventory::submit! {
 // Re-export builtin tools infrastructure
 #[cfg(feature = "comms")]
 pub use meerkat_tools::CommsToolSurface;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_tools::builtin::SqliteTaskStore;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
@@ -294,7 +321,7 @@ pub use sdk_config::SdkConfigStore;
 pub fn compose_tools_with_comms(
     base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
     tool_usage_instructions: String,
-    runtime: std::sync::Arc<meerkat_comms::CommsRuntime>,
+    material: meerkat_comms::CommsToolMaterial,
 ) -> Result<
     (
         std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
@@ -304,25 +331,27 @@ pub fn compose_tools_with_comms(
 > {
     use meerkat_tools::CommsToolSurface;
     use std::sync::Arc;
-    let router = runtime.router_arc();
-    let trusted_peers = runtime.trusted_peers_shared();
-    let self_pubkey = router.keypair_arc().public_key();
-    let comms_surface = CommsToolSurface::new_with_runtime(
-        router,
-        trusted_peers.clone(),
-        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
-    );
+    let router = material.router().clone();
+    let trusted_peers = material.trusted_peers_shared();
+    let self_pubkey = material.self_pubkey();
+    let runtime = material.into_runtime();
+    let comms_surface = CommsToolSurface::new_with_runtime(router, trusted_peers.clone(), runtime);
     let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
-    let gateway = meerkat_core::ToolGatewayBuilder::new()
-        .add_dispatcher(base_tools)
+    // Use DynamicToolComposite instead of a single ToolGateway so that
+    // base_tools with dynamic tool lists (e.g. CallbackToolDispatcher backed
+    // by a shared registry) can surface late additions via poll_external_updates.
+    // The comms surface is wrapped in its own ToolGateway for availability gating.
+    let comms_gateway = meerkat_core::ToolGatewayBuilder::new()
         .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
         .build()?;
+    let composite =
+        meerkat_core::DynamicToolComposite::new(vec![base_tools, Arc::new(comms_gateway)]);
     let mut instructions = tool_usage_instructions;
     if !instructions.is_empty() {
         instructions.push_str("\n\n");
     }
     instructions.push_str(CommsToolSurface::usage_instructions());
-    Ok((Arc::new(gateway), instructions))
+    Ok((Arc::new(composite), instructions))
 }
 
 /// Prelude module for convenient imports

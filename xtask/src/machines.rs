@@ -12,9 +12,10 @@ use clap::{Args, ValueEnum};
 use meerkat_machine_codegen::{
     composition_route_coverage_operator_name, composition_scheduler_coverage_operator_name,
     composition_witness_cfg_name, merge_mapping_document, render_composition_ci_cfg,
-    render_composition_contract_markdown, render_composition_mapping_coverage,
-    render_composition_semantic_model, render_composition_witness_cfg, render_generated_kernel_mod,
-    render_machine_ci_cfg, render_machine_contract_markdown, render_machine_kernel_module,
+    render_composition_contract_markdown, render_composition_driver,
+    render_composition_mapping_coverage, render_composition_semantic_model,
+    render_composition_witness_cfg, render_generated_kernel_mod, render_machine_ci_cfg,
+    render_machine_contract_markdown, render_machine_kernel_module,
     render_machine_mapping_coverage, render_machine_semantic_model,
 };
 use meerkat_machine_schema::{
@@ -208,6 +209,12 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         );
         write_generated(&mapping_path, &merged)?;
         println!("updated {}", mapping_path.display());
+
+        if let Some(driver_code) = render_composition_driver(&composition.schema) {
+            let driver_path = composition_driver_path(root, &composition.schema)?;
+            write_generated(&driver_path, &driver_code)?;
+            println!("generated {}", driver_path.display());
+        }
     }
 
     Ok(())
@@ -398,6 +405,13 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &render_composition_mapping_coverage(&composition.schema, &composition.coverage),
         )?;
         compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
+        if let Some(driver_code) = render_composition_driver(&composition.schema) {
+            compare_generated(
+                &composition_driver_path(root, &composition.schema)?,
+                &driver_code,
+                &mut mismatches,
+            )?;
+        }
     }
 
     Ok(mismatches)
@@ -1540,53 +1554,53 @@ struct OwnerTestSpec {
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const PEER_COMMS: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_comms_kernel",
             filter: "peer_comms_kernel_preserves_reservation_and_trust_snapshot_for_trusted_requests",
         },
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_comms_kernel",
             filter: "peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage",
         },
     ];
     const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot",
         },
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
         },
     ];
     const TURN_EXECUTION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary",
         },
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_immediate_context_completes_without_llm_loop",
         },
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_cancel_and_failure_paths_emit_terminal_effects",
         },
     ];
     const EXTERNAL_TOOL_SURFACE: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-mcp",
+            package: "meerkat-integration-tests",
             target: "external_tool_surface_kernel",
             filter: "external_tool_surface_kernel_add_and_reload_emit_canonical_deltas",
         },
         OwnerTestSpec {
-            package: "meerkat-mcp",
+            package: "meerkat-integration-tests",
             target: "external_tool_surface_kernel",
             filter: "external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit_deltas",
         },
@@ -1877,6 +1891,16 @@ pub fn composition_witness_path(root: &Path, slug: &str, witness: &str) -> PathB
 
 pub fn composition_contract_path(root: &Path, slug: &str) -> PathBuf {
     composition_dir(root, slug).join("contract.md")
+}
+
+fn composition_driver_path(root: &Path, schema: &CompositionSchema) -> Result<PathBuf> {
+    let driver = schema.driver.as_ref().ok_or_else(|| {
+        anyhow!(
+            "composition {} has no generated driver binding",
+            schema.name
+        )
+    })?;
+    Ok(root.join(&driver.module_path))
 }
 
 fn composition_dir(root: &Path, slug: &str) -> PathBuf {

@@ -21,8 +21,8 @@ pub struct ContractVersion {
 impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 6,
-        patch: 0,
+        minor: 5,
+        patch: 1,
     };
 
     /// Check compatibility: same major version (for 1.0+), or same major+minor (for 0.x).

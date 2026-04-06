@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
-    SessionError, SessionQuery, SessionService, SessionServiceControlExt, StartTurnRequest,
-    TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
+    DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
+    SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
@@ -420,6 +420,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }
@@ -428,6 +429,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         initial_turn: InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Stage,
         ..create_req(prompt)
     }
 }

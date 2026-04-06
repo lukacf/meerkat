@@ -26,8 +26,8 @@ impl Pack for ReviewPack {
         // Different models per reviewer for diverse perspectives
         let agents = [
             ("reviewer",    "reviewer-skill",          "General code reviewer",          "gemini-3.1-pro-preview"),
-            ("security",    "security-skill",          "Security-focused reviewer",      "gpt-5.3-codex"),
-            ("perf",        "perf-skill",              "Performance-focused reviewer",   "gemini-3-flash-preview"),
+            ("security",    "security-skill",          "Security-focused reviewer",      "gpt-5.4"),
+            ("perf",        "perf-skill",              "Performance-focused reviewer",   "gemini-3.1-flash-lite-preview"),
             ("synthesizer", "synthesizer-skill",       "Review synthesizer",             "claude-opus-4-6"),
         ];
 
@@ -54,7 +54,7 @@ impl Pack for ReviewPack {
             &["general_review", "security_review", "perf_review"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Parallel code review with synthesis".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Parallel code review with synthesis".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("review", profiles, skills, flows, identity_spawn_policy(&names))

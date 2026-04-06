@@ -53,6 +53,19 @@ mod filesystem_module;
 
 `FactoryAgentBuilder` has `default_tool_dispatcher` and `default_session_store` — injected into ALL `build_agent()` calls including mob-spawned sessions.
 
+## Runtime mode on wasm32
+
+WASM is an embedded/standalone surface, not a runtime-backed one. When you are
+working on wasm session creation paths:
+
+- do not invent runtime-backed `SessionRuntimeBindings`
+- prefer explicit `RuntimeBuildMode::StandaloneEphemeral`
+- treat `prepare_bindings()` as a runtime-backed surface API, not a wasm default
+
+This keeps the embedded contract honest: browser sessions use the in-memory
+substrate intentionally, not as an accidental fallback from a missing runtime
+binding.
+
 ## `@rkat/web` npm Package
 
 The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around the wasm_bindgen exports with an idiomatic camelCase API. Ships with the pre-built WASM binary and a Node.js provider proxy.

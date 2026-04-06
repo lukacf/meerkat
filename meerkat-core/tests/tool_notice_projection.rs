@@ -17,6 +17,7 @@ fn tool_notice_projection_red_ok_typed_notices_remain_separate_from_pending_stat
             .with_tool_count(Some(3)),
         ],
         pending: vec!["phase1-tool".into()],
+        background_completions: Vec::new(),
     };
 
     assert_eq!(update.notices.len(), 1);

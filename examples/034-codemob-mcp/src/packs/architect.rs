@@ -25,7 +25,7 @@ impl Pack for ArchitectPack {
 
         let mut profiles = BTreeMap::new();
         profiles.insert(ProfileName::from("planner"),     turn_driven_profile(resolve_model(overrides, "planner", "claude-opus-4-6"), "planner-skill", "Architecture planner", pp));
-        profiles.insert(ProfileName::from("critic"),      turn_driven_profile(resolve_model(overrides, "critic", "gpt-5.3-codex"), "critic-skill", "Architecture critic", pp));
+        profiles.insert(ProfileName::from("critic"),      turn_driven_profile(resolve_model(overrides, "critic", "gpt-5.4"), "critic-skill", "Architecture critic", pp));
         profiles.insert(ProfileName::from("synthesizer"), turn_driven_profile(resolve_model(overrides, "synthesizer", "gemini-3.1-pro-preview"), "synthesizer-skill", "Decision record writer", pp));
 
         let mut skills = BTreeMap::new();
@@ -40,7 +40,7 @@ impl Pack for ArchitectPack {
         steps.insert(StepId::from("synthesize"), flow_step("synthesizer", "Produce a final ADR: context, decision, consequences, alternatives.\n\n## Revised Plan\n{{ steps.revise }}".into(), &["revise"], 600_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps, root: None });
 
         mob_definition("architect", profiles, skills, flows, identity_spawn_policy(&["planner", "critic", "synthesizer"]))
     }

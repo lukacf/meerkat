@@ -1,11 +1,13 @@
 //! In-memory store implementations.
 
-use super::{MobEventStore, MobRunStore, MobSpecStore};
+use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
-use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, MobId, RunId, StepId};
-use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::run::{
+    FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
+    MobRunStatus, StepLedgerEntry,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -31,7 +33,7 @@ impl InMemoryMobEventStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobEventStore for InMemoryMobEventStore {
-    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
+    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let mut events = self.events.write().await;
         let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
         let stored = MobEvent {
@@ -44,7 +46,7 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(stored)
     }
 
-    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let mut events = self.events.write().await;
         let mut results = Vec::with_capacity(batch.len());
         for event in batch {
@@ -61,7 +63,7 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(results)
     }
 
-    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
+    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -71,16 +73,16 @@ impl MobEventStore for InMemoryMobEventStore {
             .collect())
     }
 
-    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         Ok(self.events.read().await.clone())
     }
 
-    async fn clear(&self) -> Result<(), MobError> {
+    async fn clear(&self) -> Result<(), MobStoreError> {
         self.events.write().await.clear();
         Ok(())
     }
 
-    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobError> {
+    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobStoreError> {
         let mut events = self.events.write().await;
         let before = events.len();
         events.retain(|event| event.timestamp >= older_than);
@@ -103,10 +105,10 @@ impl InMemoryMobRunStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobRunStore for InMemoryMobRunStore {
-    async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
+    async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         if runs.contains_key(&run.run_id) {
-            return Err(MobError::Internal(format!(
+            return Err(MobStoreError::Internal(format!(
                 "run already exists: {}",
                 run.run_id
             )));
@@ -115,7 +117,7 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(())
     }
 
-    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError> {
+    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
         Ok(self.runs.read().await.get(run_id).cloned())
     }
 
@@ -123,7 +125,7 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         mob_id: &MobId,
         flow_id: Option<&FlowId>,
-    ) -> Result<Vec<MobRun>, MobError> {
+    ) -> Result<Vec<MobRun>, MobStoreError> {
         Ok(self
             .runs
             .read()
@@ -142,7 +144,7 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         expected: MobRunStatus,
         next: MobRunStatus,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -163,7 +165,7 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         expected: &KernelState,
         next: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -182,7 +184,7 @@ impl MobRunStore for InMemoryMobRunStore {
         expected_flow_state: &KernelState,
         next_status: MobRunStatus,
         next_flow_state: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -206,11 +208,11 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         run.step_ledger.push(entry);
         Ok(())
     }
@@ -219,11 +221,11 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         let is_duplicate = run.step_ledger.iter().any(|existing| {
             existing.step_id == entry.step_id
                 && existing.meerkat_id == entry.meerkat_id
@@ -241,11 +243,11 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         step_id: &StepId,
         output: serde_json::Value,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         if let Some(entry) = run
             .step_ledger
             .iter_mut()
@@ -255,7 +257,7 @@ impl MobRunStore for InMemoryMobRunStore {
             entry.output = Some(output);
             return Ok(());
         }
-        Err(MobError::Internal(format!(
+        Err(MobStoreError::Internal(format!(
             "cannot set output for unknown step '{step_id}' in run '{run_id}'"
         )))
     }
@@ -264,13 +266,296 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         run.failure_ledger.push(entry);
         Ok(())
+    }
+
+    async fn upsert_loop_snapshot(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        snapshot: LoopSnapshot,
+        ledger_entry: Option<LoopIterationLedgerEntry>,
+    ) -> Result<(), MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        run.loops.insert(loop_instance_id.clone(), snapshot);
+        if let Some(entry) = ledger_entry
+            && !run.loop_iteration_ledger.iter().any(|existing| {
+                existing.loop_instance_id == entry.loop_instance_id
+                    && existing.iteration == entry.iteration
+                    && existing.frame_id == entry.frame_id
+            })
+        {
+            run.loop_iteration_ledger.push(entry);
+        }
+        Ok(())
+    }
+
+    async fn cas_frame_state(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected: Option<&FrameSnapshot>,
+        next: FrameSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        let current = run.frames.get(frame_id);
+        match (expected, current) {
+            (None, None) => {
+                // Insert new frame
+                run.frames.insert(frame_id.clone(), next);
+                Ok(true)
+            }
+            (Some(exp), Some(cur)) if exp == cur => {
+                run.frames.insert(frame_id.clone(), next);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn cas_grant_node_slot(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        // Check all expectations atomically
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        // Apply all updates
+        run.flow_state = next_run_state;
+        run.frames.insert(frame_id.clone(), next_frame);
+        Ok(true)
+    }
+
+    async fn cas_complete_step_and_record_output(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.frames.insert(frame_id.clone(), next_frame);
+        match loop_context {
+            None => {
+                run.root_step_outputs.insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+            Some((loop_id, iteration)) => {
+                let iteration_index = usize::try_from(iteration).map_err(|_| {
+                    MobStoreError::Internal(format!(
+                        "loop iteration index {iteration} exceeds usize::MAX on this target"
+                    ))
+                })?;
+                let vec = run
+                    .loop_iteration_outputs
+                    .entry(loop_id.clone())
+                    .or_default();
+                while vec.len() <= iteration_index {
+                    vec.push(IndexMap::new());
+                }
+                vec[iteration_index].insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        initial_loop: LoopSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        // Loop must not already exist
+        if run.loops.contains_key(loop_instance_id) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.frames.insert(frame_id.clone(), next_frame);
+        run.loops.insert(loop_instance_id.clone(), initial_loop);
+        Ok(true)
+    }
+
+    async fn cas_loop_request_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        initial_frame: FrameSnapshot,
+        ledger_entry: LoopIterationLedgerEntry,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        // Frame must not already exist
+        if run.frames.contains_key(frame_id) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), initial_frame);
+        if !run.loop_iteration_ledger.iter().any(|existing| {
+            existing.loop_instance_id == ledger_entry.loop_instance_id
+                && existing.iteration == ledger_entry.iteration
+                && existing.frame_id == ledger_entry.frame_id
+        }) {
+            run.loop_iteration_ledger.push(ledger_entry);
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), next_frame);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), next_frame);
+        Ok(true)
     }
 }
 
@@ -294,13 +579,13 @@ impl MobSpecStore for InMemoryMobSpecStore {
         mob_id: &MobId,
         definition: &MobDefinition,
         revision: Option<u64>,
-    ) -> Result<u64, MobError> {
+    ) -> Result<u64, MobStoreError> {
         let mut specs = self.specs.write().await;
         let current_revision = specs.get(mob_id).map_or(0, |(_, rev)| *rev);
         if let Some(expected) = revision
             && expected != current_revision
         {
-            return Err(MobError::SpecRevisionConflict {
+            return Err(MobStoreError::SpecRevisionConflict {
                 mob_id: mob_id.clone(),
                 expected: revision,
                 actual: current_revision,
@@ -312,15 +597,22 @@ impl MobSpecStore for InMemoryMobSpecStore {
         Ok(next_revision)
     }
 
-    async fn get_spec(&self, mob_id: &MobId) -> Result<Option<(MobDefinition, u64)>, MobError> {
+    async fn get_spec(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<(MobDefinition, u64)>, MobStoreError> {
         Ok(self.specs.read().await.get(mob_id).cloned())
     }
 
-    async fn list_specs(&self) -> Result<Vec<MobId>, MobError> {
+    async fn list_specs(&self) -> Result<Vec<MobId>, MobStoreError> {
         Ok(self.specs.read().await.keys().cloned().collect())
     }
 
-    async fn delete_spec(&self, mob_id: &MobId, revision: Option<u64>) -> Result<bool, MobError> {
+    async fn delete_spec(
+        &self,
+        mob_id: &MobId,
+        revision: Option<u64>,
+    ) -> Result<bool, MobStoreError> {
         let mut specs = self.specs.write().await;
         let Some((_, current_revision)) = specs.get(mob_id) else {
             return Ok(false);
@@ -379,6 +671,9 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
+            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
+            is_implicit: false,
         }
     }
 
@@ -394,6 +689,12 @@ mod tests {
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: IndexMap::new(),
+            loop_iteration_outputs: BTreeMap::new(),
         }
     }
 
@@ -531,7 +832,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             conflict,
-            MobError::SpecRevisionConflict {
+            MobStoreError::SpecRevisionConflict {
                 expected: Some(1),
                 actual: 2,
                 ..

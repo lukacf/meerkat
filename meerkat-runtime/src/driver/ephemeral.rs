@@ -659,12 +659,24 @@ impl EphemeralRuntimeDriver {
             let mut is_steer = false;
             if let Some(state) = self.ledger.get_mut(input_id) {
                 match state.apply(InputLifecycleInput::RollbackStaged) {
-                    Ok(_) => {
-                        requeue_input = state.persisted_input.clone();
-                        is_steer = requeue_input
-                            .as_ref()
-                            .and_then(super::super::input::Input::handling_mode)
-                            == Some(HandlingMode::Steer);
+                    Ok(transition) => {
+                        // Only re-enqueue if the transition went to Queued.
+                        // If max attempts exhausted, the machine transitions
+                        // to Abandoned — do not re-enqueue.
+                        if transition.next_phase == crate::input_state::InputLifecycleState::Queued
+                        {
+                            requeue_input = state.persisted_input.clone();
+                            is_steer = requeue_input
+                                .as_ref()
+                                .and_then(super::super::input::Input::handling_mode)
+                                == Some(HandlingMode::Steer);
+                        } else {
+                            tracing::warn!(
+                                input_id = %input_id,
+                                next_phase = ?transition.next_phase,
+                                "input abandoned after max stage attempts"
+                            );
+                        }
                     }
                     Err(
                         InputLifecycleError::InvalidTransition { .. }
@@ -964,6 +976,11 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     });
                 }
             }
+        }
+        if let Err(e) = crate::peer_handling_mode::validate_peer_handling_mode(&input) {
+            return Ok(AcceptOutcome::Rejected {
+                reason: e.to_string(),
+            });
         }
         let input_id = input.id().clone();
         let mut state = InputState::new_accepted(input_id.clone());

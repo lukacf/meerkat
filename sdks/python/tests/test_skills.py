@@ -213,30 +213,26 @@ async def test_deferred_session_history_routes_to_client_history_reader():
 
 
 @pytest.mark.asyncio
-async def test_client_list_mob_tools_and_call_tool():
+async def test_client_create_mob_uses_typed_route():
     client = object.__new__(MeerkatClient)
     calls: list[tuple[str, dict]] = []
 
     async def fake_request(method, params):
         calls.append((method, params))
-        if method == "mob/tools":
-            return {"tools": [{"name": "mob_create"}]}
-        if method == "mob/call":
+        if method == "mob/create":
             return {"ok": True, "mob_id": "m1"}
         return {}
 
     client._request = fake_request  # type: ignore[attr-defined]
-    tools = await MeerkatClient.list_mob_tools(client)
-    result = await MeerkatClient.call_mob_tool(
+    client._methods = {"mob/create"}  # type: ignore[attr-defined]
+    client._capabilities = []  # type: ignore[attr-defined]
+    mob = await MeerkatClient.create_mob(
         client,
-        "mob_create",
-        {"definition": {"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}}},
+        definition={"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}},
     )
-    assert tools == [{"name": "mob_create"}]
-    assert result["mob_id"] == "m1"
+    assert mob.id == "m1"
     assert calls == [
-        ("mob/tools", {}),
-        ("mob/call", {"name": "mob_create", "arguments": {"definition": {"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}}}}),
+        ("mob/create", {"definition": {"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}}}),
     ]
 
 

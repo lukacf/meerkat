@@ -754,3 +754,60 @@ describe("Mob kickoff wait wrappers", () => {
     assert.equal(fromHandle[0].meerkatId, "lead");
   });
 });
+
+describe("Mob member host ingress", () => {
+  it("routes member sends through the canonical host member-send lane", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        member_id: "reviewer-1",
+        session_id: "session-123",
+        handling_mode: "steer",
+      };
+    };
+
+    const receipt = await new Mob(client, "mob-1").member("reviewer-1").send(
+      "hello reviewer",
+      {
+        handlingMode: "steer",
+        renderMetadata: {
+          class: "peer_request",
+          salience: "urgent",
+        },
+      },
+    );
+
+    assert.deepEqual(receipt, {
+      memberId: "reviewer-1",
+      sessionId: "session-123",
+      handlingMode: "steer",
+    });
+    assert.deepEqual(calls, [
+      {
+        method: "mob/member_send",
+        params: {
+          mob_id: "mob-1",
+          meerkat_id: "reviewer-1",
+          content: "hello reviewer",
+          handling_mode: "steer",
+          render_metadata: {
+            class: "peer_request",
+            salience: "urgent",
+          },
+        },
+      },
+    ]);
+  });
+
+  it("rejects malformed member-send receipts", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ handling_mode: "queue" });
+
+    await assert.rejects(
+      () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
+      /missing session_id/,
+    );
+  });
+});

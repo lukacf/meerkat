@@ -9,7 +9,6 @@ use meerkat_core::ops_lifecycle::{
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
-use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 
@@ -147,6 +146,7 @@ use super::types::{BackgroundJob, JobId, JobStatus, JobSummary};
 struct BackgroundJobRecord {
     view: BackgroundJob,
     operation_id: OperationId,
+    completion_notified: bool,
 }
 
 /// Manager for background shell jobs
@@ -168,8 +168,6 @@ pub struct JobManager {
     /// Configuration for shell execution
     config: ShellConfig,
     resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
-    /// Optional channel for sending completion events
-    event_tx: Option<mpsc::Sender<Value>>,
     /// Shared lifecycle registry backing background shell operations.
     ops_registry: Arc<dyn OpsLifecycleRegistry>,
     /// Session-scoped owner identity for shared lifecycle records.
@@ -192,7 +190,6 @@ impl std::fmt::Debug for JobManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobManager")
             .field("config", &self.config)
-            .field("event_tx", &self.event_tx.is_some())
             .field("owner_session_id", &self.owner_session_id)
             .field(
                 "exports_canonical_async_ops",
@@ -210,7 +207,6 @@ impl JobManager {
             canonical_job_ops: Arc::new(std::sync::Mutex::new(HashMap::new())),
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
-            event_tx: None,
             ops_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
             owner_session_id: SessionId::new(),
             owner_session_bound: false,
@@ -220,15 +216,6 @@ impl JobManager {
             completed_at: Arc::new(Mutex::new(HashMap::new())),
             sync_slots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
-    }
-
-    /// Add an event sender for completion notifications
-    ///
-    /// When a job completes (success, failure, timeout, or cancel), a JSON event
-    /// will be sent through this channel.
-    pub fn with_event_sender(mut self, tx: mpsc::Sender<Value>) -> Self {
-        self.event_tx = Some(tx);
-        self
     }
 
     /// Override the owner session ID used in shared lifecycle records.
@@ -388,6 +375,7 @@ impl JobManager {
             BackgroundJobRecord {
                 view: job,
                 operation_id: operation_id.clone(),
+                completion_notified: false,
             },
         );
         self.canonical_job_ops
@@ -542,7 +530,6 @@ impl JobManager {
         let handles = Arc::clone(&self.handles);
         let cancel_notifiers = Arc::clone(&self.cancel_notifiers);
         let completed_at = Arc::clone(&self.completed_at);
-        let event_tx = self.event_tx.clone();
         let ops_registry = Arc::clone(&self.ops_registry);
         let operation_id_for_task = operation_id.clone();
         let command_clone = command.to_string();
@@ -557,6 +544,7 @@ impl JobManager {
             BackgroundJobRecord {
                 view: job,
                 operation_id: operation_id.clone(),
+                completion_notified: false,
             },
         );
         self.canonical_job_ops
@@ -700,19 +688,14 @@ impl JobManager {
             }
 
             // Update job status (preserve Cancelled if already set)
-            let status_for_event = {
+            {
                 let mut jobs_guard = jobs.lock().await;
-                if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
-                    if matches!(job.view.status, JobStatus::Cancelled { .. }) {
-                        job.view.status.clone()
-                    } else {
-                        job.view.status = final_status.clone();
-                        final_status.clone()
-                    }
-                } else {
-                    final_status.clone()
+                if let Some(job) = jobs_guard.get_mut(&job_id_clone)
+                    && !matches!(job.view.status, JobStatus::Cancelled { .. })
+                {
+                    job.view.status = final_status;
                 }
-            };
+            }
 
             // Record completion time for cleanup
             {
@@ -725,17 +708,6 @@ impl JobManager {
             // Remove cancellation notifier once the job is done
             {
                 cancel_notifiers.lock().await.remove(&job_id_for_cancel);
-            }
-
-            // Send completion event if configured
-            if let Some(tx) = event_tx {
-                let event = json!({
-                    "type": "shell_job_completed",
-                    "job_id": job_id_clone.0,
-                    "command": command_clone,
-                    "result": serde_json::to_value(&status_for_event).unwrap_or(Value::Null)
-                });
-                let _ = tx.send(event).await;
             }
         });
 
@@ -868,6 +840,120 @@ impl JobManager {
             .cloned()
     }
 
+    /// Drain completed background jobs that have not yet been notified to the agent.
+    ///
+    /// Returns a `DetachedOpCompletion` for each job whose canonical ops-lifecycle
+    /// has reached a terminal state since the last drain. Each job is returned at
+    /// most once — subsequent calls will not re-report the same completion.
+    ///
+    /// Projects from canonical ops-lifecycle snapshots (INV-001). Shell-projected
+    /// detail (command, exit code, stdout/stderr) is supplementary display (INV-002).
+    /// Returns app-facing `DetachedOpCompletion` — never surfaces `operation_id`.
+    pub async fn drain_completed(&self) -> Vec<meerkat_core::agent::DetachedOpCompletion> {
+        let mut completions = Vec::new();
+        let mut jobs = self.jobs.lock().await;
+        let mut completed_at_guard = self.completed_at.lock().await;
+
+        for (_job_id, record) in jobs.iter_mut() {
+            if record.completion_notified {
+                continue;
+            }
+
+            let snapshot = self.ops_registry.snapshot(&record.operation_id);
+            let Some(snapshot) = snapshot else { continue };
+
+            if !snapshot.status.is_terminal() {
+                continue;
+            }
+
+            let detail = Self::build_completion_detail(&record.view);
+            let completed_at_ms = snapshot.completed_at_ms;
+
+            completions.push(meerkat_core::agent::DetachedOpCompletion {
+                job_id: record.view.id.to_string(),
+                kind: snapshot.kind,
+                status: snapshot.status,
+                terminal_outcome: snapshot.terminal_outcome,
+                display_name: snapshot.display_name,
+                detail,
+                elapsed_ms: snapshot.elapsed_ms,
+            });
+
+            record.completion_notified = true;
+
+            // Record completion time so TTL/overflow cleanup can evict this job.
+            // Use the snapshot's wall-clock completion time to backdate the Instant,
+            // so TTL expiry is measured from actual completion — not from drain time.
+            let completion_instant = completed_at_ms
+                .and_then(|completed_ms| {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let ago_ms = now_ms.saturating_sub(completed_ms);
+                    Instant::now().checked_sub(Duration::from_millis(ago_ms))
+                })
+                .unwrap_or_else(Instant::now);
+            completed_at_guard
+                .entry(record.view.id.clone())
+                .or_insert(completion_instant);
+        }
+
+        completions
+    }
+
+    /// UTF-8-safe tail truncation: returns the last `max_bytes` bytes
+    /// rounded down to a char boundary so we never split a multibyte
+    /// code point.
+    fn str_tail(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        // floor_char_boundary: stable since Rust 1.80
+        let start = s.floor_char_boundary(s.len() - max_bytes);
+        &s[start..]
+    }
+
+    fn build_completion_detail(view: &BackgroundJob) -> String {
+        let mut parts = Vec::new();
+        match &view.status {
+            JobStatus::Completed {
+                exit_code,
+                stdout,
+                stderr,
+                duration_secs,
+            } => {
+                if let Some(code) = exit_code {
+                    parts.push(format!("exit_code: {code}"));
+                }
+                parts.push(format!("duration: {duration_secs:.1}s"));
+                if !stdout.is_empty() {
+                    parts.push(format!("stdout: {}", Self::str_tail(stdout, 200)));
+                }
+                if !stderr.is_empty() {
+                    parts.push(format!("stderr: {}", Self::str_tail(stderr, 200)));
+                }
+            }
+            JobStatus::Failed {
+                error,
+                duration_secs,
+            } => {
+                parts.push(format!("error: {error}"));
+                parts.push(format!("duration: {duration_secs:.1}s"));
+            }
+            JobStatus::TimedOut { duration_secs, .. } => {
+                parts.push(format!("timed_out after {duration_secs:.1}s"));
+            }
+            JobStatus::Cancelled { duration_secs } => {
+                parts.push(format!("cancelled after {duration_secs:.1}s"));
+            }
+            JobStatus::Running { .. } => {
+                parts.push("still running (unexpected)".to_string());
+            }
+        }
+        parts.join("; ")
+    }
+
     /// Clean up old completed jobs based on configuration
     ///
     /// This method is called automatically during [`spawn_job`](Self::spawn_job) and removes:
@@ -889,10 +975,13 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        // First pass: collect job IDs older than TTL
+        // First pass: collect job IDs older than TTL (only if already notified)
         let expired_jobs: Vec<JobId> = completed_at_guard
             .iter()
-            .filter(|(_, completed_time)| now.duration_since(**completed_time) > ttl)
+            .filter(|(job_id, completed_time)| {
+                now.duration_since(**completed_time) > ttl
+                    && jobs_guard.get(job_id).is_none_or(|j| j.completion_notified)
+            })
             .map(|(job_id, _)| job_id.clone())
             .collect();
 
@@ -905,19 +994,23 @@ impl JobManager {
             completed_at_guard.remove(job_id);
         }
 
-        // Second pass: if still over limit, remove oldest completed jobs
+        // Second pass: if still over limit, remove oldest evictable (notified) completed jobs
         if max_completed > 0 && completed_at_guard.len() > max_completed {
-            let mut completed_jobs: Vec<(JobId, Instant)> = completed_at_guard
+            let mut evictable_jobs: Vec<(JobId, Instant)> = completed_at_guard
                 .iter()
+                .filter(|(job_id, _)| jobs_guard.get(job_id).is_none_or(|j| j.completion_notified))
                 .map(|(k, v)| (k.clone(), *v))
                 .collect();
 
             // Sort by completion time (oldest first)
-            completed_jobs.sort_by_key(|(_, time)| *time);
+            evictable_jobs.sort_by_key(|(_, time)| *time);
 
-            // Remove oldest jobs until we're under the limit
-            let to_remove = completed_jobs.len() - max_completed;
-            for (job_id, _) in completed_jobs.into_iter().take(to_remove) {
+            // Remove oldest evictable jobs until total completed count is under the limit
+            let total_completed = completed_at_guard.len();
+            let to_remove = total_completed
+                .saturating_sub(max_completed)
+                .min(evictable_jobs.len());
+            for (job_id, _) in evictable_jobs.into_iter().take(to_remove) {
                 jobs_guard.remove(&job_id);
                 canonical_job_ops_guard.remove(&job_id);
                 handles_guard.remove(&job_id);
@@ -1030,6 +1123,35 @@ impl Drop for SyncSlotGuard {
     }
 }
 
+impl meerkat_core::completion_feed::CompletionEnrichmentProvider for JobManager {
+    fn enrich(
+        &self,
+        operation_id: &OperationId,
+    ) -> Option<meerkat_core::completion_feed::CompletionEnrichmentData> {
+        // Reverse-lookup: find which job_id maps to this operation_id.
+        let canonical = self
+            .canonical_job_ops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let job_id = canonical
+            .iter()
+            .find(|(_, oid)| *oid == operation_id)
+            .map(|(jid, _)| jid.clone())?;
+        drop(canonical);
+
+        // Try to read the job record. The jobs map uses a tokio::Mutex, so
+        // we use try_lock (sync context). If contended, return None — the
+        // caller will use fallback display.
+        let jobs = self.jobs.try_lock().ok()?;
+        let record = jobs.get(&job_id)?;
+        let detail = Self::build_completion_detail(&record.view);
+        Some(meerkat_core::completion_feed::CompletionEnrichmentData {
+            job_id: job_id.to_string(),
+            detail,
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1051,10 +1173,8 @@ mod tests {
     fn test_job_manager_struct() {
         // Verify JobManager has the required fields
         let config = ShellConfig::default();
-        let manager = bound_job_manager(config);
+        let _manager = bound_job_manager(config);
 
-        // Check that it has the expected structure by using it
-        assert!(manager.event_tx.is_none());
         // jobs and handles are Arc<Mutex<HashMap>>, verified by existence
     }
 
@@ -1084,31 +1204,6 @@ mod tests {
         assert_eq!(manager.config.project_root, PathBuf::from("/tmp/test"));
         assert_eq!(manager.config.max_completed_jobs, 100);
         assert_eq!(manager.config.completed_job_ttl_secs, 300);
-
-        // event_tx should be None by default
-        assert!(manager.event_tx.is_none());
-    }
-
-    // ==================== Event Sender Tests ====================
-
-    #[test]
-    fn test_job_manager_has_event_sender() {
-        let config = ShellConfig::default();
-        let manager = bound_job_manager(config);
-
-        // Default: no event sender
-        assert!(manager.event_tx.is_none());
-    }
-
-    #[test]
-    fn test_job_manager_with_event_sender() {
-        let config = ShellConfig::default();
-        let (tx, _rx) = mpsc::channel::<Value>(10);
-
-        let manager = bound_job_manager(config).with_event_sender(tx);
-
-        // Now should have event sender
-        assert!(manager.event_tx.is_some());
     }
 
     #[tokio::test]
@@ -1150,6 +1245,7 @@ mod tests {
                 },
             },
             operation_id,
+            completion_notified: false,
         };
 
         let snapshot = manager.snapshot_for_job(&job);
@@ -1355,6 +1451,7 @@ mod tests {
                 },
             },
             operation_id: operation_id.clone(),
+            completion_notified: false,
         };
 
         manager.jobs.lock().await.insert(job_id.clone(), job);
@@ -1578,67 +1675,6 @@ mod tests {
     }
 
     // ==================== Event Notification Tests ====================
-
-    #[tokio::test]
-    #[cfg(feature = "integration-real-tests")]
-    #[ignore = "integration-real: spawns shell processes"]
-    async fn integration_real_job_manager_sends_completion_event() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        config.shell = "sh".to_string();
-
-        let (tx, mut rx) = mpsc::channel::<Value>(10);
-
-        let manager = bound_job_manager(config).with_event_sender(tx);
-
-        // Spawn a quick job
-        let _job_id = manager.spawn_job("echo done", None, 30).await.unwrap();
-
-        // Wait for event
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("Should receive event within timeout")
-            .expect("Channel should not be closed");
-
-        // Verify event structure
-        assert_eq!(event["type"], "shell_job_completed");
-        assert!(event["job_id"].is_string());
-        assert_eq!(event["command"], "echo done");
-        assert!(event["result"].is_object());
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "integration-real-tests")]
-    #[ignore = "integration-real: spawns shell processes"]
-    async fn integration_real_job_manager_event_payload() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        config.shell = "sh".to_string();
-
-        let (tx, mut rx) = mpsc::channel::<Value>(10);
-
-        let manager = bound_job_manager(config).with_event_sender(tx);
-
-        let job_id = manager
-            .spawn_job("echo 'hello world'", None, 30)
-            .await
-            .unwrap();
-
-        // Wait for event
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("Should receive event within timeout")
-            .expect("Channel should not be closed");
-
-        // Verify payload details
-        assert_eq!(event["type"], "shell_job_completed");
-        assert_eq!(event["job_id"], job_id.0);
-        assert_eq!(event["command"], "echo 'hello world'");
-
-        // Result should have status field
-        let result = &event["result"];
-        assert!(result["status"].is_string());
-    }
 
     // ==================== Regression Tests ====================
 
@@ -2756,5 +2792,229 @@ mod tests {
                 "TOCTOU race on iteration {iteration}! Max concurrent was {final_max}, limit is 2"
             );
         }
+    }
+
+    // ==================== CHOKE-001/002: Drain + Cleanup Guard Tests ====================
+
+    #[tokio::test]
+    async fn choke_001_drain_completed_returns_typed_projection() {
+        // Setup: create a JobManager with a real RuntimeOpsLifecycleRegistry
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(ShellConfig::default())
+            .with_owner_session_id(SessionId::new())
+            .with_ops_registry(Arc::clone(&registry));
+
+        // Register a synthetic running job
+        let job_id = manager
+            .register_synthetic_running_job("shell:choke-001", None, 30)
+            .await
+            .expect("synthetic job should register");
+
+        // Resolve the canonical operation ID for this job
+        let op_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("synthetic job must have a canonical operation");
+
+        // Complete the operation in the ops registry
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 42,
+                    tokens_used: 0,
+                },
+            )
+            .expect("complete_operation should succeed");
+
+        // Call drain_completed()
+        let completions = manager.drain_completed().await;
+
+        // Assert: returns exactly one DetachedOpCompletion
+        assert_eq!(
+            completions.len(),
+            1,
+            "drain_completed should return exactly one completion"
+        );
+        let c = &completions[0];
+
+        // Assert: job_id matches the shell job id
+        assert_eq!(
+            c.job_id,
+            job_id.to_string(),
+            "completion job_id must match the shell job id"
+        );
+
+        // Assert: status is OperationStatus::Completed (from canonical snapshot)
+        assert_eq!(
+            c.status,
+            OperationStatus::Completed,
+            "terminal status must come from canonical ops-lifecycle"
+        );
+
+        // Assert: display_name comes from the snapshot, not shell-local state
+        assert!(
+            !c.display_name.is_empty(),
+            "display_name must be populated from the ops-lifecycle snapshot"
+        );
+
+        // Assert: second call to drain_completed() returns empty (already notified)
+        let second = manager.drain_completed().await;
+        assert!(
+            second.is_empty(),
+            "second drain_completed must return empty — jobs already notified"
+        );
+    }
+
+    #[tokio::test]
+    async fn choke_002_unnotified_completions_survive_cleanup() {
+        // Setup: create JobManager with aggressive TTL (1 second) and max_completed=1
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let config = ShellConfig {
+            completed_job_ttl_secs: 1,
+            max_completed_jobs: 1,
+            ..ShellConfig::default()
+        };
+        let manager = JobManager::new(config)
+            .with_owner_session_id(SessionId::new())
+            .with_ops_registry(Arc::clone(&registry));
+
+        // Register + complete a synthetic job
+        let job_id = manager
+            .register_synthetic_running_job("shell:choke-002", None, 30)
+            .await
+            .expect("synthetic job should register");
+        let op_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("must have canonical op");
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".to_string(),
+                    is_error: false,
+                    duration_ms: 10,
+                    tokens_used: 0,
+                },
+            )
+            .expect("complete should succeed");
+
+        // Wait for TTL to expire
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Trigger cleanup (spawning a new job triggers cleanup_old_jobs internally)
+        let _trigger = manager
+            .register_synthetic_running_job("shell:trigger-cleanup", None, 30)
+            .await
+            .expect("trigger job should register");
+
+        // Assert: the completed-but-unnotified job STILL exists (survives cleanup)
+        assert!(
+            manager.jobs.lock().await.contains_key(&job_id),
+            "unnotified completed job must survive cleanup even after TTL"
+        );
+
+        // Drain to mark it notified
+        let drained = manager.drain_completed().await;
+        assert!(
+            !drained.is_empty(),
+            "drain_completed must return the unnotified completion"
+        );
+
+        // Trigger cleanup again
+        let _trigger2 = manager
+            .register_synthetic_running_job("shell:trigger-cleanup-2", None, 30)
+            .await
+            .expect("second trigger job should register");
+
+        // Assert: the notified job is now evictable (may have been cleaned up)
+        // After draining + TTL expired + cleanup triggered, the job should be gone
+        let still_exists = manager.jobs.lock().await.contains_key(&job_id);
+        assert!(
+            !still_exists,
+            "notified job should be evictable after TTL expiry + cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn choke_002_overflow_cleanup_uses_filtered_evictable_subset() {
+        // Setup: create JobManager with max_completed_jobs=2
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let config = ShellConfig {
+            max_completed_jobs: 2,
+            completed_job_ttl_secs: 3600, // long TTL so only overflow triggers cleanup
+            ..ShellConfig::default()
+        };
+        let manager = JobManager::new(config)
+            .with_owner_session_id(SessionId::new())
+            .with_ops_registry(Arc::clone(&registry));
+
+        // Register + complete 4 synthetic jobs
+        let mut job_ids = Vec::new();
+        for i in 0..4 {
+            let jid = manager
+                .register_synthetic_running_job(&format!("shell:overflow-{i}"), None, 30)
+                .await
+                .expect("synthetic job should register");
+            let op_id = manager
+                .canonical_operation_for_job(&jid)
+                .expect("must have canonical op");
+            registry
+                .complete_operation(
+                    &op_id,
+                    OperationResult {
+                        id: op_id.clone(),
+                        content: format!("done-{i}"),
+                        is_error: false,
+                        duration_ms: 10,
+                        tokens_used: 0,
+                    },
+                )
+                .expect("complete should succeed");
+            job_ids.push(jid);
+        }
+
+        // Do NOT drain (all are unnotified)
+        // Trigger cleanup by spawning another job
+        let _trigger = manager
+            .register_synthetic_running_job("shell:trigger-overflow", None, 30)
+            .await
+            .expect("trigger job should register");
+
+        // Assert: all 4 jobs still exist (none evictable because none notified)
+        let jobs_guard = manager.jobs.lock().await;
+        for jid in &job_ids {
+            assert!(
+                jobs_guard.contains_key(jid),
+                "unnotified job {jid} must survive overflow cleanup"
+            );
+        }
+        drop(jobs_guard);
+
+        // Drain 2 of them (mark notified)
+        // First drain gets all 4, but we only want to test that draining makes them evictable.
+        // Since drain_completed drains ALL completed-unnotified, we drain once and then
+        // verify the cleanup behavior.
+        let drained = manager.drain_completed().await;
+        assert_eq!(drained.len(), 4, "all 4 completed jobs should be drained");
+
+        // Trigger cleanup again — now all 4 are notified and evictable
+        let _trigger2 = manager
+            .register_synthetic_running_job("shell:trigger-overflow-2", None, 30)
+            .await
+            .expect("second trigger should register");
+
+        // Assert: with max_completed=2, at least 2 of the notified jobs should be evicted
+        // (overflow cleanup removes oldest completed jobs when count exceeds max)
+        let remaining_completed = manager.completed_job_count().await;
+        assert!(
+            remaining_completed <= manager.config.max_completed_jobs,
+            "after cleanup, completed job count ({remaining_completed}) should be \
+             at or below max_completed_jobs ({})",
+            manager.config.max_completed_jobs,
+        );
     }
 }

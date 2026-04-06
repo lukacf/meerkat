@@ -84,7 +84,7 @@ export class Member {
     );
     const receipt = JSON.parse(json) as Partial<MemberDeliveryReceipt>;
     if (typeof receipt.session_id !== 'string' || receipt.session_id.length === 0) {
-      throw new Error('Invalid mob/send response: missing session_id');
+      throw new Error('Invalid mob member delivery response: missing session_id');
     }
     return {
       member_id:

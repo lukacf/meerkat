@@ -19,7 +19,6 @@ use crate::tasks::{MobTask, TaskBoard, TaskStatus};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_client::LlmClient;
-use meerkat_core::ToolGatewayBuilder;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{CommsCommand, EventStream, InputStreamMode, PeerName, StreamError};
 use meerkat_core::error::ToolError;
@@ -55,16 +54,21 @@ mod edge_locks;
 mod event_router;
 mod events;
 mod flow;
+pub mod flow_frame_engine;
+pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
+pub(crate) mod loop_iteration_authority;
 mod mob_lifecycle_authority;
 mod mob_orchestrator_authority;
 mod ops_adapter;
 mod orchestrator_kernel;
-mod path;
+pub mod path;
 mod pending_spawn_lineage;
 mod provision_guard;
 mod provisioner;
+pub mod pump;
+pub mod recovery;
 mod roster_authority;
 mod session_service;
 mod spawn_policy;
@@ -89,6 +93,7 @@ use tools::compose_external_tools_for_profile;
 
 pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
+pub use flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
@@ -98,6 +103,8 @@ pub use handle::{
 };
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
+pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};
+pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};

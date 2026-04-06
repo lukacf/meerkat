@@ -2,19 +2,23 @@ mod comms_drain_lifecycle;
 mod compositions;
 mod coverage;
 mod external_tool_surface;
+mod flow_frame;
 mod flow_run;
 mod input_lifecycle;
+mod loop_iteration;
 mod mob_helper_result_anchor;
 mod mob_lifecycle;
 mod mob_member_lifecycle_anchor;
 mod mob_orchestrator;
 mod mob_runtime_bridge_anchor;
 mod mob_wiring_anchor;
+mod occurrence_lifecycle;
 mod ops_lifecycle;
 mod peer_comms;
 mod peer_directory_reachability;
 mod runtime_control;
 mod runtime_ingress;
+mod schedule_lifecycle;
 mod turn_execution;
 
 use crate::{CompositionSchema, MachineSchema};
@@ -22,9 +26,9 @@ use crate::{CompositionSchema, MachineSchema};
 pub use comms_drain_lifecycle::comms_drain_lifecycle_machine;
 pub use compositions::{
     comms_drain_lifecycle_composition, continuation_runtime_bundle_composition,
-    external_tool_bundle_composition, mob_bundle_composition, ops_peer_bundle_composition,
-    ops_runtime_bundle_composition, peer_runtime_bundle_composition, runtime_pipeline_composition,
-    surface_event_runtime_bundle_composition,
+    external_tool_bundle_composition, flow_frame_loop_composition, mob_bundle_composition,
+    ops_peer_bundle_composition, ops_runtime_bundle_composition, peer_runtime_bundle_composition,
+    runtime_pipeline_composition, surface_event_runtime_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
@@ -32,8 +36,10 @@ pub use coverage::{
     canonical_machine_coverage_manifests,
 };
 pub use external_tool_surface::external_tool_surface_machine;
+pub use flow_frame::flow_frame_machine;
 pub use flow_run::flow_run_machine;
 pub use input_lifecycle::input_lifecycle_machine;
+pub use loop_iteration::loop_iteration_machine;
 /// Observation anchors hold statements about what the composition has seen while
 /// canonical mob ownership schemas continue to evolve. They are not the final
 /// owners of these routes and only exist to keep the instrumentation explicit.
@@ -43,11 +49,13 @@ pub use mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine;
 pub use mob_orchestrator::mob_orchestrator_machine;
 pub use mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine;
 pub use mob_wiring_anchor::mob_wiring_anchor_machine;
+pub use occurrence_lifecycle::occurrence_lifecycle_machine;
 pub use ops_lifecycle::ops_lifecycle_machine;
 pub use peer_comms::peer_comms_machine;
 pub use peer_directory_reachability::peer_directory_reachability_machine;
 pub use runtime_control::runtime_control_machine;
 pub use runtime_ingress::runtime_ingress_machine;
+pub use schedule_lifecycle::schedule_lifecycle_machine;
 pub use turn_execution::turn_execution_machine;
 
 pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
@@ -56,6 +64,8 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         runtime_control_machine(),
         runtime_ingress_machine(),
         ops_lifecycle_machine(),
+        schedule_lifecycle_machine(),
+        occurrence_lifecycle_machine(),
         peer_comms_machine(),
         peer_directory_reachability_machine(),
         external_tool_surface_machine(),
@@ -72,6 +82,8 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         flow_run_machine(),
         mob_orchestrator_machine(),
         comms_drain_lifecycle_machine(),
+        flow_frame_machine(),
+        loop_iteration_machine(),
     ]
 }
 
@@ -85,6 +97,7 @@ pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
         ops_runtime_bundle_composition(),
         ops_peer_bundle_composition(),
         mob_bundle_composition(),
+        flow_frame_loop_composition(),
         comms_drain_lifecycle_composition(),
     ]
 }

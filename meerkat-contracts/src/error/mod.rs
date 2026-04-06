@@ -24,6 +24,7 @@ use crate::capability::CapabilityId;
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     SessionNotFound,
+    ScheduleNotFound,
     SessionBusy,
     SessionNotRunning,
     RequestCancelled,
@@ -44,6 +45,7 @@ impl ErrorCode {
     pub const fn jsonrpc_code(self) -> i32 {
         match self {
             Self::SessionNotFound => -32001,
+            Self::ScheduleNotFound => -32023,
             Self::SessionBusy => -32002,
             Self::SessionNotRunning => -32003,
             Self::RequestCancelled => -32005,
@@ -63,7 +65,7 @@ impl ErrorCode {
     /// Map to HTTP status code.
     pub const fn http_status(self) -> u16 {
         match self {
-            Self::SessionNotFound | Self::SkillNotFound => 404,
+            Self::SessionNotFound | Self::ScheduleNotFound | Self::SkillNotFound => 404,
             Self::SessionBusy | Self::SessionNotRunning | Self::DuplicateInput => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
@@ -80,6 +82,7 @@ impl ErrorCode {
     pub const fn cli_exit_code(self) -> i32 {
         match self {
             Self::SessionNotFound => 10,
+            Self::ScheduleNotFound => 43,
             Self::SessionBusy => 11,
             Self::SessionNotRunning => 12,
             Self::RequestCancelled => 14,
@@ -131,6 +134,7 @@ impl ErrorCode {
     pub fn category(self) -> ErrorCategory {
         match self {
             Self::SessionNotFound
+            | Self::ScheduleNotFound
             | Self::SessionBusy
             | Self::SessionNotRunning
             | Self::DuplicateInput => ErrorCategory::Session,
@@ -220,6 +224,7 @@ mod tests {
     fn test_error_code_roundtrip() {
         let codes = [
             ErrorCode::SessionNotFound,
+            ErrorCode::ScheduleNotFound,
             ErrorCode::SessionBusy,
             ErrorCode::ProviderError,
             ErrorCode::InternalError,
@@ -246,6 +251,7 @@ mod tests {
         // Every code should have valid projections
         for code in [
             ErrorCode::SessionNotFound,
+            ErrorCode::ScheduleNotFound,
             ErrorCode::SessionBusy,
             ErrorCode::SessionNotRunning,
             ErrorCode::RequestCancelled,

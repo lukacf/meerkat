@@ -18,6 +18,7 @@ ENTRIES=(
   "meerkat-machine-schema=${ROOT}/meerkat-machine-schema"
   "meerkat-machine-kernels=${ROOT}/meerkat-machine-kernels"
   "meerkat-core=${ROOT}/meerkat-core"
+  "meerkat-schedule=${ROOT}/meerkat-schedule"
   "meerkat-client=${ROOT}/meerkat-client"
   "meerkat-store=${ROOT}/meerkat-store"
   "meerkat-tools=${ROOT}/meerkat-tools"

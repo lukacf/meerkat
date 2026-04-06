@@ -284,16 +284,44 @@ impl SessionBackend {
             let _ = state.discard_turn_context(&context_input_id).await;
         }
 
-        match completion {
-            meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                Err(MobError::Internal(format!("turn abandoned: {reason}")))
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                Err(MobError::Internal(format!("runtime terminated: {reason}")))
-            }
+        runtime_completion_to_mob_result(session_id, completion)
+    }
+}
+
+fn runtime_completion_to_mob_result(
+    session_id: &SessionId,
+    completion: meerkat_runtime::completion::CompletionOutcome,
+) -> Result<(), MobError> {
+    match completion {
+        meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+            Err(MobError::CallbackPending {
+                session_id: session_id.clone(),
+                tool_name,
+                args,
+            })
         }
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+            Err(MobError::Internal(format!("turn abandoned: {reason}")))
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            Err(MobError::Internal(format!("runtime terminated: {reason}")))
+        }
+    }
+}
+
+fn session_turn_error_to_mob_error(session_id: &SessionId, error: SessionError) -> MobError {
+    match error {
+        SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+            tool_name,
+            args,
+        }) => MobError::CallbackPending {
+            session_id: session_id.clone(),
+            tool_name,
+            args,
+        },
+        other => other.into(),
     }
 }
 
@@ -368,6 +396,67 @@ impl RuntimeSessionState {
 
     async fn clear_queued_turns(&self) {
         self.queued_turns.lock().await.entries.clear();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::{runtime_completion_to_mob_result, session_turn_error_to_mob_error};
+    use crate::error::MobError;
+    use meerkat_core::service::SessionError;
+    use meerkat_core::types::SessionId;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_callback_pending_maps_to_typed_mob_error() {
+        let session_id = SessionId::new();
+        let err = runtime_completion_to_mob_result(
+            &session_id,
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            },
+        )
+        .expect_err("callback pending should remain resumable mob state");
+
+        match err {
+            MobError::CallbackPending {
+                session_id: actual_session_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, json!({ "value": "browser" }));
+            }
+            other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_session_callback_pending_maps_to_typed_mob_error() {
+        let session_id = SessionId::new();
+        let err = session_turn_error_to_mob_error(
+            &session_id,
+            SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            }),
+        );
+
+        match err {
+            MobError::CallbackPending {
+                session_id: actual_session_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, json!({ "value": "browser" }));
+            }
+            other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
     }
 }
 
@@ -541,18 +630,72 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 impl MobProvisioner for SessionBackend {
     async fn provision_member(
         &self,
-        req: ProvisionMemberRequest,
+        mut req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
         tracing::debug!(
             backend = ?req.backend,
             peer_name = %req.peer_name,
             "SessionBackend::provision_member start"
         );
-        let created = self
+        // Pre-register with the runtime adapter so the factory receives
+        // epoch-local bindings instead of creating a competing registry.
+        let pre_registered_id = if let Some(adapter) = &self.runtime_adapter {
+            if req.create_session.build.is_none() {
+                req.create_session.build =
+                    Some(meerkat_core::service::SessionBuildOptions::default());
+            }
+            let member_session_id = req
+                .create_session
+                .build
+                .as_ref()
+                .and_then(|b| b.resume_session.as_ref())
+                .map(|s| s.id().clone())
+                .unwrap_or_else(|| {
+                    let id = SessionId::new();
+                    let session = meerkat_core::session::Session::with_id(id.clone());
+                    if let Some(ref mut build) = req.create_session.build {
+                        build.resume_session = Some(session);
+                    }
+                    id
+                });
+            let bindings = adapter
+                .prepare_bindings(member_session_id.clone())
+                .await
+                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+            if let Some(ref mut build) = req.create_session.build {
+                build.runtime_build_mode =
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
+            }
+            Some(member_session_id)
+        } else {
+            None
+        };
+        let created = match self
             .session_service
             .create_session(req.create_session)
-            .await?;
-        if self.runtime_adapter.is_some() {
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                // Rollback: unregister the pre-registered session on failure
+                if let (Some(adapter), Some(pre_id)) = (&self.runtime_adapter, &pre_registered_id) {
+                    adapter.unregister_session(pre_id).await;
+                }
+                return Err(e.into());
+            }
+        };
+        // Reconcile: if the session service returned a different ID than we
+        // pre-registered (e.g. LocalSessionService mints fresh IDs), unregister
+        // the orphan and re-register with the real ID.
+        if let (Some(adapter), Some(pre_id)) = (&self.runtime_adapter, &pre_registered_id) {
+            if *pre_id != created.session_id {
+                tracing::debug!(
+                    pre_registered = %pre_id,
+                    actual = %created.session_id,
+                    "mob provisioner: session service returned different ID; reconciling runtime registration"
+                );
+                adapter.unregister_session(pre_id).await;
+            }
             let _ = self.runtime_session_state(&created.session_id).await;
         }
         if let (Some(owner_session_id), Some(registry)) = (req.owner_session_id, req.ops_registry) {
@@ -733,7 +876,7 @@ impl MobProvisioner for SessionBackend {
             .start_turn(&session_id, req)
             .await
             .map(|_| ())
-            .map_err(Into::into)
+            .map_err(|error| session_turn_error_to_mob_error(&session_id, error))
     }
 
     async fn start_flow_step(
@@ -904,7 +1047,7 @@ impl MultiBackendProvisioner {
 
     async fn external_member_ref(
         &self,
-        create_session: CreateSessionRequest,
+        mut create_session: CreateSessionRequest,
         peer_name: String,
         owner_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
@@ -922,10 +1065,66 @@ impl MultiBackendProvisioner {
             .external
             .as_ref()
             .ok_or_else(|| MobError::WiringError("external backend is not configured".into()))?;
-        let created = external
+        // Pre-register with the runtime adapter (mirrors SessionBackend::provision_member).
+        let pre_registered_id = if let Some(adapter) = &self.session.runtime_adapter {
+            if create_session.build.is_none() {
+                create_session.build = Some(meerkat_core::service::SessionBuildOptions::default());
+            }
+            let member_session_id = create_session
+                .build
+                .as_ref()
+                .and_then(|b| b.resume_session.as_ref())
+                .map(|s| s.id().clone())
+                .unwrap_or_else(|| {
+                    let id = SessionId::new();
+                    let session = meerkat_core::session::Session::with_id(id.clone());
+                    if let Some(ref mut build) = create_session.build {
+                        build.resume_session = Some(session);
+                    }
+                    id
+                });
+            let bindings = adapter
+                .prepare_bindings(member_session_id.clone())
+                .await
+                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
+            if let Some(ref mut build) = create_session.build {
+                build.runtime_build_mode =
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
+            }
+            Some(member_session_id)
+        } else {
+            None
+        };
+        let created = match external
             .session_service
             .create_session(create_session)
-            .await?;
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                if let (Some(adapter), Some(pre_id)) =
+                    (&self.session.runtime_adapter, &pre_registered_id)
+                {
+                    adapter.unregister_session(pre_id).await;
+                }
+                return Err(e.into());
+            }
+        };
+        // Reconcile: unregister orphan if session service returned a different ID.
+        if let (Some(adapter), Some(pre_id)) = (&self.session.runtime_adapter, &pre_registered_id) {
+            if *pre_id != created.session_id {
+                tracing::debug!(
+                    pre_registered = %pre_id,
+                    actual = %created.session_id,
+                    "mob external provisioner: reconciling runtime registration"
+                );
+                adapter.unregister_session(pre_id).await;
+            }
+            let _ = self
+                .session
+                .runtime_session_state(&created.session_id)
+                .await;
+        }
         if let (Some(owner_session_id), Some(registry)) = (owner_session_id, ops_registry) {
             self.session.ops_adapter.bind_session_registry(
                 created.session_id.clone(),

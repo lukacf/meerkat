@@ -20,8 +20,8 @@ mod render;
 pub use artifacts::{
     composition_route_coverage_operator_name, composition_scheduler_coverage_operator_name,
     composition_witness_cfg_name, render_composition_ci_cfg, render_composition_contract_markdown,
-    render_composition_semantic_model, render_composition_witness_cfg, render_machine_ci_cfg,
-    render_machine_contract_markdown, render_machine_semantic_model,
+    render_composition_driver, render_composition_semantic_model, render_composition_witness_cfg,
+    render_machine_ci_cfg, render_machine_contract_markdown, render_machine_semantic_model,
 };
 pub use render::render_machine_module;
 #[cfg(not(test))]

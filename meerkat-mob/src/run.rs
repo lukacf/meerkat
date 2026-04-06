@@ -2,13 +2,35 @@
 
 use crate::definition::{FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
 use crate::error::MobError;
-use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
+use crate::ids::{
+    FlowId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId,
+};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use meerkat_machine_kernels::generated::flow_run;
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+
+/// Snapshot of a FlowFrameMachine kernel state stored per-frame in MobRun.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FrameSnapshot {
+    pub kernel_state: KernelState,
+}
+
+/// Snapshot of a LoopIterationMachine kernel state stored per-loop in MobRun.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoopSnapshot {
+    pub kernel_state: KernelState,
+}
+
+/// Ledger entry recording the mapping of a loop iteration to its body frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopIterationLedgerEntry {
+    pub loop_instance_id: LoopInstanceId,
+    pub iteration: u64,
+    pub frame_id: FrameId,
+}
 
 /// Persisted flow run aggregate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +45,27 @@ pub struct MobRun {
     pub completed_at: Option<DateTime<Utc>>,
     pub step_ledger: Vec<StepLedgerEntry>,
     pub failure_ledger: Vec<FailureLedgerEntry>,
+    /// Per-frame kernel snapshots indexed by FrameId.
+    #[serde(default)]
+    pub frames: BTreeMap<FrameId, FrameSnapshot>,
+    /// Per-loop kernel snapshots indexed by LoopInstanceId.
+    #[serde(default)]
+    pub loops: BTreeMap<LoopInstanceId, LoopSnapshot>,
+    /// Ordered ledger of loop iteration → body frame mappings.
+    #[serde(default)]
+    pub loop_iteration_ledger: Vec<LoopIterationLedgerEntry>,
+    /// Schema version: 0 for legacy runs, 4 for self-describing frame-aware runs.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Root frame step outputs keyed by step_id string.
+    #[serde(default)]
+    pub root_step_outputs: IndexMap<StepId, serde_json::Value>,
+    /// Loop iteration outputs: key=loop_id, value=per-iteration step outputs.
+    ///
+    /// Uses `BTreeMap` (not `IndexMap`) so that recovery reconciliation can iterate
+    /// in stable key order without depending on insertion order.
+    #[serde(default)]
+    pub loop_iteration_outputs: BTreeMap<LoopId, Vec<IndexMap<StepId, serde_json::Value>>>,
 }
 
 impl MobRun {
@@ -55,6 +98,12 @@ impl MobRun {
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: IndexMap::new(),
+            loop_iteration_outputs: BTreeMap::new(),
         }
     }
 
@@ -193,6 +242,37 @@ impl MobRun {
                     "max_step_retries".to_string(),
                     KernelValue::U64(max_step_retries),
                 ),
+                // v2 scheduler limits — read from config, default to 0 (unlimited/disabled)
+                (
+                    "max_active_nodes".to_string(),
+                    KernelValue::U64(
+                        config
+                            .limits
+                            .as_ref()
+                            .and_then(|l| l.max_active_nodes)
+                            .unwrap_or(0),
+                    ),
+                ),
+                (
+                    "max_active_frames".to_string(),
+                    KernelValue::U64(
+                        config
+                            .limits
+                            .as_ref()
+                            .and_then(|l| l.max_active_frames)
+                            .unwrap_or(0),
+                    ),
+                ),
+                (
+                    "max_frame_depth".to_string(),
+                    KernelValue::U64(
+                        config
+                            .limits
+                            .as_ref()
+                            .and_then(|l| l.max_frame_depth)
+                            .unwrap_or(0),
+                    ),
+                ),
             ]),
         };
         let outcome = flow_run::transition(&initial, &input)
@@ -230,6 +310,7 @@ impl MobRun {
             flow_spec: FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
             topology: None,
             supervisor: None,
@@ -407,12 +488,64 @@ impl FlowRunConfig {
     }
 }
 
+/// Per-loop iteration output history, ordered by iteration index.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LoopContextHistory {
+    /// One entry per completed iteration, ordered by iteration index.
+    pub iterations: Vec<IndexMap<StepId, serde_json::Value>>,
+}
+
 /// Runtime context available to condition evaluators.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowContext {
     pub run_id: RunId,
     pub activation_params: serde_json::Value,
+    /// Root frame step outputs keyed by step_id.
     pub step_outputs: IndexMap<StepId, serde_json::Value>,
+    /// Per-loop iteration history keyed by loop_id.
+    #[serde(default)]
+    pub loop_outputs: IndexMap<LoopId, LoopContextHistory>,
+}
+
+impl FlowContext {
+    /// Rebuild a `FlowContext` from a persisted `MobRun` aggregate.
+    pub fn from_run_aggregate(
+        run: &MobRun,
+        run_id: RunId,
+        activation_params: serde_json::Value,
+    ) -> Self {
+        let loop_outputs = run
+            .loop_iteration_outputs
+            .iter()
+            .map(|(loop_id, iterations)| {
+                let history = LoopContextHistory {
+                    iterations: iterations.clone(),
+                };
+                (loop_id.clone(), history)
+            })
+            .collect();
+
+        // Seed step_outputs from root outputs, then project last-iteration
+        // outputs from each completed loop into step_outputs (dogma Rule 13:
+        // the projection must match what execute_frame_inner does at runtime —
+        // the last iteration's body step outputs are merged into step_outputs
+        // so that downstream steps/templates see them at steps.<id>).
+        let mut step_outputs = run.root_step_outputs.clone();
+        for iterations in run.loop_iteration_outputs.values() {
+            if let Some(last_iter) = iterations.last() {
+                for (sid, out) in last_iter {
+                    step_outputs.insert(sid.clone(), out.clone());
+                }
+            }
+        }
+
+        FlowContext {
+            run_id,
+            activation_params,
+            step_outputs,
+            loop_outputs,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +590,7 @@ mod tests {
             FlowSpec {
                 description: Some("demo flow".to_string()),
                 steps,
+                root: None,
             },
         );
 
@@ -520,9 +654,13 @@ mod tests {
                 max_step_retries: Some(1),
                 max_orphaned_turns: Some(8),
                 cancel_grace_timeout_ms: None,
+                ..Default::default()
             }),
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
+            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
+            is_implicit: false,
         }
     }
 
@@ -589,6 +727,12 @@ mod tests {
                 reason: "boom".to_string(),
                 timestamp: now,
             }],
+            frames: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: IndexMap::new(),
+            loop_iteration_outputs: BTreeMap::new(),
         };
 
         let encoded = serde_json::to_string(&run).unwrap();
@@ -606,6 +750,7 @@ mod tests {
             run_id: RunId::new(),
             activation_params: serde_json::json!({"input":"x"}),
             step_outputs: outputs,
+            loop_outputs: IndexMap::new(),
         };
 
         let encoded = serde_json::to_string(&context).unwrap();

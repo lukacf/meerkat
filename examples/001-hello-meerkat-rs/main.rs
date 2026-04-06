@@ -9,8 +9,9 @@
 //! - Running a single-turn session and reading the result
 //!
 //! Note: Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path
-//! with `PersistentSessionService` + `RuntimeSessionAdapter` for keep-alive,
-//! Queue/Steer routing, and comms. This example uses the direct path for simplicity.
+//! with `PersistentSessionService` + `RuntimeSessionAdapter` + session runtime
+//! bindings for keep-alive, Queue/Steer routing, and comms. This example uses
+//! the explicit standalone path for simplicity.
 //!
 //! ## Run
 //! ```bash
@@ -40,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: None,
             labels: None,
         })

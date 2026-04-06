@@ -490,6 +490,7 @@ pub fn peer_comms_machine() -> MachineSchema {
                 emit: vec![emit_submit_candidate()],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![disposition(
             "SubmitPeerInputCandidate",
             EffectDisposition::Routed {

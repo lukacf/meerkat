@@ -108,7 +108,7 @@ schema level, and CI gates enforce zero open findings.
 </Note>
 
 <Note>
-**Mob runtime contract vs backend selection:** Mob tools are exposed through `meerkat-mob-mcp` dispatcher composition (`SessionBuildOptions.external_tools`). CLI `run`/`resume` pre-compose this path, while `rkat mob ...` is the explicit direct lifecycle surface. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
+**Mob runtime contract vs backend selection:** Agent-side mob tools are exposed through `meerkat-mob-mcp` dispatcher composition (`SessionBuildOptions.external_tools`). CLI `run`/`resume` pre-compose this path, while `rkat mob ...` is the explicit direct lifecycle surface. Public host APIs use typed `mob/*` or `meerkat_mob_*` control planes instead of re-exporting the raw dispatcher. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
 </Note>
 
 ### Detailed component view
@@ -201,12 +201,16 @@ Runtime control plane for session-backed agent lifecycle:
 
 - **RuntimeControlPlane**: manages runtime-level state (attached, idle, retiring) and dispatches commands
 - **RuntimeDriver**: per-session driver that owns the `Agent` exclusively in a dedicated tokio task
-- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model
+- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model and owns session runtime bindings / epoch recovery
 - **Input taxonomy**: typed `Input` enum (Prompt, Peer, FlowStep, ExternalEvent, Continuation, Operation) with durability, origin, and visibility metadata
 - **InputLifecycleState**: full state machine for input processing (Accepted → Consumed | Superseded | Coalesced | Abandoned)
 
 This crate sits between surfaces and `SessionService`, providing the stateful runtime that owns
 keep-alive, ingress admission, and live routing semantics for the product surfaces.
+
+`RuntimeSessionAdapter::prepare_bindings(session_id)` is the canonical runtime-backed entry seam.
+It returns `SessionRuntimeBindings`, which bundle the session-scoped ops lifecycle registry,
+runtime epoch identity, and shared cursor state needed for recovery-safe completion handling.
 </Accordion>
 
 <Accordion title="meerkat-machine-schema">
@@ -335,14 +339,15 @@ MCP protocol client implementation:
 </Accordion>
 
 <Accordion title="meerkat-mcp-server">
-MCP server exposing Meerkat as tools for other MCP clients (25 tools total):
+MCP server exposing Meerkat as tools for other MCP clients:
 
 - **Core**: `meerkat_run`, `meerkat_resume`, `meerkat_config`, `meerkat_capabilities`, `meerkat_models_catalog`
 - **Session lifecycle**: `meerkat_read`, `meerkat_sessions`, `meerkat_interrupt`, `meerkat_archive`
 - **Skills**: `meerkat_skills`
 - **MCP management**: `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload`
 - **Event streaming**: `meerkat_event_stream_open`, `meerkat_event_stream_read`, `meerkat_event_stream_close`
-- **Mob** (feature-gated): `meerkat_mob_event_stream_open`, `meerkat_mob_event_stream_read`, `meerkat_mob_event_stream_close`
+- **Mob host control plane** (feature-gated): typed `meerkat_mob_*` tools such as `meerkat_mob_create`, `meerkat_mob_list`, `meerkat_mob_status`, `meerkat_mob_lifecycle`, `meerkat_mob_spawn`, `meerkat_mob_member_send`
+- **Mob streaming** (feature-gated): `meerkat_mob_event_stream_open`, `meerkat_mob_event_stream_read`, `meerkat_mob_event_stream_close`
 - **Comms** (feature-gated): `meerkat_comms_send`, `meerkat_comms_peers`
 
 Tools with `handler: "callback"` support a callback pattern where the MCP client executes tools and returns results via `meerkat_resume`.
@@ -391,10 +396,13 @@ Mob runtime for multi-agent coordination:
 - **MobBuilder**: construct or resume a mob runtime from a `MobDefinition` and `MobStorage`
 - **MobHandle**: runtime handle for lifecycle, membership, wiring, turns, flows, and tasks
 - **MobDefinition**: declarative mob structure (profiles, wiring, topology, limits, flows)
-- **MobStorage**: event/run/spec storage bundle (in-memory or redb)
+- **MobStorage**: event/run/spec storage bundle (SQLite/WAL persistent or in-memory)
 - **Flow engine**: `run_flow` / `flow_status` / `cancel_flow` for multi-step orchestration
+- **FlowFrameEngine**: frame-based flow execution with `repeat_until` loops (v2 flows)
 - **Task board**: shared `task_create` / `task_update` / `task_list` for structured work assignment
 - **Parallel spawn**: `spawn_many` batches provisioning and wiring concurrently
+
+Prefabs are gone; all mob creation uses `MobDefinition` only.
 
 Feature-gated; depends on `meerkat-core` directly.
 </Accordion>
@@ -411,12 +419,19 @@ Depends on `meerkat-mob` for mob definition types.
 </Accordion>
 
 <Accordion title="meerkat-mob-mcp">
-Tool-dispatch bridge that exposes mob capabilities to non-Rust-SDK surfaces:
+Mob integration seam that serves two distinct roles:
 
 - **MobMcpState**: shared state handle wrapping the `MobSessionService`
-- **MobMcpDispatcher**: implements `AgentToolDispatcher`, routing `mob_*` tool calls into the mob runtime
+- **MobMcpDispatcher**: implements `AgentToolDispatcher`, routing agent-side `mob_*` tool calls into the mob runtime
+- **Public MCP helpers**: `public_tools_list()` / `handle_public_tools_call()` expose typed `meerkat_mob_*` host control-plane tools for mob-only MCP hosts
 
-Composed via `SessionBuildOptions.external_tools` so CLI, REST, RPC, and MCP server surfaces all get mob tool capability through the same path.
+Composed via `SessionBuildOptions.external_tools` when a surface wants to grant
+agent-side `mob_*` capability. Public host surfaces use the typed helpers or
+their own canonical typed transport contracts instead of re-exporting the raw
+dispatcher.
+- **AgentMobToolSurface**: agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`)
+
+Composed via `SessionBuildOptions.external_tools` so CLI, REST, RPC, and MCP server surfaces all get mob tool capability through the same path. Agent-facing delegation tools are late-bound via `MobToolsFactory`.
 </Accordion>
 
 <Accordion title="meerkat-rpc">
@@ -441,7 +456,8 @@ The main entry point. Re-exports types and provides:
 - **build_persistent_service()**: runtime-backed persistent service constructor for the main Rust embedding path
 - **build_ephemeral_service()**: in-memory substrate constructor for testing and embedded Queue-only use
 - **AgentBuildConfig**: per-request configuration (model, system prompt, tool overrides, realm metadata)
-- **SessionBuildOptions**: in-band request build options used by all surfaces
+- **SessionBuildOptions**: in-band request build options used by all surfaces, including `runtime_build_mode`
+- **RuntimeBuildMode / SessionRuntimeBindings**: explicit runtime ownership contract for runtime-backed vs standalone builds
 
 The `FactoryAgentBuilder` pattern works as follows:
 
@@ -453,7 +469,7 @@ The `FactoryAgentBuilder` pattern works as follows:
     Service invokes `builder.build_agent(req, event_tx)`.
   </Step>
   <Step title="Delegate to factory">
-    `FactoryAgentBuilder` converts `SessionBuildOptions` into `AgentBuildConfig` and delegates to `AgentFactory::build_agent()`.
+    `FactoryAgentBuilder` converts `SessionBuildOptions` into `AgentBuildConfig` and delegates to `AgentFactory::build_agent()`. Runtime-backed surfaces thread `RuntimeBuildMode::SessionOwned(bindings)` through this seam; standalone/testing paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
   </Step>
   <Step title="Persist metadata">
     Realm metadata (`realm_id`, `instance_id`, `backend`, `config_generation`) is written into session metadata.

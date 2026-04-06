@@ -74,6 +74,7 @@ mod tests {
             }),
             body: "test body".into(),
             blocks: None,
+            handling_mode: None,
         })
     }
 
@@ -92,6 +93,7 @@ mod tests {
             convention: Some(PeerConvention::Message),
             body: "test body".into(),
             blocks: None,
+            handling_mode: None,
         })
     }
 

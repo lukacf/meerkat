@@ -12,6 +12,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `admitted_peer_work_enters_ingress`: `runtime_control`.`SubmitAdmittedIngressEffect` -> `runtime_ingress`.`AdmitQueued` [Immediate]
 - `peer_ingress_ready_begins_run`: `runtime_ingress`.`ReadyForRun` -> `runtime_control`.`BeginRun` [Immediate]
 
+## Target Selectors
+- `(none)`
+
+## Driver
+- `(none)`
+
+## Transaction Plans
+- `(none)`
+
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, peer_plane)`
 

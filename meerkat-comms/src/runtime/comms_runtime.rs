@@ -134,6 +134,30 @@ impl Drop for SessionIdentityClaim {
     }
 }
 
+/// Forcibly release a session identity claim that was not cleaned up by Drop.
+///
+/// This is needed when the task holding a [`SessionIdentityClaim`] is not
+/// joined on shutdown — the Drop never fires and the claim persists in the
+/// process-global set, preventing the same session_id from being reused
+/// after an in-process restart.
+///
+/// Returns `true` if the claim was present and removed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn release_session_claim(session_id: &meerkat_core::SessionId) -> bool {
+    SESSION_IDENTITY_CLAIMS
+        .lock()
+        .remove(&session_id.to_string())
+}
+
+/// Remove all session identity claims.
+///
+/// Intended for in-process restart / test teardown where the previous
+/// runtime's tasks may not have been joined and their claims linger.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_all_session_claims() {
+    SESSION_IDENTITY_CLAIMS.lock().clear();
+}
+
 struct InteractionStream {
     id: Uuid,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
@@ -790,6 +814,41 @@ pub enum CommsRuntimeError {
     AlreadyStarted,
     #[error("Unsafe binding: {0}")]
     UnsafeBinding(String),
+}
+
+/// Material needed by the facade's comms tool composition helper.
+///
+/// Bundles the concrete router/trust/key access so the facade doesn't
+/// reach into CommsRuntime internals directly. Construct via
+/// [`CommsRuntime::tool_material()`].
+pub struct CommsToolMaterial {
+    router: Arc<Router>,
+    trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+    self_pubkey: crate::identity::PubKey,
+    runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+}
+
+impl CommsToolMaterial {
+    /// Router for tool dispatch.
+    pub fn router(&self) -> &Arc<Router> {
+        &self.router
+    }
+    /// Live trust state for peer availability gating.
+    pub fn trusted_peers(&self) -> &Arc<parking_lot::RwLock<TrustedPeers>> {
+        &self.trusted_peers
+    }
+    /// Owned clone of the trust state Arc (for availability closures).
+    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+        self.trusted_peers.clone()
+    }
+    /// This runtime's public key.
+    pub fn self_pubkey(&self) -> crate::identity::PubKey {
+        self.self_pubkey
+    }
+    /// Trait-erased runtime for the comms tool surface.
+    pub fn into_runtime(self) -> Arc<dyn meerkat_core::agent::CommsRuntime> {
+        self.runtime
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1505,6 +1564,19 @@ impl CommsRuntime {
         self.inbox_notify.clone()
     }
 
+    /// Extract the material needed for comms tool composition.
+    ///
+    /// The facade uses this to compose comms tools without reaching into
+    /// router/trust/key internals directly.
+    pub fn tool_material(self: &Arc<Self>) -> CommsToolMaterial {
+        CommsToolMaterial {
+            router: self.router_arc(),
+            trusted_peers: self.trusted_peers_shared(),
+            self_pubkey: self.public_key,
+            runtime: Arc::clone(self) as Arc<dyn meerkat_core::agent::CommsRuntime>,
+        }
+    }
+
     /// Get an event injector for this runtime's inbox.
     pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
         Arc::new(crate::CommsEventInjector::new(
@@ -1583,6 +1655,11 @@ impl CommsRuntime {
 
     pub async fn recv_message(&self) -> Option<CommsMessage> {
         loop {
+            // Register the waiter BEFORE draining so a message that arrives
+            // between the drain returning empty and the await cannot be lost.
+            // inbox_notify uses notify_waiters() which only wakes already-
+            // registered listeners.
+            let notified = self.inbox_notify.notified();
             {
                 let mut inbox = self.inbox.lock().await;
                 // Consume one entry at a time so back-to-back messages are
@@ -1595,7 +1672,7 @@ impl CommsRuntime {
                     }
                 }
             }
-            self.inbox_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -3498,5 +3575,45 @@ mod tests {
             !removed,
             "remove should return false for peer that was never trusted"
         );
+    }
+
+    /// Regression: SESSION_IDENTITY_CLAIMS is process-global. If a task
+    /// holding a SessionIdentityClaim is not joined on shutdown, the claim
+    /// lingers and prevents re-acquiring the same session_id after an
+    /// in-process restart.
+    #[test]
+    fn test_release_session_claim_allows_reacquire() {
+        let sid = meerkat_core::SessionId::new();
+        // Acquire the claim
+        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
+        // Simulate leaked claim (forget Drop)
+        std::mem::forget(claim);
+
+        // Without release, re-acquiring fails
+        assert!(
+            SessionIdentityClaim::acquire(&sid).is_err(),
+            "second acquire should fail while claim is leaked"
+        );
+
+        // Force-release the leaked claim
+        assert!(release_session_claim(&sid));
+
+        // Now re-acquiring succeeds
+        let claim2 = SessionIdentityClaim::acquire(&sid)
+            .expect("acquire should succeed after force-release");
+        drop(claim2);
+    }
+
+    #[test]
+    fn test_clear_all_session_claims_allows_reacquire() {
+        let sid = meerkat_core::SessionId::new();
+        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
+        std::mem::forget(claim);
+
+        clear_all_session_claims();
+
+        let claim2 =
+            SessionIdentityClaim::acquire(&sid).expect("acquire should succeed after clear_all");
+        drop(claim2);
     }
 }

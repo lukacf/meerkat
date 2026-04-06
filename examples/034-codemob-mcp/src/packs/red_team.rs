@@ -25,8 +25,8 @@ impl Pack for RedTeamPack {
 
         let mut profiles = BTreeMap::new();
         // Different providers for advocate/adversary ensures genuinely different reasoning
-        profiles.insert(ProfileName::from("advocate"),  turn_driven_profile(resolve_model(overrides, "advocate", "gemini-3-flash-preview"), "advocate-skill", "Advocate — argues in favor", pp));
-        profiles.insert(ProfileName::from("adversary"), turn_driven_profile(resolve_model(overrides, "adversary", "gpt-5.2"), "adversary-skill", "Adversary — argues against", pp));
+        profiles.insert(ProfileName::from("advocate"),  turn_driven_profile(resolve_model(overrides, "advocate", "gemini-3.1-flash-lite-preview"), "advocate-skill", "Advocate — argues in favor", pp));
+        profiles.insert(ProfileName::from("adversary"), turn_driven_profile(resolve_model(overrides, "adversary", "gpt-5.4"), "adversary-skill", "Adversary — argues against", pp));
         profiles.insert(ProfileName::from("judge"),     turn_driven_profile(resolve_model(overrides, "judge", "claude-opus-4-6"), "judge-skill", "Judge — balanced assessment", pp));
 
         let mut skills = BTreeMap::new();
@@ -43,7 +43,7 @@ impl Pack for RedTeamPack {
             &["advocate_case", "adversary_case"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps, root: None });
 
         mob_definition("redteam", profiles, skills, flows, identity_spawn_policy(&["advocate", "adversary", "judge"]))
     }

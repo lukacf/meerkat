@@ -534,9 +534,7 @@ class MeerkatClient:
     def has_capability(self, capability_id: str) -> bool:
         """Check if a capability is available."""
         if capability_id == "mob":
-            return bool(
-                {"mob/create", "mob/list", "mob/call"} & self._methods
-            )
+            return bool({"mob/create", "mob/list"} & self._methods)
         return any(
             c.id == capability_id and c.available
             for c in self.capabilities
@@ -665,23 +663,6 @@ class MeerkatClient:
             params["source"] = source
         return await self._request("skills/inspect", params)
 
-    async def list_mob_tools(self) -> list[dict[str, Any]]:
-        result = await self._request("mob/tools", {})
-        return result.get("tools", [])
-
-    async def call_mob_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await self._request(
-            "mob/call",
-            {
-                "name": name,
-                "arguments": arguments or {},
-            },
-        )
-
     async def subscribe_session_events(self, session_id: str) -> EventSubscription:
         return await self._open_event_subscription(
             "session/stream_open",
@@ -713,6 +694,46 @@ class MeerkatClient:
     async def list_mob_members(self, mob_id: str) -> list[dict[str, Any]]:
         result = await self._request("mob/members", {"mob_id": mob_id})
         return result.get("members", [])
+
+    async def send_mob_member_content(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        content: str | list[dict[str, Any]],
+        *,
+        handling_mode: Literal["queue", "steer"] = "queue",
+        render_metadata: RenderMetadata | None = None,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "mob/member_send",
+            {
+                "mob_id": mob_id,
+                "meerkat_id": meerkat_id,
+                "content": content,
+                "handling_mode": handling_mode,
+                "render_metadata": render_metadata,
+            },
+        )
+        session_id = result.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/member_send response: missing session_id",
+            )
+        receipt_handling_mode = result.get("handling_mode")
+        return {
+            "member_id": (
+                result["member_id"]
+                if isinstance(result.get("member_id"), str) and result["member_id"]
+                else meerkat_id
+            ),
+            "session_id": session_id,
+            "handling_mode": (
+                receipt_handling_mode
+                if receipt_handling_mode in {"queue", "steer"}
+                else handling_mode
+            ),
+        }
 
     async def spawn_mob_member(
         self,
@@ -848,30 +869,6 @@ class MeerkatClient:
 
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
-
-    async def send_mob_member_content(
-        self,
-        mob_id: str,
-        meerkat_id: str,
-        content: str | list[dict[str, Any]],
-        *,
-        handling_mode: Literal["queue", "steer"] = "queue",
-        render_metadata: RenderMetadata | None = None,
-    ) -> dict[str, Any]:
-        result = await self._request(
-            "mob/send",
-            {
-                "mob_id": mob_id,
-                "meerkat_id": meerkat_id,
-                "content": content,
-                "handling_mode": handling_mode,
-                "render_metadata": render_metadata,
-            },
-        )
-        session_id = result.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
-            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/send response: missing session_id")
-        return result
 
     async def append_mob_system_context(
         self,

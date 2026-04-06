@@ -213,26 +213,17 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
       "definition": {"id":"my-mob","profiles":{}}
     }}
 
-    // Spawn and send work
+    // Spawn work-capable members
     {"jsonrpc":"2.0","id":3,"method":"mob/spawn","params":{
       "mob_id": "my-mob",
       "profile": "lead",
       "meerkat_id": "lead-1"
     }}
-    {"jsonrpc":"2.0","id":4,"method":"mob/send","params":{
-      "mob_id": "my-mob",
-      "meerkat_id": "lead-1",
-      "content": "Coordinate the release triage."
-    }}
     ```
   </Tab>
   <Tab title="REST">
-    ```bash
-    curl http://localhost:8080/mob/tools
-    curl -X POST http://localhost:8080/mob/call \
-      -H "Content-Type: application/json" \
-      -d '{"name":"mob_create","arguments":{"definition":{"id":"my-mob","profiles":{}}}}'
-    ```
+    REST keeps mob event streams and helper endpoints, but direct lifecycle
+    control for app hosts uses the canonical JSON-RPC / SDK `mob/*` methods.
   </Tab>
   <Tab title="Python">
     ```python

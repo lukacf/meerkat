@@ -5,6 +5,9 @@ pub mod mobs;
 use std::sync::Arc;
 
 use meerkat::surface::RequestContext;
+use meerkat::SessionService;
+use meerkat_core::service::{SessionQuery, SessionSummary};
+use meerkat_core::types::SessionId;
 use serde_json::{Value, json};
 
 use crate::state::ForceState;
@@ -43,14 +46,14 @@ const MODEL_DESCRIPTION: &str = "\
 Available models: \
 claude-opus-4-6 (Anthropic, strongest reasoning), \
 claude-sonnet-4-6 (Anthropic, fast + capable), \
-gpt-5.3-codex (OpenAI, code-specialized), \
+gpt-5.4 (OpenAI, strongest general + code), \
 gpt-5.2-pro (OpenAI, deep reasoning — slow, use sparingly), \
 gemini-3.1-pro-preview (Google, strong general), \
-gemini-3-flash-preview (Google, fastest). \
-Default: gpt-5.3-codex. \
+gemini-3.1-flash-lite-preview (Google, fastest). \
+Default: gpt-5.4. \
 Guidance: use opus/gpt-5.2-pro for complex reasoning (architecture, judging). \
-Use sonnet/gpt-5.3-codex for code tasks. \
-Use gemini-3-flash for speed-sensitive roles. \
+Use sonnet/gpt-5.4 for code tasks. \
+Use gemini-3.1-flash-lite-preview for speed-sensitive roles. \
 Mix providers in multi-agent packs for perspective diversity";
 
 pub fn tools_list() -> Vec<Value> {
@@ -65,7 +68,11 @@ pub fn tools_list() -> Vec<Value> {
             "description": format!(
                 "Get a quick opinion from a single AI agent. No coordination overhead \
                 — like asking a colleague. Use this when you want a second opinion, \
-                a sanity check, or a fresh perspective on something specific. {MODEL_DESCRIPTION}"
+                a sanity check, or a fresh perspective on something specific. \
+                Returns a session_id that can be passed in follow-up calls to continue \
+                the conversation with full history. Set shell=true to give the agent \
+                shell access for running commands. Use system_prompt to set a custom \
+                persona (e.g. \"You are a security expert\"). {MODEL_DESCRIPTION}"
             ),
             "inputSchema": {
                 "type": "object",
@@ -80,12 +87,29 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "model": {
                         "type": "string",
-                        "description": format!("Model to use (default: gpt-5.3-codex). {MODEL_DESCRIPTION}")
+                        "description": format!("Model to use (default: gpt-5.4). {MODEL_DESCRIPTION}")
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "Custom system prompt / persona for the agent. Default: general technical advisor. Examples: \"You are a Rust borrow checker expert\", \"You are a security auditor focused on OWASP top 10\". Only used when creating a new session — ignored on continuation."
+                    },
+                    "shell": {
+                        "type": "boolean",
+                        "description": "Enable/disable shell access for this agent. When true, the agent can execute shell commands to inspect files, run tests, etc. Only used when creating a new session — inherited on continuation."
                     },
                     "provider_params": {
                         "type": "object",
                         "description": "Provider-specific parameters. Examples: {\"reasoning_effort\": \"high\"} for deep thinking (OpenAI o-series, Anthropic extended thinking), {\"temperature\": 0.2} for more deterministic output",
                         "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Continue an existing session. Pass the session_id from a previous consult response to continue the conversation with full history. Model, system_prompt, and shell settings are inherited from the original session."
+                    },
+                    "skills": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Skill names to load into the agent's context. Each skill adds domain knowledge to the system prompt. Available: meerkat-platform, meerkat-architecture, meerkat-wasm, rct-methodology, rust-cicd-pipeline, skill-creator, mobkit-platform. Only used when creating a new session."
                     }
                 },
                 "required": ["question"]
@@ -97,7 +121,8 @@ pub fn tools_list() -> Vec<Value> {
                 "Spawn a team of AI agents to collaboratively solve a problem. Each pack defines \
                 a different team composition optimized for specific tasks. Use list_packs to see all \
                 available packs including user-created ones. Returns structured results after agents \
-                deliberate. {MODEL_DESCRIPTION}"
+                deliberate. Returns a session_id — pass it in follow-up calls to continue with the \
+                same mob (agents keep their conversation history). {MODEL_DESCRIPTION}"
             ),
             "inputSchema": {
                 "type": "object",
@@ -118,7 +143,7 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
                         "description": format!(
-                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-6\", \"planner\": \"gpt-5.3-codex\"}}. \
+                            "Override models per role, e.g. {{\"critic\": \"claude-opus-4-6\", \"planner\": \"gpt-5.4\"}}. \
                             Role names depend on the pack. {MODEL_DESCRIPTION}"
                         )
                     },
@@ -126,9 +151,32 @@ pub fn tools_list() -> Vec<Value> {
                         "type": "object",
                         "description": "Provider-specific parameters applied to ALL agents in the pack. Examples: {\"reasoning_effort\": \"high\"} for deep thinking, {\"temperature\": 0.2} for deterministic output. Per-agent overrides not yet supported.",
                         "additionalProperties": true
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Continue an existing mob session. Pass the session_id from a previous deliberate response to reuse agents and their conversation history. The mob is kept alive between calls."
                     }
                 },
                 "required": ["pack", "task"]
+            }
+        }),
+        json!({
+            "name": "list_sessions",
+            "description": "List active consult sessions with their IDs, timestamps, model, and message count. Use this to see what sessions are available for continuation or cleanup.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "destroy_session",
+            "description": "Destroy (archive) a consult session. Frees resources and makes the session_id no longer usable for continuation. Use this to clean up sessions you no longer need.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The session_id to destroy"
+                    }
+                },
+                "required": ["session_id"]
             }
         }),
         json!({
@@ -237,6 +285,27 @@ pub fn tools_list() -> Vec<Value> {
     ]
 }
 
+fn format_session_summary(s: &SessionSummary) -> Value {
+    let created = s
+        .created_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let updated = s
+        .updated_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    json!({
+        "session_id": s.session_id.to_string(),
+        "created_at": created,
+        "updated_at": updated,
+        "message_count": s.message_count,
+        "is_active": s.is_active,
+        "labels": s.labels,
+    })
+}
+
 pub async fn handle_tool_call(
     state: &ForceState,
     name: &str,
@@ -268,6 +337,31 @@ pub async fn handle_tool_call(
                 request_context,
             )
             .await
+        }
+        "list_sessions" => {
+            let mut labels = std::collections::BTreeMap::new();
+            labels.insert("source".into(), "consult".into());
+            let sessions = state
+                .session_service
+                .list(SessionQuery { labels: Some(labels), ..SessionQuery::default() })
+                .await
+                .map_err(|e| ToolCallError::internal(format!("List sessions failed: {e}")))?;
+            let summaries: Vec<Value> = sessions.iter().map(format_session_summary).collect();
+            Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&summaries).unwrap_or_default()}]}))
+        }
+        "destroy_session" => {
+            let sid = arguments
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ToolCallError::invalid_params("session_id is required"))?;
+            let session_id = SessionId::parse(sid)
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid session_id: {e}")))?;
+            state
+                .session_service
+                .archive(&session_id)
+                .await
+                .map_err(|e| ToolCallError::internal(format!("Destroy failed: {e}")))?;
+            Ok(json!({"content": [{"type": "text", "text": format!("Session {session_id} destroyed.")}]}))
         }
         "create_mob" => {
             let result = mobs::handle_create(arguments).await?;

@@ -12,3 +12,5 @@ pub use comms_config::CoreCommsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use comms_config::ResolvedCommsConfig;
 pub use comms_runtime::{CommsRuntime, CommsRuntimeError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use comms_runtime::{clear_all_session_claims, release_session_claim};

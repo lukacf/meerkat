@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS runtime_session_snapshots (
 CREATE TABLE IF NOT EXISTS runtime_states (
     runtime_id TEXT PRIMARY KEY,
     runtime_state_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
+    runtime_id TEXT PRIMARY KEY,
+    state_json BLOB NOT NULL
 )";
 
     fn ensure_runtime_schema(conn: &Connection) -> Result<(), RuntimeStoreError> {
@@ -474,6 +478,61 @@ CREATE TABLE IF NOT EXISTS runtime_states (
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let snapshot = snapshot.clone();
+            tokio::task::spawn_blocking(move || {
+                let state_json = serde_json::to_vec(&snapshot)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_ops_lifecycle (runtime_id, state_json)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(runtime_id) DO UPDATE SET state_json = excluded.state_json
+                    ",
+                    params![runtime_id_text(&runtime_id), state_json],
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                conn.query_row(
+                    "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                .map(|bytes| {
+                    serde_json::from_slice(&bytes)
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+                })
+                .transpose()
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?

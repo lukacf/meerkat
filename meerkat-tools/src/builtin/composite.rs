@@ -9,7 +9,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutpu
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
-use meerkat_core::agent::OpsLifecycleBindError;
+use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -58,6 +58,10 @@ pub struct CompositeDispatcher {
     /// Stashed interrupt receiver for carry-forward across dispatcher rebuilds.
     /// Set by `bind_wait_interrupt`, re-applied by `bind_ops_lifecycle`.
     wait_interrupt_rx: Option<meerkat_core::wait_interrupt::WaitInterruptReceiver>,
+    /// Stashed completion feed for carry-forward across dispatcher rebuilds.
+    completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    /// Shared interrupt baseline for the wait tool (stamped by agent before dispatch).
+    interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl CompositeDispatcher {
@@ -193,6 +197,8 @@ impl CompositeDispatcher {
             job_manager,
             allowed_tools,
             wait_interrupt_rx: None,
+            completion_feed: None,
+            interrupt_baseline: None,
         })
     }
 
@@ -244,6 +250,8 @@ impl CompositeDispatcher {
             image_tool_results: true,
             allowed_tools,
             wait_interrupt_rx: None,
+            completion_feed: None,
+            interrupt_baseline: None,
         })
     }
 
@@ -434,23 +442,65 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        if let Some(ref ext) = self.external {
+        #[allow(unused_mut)]
+        let mut update = if let Some(ref ext) = self.external {
             ext.poll_external_updates().await
         } else {
             ExternalToolUpdate::default()
+        };
+
+        // When the CompletionFeed is wired, the agent boundary drains completions
+        // directly from the feed. drain_completed() still runs for its side effect
+        // (flipping completion_notified so cleanup_old_jobs can evict).
+        //
+        // When NO feed is wired (direct AgentBuilder paths without AgentFactory),
+        // background_completions is the only delivery path — return them here so
+        // the agent boundary's legacy ext.background_completions processing works.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref mgr) = self.job_manager {
+            let drained = mgr.drain_completed().await;
+            if self.completion_feed.is_none() {
+                update.background_completions.extend(drained);
+            }
+        }
+
+        update
+    }
+
+    fn capabilities(&self) -> DispatcherCapabilities {
+        let has_wait = self.builtin_tools.iter().any(|t| t.name() == "wait");
+        let mut ops_lifecycle = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.job_manager.is_some() {
+            ops_lifecycle = true;
+        }
+        if !ops_lifecycle {
+            ops_lifecycle = self
+                .external
+                .as_ref()
+                .is_some_and(|ext| ext.capabilities().ops_lifecycle);
+        }
+        DispatcherCapabilities {
+            wait_interrupt: has_wait,
+            ops_lifecycle,
+            completion_feed: has_wait,
         }
     }
 
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
-    {
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        // Swap the wait tool with an interrupt-aware version
+        // Swap the wait tool with an interrupt-aware version, including
+        // completion feed + baseline if available.
         use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
+        let new_wait = Arc::new(WaitTool::with_interrupt_and_feed(
+            rx.clone(),
+            owned.completion_feed.clone(),
+            owned.interrupt_baseline.clone(),
+        ));
         for tool in &mut owned.builtin_tools {
             if tool.name() == "wait" {
                 *tool = new_wait;
@@ -460,25 +510,51 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // Stash the receiver for carry-forward across dispatcher rebuilds
         // (e.g., bind_ops_lifecycle creates a fresh CompositeDispatcher).
         owned.wait_interrupt_rx = Some(rx);
-        Ok(Arc::new(owned))
+        Ok(BindOutcome::Bound(Arc::new(owned)))
     }
 
-    fn supports_wait_interrupt(&self) -> bool {
-        self.builtin_tools.iter().any(|t| t.name() == "wait")
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
+        baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
+        let mut owned = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        // Swap the wait tool with a feed-aware version (no comms rx).
+        use crate::builtin::utility::WaitTool;
+        let new_wait = Arc::new(WaitTool::with_feed_only(
+            Arc::clone(&feed),
+            Arc::clone(&baseline),
+        ));
+        for tool in &mut owned.builtin_tools {
+            if tool.name() == "wait" {
+                *tool = new_wait;
+                break;
+            }
+        }
+        owned.completion_feed = Some(feed);
+        owned.interrupt_baseline = Some(baseline);
+        Ok(BindOutcome::Bound(Arc::new(owned)))
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let mut owned =
             Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
         #[allow(clippy::redundant_clone)]
         // clone needed on non-wasm32 where owner_session_id is reused
         let rebound_external = match owned.external.take() {
-            Some(external) if external.supports_ops_lifecycle_binding() => {
-                Some(external.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?)
+            Some(external)
+                if external.capabilities().ops_lifecycle && Arc::strong_count(&external) == 1 =>
+            {
+                Some(
+                    external
+                        .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?
+                        .into_dispatcher(),
+                )
             }
             other => other,
         };
@@ -489,9 +565,21 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
 
-            // Carry forward interrupt receiver so comms-driven wait interrupts
-            // survive the ops-lifecycle rebuild.
+            // Transplant the fully-configured WaitTool from the old dispatcher
+            // into the rebuild, rather than dismantling it into parts (interrupt_rx,
+            // feed, baseline) and reconstructing. The WaitTool already holds all
+            // three pieces from prior bind_wait_interrupt / bind_completion_feed.
+            let old_wait = owned
+                .builtin_tools
+                .iter()
+                .find(|t| t.name() == "wait")
+                .cloned();
+
+            // Carry forward comms interrupt receiver and feed/baseline for
+            // the struct fields (used by capabilities() and future rebuilds).
             let interrupt_rx = owned.wait_interrupt_rx.take();
+            let feed = owned.completion_feed.take();
+            let baseline = owned.interrupt_baseline.take();
 
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
             let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
@@ -506,18 +594,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
-            // Re-apply the interrupt receiver on the new wait tool and stash
-            // it for any future rebuilds.
-            if let Some(rx) = interrupt_rx {
-                use crate::builtin::utility::WaitTool;
-                let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
+            // Restore struct fields for future rebuilds and capabilities().
+            rebound.wait_interrupt_rx = interrupt_rx;
+            rebound.completion_feed = feed;
+            rebound.interrupt_baseline = baseline;
+
+            // Replace the bare WaitTool::new() with the transplanted one.
+            if let Some(configured_wait) = old_wait {
                 for tool in &mut rebound.builtin_tools {
                     if tool.name() == "wait" {
-                        *tool = new_wait;
+                        *tool = configured_wait;
                         break;
                     }
                 }
-                rebound.wait_interrupt_rx = Some(rx);
             }
 
             #[cfg(feature = "skills")]
@@ -525,7 +614,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 rebound.register_skill_tools(skill_tools);
             }
 
-            Ok(Arc::new(rebound))
+            Ok(BindOutcome::Bound(Arc::new(rebound)))
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -537,15 +626,17 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
     }
 
-    fn supports_ops_lifecycle_binding(&self) -> bool {
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::completion_feed::CompletionEnrichmentProvider>> {
         #[cfg(not(target_arch = "wasm32"))]
-        if self.job_manager.is_some() {
-            return true;
+        if let Some(ref mgr) = self.job_manager {
+            return Some(Arc::clone(mgr)
+                as Arc<
+                    dyn meerkat_core::completion_feed::CompletionEnrichmentProvider,
+                >);
         }
-
-        self.external
-            .as_ref()
-            .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
+        None
     }
 }
 
@@ -639,7 +730,8 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
         let rebound = dispatcher
             .bind_wait_interrupt(rx)
-            .expect("bind_wait_interrupt should succeed");
+            .expect("bind_wait_interrupt should succeed")
+            .into_dispatcher();
 
         // Dispatch a wait call and interrupt it
         let call_json =
@@ -847,7 +939,7 @@ mod tests {
         .expect("composite dispatcher should build");
 
         assert!(
-            dispatcher.supports_ops_lifecycle_binding(),
+            dispatcher.capabilities().ops_lifecycle,
             "shell-enabled composite dispatcher should support ops lifecycle binding"
         );
         assert!(
@@ -884,7 +976,8 @@ mod tests {
             Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
         let rebound = dispatcher
             .bind_ops_lifecycle(Arc::clone(&registry), SessionId::new())
-            .expect("ops lifecycle binding should succeed");
+            .expect("ops lifecycle binding should succeed")
+            .into_dispatcher();
 
         let call_json = serde_json::value::RawValue::from_string(
             r#"{"command":"sleep 60","background":true}"#.to_string(),

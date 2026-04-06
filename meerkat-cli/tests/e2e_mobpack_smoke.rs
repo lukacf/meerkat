@@ -195,6 +195,7 @@ async fn write_rpc_state_probe_mobpack_fixture(
     "worker":{{
       "model":"{model}",
       "tools":{{"comms":true}},
+      "external_addressable":true,
       "peer_description":"Worker specialist"
     }},
     "reviewer":{{
@@ -906,7 +907,11 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         &mut surface,
         4,
         "mob/wire",
-        json!({"mob_id": mob_id, "a":"lead-1", "b":"worker-1"}),
+        json!({
+            "mob_id": mob_id,
+            "member": "lead-1",
+            "peer": { "local": "worker-1" }
+        }),
         15,
     )
     .await?;
@@ -930,7 +935,11 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         &mut surface,
         5,
         "mob/unwire",
-        json!({"mob_id": mob_id, "a":"lead-1", "b":"worker-1"}),
+        json!({
+            "mob_id": mob_id,
+            "member": "lead-1",
+            "peer": { "local": "worker-1" }
+        }),
         15,
     )
     .await?;
@@ -952,36 +961,22 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
     assert_eq!(appended["session_id"], worker_session_id);
     assert_eq!(appended["status"], "staged");
 
-    let sent = rpc_call(
+    let send_err = rpc_call(
         &mut surface,
         7,
         "mob/send",
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
+            "content": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
         }),
         120,
     )
-    .await?;
-    assert_eq!(sent["session_id"], worker_session_id);
-    assert_eq!(sent["member_id"], "worker-1");
-
-    let read_after_send = rpc_call(
-        &mut surface,
-        8,
-        "session/read",
-        json!({ "session_id": worker_session_id }),
-        30,
-    )
-    .await?;
-    let last_text = read_after_send["last_assistant_text"]
-        .as_str()
-        .ok_or("session/read missing last_assistant_text after mob/send")?
-        .to_uppercase();
+    .await
+    .expect_err("mob/send should be removed from the public RPC surface");
     assert!(
-        last_text.contains("TURN_PROBE_29") && last_text.contains("CTX_MOB_29"),
-        "mob/send turn should materialize assistant output with the staged context: {read_after_send}"
+        send_err.to_string().contains("Method not found"),
+        "removed mob/send route should reject CLI smoke traffic: {send_err}"
     );
 
     let _ = rpc_call(
@@ -1385,7 +1380,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
     assert_eq!(appended["status"], "staged");
     assert_eq!(appended["session_id"], original_session_id);
 
-    let sent = rpc_call(
+    let send_err = rpc_call(
         &mut surface,
         204,
         "mob/send",
@@ -1396,25 +1391,11 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         }),
         120,
     )
-    .await?;
-    assert_eq!(sent["session_id"], original_session_id);
-    assert_eq!(sent["member_id"], "worker-1");
-
-    let read_after_send = rpc_call(
-        &mut surface,
-        205,
-        "session/read",
-        json!({ "session_id": original_session_id }),
-        30,
-    )
-    .await?;
-    let last_text = read_after_send["last_assistant_text"]
-        .as_str()
-        .ok_or("session/read missing last_assistant_text after mob/send")?
-        .to_uppercase();
+    .await
+    .expect_err("mob/send should be removed from the public RPC surface");
     assert!(
-        last_text.contains("TURN_PROBE_29") && last_text.contains("CTX_MOB_29"),
-        "mob/send turn should materialize assistant output with the staged context: {read_after_send}"
+        send_err.to_string().contains("Method not found"),
+        "removed mob/send route should reject member turn probes: {send_err}"
     );
 
     match rpc_call(
@@ -1456,26 +1437,12 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
                 60,
             )
             .await
-            .expect_err("broken member must fail no later than its first execution attempt");
+            .expect_err("mob/send should be removed before broken-member execution");
             assert!(
-                broken_send_err.to_string().contains("rpc mob/send failed"),
+                broken_send_err.to_string().contains("Method not found"),
                 "unexpected broken member error: {broken_send_err}"
             );
-            let broken_read = rpc_call(
-                &mut surface,
-                208,
-                "session/read",
-                json!({ "session_id": broken_session_id }),
-                30,
-            )
-            .await?;
-            assert!(
-                broken_read["last_assistant_text"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .is_empty(),
-                "failed member turns should not fabricate assistant text: {broken_read}"
-            );
+            let _ = broken_session_id;
         }
     }
 
@@ -1506,7 +1473,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
             })
         })
         .ok_or("respawned worker session_id missing")?;
-    let sent_after_respawn = rpc_call(
+    let send_after_respawn_err = rpc_call(
         &mut surface,
         210,
         "mob/send",
@@ -1517,25 +1484,15 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         }),
         120,
     )
-    .await?;
-    assert_eq!(sent_after_respawn["session_id"], respawned_session_id);
-
-    let read_after_respawn = rpc_call(
-        &mut surface,
-        211,
-        "session/read",
-        json!({ "session_id": respawned_session_id }),
-        30,
-    )
-    .await?;
-    let respawn_text = read_after_respawn["last_assistant_text"]
-        .as_str()
-        .ok_or("session/read missing last_assistant_text after respawn")?
-        .to_uppercase();
+    .await
+    .expect_err("mob/send should stay unavailable after respawn");
     assert!(
-        respawn_text.contains("RESPAWN_PROBE_29"),
-        "respawned worker should answer on its new session: {read_after_respawn}"
+        send_after_respawn_err
+            .to_string()
+            .contains("Method not found"),
+        "removed mob/send route should stay unavailable after respawn: {send_after_respawn_err}"
     );
+    let _ = respawned_session_id;
 
     let events = rpc_call(
         &mut surface,

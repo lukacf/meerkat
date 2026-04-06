@@ -137,6 +137,44 @@ pub fn render_composition_module(schema: &CompositionSchema) -> String {
     }
     out.push('\n');
 
+    pushln!(&mut out, "TARGET_SELECTORS");
+    for selector in &schema.route_target_selectors {
+        pushln!(
+            &mut out,
+            "  {} selects {} from {:?}",
+            selector.route_name,
+            selector.selector_field,
+            selector.source
+        );
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "DRIVER");
+    match &schema.driver {
+        Some(driver) => {
+            pushln!(
+                &mut out,
+                "  {} @ {}",
+                driver.driver_type,
+                driver.module_path
+            );
+        }
+        None => pushln!(&mut out, "  (none)"),
+    }
+    out.push('\n');
+
+    pushln!(&mut out, "TRANSACTION_PLANS");
+    for plan in &schema.transaction_plans {
+        pushln!(
+            &mut out,
+            "  {} == {} via {}",
+            plan.name,
+            plan.trigger,
+            plan.store_primitive
+        );
+    }
+    out.push('\n');
+
     pushln!(&mut out, "ACTOR_PRIORITIES");
     for priority in &schema.actor_priorities {
         pushln!(
@@ -1066,6 +1104,7 @@ mod tests {
                     emit: vec![],
                 },
             ],
+            ci_step_limit: None,
             effect_dispositions: vec![],
         }
     }

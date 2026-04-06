@@ -20,6 +20,7 @@ path = "tests/integration_shell_jobs.rs"
 default = ["comms", "mcp", "skills"]
 comms = ["dep:meerkat-comms", "dep:parking_lot"]
 mcp = ["dep:meerkat-mcp"]
+sqlite = ["dep:rusqlite"]
 skills = []
 integration-real-tests = []
 
@@ -48,6 +49,7 @@ toml = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 meerkat-runtime = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 base64 = "0.22"
 shlex = "1.3"
 globset = "0.4"

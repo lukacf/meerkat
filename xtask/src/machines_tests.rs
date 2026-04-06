@@ -33,7 +33,10 @@ fn output_paths_land_under_specs() {
 fn richer_machine_owner_tests_are_registered_with_exact_filters() {
     let peer = owner_test_specs_for_machine("peer_comms");
     assert_eq!(peer.len(), 2);
-    assert!(peer.iter().all(|spec| spec.package == "meerkat-comms"));
+    assert!(
+        peer.iter()
+            .all(|spec| spec.package == "meerkat-integration-tests")
+    );
     assert!(
         peer.iter()
             .any(|spec| spec.filter.contains("trust_snapshot"))
@@ -41,7 +44,10 @@ fn richer_machine_owner_tests_are_registered_with_exact_filters() {
 
     let turn = owner_test_specs_for_machine("turn_execution");
     assert_eq!(turn.len(), 3);
-    assert!(turn.iter().all(|spec| spec.package == "meerkat-core"));
+    assert!(
+        turn.iter()
+            .all(|spec| spec.package == "meerkat-integration-tests")
+    );
     assert!(
         turn.iter()
             .any(|spec| spec.filter.contains("immediate_context"))
@@ -49,7 +55,11 @@ fn richer_machine_owner_tests_are_registered_with_exact_filters() {
 
     let external = owner_test_specs_for_machine("external_tool_surface");
     assert_eq!(external.len(), 2);
-    assert!(external.iter().all(|spec| spec.package == "meerkat-mcp"));
+    assert!(
+        external
+            .iter()
+            .all(|spec| spec.package == "meerkat-integration-tests")
+    );
     assert!(
         external
             .iter()

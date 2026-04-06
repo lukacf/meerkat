@@ -277,6 +277,35 @@ pub fn spawn_comms_drain(
     })
 }
 
+fn interaction_terminal_event(
+    interaction_id: meerkat_core::interaction::InteractionId,
+    outcome: CompletionOutcome,
+) -> AgentEvent {
+    match outcome {
+        CompletionOutcome::Completed(result) => AgentEvent::InteractionComplete {
+            interaction_id,
+            result: result.text,
+        },
+        CompletionOutcome::CompletedWithoutResult => AgentEvent::InteractionComplete {
+            interaction_id,
+            result: String::new(),
+        },
+        CompletionOutcome::CallbackPending { tool_name, args } => {
+            AgentEvent::InteractionCallbackPending {
+                interaction_id,
+                tool_name,
+                args,
+            }
+        }
+        CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
+            AgentEvent::InteractionFailed {
+                interaction_id,
+                error: reason,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -333,6 +362,33 @@ mod tests {
         assert_eq!(classified.class, PeerInputClass::PeerLifecycleRetired);
         assert_eq!(classified.lifecycle_peer.as_deref(), Some("peer-a"));
     }
+
+    #[test]
+    fn callback_pending_maps_to_interaction_callback_pending_terminal_event() {
+        let interaction_id = InteractionId(Uuid::new_v4());
+        let event = interaction_terminal_event(
+            interaction_id,
+            CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            },
+        );
+
+        assert!(
+            matches!(event, AgentEvent::InteractionCallbackPending { .. }),
+            "expected callback-pending interaction event"
+        );
+        if let AgentEvent::InteractionCallbackPending {
+            interaction_id: actual_id,
+            tool_name,
+            args,
+        } = event
+        {
+            assert_eq!(actual_id, interaction_id);
+            assert_eq!(tool_name, "external_mock");
+            assert_eq!(args, json!({ "value": "browser" }));
+        }
+    }
 }
 
 /// Bridge between a completion handle and the comms interaction lifecycle.
@@ -349,21 +405,7 @@ fn spawn_completion_bridge(
         };
 
         if let Some(tx) = subscriber {
-            let event = match outcome {
-                CompletionOutcome::Completed(result) => AgentEvent::InteractionComplete {
-                    interaction_id,
-                    result: result.text,
-                },
-                CompletionOutcome::CompletedWithoutResult => AgentEvent::InteractionComplete {
-                    interaction_id,
-                    result: String::new(),
-                },
-                CompletionOutcome::Abandoned(reason)
-                | CompletionOutcome::RuntimeTerminated(reason) => AgentEvent::InteractionFailed {
-                    interaction_id,
-                    error: reason,
-                },
-            };
+            let event = interaction_terminal_event(interaction_id, outcome);
 
             if crate::tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event))
                 .await

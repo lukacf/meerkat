@@ -194,5 +194,6 @@ pub fn mob_definition(
         limits: None,
         spawn_policy,
         event_router: None,
+        owner_session_id: None,
     }
 }

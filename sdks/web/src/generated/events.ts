@@ -247,6 +247,13 @@ export interface InteractionCompleteEvent {
   type: "interaction_complete";
 }
 
+export interface InteractionCallbackPendingEvent {
+  args: unknown;
+  interaction_id: InteractionId;
+  tool_name: string;
+  type: "interaction_callback_pending";
+}
+
 export interface InteractionFailedEvent {
   error: string;
   interaction_id: InteractionId;
@@ -261,6 +268,14 @@ export interface StreamTruncatedEvent {
 export interface ToolConfigChangedEvent {
   payload: ToolConfigChangedPayload;
   type: "tool_config_changed";
+}
+
+export interface BackgroundJobCompletedEvent {
+  detail: string;
+  display_name: string;
+  job_id: string;
+  status: string;
+  type: "background_job_completed";
 }
 
 export const KNOWN_AGENT_EVENT_TYPES = [
@@ -328,6 +343,8 @@ export type AgentEvent =
   SkillsResolvedEvent |
   SkillResolutionFailedEvent |
   InteractionCompleteEvent |
+  InteractionCallbackPendingEvent |
   InteractionFailedEvent |
   StreamTruncatedEvent |
-  ToolConfigChangedEvent;
+  ToolConfigChangedEvent |
+  BackgroundJobCompletedEvent;

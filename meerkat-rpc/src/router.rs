@@ -311,16 +311,42 @@ impl MethodRouter {
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
         #[cfg(feature = "mob")]
-        let mob_state = Arc::new(
+        let mob_state = Arc::new({
+            let llm_provider: Arc<
+                dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync,
+            > = Arc::new({
+                let runtime = runtime.clone();
+                move || runtime.default_llm_client()
+            });
+            let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
+                let runtime = runtime.clone();
+                move || {
+                    let tx = runtime.callback_request_tx()?;
+                    Some(
+                        Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                            runtime.registered_tools(),
+                            tx,
+                            runtime.callback_id_counter(),
+                            vec![],
+                        )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+                    )
+                }
+            });
             meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                 runtime.session_service(),
                 Some(runtime_adapter.clone()),
             )
-            .with_default_llm_client_provider(Some(Arc::new({
-                let runtime = runtime.clone();
-                move || runtime.default_llm_client()
-            }))),
-        );
+            .with_default_llm_client_provider(Some(llm_provider))
+            .with_external_tools_provider(Some(tools_provider))
+        });
+        #[cfg(feature = "mob")]
+        runtime.set_mob_state(mob_state.clone());
+        let schedule_runtime = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
+                tracing::warn!("failed to start RPC schedule host: {error}");
+            }
+        });
         Self {
             runtime,
             config_store,
@@ -341,6 +367,12 @@ impl MethodRouter {
     /// Get a reference to the runtime adapter for session registration.
     pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
         &self.runtime_adapter
+    }
+
+    /// Get a reference to the mob state for authoritative inspection (testing).
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> &Arc<meerkat_mob_mcp::MobMcpState> {
+        &self.mob_state
     }
 
     #[allow(clippy::result_large_err)]
@@ -461,6 +493,13 @@ impl MethodRouter {
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
+        runtime.set_mob_state(mob_state.clone());
+        let schedule_runtime = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
+                tracing::warn!("failed to start RPC schedule host: {error}");
+            }
+        });
         Self {
             runtime,
             config_store,
@@ -614,6 +653,34 @@ impl MethodRouter {
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            "schedule/create" => {
+                handlers::schedule::handle_create(id, params, self.runtime.clone()).await
+            }
+            "schedule/get" => {
+                handlers::schedule::handle_get(id, params, self.runtime.clone()).await
+            }
+            "schedule/list" => {
+                handlers::schedule::handle_list(id, params, self.runtime.clone()).await
+            }
+            "schedule/update" => {
+                handlers::schedule::handle_update(id, params, self.runtime.clone()).await
+            }
+            "schedule/pause" => {
+                handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
+            }
+            "schedule/resume" => {
+                handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
+            }
+            "schedule/delete" => {
+                handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
+            }
+            "schedule/occurrences" => {
+                handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
+            }
+            "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            "schedule/call" => {
+                handlers::schedule::handle_call(id, params, self.runtime.clone()).await
+            }
             "turn/start" => {
                 handlers::turn::handle_start(
                     id,
@@ -637,10 +704,6 @@ impl MethodRouter {
                 }
             }
             #[cfg(feature = "mob")]
-            "mob/tools" => handlers::mob::handle_tools(id).await,
-            #[cfg(feature = "mob")]
-            "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
             "mob/create" => handlers::mob::handle_create(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/list" => handlers::mob::handle_list(id, &self.mob_state).await,
@@ -663,9 +726,11 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/unwire" => handlers::mob::handle_unwire(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
-            "mob/send" => handlers::mob::handle_send(id, params, &self.mob_state).await,
-            #[cfg(feature = "mob")]
             "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/member_send" => {
+                handlers::mob::handle_member_send(id, params, &self.mob_state).await
+            }
             #[cfg(feature = "mob")]
             "mob/append_system_context" => {
                 handlers::mob::handle_append_system_context(
@@ -1053,6 +1118,12 @@ impl MethodRouter {
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
                 Ok(()) => {
+                    // Clean up session-owned mobs (implicit + explicit).
+                    #[cfg(feature = "mob")]
+                    let _ = self
+                        .mob_state
+                        .destroy_session_mobs(&session_id.to_string())
+                        .await;
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))
                 }
@@ -2395,8 +2466,9 @@ mod tests {
             assert!(method_names.contains(&"mob/fork_helper"));
             assert!(method_names.contains(&"mob/force_cancel"));
             assert!(method_names.contains(&"mob/member_status"));
-            assert!(method_names.contains(&"mob/tools"));
-            assert!(method_names.contains(&"mob/call"));
+            assert!(method_names.contains(&"mob/member_send"));
+            assert!(!method_names.contains(&"mob/tools"));
+            assert!(!method_names.contains(&"mob/call"));
             assert!(method_names.contains(&"mob/stream_open"));
             assert!(method_names.contains(&"mob/stream_close"));
         }
@@ -2413,18 +2485,14 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_tools_and_call_flow_work() {
+    async fn mob_compatibility_routes_are_not_found() {
         let (router, _notif_rx) = test_router().await;
 
         let tools_resp = router
             .dispatch(make_request_no_params("mob/tools"))
             .await
             .unwrap();
-        let tools_binding = result_value(&tools_resp);
-        let tools = tools_binding["tools"]
-            .as_array()
-            .expect("tools should be array");
-        assert!(tools.iter().any(|tool| tool["name"] == "mob_create"));
+        assert_eq!(error_code(&tools_resp), error::METHOD_NOT_FOUND);
 
         let create_resp = router
             .dispatch(make_request(
@@ -2446,8 +2514,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let created = result_value(&create_resp);
-        assert!(created["mob_id"].as_str().is_some());
+        assert_eq!(error_code(&create_resp), error::METHOD_NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2582,6 +2649,7 @@ mod tests {
                         "profiles": {
                             "worker": {
                                 "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
                                 "tools": { "comms": true }
                             }
                         }
@@ -2623,6 +2691,132 @@ mod tests {
             .unwrap();
         let appended = result_value(&append_resp);
         assert_eq!(appended["status"], "staged");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_member_send_host_route_targets_canonical_member_path() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-member-send",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let send_resp = router
+            .dispatch(make_request(
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "meerkat_id": "worker-1",
+                    "content": "Please acknowledge with HOST_ROUTE_OK."
+                }),
+            ))
+            .await
+            .unwrap();
+        let sent = result_value(&send_resp);
+        assert_eq!(sent["member_id"], "worker-1");
+        assert_eq!(sent["handling_mode"], "queue");
+        assert!(sent["session_id"].as_str().is_some());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_member_send_host_route_preserves_steer_mode_rejection() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-member-send-steer",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let send_resp = router
+            .dispatch(make_request(
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "meerkat_id": "worker-1",
+                    "content": "Please acknowledge with HOST_ROUTE_STEER.",
+                    "handling_mode": "steer"
+                }),
+            ))
+            .await
+            .unwrap();
+        let err = send_resp
+            .error
+            .expect("steer send should fail on direct path");
+        assert!(
+            err.message
+                .contains("handling_mode Steer requires a runtime-backed surface"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -3546,7 +3740,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_send_rejects_while_archive_retirement_is_in_flight() {
+    async fn mob_send_route_is_unavailable_while_archive_retirement_is_in_flight() {
         let (router, _notif_rx) = test_router_with_mob_state(
             meerkat_mob_mcp::MobMcpState::new_in_memory_with_archive_delay(250),
         )
@@ -3631,10 +3825,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
-            send_resp.error.is_some(),
-            "retiring member must reject new mob/send work before archive completes"
-        );
+        assert_eq!(error_code(&send_resp), error::METHOD_NOT_FOUND);
 
         let archive_resp = archive.await.expect("archive join");
         assert_eq!(result_value(&archive_resp)["archived"], true);
@@ -3728,10 +3919,17 @@ mod tests {
 
         let create_resp = router
             .dispatch(make_request(
-                "mob/call",
+                "mob/create",
                 serde_json::json!({
-                    "name": "mob_create",
-                    "arguments": { "definition": { "id": "test_mob", "profiles": { "worker": { "model": "claude-sonnet-4-6", "tools": { "comms": true } } } } }
+                    "definition": {
+                        "id": "test_mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-6",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
                 }),
             ))
             .await
@@ -3784,10 +3982,17 @@ mod tests {
         // Create a mob first.
         let create_resp = router
             .dispatch(make_request(
-                "mob/call",
+                "mob/create",
                 serde_json::json!({
-                    "name": "mob_create",
-                    "arguments": { "definition": { "id": "test_mob", "profiles": { "worker": { "model": "claude-sonnet-4-6", "tools": { "comms": true } } } } }
+                    "definition": {
+                        "id": "test_mob",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-6",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
                 }),
             ))
             .await
@@ -3978,7 +4183,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_send_rejects_legacy_message_shape() {
+    async fn mob_send_route_is_not_found() {
         let (router, _notif_rx) = test_router().await;
         let req = make_request(
             "mob/send",
@@ -3990,11 +4195,7 @@ mod tests {
         );
 
         let resp = router.dispatch(req).await.unwrap();
-        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
-        assert!(
-            error_message(&resp).contains("unknown field `message`"),
-            "legacy mob/send payloads should be rejected after the 0.5 clean cut"
-        );
+        assert_eq!(error_code(&resp), error::METHOD_NOT_FOUND);
     }
 
     #[cfg(feature = "mob")]

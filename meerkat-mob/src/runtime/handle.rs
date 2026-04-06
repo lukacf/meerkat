@@ -8,7 +8,7 @@ use meerkat_core::comms::{
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::service::SessionError;
+use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::time_compat::Instant;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
@@ -527,11 +527,14 @@ impl MobEventsView {
         after_cursor: u64,
         limit: usize,
     ) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.inner.poll(after_cursor, limit).await
+        self.inner
+            .poll(after_cursor, limit)
+            .await
+            .map_err(MobError::from)
     }
 
     pub async fn replay_all(&self) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.inner.replay_all().await
+        self.inner.replay_all().await.map_err(MobError::from)
     }
 }
 
@@ -561,7 +564,10 @@ impl MobHandle {
         after_cursor: u64,
         limit: usize,
     ) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.events.poll(after_cursor, limit).await
+        self.events
+            .poll(after_cursor, limit)
+            .await
+            .map_err(MobError::from)
     }
 
     /// Current mob lifecycle state (lock-free read).
@@ -778,6 +784,33 @@ impl MobHandle {
         MobEventsView {
             inner: self.events.clone(),
         }
+    }
+
+    /// Append a dispatcher-owned operator provenance projection.
+    ///
+    /// This is audit/projection data only. It must never become
+    /// authorization truth.
+    pub async fn record_operator_action_provenance(
+        &self,
+        tool_name: &str,
+        authority_context: &MobToolAuthorityContext,
+    ) -> Result<(), MobError> {
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::OperatorActionRecorded {
+                    tool_name: tool_name.to_string(),
+                    principal_token: authority_context.principal_token().clone(),
+                    caller_provenance: authority_context.caller_provenance().cloned(),
+                    audit_invocation_id: authority_context
+                        .audit_invocation_id()
+                        .map(ToOwned::to_owned),
+                },
+            })
+            .await
+            .map(|_| ())
+            .map_err(MobError::from)
     }
 
     /// Subscribe to agent-level events for a specific meerkat.
@@ -1688,7 +1721,11 @@ impl MobHandle {
         Ok(material.to_snapshot())
     }
 
-    /// Wait for all currently-running autonomous kickoff turns in the current roster snapshot.
+    /// Wait until all autonomous members have been admitted to the runtime.
+    ///
+    /// Autonomous members no longer run a separate kickoff turn — their initial
+    /// prompt is injected through the runtime input path at spawn time. This
+    /// method returns member snapshots immediately since admission is synchronous.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -1703,7 +1740,9 @@ impl MobHandle {
             .await
     }
 
-    /// Wait for currently-running autonomous kickoff turns for the given member ids.
+    /// Wait until the given autonomous members have been admitted to the runtime.
+    ///
+    /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for details.
     pub async fn wait_for_members_kickoff_complete(
         &self,
         ids: &[MeerkatId],

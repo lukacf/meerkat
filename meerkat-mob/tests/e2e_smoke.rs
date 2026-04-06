@@ -82,7 +82,7 @@ impl SmokePaths {
             project_root: root.join("project-root"),
             context_root: root.join("context-root"),
             sessions_root: root.join("sessions-jsonl"),
-            mob_db_path: root.join("mob.redb"),
+            mob_db_path: root.join("mob.db"),
         }
     }
 }
@@ -118,7 +118,7 @@ fn persistent_service(
 }
 
 fn persistent_mob_storage(paths: &SmokePaths) -> MobStorage {
-    MobStorage::redb(&paths.mob_db_path).expect("create redb-backed mob storage")
+    MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage")
 }
 
 fn joke_mob_definition(model: String) -> MobDefinition {
@@ -179,6 +179,9 @@ fn joke_mob_definition(model: String) -> MobDefinition {
         limits: None,
         spawn_policy: None,
         event_router: None,
+        owner_session_id: None,
+        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
+        is_implicit: false,
     }
 }
 

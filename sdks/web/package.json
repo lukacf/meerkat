@@ -1,6 +1,6 @@
 {
   "name": "@rkat/web",
-  "version": "0.6.0",
+  "version": "0.5.1",
   "description": "Browser SDK for Meerkat agent runtime (WASM)",
   "type": "module",
   "main": "./dist/index.js",

@@ -6,6 +6,18 @@ icon: "gears"
 
 Advanced Rust SDK usage for the cases where the runtime-backed `SessionService` path is intentionally not enough. This page covers expert-level direct agent construction, provider configuration, budgets, hook helpers, and lower-level delivery internals.
 
+## Runtime-backed vs standalone builds
+
+The Rust contract is explicit:
+
+- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- those bindings should be threaded through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+- standalone/testing/embedded paths should use `RuntimeBuildMode::StandaloneEphemeral`
+
+That split matters because runtime-backed bindings carry the session's runtime
+epoch, canonical ops lifecycle registry, and shared cursor state used for
+recovery-safe background completion handling.
+
 ## AgentBuilder vs AgentFactory
 
 `AgentBuilder` (in `meerkat-core`) wires the agent loop primitives: LLM client, tool dispatcher, and session store. It has no dependency on `meerkat-tools` and no opinions about which tools exist.
@@ -13,6 +25,10 @@ Advanced Rust SDK usage for the cases where the runtime-backed `SessionService` 
 `AgentFactory` (in the `meerkat` facade) is the opinionated composition layer. It knows about tool categories, runtime resources, comms, memory, mobs, and skills, and wires them into the dispatcher before passing them to `AgentBuilder`. All public surfaces go through the runtime-backed session path built on top of `AgentFactory`.
 
 **Use `AgentFactory` via `build_persistent_service()` (main path) or `build_ephemeral_service()` (substrate/testing path) unless you explicitly need to bypass session lifecycle orchestration.** Direct `AgentBuilder` usage means you own composition, persistence, event handling, and any drift from the standard runtime-backed path.
+
+If you are building a runtime-backed surface around `SessionService`, avoid the
+old hand-rolled `register_session()` + registry extraction pattern. Prefer the
+binding seam above so the runtime/session owner stays canonical.
 
 ## AgentBuilder
 

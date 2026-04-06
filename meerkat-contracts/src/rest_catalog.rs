@@ -98,6 +98,47 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             vec![RestOperationDescriptor::new("get", "SSE event stream")],
         ),
         RestPathDescriptor::new(
+            "/schedule/tools",
+            vec![RestOperationDescriptor::new("get", "List schedule tools")],
+        ),
+        RestPathDescriptor::new(
+            "/schedule/call",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Invoke a schedule tool",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/schedules",
+            vec![
+                RestOperationDescriptor::new("get", "List schedules"),
+                RestOperationDescriptor::new("post", "Create schedule"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}",
+            vec![
+                RestOperationDescriptor::new("get", "Get schedule"),
+                RestOperationDescriptor::new("patch", "Update schedule"),
+                RestOperationDescriptor::new("delete", "Delete schedule"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/pause",
+            vec![RestOperationDescriptor::new("post", "Pause schedule")],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/resume",
+            vec![RestOperationDescriptor::new("post", "Resume schedule")],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/occurrences",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "List schedule occurrences",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/comms/send",
             vec![RestOperationDescriptor::new("post", "Send a comms message")],
         ),
@@ -196,17 +237,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/tools",
-            vec![RestOperationDescriptor::new("get", "List mob tools")],
-        ),
-        RestPathDescriptor::new(
-            "/mob/call",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Invoke a mob tool call",
-            )],
-        ),
-        RestPathDescriptor::new(
             "/mob/{id}/events",
             vec![RestOperationDescriptor::new("get", "SSE mob event stream")],
         ),
@@ -268,6 +298,8 @@ mod tests {
         let paths = rest_documented_paths();
         for expected in [
             "/config",
+            "/schedules",
+            "/schedules/{id}/occurrences",
             "/mob/{id}/members/{meerkat_id}/status",
             "/mob/{id}/members/{meerkat_id}/cancel",
             "/mob/{id}/members/{meerkat_id}/respawn",

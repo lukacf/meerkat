@@ -171,6 +171,7 @@ mod tests {
             }),
             body: "progress".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(is_coalescing_eligible(&input));
     }
@@ -193,6 +194,7 @@ mod tests {
             convention: Some(PeerConvention::Message),
             body: "hello".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(!is_coalescing_eligible(&input));
     }

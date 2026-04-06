@@ -20,6 +20,24 @@ The runtime-backed path is:
 Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()
 ```
 
+The runtime-backed build contract has an explicit binding seam:
+
+- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+- standalone / embedded / test-only builds should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly instead of relying on silent fallback
+
+`SessionRuntimeBindings` is the epoch-local runtime handle for a session. It carries:
+
+- `session_id`
+- `epoch_id`
+- the canonical `OpsLifecycleRegistry`
+- shared consumer cursor state used for recovery-safe completion visibility
+
+This keeps one owner for runtime semantics:
+
+- `PersistentRuntimeDriver::recover()` owns input/runtime/control recovery
+- `RuntimeSessionAdapter` owns session entry recovery (`ops_lifecycle`, `epoch_id`, cursor state)
+
 Direct substrate usage is intentionally narrower:
 
 - Queue-only turns
@@ -34,6 +52,8 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 - Surfaces pass per-request build data in-band via `CreateSessionRequest.build` (`SessionBuildOptions`).
 - No out-of-band staging lock is used.
 - `FactoryAgentBuilder` maps `SessionBuildOptions` to `AgentBuildConfig`.
+- For runtime-backed builds, `SessionBuildOptions.runtime_build_mode` should carry `RuntimeBuildMode::SessionOwned(bindings)` from `prepare_bindings()`.
+- For standalone/testing/embedded builds, prefer `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 - Session metadata persists realm context and durable session identity:
   - `realm_id`
   - `instance_id`

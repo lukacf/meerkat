@@ -14,11 +14,13 @@ use futures::stream;
 use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::LlmClient;
+use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
-    Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata, SessionTooling,
+    AgentToolDispatcher, Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata,
+    SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef, ToolDispatchOutcome, ToolError,
     UserMessage,
 };
-use meerkat_store::{SessionFilter, SessionStore, StoreError};
+use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +64,51 @@ impl LlmClient for MockLlmClient {
 
 fn temp_factory(temp: &tempfile::TempDir) -> AgentFactory {
     AgentFactory::new(temp.path().join("sessions"))
+}
+
+struct EmptyDispatcher;
+
+#[async_trait]
+impl AgentToolDispatcher for EmptyDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Vec::<Arc<ToolDef>>::new().into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+}
+
+struct RecordingMobToolsFactory {
+    observed_authority_context:
+        Arc<std::sync::Mutex<Vec<Option<meerkat_core::service::MobToolAuthorityContext>>>>,
+}
+
+#[async_trait]
+impl meerkat_core::service::MobToolsFactory for RecordingMobToolsFactory {
+    async fn build_mob_tools(
+        &self,
+        args: meerkat_core::service::MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
+        self.observed_authority_context
+            .lock()
+            .expect("recording mutex")
+            .push(args.authority_context);
+        Ok(Arc::new(EmptyDispatcher))
+    }
+}
+
+fn create_test_authority() -> MobToolAuthorityContext {
+    MobToolAuthorityContext::new(OpaquePrincipalToken::new("test-principal"), true)
+        .with_managed_mob_scope(["mob-a"])
+}
+
+fn assert_generated_create_only_authority(authority: Option<&MobToolAuthorityContext>) {
+    let authority = authority.expect("generated create-only authority");
+    assert!(authority.can_create_mobs());
+    assert!(authority.managed_mob_scope().is_empty());
+    assert!(authority.caller_provenance().is_none());
+    assert!(authority.audit_invocation_id().is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +237,11 @@ async fn build_agent_sets_session_metadata() {
     assert_eq!(metadata.model, "claude-sonnet-4-5");
     assert_eq!(metadata.max_tokens, 2048);
     assert_eq!(metadata.provider, Provider::Anthropic);
-    assert!(metadata.tooling.builtins);
-    assert!(metadata.tooling.shell);
-    assert!(!metadata.tooling.comms);
+    // No explicit override was set → Inherit (follows factory default)
+    assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Inherit);
+    assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Inherit);
+    // comms has no override field — always persisted as Inherit
+    assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Inherit);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
     assert!(metadata.tooling.active_skills.is_none());
@@ -222,7 +271,12 @@ async fn build_agent_with_builtins_has_tools() {
         .session()
         .session_metadata()
         .expect("session should have metadata");
-    assert!(metadata.tooling.builtins, "builtins should be enabled");
+    // No explicit override → Inherit (builtins are active via factory default)
+    assert_eq!(
+        metadata.tooling.builtins,
+        ToolCategoryOverride::Inherit,
+        "builtins should be Inherit when no explicit override was set"
+    );
 }
 
 /// 6. `build_agent` with `resume_session` preserves existing session messages.
@@ -279,11 +333,11 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             "reasoning": { "budget_tokens": 2048 }
         })),
         tooling: SessionTooling {
-            builtins: true,
-            shell: false,
-            comms: false,
-            mob: false,
-            memory: false,
+            builtins: ToolCategoryOverride::Enable,
+            shell: ToolCategoryOverride::Disable,
+            comms: ToolCategoryOverride::Disable,
+            mob: ToolCategoryOverride::Disable,
+            memory: ToolCategoryOverride::Disable,
             active_skills: None,
         },
         keep_alive: false,
@@ -358,11 +412,11 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 "reasoning": { "budget_tokens": 2048 }
             })),
             tooling: SessionTooling {
-                builtins: false,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Disable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: true,
@@ -434,11 +488,11 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -487,11 +541,11 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: true,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Enable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -563,11 +617,11 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: true,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Enable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -884,11 +938,11 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: false,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Disable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: Some(vec![meerkat_core::skills::SkillId(
                     "nonexistent-legacy-skill".into(),
                 )]),
@@ -949,24 +1003,24 @@ impl TrackingSessionStore {
 
 #[async_trait]
 impl SessionStore for TrackingSessionStore {
-    async fn save(&self, _session: &Session) -> Result<(), StoreError> {
+    async fn save(&self, _session: &Session) -> Result<(), SessionStoreError> {
         self.save_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         Ok(None)
     }
 
     async fn list(
         &self,
         _filter: SessionFilter,
-    ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+    ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
         Ok(vec![])
     }
 
-    async fn delete(&self, _id: &SessionId) -> Result<(), StoreError> {
+    async fn delete(&self, _id: &SessionId) -> Result<(), SessionStoreError> {
         Ok(())
     }
 }
@@ -997,5 +1051,500 @@ async fn build_agent_with_custom_session_store() {
         store.save_count() > 0,
         "Custom store should have been used for saving, got {} saves",
         store.save_count()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: ToolCategoryOverride upgrade semantics on resume
+// ---------------------------------------------------------------------------
+
+/// Regression: a session created before mob tools existed (mob=Inherit via
+/// serde default) should NOT suppress mob tools on resume. The factory's
+/// current runtime default should win.
+#[tokio::test]
+async fn resume_with_inherit_mob_allows_factory_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(true); // factory enables mob
+    let config = Config::default();
+
+    // Simulate a session from a pre-mob Meerkat version:
+    // mob field is Inherit (the serde default for missing/false fields).
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Inherit, // <-- key: no opinion
+                memory: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    // Mob should stay Inherit — the session has no opinion, so it continues to
+    // follow whatever the factory default is at each future resume.
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Inherit,
+        "Inherit mob must be preserved through save/resume, not collapsed to Enable"
+    );
+}
+
+/// Regression: a session with mob=Disable should remain disabled on resume,
+/// even if the factory now enables mob by default.
+#[tokio::test]
+async fn resume_with_disable_mob_stays_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(true); // factory enables mob
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable, // <-- explicitly off
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Disable,
+        "Disable mob should be preserved on resume despite factory enabling it"
+    );
+}
+
+/// Regression: a session with mob=Enable should remain enabled even if
+/// the factory default changes to disabled.
+#[tokio::test]
+async fn resume_with_enable_mob_stays_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(false); // factory disables mob
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Enable, // <-- explicitly on
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Enable,
+        "Enable mob should be preserved on resume despite factory disabling it"
+    );
+}
+
+#[tokio::test]
+async fn ambient_factory_mob_enable_does_not_imply_operator_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp).mob(true).mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.as_slice(), &[None]);
+}
+
+#[tokio::test]
+async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp).mob(true).mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Enable,
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        resume_session: Some(session),
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.as_slice(), &[None]);
+}
+
+#[tokio::test]
+async fn explicit_mob_override_generates_create_only_operator_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        override_mob: Some(true),
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.len(), 1);
+    assert_generated_create_only_authority(observed[0].as_ref());
+}
+
+#[tokio::test]
+async fn resumed_explicit_mob_override_generates_create_only_operator_capabilities() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        override_mob: Some(true),
+        resume_session: Some(session),
+        resume_override_mask: meerkat_core::service::ResumeOverrideMask {
+            override_mob: true,
+            ..Default::default()
+        },
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.len(), 1);
+    assert_generated_create_only_authority(observed[0].as_ref());
+}
+
+#[tokio::test]
+async fn explicit_mob_authority_is_forwarded_to_mob_tools_factory() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp).mob(true).mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    build_config.mob_tool_authority_context = Some(create_test_authority());
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.as_slice(), &[Some(create_test_authority())]);
+}
+
+#[tokio::test]
+async fn explicit_mob_authority_is_persisted_on_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let mut build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    build_config.mob_tool_authority_context = Some(create_test_authority());
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    assert_eq!(
+        agent.session().mob_tool_authority_context(),
+        Some(create_test_authority())
+    );
+}
+
+#[tokio::test]
+async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobToolsFactory {
+        observed_authority_context: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Inherit,
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+    session
+        .set_mob_tool_authority_context(Some(create_test_authority()))
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        resume_session: Some(session),
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.as_slice(), &[Some(create_test_authority())]);
+}
+
+// ---------------------------------------------------------------------------
+// Shared comms runtime vs per-session comms_name
+// ---------------------------------------------------------------------------
+
+/// When `with_comms_runtime` is set and the build has `comms_name`, the factory
+/// must NOT use the shared runtime — it must create a per-session runtime so the
+/// member gets its own keypair, inbox, and trusted-peer set. Sharing the surface
+/// runtime with mob members would collapse their PeerCommsMachine state into one
+/// instance, breaking peer-to-peer addressing.
+///
+/// This test validates both paths:
+/// 1. No comms_name → build succeeds using the shared runtime
+/// 2. comms_name set → build succeeds using a fresh per-session runtime
+///
+/// The two agents must have different peer identities (different public keys).
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn shared_comms_runtime_skipped_when_comms_name_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let comms_config = meerkat_comms::ResolvedCommsConfig {
+        enabled: true,
+        name: "shared-parent".to_string(),
+        inproc_namespace: None,
+        listen_tcp: None,
+        listen_uds: None,
+        event_listen_tcp: None,
+        #[cfg(unix)]
+        event_listen_uds: None,
+        identity_dir: temp.path().join("identity"),
+        trusted_peers_path: temp.path().join("trusted_peers.json"),
+        comms_config: Default::default(),
+        auth: Default::default(),
+        require_peer_auth: false,
+        allow_external_unauthenticated: false,
+    };
+    let shared_runtime = Arc::new(
+        meerkat_comms::CommsRuntime::new_with_silent_intents(
+            comms_config,
+            Arc::new(std::collections::HashSet::new()),
+        )
+        .await
+        .unwrap(),
+    );
+    let _shared_pubkey = shared_runtime.public_key().to_peer_id();
+
+    // Add a sentinel peer to the shared runtime so we can detect reuse.
+    shared_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+        name: "sentinel".into(),
+        pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+        addr: "tcp://127.0.0.1:9999".into(),
+        meta: meerkat_comms::PeerMeta::default(),
+    });
+
+    let factory = temp_factory(&temp).with_comms_runtime(shared_runtime);
+    let config = Config::default();
+
+    // 1. Build WITHOUT comms_name — should reuse the shared runtime.
+    //    The sentinel peer should be visible.
+    let parent_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        comms_name: None,
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let parent_agent = factory
+        .build_agent(parent_config, &config)
+        .await
+        .expect("parent build (no comms_name) should succeed");
+
+    // 2. Build WITH comms_name — should get a fresh per-session runtime.
+    //    The sentinel peer should NOT be visible.
+    let member_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        comms_name: Some("mob/delegate/helper".to_string()),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+    let member_agent = factory
+        .build_agent(member_config, &config)
+        .await
+        .expect("member build (with comms_name) should succeed");
+
+    // Verify identities differ via the session metadata stored on the agent's session.
+    let parent_meta = parent_agent.session().session_metadata();
+    let member_meta = member_agent.session().session_metadata();
+
+    // The parent has no comms_name (surface identity).
+    assert!(
+        parent_meta
+            .as_ref()
+            .and_then(|m| m.comms_name.as_ref())
+            .is_none(),
+        "parent session should have no comms_name in metadata"
+    );
+
+    // The member has a comms_name (per-session identity).
+    assert_eq!(
+        member_meta
+            .as_ref()
+            .and_then(|m| m.comms_name.as_ref())
+            .map(String::as_str),
+        Some("mob/delegate/helper"),
+        "member session should have its own comms_name in metadata"
     );
 }

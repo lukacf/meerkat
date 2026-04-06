@@ -11,10 +11,11 @@
 
 use crate::Provider;
 use crate::peer_meta::PeerMeta;
-use crate::service::AppendSystemContextRequest;
+use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
-use crate::types::{Message, SessionId, Usage};
+use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolResult, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Current session format version
@@ -100,6 +101,12 @@ fn default_version() -> u32 {
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 
+/// Metadata key used to store deferred-turn control state.
+pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
+
+/// Metadata key used to store recoverable build-only session state.
+pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
+
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 
@@ -123,6 +130,99 @@ pub struct PendingSystemContextAppend {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     pub accepted_at: SystemTime,
+}
+
+/// Durable control state for deferred first-turn prompt and staged callback tool results.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionDeferredTurnState {
+    #[serde(default, skip_serializing_if = "DeferredFirstTurnPhase::is_inactive")]
+    pub first_turn_phase: DeferredFirstTurnPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_initial_prompt: Option<PendingDeferredPrompt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tool_results: Vec<PendingToolResultsMessage>,
+}
+
+/// Canonical lifecycle phase for the session's deferred first turn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredFirstTurnPhase {
+    /// The session was not created in deferred-first-turn mode.
+    #[default]
+    Inactive,
+    /// The session exists durably but the first turn has not started yet.
+    Pending,
+    /// The first turn has started; build-only overrides are no longer legal.
+    Consumed,
+}
+
+impl DeferredFirstTurnPhase {
+    pub fn is_inactive(&self) -> bool {
+        matches!(self, Self::Inactive)
+    }
+}
+
+fn is_default_hook_run_overrides(value: &crate::HookRunOverrides) -> bool {
+    value == &crate::HookRunOverrides::default()
+}
+
+fn is_default_call_timeout_override(value: &crate::CallTimeoutOverride) -> bool {
+    value == &crate::CallTimeoutOverride::default()
+}
+
+/// Durable build-only session state required to faithfully recover and rebuild
+/// a persisted session without surface-local shadow config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionBuildState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<crate::OutputSchema>,
+    #[serde(default, skip_serializing_if = "is_default_hook_run_overrides")]
+    pub hooks_override: crate::HookRunOverrides,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limits: Option<crate::BudgetLimits>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recoverable_tool_defs: Vec<ToolDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub silent_comms_intents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inline_peer_notifications: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
+    #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
+    pub call_timeout_override: crate::CallTimeoutOverride,
+}
+
+/// Deferred create-time prompt staged for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingDeferredPrompt {
+    pub prompt: ContentInput,
+    pub accepted_at: SystemTime,
+}
+
+/// Staged callback tool results waiting to be admitted on the next turn seam.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingToolResultsMessage {
+    pub results: Vec<ToolResult>,
+    pub accepted_at: SystemTime,
+}
+
+impl PartialEq for PendingToolResultsMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.accepted_at == other.accepted_at
+            && serde_json::to_value(&self.results).ok() == serde_json::to_value(&other.results).ok()
+    }
 }
 
 /// Seen idempotency-key entry for system-context append requests.
@@ -206,6 +306,82 @@ impl SessionSystemContextState {
             }
         }
         self.pending.clear();
+    }
+}
+
+impl SessionDeferredTurnState {
+    /// Mark that this session has a deferred first turn waiting to start.
+    pub fn mark_initial_turn_pending(&mut self) {
+        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+    }
+
+    /// Mark the deferred first turn as started.
+    ///
+    /// Returns true when the phase transitioned from `Pending`.
+    pub fn mark_initial_turn_started(&mut self) -> bool {
+        let was_pending = matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending);
+        if was_pending {
+            self.first_turn_phase = DeferredFirstTurnPhase::Consumed;
+        }
+        was_pending
+    }
+
+    /// Restore the deferred first-turn pending phase after a failed pre-run setup.
+    pub fn restore_initial_turn_pending(&mut self) {
+        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+    }
+
+    /// Whether build-only first-turn overrides are still legal for this session.
+    pub fn allows_initial_turn_overrides(&self) -> bool {
+        matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending)
+    }
+
+    /// Stage the create-time prompt for a later first turn.
+    pub fn stage_initial_prompt(&mut self, prompt: ContentInput, accepted_at: SystemTime) {
+        if !prompt.has_images() && prompt.text_content().trim().is_empty() {
+            self.pending_initial_prompt = None;
+            return;
+        }
+
+        self.pending_initial_prompt = Some(PendingDeferredPrompt {
+            prompt,
+            accepted_at,
+        });
+    }
+
+    /// Stage one callback tool-results message for the next turn.
+    pub fn stage_tool_results(
+        &mut self,
+        results: Vec<ToolResult>,
+        accepted_at: SystemTime,
+    ) -> usize {
+        if results.is_empty() {
+            return 0;
+        }
+
+        let accepted = results.len();
+        self.pending_tool_results.push(PendingToolResultsMessage {
+            results,
+            accepted_at,
+        });
+        accepted
+    }
+
+    /// Consume the staged initial prompt, if any.
+    pub fn take_initial_prompt(&mut self) -> Option<ContentInput> {
+        self.pending_initial_prompt
+            .take()
+            .map(|pending| pending.prompt)
+    }
+
+    /// Consume all staged callback tool-results messages.
+    pub fn take_tool_results(&mut self) -> Vec<PendingToolResultsMessage> {
+        std::mem::take(&mut self.pending_tool_results)
+    }
+
+    /// Whether any callback tool results are currently staged.
+    pub fn has_pending_tool_results(&self) -> bool {
+        !self.pending_tool_results.is_empty()
     }
 }
 
@@ -412,6 +588,12 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Remove a metadata value.
+    pub fn remove_metadata(&mut self, key: &str) {
+        self.metadata.remove(key);
+        self.updated_at = SystemTime::now();
+    }
+
     /// Store SessionMetadata in the session metadata map.
     pub fn set_session_metadata(
         &mut self,
@@ -444,6 +626,53 @@ impl Session {
         self.metadata
             .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store durable deferred-turn control state in the session metadata map.
+    pub fn set_deferred_turn_state(
+        &mut self,
+        state: SessionDeferredTurnState,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_DEFERRED_TURN_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load durable deferred-turn control state from the session metadata map.
+    pub fn deferred_turn_state(&self) -> Option<SessionDeferredTurnState> {
+        self.metadata
+            .get(SESSION_DEFERRED_TURN_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store recoverable build-only session state in the session metadata map.
+    pub fn set_build_state(&mut self, state: SessionBuildState) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_BUILD_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load recoverable build-only session state from the session metadata map.
+    pub fn build_state(&self) -> Option<SessionBuildState> {
+        self.metadata
+            .get(SESSION_BUILD_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store typed mob operator authority inside canonical build-state metadata.
+    pub fn set_mob_tool_authority_context(
+        &mut self,
+        authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), serde_json::Error> {
+        let mut build_state = self.build_state().unwrap_or_default();
+        build_state.mob_tool_authority_context = authority_context;
+        self.set_build_state(build_state)
+    }
+
+    /// Load typed mob operator authority from canonical build-state metadata.
+    pub fn mob_tool_authority_context(&self) -> Option<MobToolAuthorityContext> {
+        self.build_state()
+            .and_then(|state| state.mob_tool_authority_context)
     }
 
     /// Fork the session at a specific message index
@@ -568,19 +797,154 @@ impl SessionMetadata {
 /// Key used to store SessionMetadata in Session metadata map.
 pub const SESSION_METADATA_KEY: &str = "session_metadata";
 
-/// Tooling flags captured at session creation time.
+/// Caller intent for a tool category.
+///
+/// Distinguishes "no opinion / didn't exist" (`Inherit`) from explicit
+/// `Enable` / `Disable` so that resumed sessions don't freeze tool
+/// availability at the capabilities of the Meerkat version that created them.
+///
+/// **Dogma §10:** Inherit, disable, and set are different facts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategoryOverride {
+    /// No explicit intent — inherit runtime/factory default.
+    #[default]
+    Inherit,
+    /// Explicitly enabled by caller.
+    Enable,
+    /// Explicitly disabled by caller.
+    Disable,
+}
+
+impl ToolCategoryOverride {
+    /// Resolve this override against a runtime default.
+    ///
+    /// - `Enable` → `true`
+    /// - `Disable` → `false`
+    /// - `Inherit` → `runtime_default`
+    #[must_use]
+    pub fn resolve(self, runtime_default: bool) -> bool {
+        match self {
+            Self::Enable => true,
+            Self::Disable => false,
+            Self::Inherit => runtime_default,
+        }
+    }
+
+    /// Convert to `Option<bool>` for feeding `AgentBuildConfig` override fields.
+    ///
+    /// - `Enable` → `Some(true)`
+    /// - `Disable` → `Some(false)`
+    /// - `Inherit` → `None` (factory default wins)
+    #[must_use]
+    pub fn to_override(self) -> Option<bool> {
+        match self {
+            Self::Enable => Some(true),
+            Self::Disable => Some(false),
+            Self::Inherit => None,
+        }
+    }
+
+    /// Construct from a resolved effective bool.
+    ///
+    /// **Warning:** this collapses `Inherit` into `Enable`/`Disable`. Prefer
+    /// [`from_override`] when persisting session metadata so that `Inherit`
+    /// survives across save/resume cycles. Only use `from_effective` in test
+    /// helpers or when constructing metadata from external sources that only
+    /// provide a resolved bool.
+    #[must_use]
+    pub fn from_effective(enabled: bool) -> Self {
+        if enabled { Self::Enable } else { Self::Disable }
+    }
+
+    /// Construct from an `Option<bool>` override field, preserving `Inherit`.
+    ///
+    /// - `Some(true)` → `Enable`
+    /// - `Some(false)` → `Disable`
+    /// - `None` → `Inherit` (factory default was used, no explicit intent)
+    ///
+    /// This is the inverse of [`to_override`] and should be used when persisting
+    /// session tooling metadata so that `Inherit` survives across save/resume
+    /// cycles.
+    #[must_use]
+    pub fn from_override(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => Self::Enable,
+            Some(false) => Self::Disable,
+            None => Self::Inherit,
+        }
+    }
+}
+
+/// Backward-compatible deserializer: accepts both old `bool` JSON and new
+/// tri-state `"inherit"` / `"enable"` / `"disable"` strings.
+///
+/// Old persisted sessions have `"mob": false` or `"builtins": true`.
+/// - `true`  → `Enable`  (user explicitly had it on)
+/// - `false` → `Inherit` (can't distinguish "disabled" from "didn't exist")
+/// - string  → normal enum deserialization
+fn deserialize_tool_category_compat<'de, D>(
+    deserializer: D,
+) -> Result<ToolCategoryOverride, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct ToolCategoryVisitor;
+
+    impl de::Visitor<'_> for ToolCategoryVisitor {
+        type Value = ToolCategoryOverride;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a boolean or one of \"inherit\", \"enable\", \"disable\"")
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(if v {
+                ToolCategoryOverride::Enable
+            } else {
+                ToolCategoryOverride::Inherit
+            })
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match v {
+                "inherit" => Ok(ToolCategoryOverride::Inherit),
+                "enable" => Ok(ToolCategoryOverride::Enable),
+                "disable" => Ok(ToolCategoryOverride::Disable),
+                _ => Err(de::Error::unknown_variant(
+                    v,
+                    &["inherit", "enable", "disable"],
+                )),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(ToolCategoryVisitor)
+}
+
+/// Tooling intent captured at session creation time.
+///
+/// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
+/// explicit enable/disable (Dogma §10). On resume, `Inherit` falls through
+/// to the factory's current runtime default, allowing new tool categories
+/// to become available without re-creating the session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionTooling {
-    pub builtins: bool,
-    pub shell: bool,
-    pub comms: bool,
-    /// Mob (multi-agent orchestration) tools enabled.
-    #[serde(default)]
-    pub mob: bool,
-    /// Semantic memory enabled.
-    #[serde(default)]
-    pub memory: bool,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub builtins: ToolCategoryOverride,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub shell: ToolCategoryOverride,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub comms: ToolCategoryOverride,
+    /// Mob (multi-agent orchestration) tools.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub mob: ToolCategoryOverride,
+    /// Semantic memory.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub memory: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillId>>,
@@ -740,6 +1104,27 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_session_mob_tool_authority_context_roundtrip() {
+        let mut session = Session::new();
+        let authority = MobToolAuthorityContext::new(
+            crate::service::OpaquePrincipalToken::new("opaque-principal"),
+            false,
+        )
+        .with_managed_mob_scope(["mob-a"])
+        .with_audit_invocation_id("audit-1");
+
+        session
+            .set_mob_tool_authority_context(Some(authority.clone()))
+            .expect("authority should serialize");
+        assert_eq!(session.mob_tool_authority_context(), Some(authority));
+
+        session
+            .set_mob_tool_authority_context(None)
+            .expect("authority should clear");
+        assert!(session.mob_tool_authority_context().is_none());
     }
 
     #[test]

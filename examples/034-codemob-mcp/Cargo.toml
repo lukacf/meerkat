@@ -11,7 +11,7 @@ name = "codemob-mcp"
 path = "src/main.rs"
 
 [dependencies]
-meerkat = { path = "../../meerkat", features = ["comms"] }
+meerkat = { path = "../../meerkat", features = ["comms", "session-compaction", "memory-store-session"] }
 meerkat-core = { path = "../../meerkat-core" }
 meerkat-mob = { path = "../../meerkat-mob" }
 meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
@@ -24,3 +24,4 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"

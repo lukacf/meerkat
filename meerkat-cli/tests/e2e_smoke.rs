@@ -651,3 +651,209 @@ async fn inner_e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
+
+// ===========================================================================
+// E2E-001: Background job active-turn completion surfacing
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "e2e: live API + shell — background job notification (REQ-001)"]
+async fn e2e_001_background_job_active_turn_completion() -> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    if std::env::var("RUN_TEST_E2E_BG_001_INNER").is_ok() {
+        return inner_e2e_001_bg_active_turn().await;
+    }
+
+    let temp_dir = TempDir::new()?;
+    let project_dir = temp_dir.path().join("project");
+    tokio::fs::create_dir_all(project_dir.join(".rkat")).await?;
+
+    let data_dir = temp_dir.path().join("data");
+    tokio::fs::create_dir_all(&data_dir).await?;
+
+    let status = Command::new(std::env::current_exe()?)
+        .arg("e2e_001_background_job_active_turn_completion")
+        .arg("--ignored")
+        .env("RUN_TEST_E2E_BG_001_INNER", "1")
+        .env("HOME", temp_dir.path())
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("TEST_PROJECT_DIR", &project_dir)
+        .env("TEST_DATA_DIR", &data_dir)
+        .status()
+        .await?;
+
+    assert!(status.success(), "inner test failed");
+    Ok(())
+}
+
+async fn inner_e2e_001_bg_active_turn() -> Result<(), Box<dyn std::error::Error>> {
+    let project_dir = PathBuf::from(std::env::var("TEST_PROJECT_DIR")?);
+
+    std::env::set_current_dir(&project_dir)?;
+    write_smoke_config(&project_dir).await?;
+
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+
+    // Ask the agent to run a fast background job and wait for it to complete.
+    // The agent should see the completion via [SYSTEM NOTICE][BG_JOB].
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .args([
+                "run",
+                "Run `echo bg_done` in the background using the shell tool with background=true. \
+                 Then call shell_job_status to check on it. \
+                 Report the final status including the job_id.",
+                "--tools",
+                "full",
+                "--output",
+                "json",
+                "--stream",
+            ])
+            .output(),
+    )
+    .await??;
+
+    assert!(
+        output.status.success(),
+        "rkat run failed (exit {:?}): {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+
+    // The agent should surface a background job completion notice or mention
+    // the job result. Look for evidence of the notification path.
+    let has_bg_notice =
+        combined.contains("[BG_JOB]") || combined.contains("background_job_completed");
+    let has_job_id = combined.contains("job_id") || combined.contains("j_");
+    let has_bg_done = combined.contains("bg_done");
+
+    assert!(
+        has_bg_notice || has_bg_done,
+        "E2E-001: expected background job completion notice or output in transcript.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // CONTRACT-002: surfaced handle is job_id, not operation_id
+    if has_bg_notice {
+        assert!(
+            has_job_id,
+            "E2E-001: background notice should reference job_id (CONTRACT-002)"
+        );
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// E2E-002: Background job idle keep-alive completion surfacing
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "e2e: live API + shell + keep-alive — background job idle wake (REQ-002)"]
+async fn e2e_002_background_job_idle_keepalive_completion() -> Result<(), Box<dyn std::error::Error>>
+{
+    if skip_if_no_api_prereqs() {
+        return Ok(());
+    }
+
+    if std::env::var("RUN_TEST_E2E_BG_002_INNER").is_ok() {
+        return inner_e2e_002_bg_keepalive().await;
+    }
+
+    let temp_dir = TempDir::new()?;
+    let project_dir = temp_dir.path().join("project");
+    tokio::fs::create_dir_all(project_dir.join(".rkat")).await?;
+
+    let data_dir = temp_dir.path().join("data");
+    tokio::fs::create_dir_all(&data_dir).await?;
+
+    let status = Command::new(std::env::current_exe()?)
+        .arg("e2e_002_background_job_idle_keepalive_completion")
+        .arg("--ignored")
+        .env("RUN_TEST_E2E_BG_002_INNER", "1")
+        .env("HOME", temp_dir.path())
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("TEST_PROJECT_DIR", &project_dir)
+        .env("TEST_DATA_DIR", &data_dir)
+        .status()
+        .await?;
+
+    assert!(status.success(), "inner test failed");
+    Ok(())
+}
+
+async fn inner_e2e_002_bg_keepalive() -> Result<(), Box<dyn std::error::Error>> {
+    let project_dir = PathBuf::from(std::env::var("TEST_PROJECT_DIR")?);
+
+    std::env::set_current_dir(&project_dir)?;
+    write_smoke_config(&project_dir).await?;
+
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+
+    // Start a keep-alive session via --keep-alive. The agent stays alive after
+    // its initial turn. We launch a background job, let the agent finish its
+    // turn, then wait for the background job to complete while idle. The runtime
+    // should wake and surface the completion without user input.
+    //
+    // We redirect output to a temp file and read it after killing the process,
+    // because SIGKILL does not flush piped stdout/stderr.
+    let stdout_file = project_dir.join("e2e_002_stdout.txt");
+    let stderr_file = project_dir.join("e2e_002_stderr.txt");
+    let stdout_f = std::fs::File::create(&stdout_file)?;
+    let stderr_f = std::fs::File::create(&stderr_file)?;
+
+    let mut child = Command::new(&rkat)
+        .current_dir(&project_dir)
+        .args([
+            "run",
+            "Run `sleep 2 && echo keepalive_bg_done` in the background using shell with background=true. \
+             Then say 'Waiting for background job.' and stop.",
+            "--tools",
+            "full",
+            "--keep-alive",
+            "--stream",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout_f))
+        .stderr(std::process::Stdio::from(stderr_f))
+        .spawn()?;
+
+    // Wait for the background job to complete (2s) plus margin for the
+    // agent to process the initial turn + wake cycle.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    // Kill the process and read captured output from files
+    child.kill().await.ok();
+    let _ = child.wait().await;
+
+    let stdout = tokio::fs::read_to_string(&stdout_file)
+        .await
+        .unwrap_or_default();
+    let stderr = tokio::fs::read_to_string(&stderr_file)
+        .await
+        .unwrap_or_default();
+    let combined = format!("{stdout}\n{stderr}");
+
+    // The session should have woken up and surfaced the completion.
+    let has_bg_notice =
+        combined.contains("[BG_JOB]") || combined.contains("background_job_completed");
+    let has_bg_done = combined.contains("keepalive_bg_done");
+
+    assert!(
+        has_bg_notice || has_bg_done,
+        "E2E-002: expected background job completion surfaced during idle keep-alive.\n\
+         The runtime should have woken the session without user input (REQ-002).\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    Ok(())
+}

@@ -6,6 +6,7 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
+use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
@@ -90,6 +91,38 @@ fn input_turn_metadata(
             },
         ),
         _ => None,
+    }
+}
+
+fn resolve_completion_waiters(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    run_result: Option<meerkat_core::types::RunResult>,
+    terminal: Option<CoreApplyTerminal>,
+) {
+    match terminal {
+        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+            for input_id in input_ids {
+                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
+            }
+        }
+        Some(CoreApplyTerminal::RunResult(_)) => match run_result {
+            Some(result) => {
+                for input_id in input_ids {
+                    registry.resolve_completed(input_id, result.clone());
+                }
+            }
+            None => {
+                for input_id in input_ids {
+                    registry.resolve_without_result(input_id);
+                }
+            }
+        },
+        None => {
+            for input_id in input_ids {
+                registry.resolve_without_result(input_id);
+            }
+        }
     }
 }
 
@@ -258,6 +291,7 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
     driver: crate::session_adapter::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
@@ -266,9 +300,58 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
     completions: Option<crate::session_adapter::SharedCompletionRegistry>,
+    detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
+    completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Feed-based idle wake state (local to this loop).
+        // Seed from epoch cursor state if available (runtime-backed surfaces),
+        // otherwise fall back to the feed watermark to avoid replaying historical
+        // completions from a prior runtime loop (e.g., after stop/resume).
+        let initial_watermark = epoch_cursor_state
+            .as_ref()
+            .map(|cs| {
+                let obs = cs
+                    .runtime_observed_seq
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let inj = cs
+                    .runtime_last_injected_seq
+                    .load(std::sync::atomic::Ordering::Acquire);
+                // Use the max of observed/injected as the initial watermark only
+                // if non-zero (recovered state); otherwise fall back to feed.
+                let recovered = obs.max(inj);
+                if recovered > 0 {
+                    recovered
+                } else {
+                    completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0)
+                }
+            })
+            .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
+        let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
+        let mut last_injected_seq: meerkat_core::completion_feed::CompletionSeq =
+            epoch_cursor_state
+                .as_ref()
+                .map(|cs| {
+                    cs.runtime_last_injected_seq
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .filter(|&v| v > 0)
+                .unwrap_or(initial_watermark);
+
         loop {
+            // Build a future for the idle wake. Feed-based if available,
+            // otherwise falls back to DetachedWakeState Notify.
+            let idle_wake = async {
+                if let Some(ref feed) = completion_feed {
+                    feed.wait_for_advance(observed_seq).await;
+                } else if let Some(ref state) = detached_wake {
+                    state.notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+
             tokio::select! {
                 biased;
                 maybe_command = control_rx.recv() => {
@@ -301,20 +384,212 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
+                            // Secondary wake path: re-check after queue drain.
+                            // If a completion arrived during process_queue, inject
+                            // and immediately process the continuation.
+                            if maybe_inject_feed_wake(
+                                &driver,
+                                completion_feed.as_deref(),
+                                detached_wake.as_ref(),
+                                &mut observed_seq,
+                                &mut last_injected_seq,
+                                epoch_cursor_state.as_deref(),
+                            )
+                            .await
+                                && process_queue(
+                                    &driver,
+                                    &mut *executor,
+                                    &mut control_rx,
+                                    completions.as_ref(),
+                                )
+                                .await
+                            {
+                                break;
+                            }
                         }
                         None => break,
+                    }
+                }
+                () = idle_wake => {
+                    // A completion arrived while idle. Check if it's a
+                    // BackgroundToolOp that hasn't been injected yet.
+                    // Only BackgroundToolOp triggers idle wake — MobMemberChild
+                    // completions already wake through comms terminal response.
+                    if let Some(ref feed) = completion_feed {
+                        let batch = feed.list_since(observed_seq);
+
+                        let has_new_bg_completion = batch.entries.iter().any(|e| {
+                            e.kind
+                                == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
+                                && e.seq > last_injected_seq
+                        });
+
+                        if has_new_bg_completion {
+                            // Verify quiescence before injecting.
+                            let d = driver.lock().await;
+                            let quiescent = d.is_quiescent_for_detached_wake();
+                            drop(d);
+
+                            if quiescent {
+                                let input = crate::input::Input::Continuation(
+                                    crate::input::ContinuationInput::detached_background_op_completed(),
+                                );
+                                let mut d = driver.lock().await;
+                                if d.as_driver_mut().accept_input(input).await.is_ok() {
+                                    last_injected_seq = batch.watermark;
+                                    if let Some(ref cs) = epoch_cursor_state {
+                                        cs.runtime_last_injected_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                                    }
+                                }
+                                // Advance cursor only after successful injection
+                                // or when quiescent (no pending BG work to retry).
+                                observed_seq = batch.watermark;
+                                if let Some(ref cs) = epoch_cursor_state {
+                                    cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                                }
+                                drop(d);
+                                if process_queue(
+                                    &driver,
+                                    &mut *executor,
+                                    &mut control_rx,
+                                    completions.as_ref(),
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            // Non-quiescent: do NOT advance observed_seq.
+                            // The completion stays visible for the next wake
+                            // so it's not permanently lost.
+                        } else {
+                            // No new BG completions — advance to prevent hot-spin
+                            // on non-BG entries (MobMemberChild, etc.).
+                            observed_seq = batch.watermark;
+                            if let Some(ref cs) = epoch_cursor_state {
+                                cs.runtime_observed_seq.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                    } else if let Some(ref state) = detached_wake
+                        && state.pending.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        // Legacy detached wake path (no feed).
+                        let input = crate::input::Input::Continuation(
+                            crate::input::ContinuationInput::detached_background_op_completed(),
+                        );
+                        let mut d = driver.lock().await;
+                        if d.as_driver_mut().accept_input(input).await.is_ok() {
+                            state.pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        drop(d);
+                        if process_queue(
+                            &driver,
+                            &mut *executor,
+                            &mut control_rx,
+                            completions.as_ref(),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
         }
 
         // Loop exiting — resolve any pending completion waiters as terminated.
-        // This ensures callers don't hang if the runtime shuts down mid-work.
         if let Some(ref completions) = completions {
             let mut reg = completions.lock().await;
             reg.resolve_all_terminated("runtime loop exited");
         }
     })
+}
+
+/// Check for new background op completions and inject a continuation if needed.
+///
+/// Called after queue processing completes (session has returned to idle).
+/// Returns `true` if a continuation was injected (caller should process_queue).
+/// Supports both feed-based (new) and DetachedWakeState (legacy) paths.
+async fn maybe_inject_feed_wake(
+    driver: &crate::session_adapter::SharedDriver,
+    feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
+    wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
+    observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
+    last_injected_seq: &mut meerkat_core::completion_feed::CompletionSeq,
+    epoch_cursor_state: Option<&meerkat_core::EpochCursorState>,
+) -> bool {
+    if let Some(feed) = feed {
+        let batch = feed.list_since(*observed_seq);
+
+        let has_new_bg_completion = batch.entries.iter().any(|e| {
+            e.kind == meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp
+                && e.seq > *last_injected_seq
+        });
+
+        if !has_new_bg_completion {
+            // No new BG completions — advance to prevent hot-spin
+            // on non-BG entries (MobMemberChild, etc.).
+            *observed_seq = batch.watermark;
+            if let Some(cs) = epoch_cursor_state {
+                cs.runtime_observed_seq
+                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
+            }
+            return false;
+        }
+
+        // Verify quiescence before injecting.
+        let d = driver.lock().await;
+        if !d.is_quiescent_for_detached_wake() {
+            // Non-quiescent: do NOT advance observed_seq. The completion
+            // stays visible for the next wake so it's not permanently lost.
+            return false;
+        }
+        drop(d);
+
+        let input = crate::input::Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let mut d = driver.lock().await;
+        if d.as_driver_mut().accept_input(input).await.is_ok() {
+            *last_injected_seq = batch.watermark;
+            if let Some(cs) = epoch_cursor_state {
+                cs.runtime_last_injected_seq
+                    .store(batch.watermark, std::sync::atomic::Ordering::Release);
+            }
+        }
+        // Advance cursor after injection attempt (quiescent path).
+        *observed_seq = batch.watermark;
+        if let Some(cs) = epoch_cursor_state {
+            cs.runtime_observed_seq
+                .store(batch.watermark, std::sync::atomic::Ordering::Release);
+        }
+        true
+    } else {
+        // Legacy DetachedWakeState path
+        let Some(state) = wake_state else {
+            return false;
+        };
+
+        if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+
+        let d = driver.lock().await;
+        if !d.is_quiescent_for_detached_wake() {
+            return false;
+        }
+        drop(d);
+
+        // Legacy path: fire notify to wake the idle arm on next iteration.
+        state
+            .signaled
+            .store(true, std::sync::atomic::Ordering::Release);
+        state.notify.notify_one();
+        false // Legacy path doesn't inject inline — idle arm handles it
+    }
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -411,8 +686,12 @@ async fn process_queue(
                 let mut d = driver.lock().await;
                 match result {
                     Ok(output) => {
-                        // Capture run_result before moving output fields
-                        let run_result = output.run_result;
+                        let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                            receipt,
+                            session_snapshot,
+                            run_result,
+                            terminal,
+                        } = output;
 
                         // BoundaryApplied transitions Staged → Applied → APC
                         // and triggers atomic persistence in PersistentRuntimeDriver
@@ -420,8 +699,8 @@ async fn process_queue(
                             .as_driver_mut()
                             .on_run_event(RunEvent::BoundaryApplied {
                                 run_id: run_id.clone(),
-                                receipt: output.receipt,
-                                session_snapshot: output.session_snapshot,
+                                receipt,
+                                session_snapshot,
                             })
                             .await
                         {
@@ -472,18 +751,7 @@ async fn process_queue(
                         // Resolve completion waiters unconditionally
                         if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            match run_result {
-                                Some(result) => {
-                                    for input_id in &input_ids {
-                                        reg.resolve_completed(input_id, result.clone());
-                                    }
-                                }
-                                None => {
-                                    for input_id in &input_ids {
-                                        reg.resolve_without_result(input_id);
-                                    }
-                                }
-                            }
+                            resolve_completion_waiters(&mut reg, &input_ids, run_result, terminal);
                         }
                     }
                     Err(e) => {
@@ -594,6 +862,7 @@ mod tests {
             convention: None,
             body: "peer message".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
     }
@@ -647,6 +916,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "see this image".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);
@@ -701,6 +971,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone()) {
             RunPrimitive::StagedInput(staged) => staged,
@@ -748,6 +1019,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone()) {
             RunPrimitive::StagedInput(staged) => staged,
@@ -1042,5 +1314,30 @@ mod tests {
             Some(render_metadata)
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_completion_waiters_surfaces_callback_pending() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        resolve_completion_waiters(
+            &mut registry,
+            std::slice::from_ref(&input_id),
+            None,
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            }),
+        );
+
+        match handle.wait().await {
+            crate::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, serde_json::json!({ "value": "browser" }));
+            }
+            other => panic!("Expected CallbackPending, got {other:?}"),
+        }
     }
 }

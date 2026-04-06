@@ -795,8 +795,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {"run_id": "run-1"}
         if method == "mob/flow_status":
             return {"run": {"status": "running"}}
-        if method == "mob/send":
-            return {"session_id": "session-1", "member_id": "agent-a"}
         if method == "mob/wait_kickoff":
             return {
                 "members": [
@@ -828,9 +826,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         {"external": {"name": "remote", "peer_id": "ed25519:remote", "address": "inproc://remote"}},
     )
     await client.mob_lifecycle("mob-1", "start")
-    send_receipt = await client.send_mob_member_content("mob-1", "agent-a", "hello")
-    assert send_receipt["session_id"] == "session-1"
-    assert send_receipt["member_id"] == "agent-a"
     wait_members = await client.wait_mob_kickoff(
         "mob-1",
         member_ids=["agent-a"],
@@ -860,7 +855,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/wire",
         "mob/unwire",
         "mob/lifecycle",
-        "mob/send",
         "mob/wait_kickoff",
         "mob/wait_kickoff",
         "mob/append_system_context",
@@ -881,9 +875,64 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
-    assert calls[11][1] == {
+    assert calls[10][1] == {
         "mob_id": "mob-1",
         "member_ids": ["agent-a"],
         "timeout_ms": 1234,
     }
-    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[11][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_uses_canonical_host_member_send_lane() -> None:
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "member_id": "agent-a",
+            "session_id": "session-123",
+            "handling_mode": "steer",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    receipt = await client.send_mob_member_content(
+        "mob-1",
+        "agent-a",
+        "hello reviewer",
+        handling_mode="steer",
+        render_metadata={"class": "peer_request", "salience": "urgent"},
+    )
+
+    assert receipt == {
+        "member_id": "agent-a",
+        "session_id": "session-123",
+        "handling_mode": "steer",
+    }
+    assert calls == [
+        (
+            "mob/member_send",
+            {
+                "mob_id": "mob-1",
+                "meerkat_id": "agent-a",
+                "content": "hello reviewer",
+                "handling_mode": "steer",
+                "render_metadata": {"class": "peer_request", "salience": "urgent"},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
+    client = MeerkatClient()
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {"handling_mode": "queue"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing session_id"):
+        await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")

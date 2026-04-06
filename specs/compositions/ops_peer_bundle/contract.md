@@ -9,6 +9,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Routes
 - `ops_peer_ready_trusts_peer_comms`: `ops_lifecycle`.`ExposeOperationPeer` -> `peer_comms`.`TrustPeer` [Immediate]
 
+## Target Selectors
+- `(none)`
+
+## Driver
+- `(none)`
+
+## Transaction Plans
+- `(none)`
+
 ## Scheduler Rules
 - `(none)`
 

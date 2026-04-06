@@ -155,6 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "mcp")]
     meerkat_rest::shutdown_all_mcp_sessions(&shutdown_state).await;
 
+    shutdown_state.shutdown_schedule_host().await;
+
     tracing::info!("Server shutdown complete");
     Ok(())
 }

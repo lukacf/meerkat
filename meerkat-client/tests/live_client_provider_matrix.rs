@@ -178,7 +178,7 @@ async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::ToolCallDelta { .. }) | Ok(LlmEvent::ToolCallComplete { .. }) => {
+            Ok(LlmEvent::ToolCallDelta { .. } | LlmEvent::ToolCallComplete { .. }) => {
                 got_tool = true;
             }
             Ok(LlmEvent::Done {
@@ -480,7 +480,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::ToolCallDelta { .. }) | Ok(LlmEvent::ToolCallComplete { .. }) => {
+            Ok(LlmEvent::ToolCallDelta { .. } | LlmEvent::ToolCallComplete { .. }) => {
                 got_tool = true;
             }
             Ok(LlmEvent::Done {
@@ -559,7 +559,7 @@ async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(LlmEvent::ToolCallDelta { .. }) | Ok(LlmEvent::ToolCallComplete { .. }) => {
+            Ok(LlmEvent::ToolCallDelta { .. } | LlmEvent::ToolCallComplete { .. }) => {
                 got_tool = true;
             }
             Ok(LlmEvent::Done {

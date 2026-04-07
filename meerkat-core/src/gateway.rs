@@ -38,6 +38,7 @@ use crate::tokio;
 use crate::types::ToolResult;
 use crate::types::{ToolCallView, ToolDef};
 use async_trait::async_trait;
+use portable_atomic::AtomicU64;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -469,7 +470,7 @@ impl AgentToolDispatcher for ToolGateway {
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: Arc<dyn crate::completion_feed::CompletionFeed>,
-        baseline: Arc<std::sync::atomic::AtomicU64>,
+        baseline: Arc<AtomicU64>,
     ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
@@ -714,7 +715,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: Arc<dyn crate::completion_feed::CompletionFeed>,
-        baseline: Arc<std::sync::atomic::AtomicU64>,
+        baseline: Arc<AtomicU64>,
     ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;

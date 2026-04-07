@@ -7,8 +7,9 @@
 //! Design rule: one build consumes bindings, it does not create them.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
+use portable_atomic::AtomicU64;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

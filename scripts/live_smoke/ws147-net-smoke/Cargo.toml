@@ -1,0 +1,31 @@
+[package]
+name = "ws147-net-smoke"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "ws147-net-smoke"
+harness = false
+
+[workspace]
+
+[patch.crates-io]
+esp-idf-sys = { path = "../esp32-contract-probe/firmware-rust/vendor/esp-idf-sys" }
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1.0"
+embedded-svc = "0.29"
+esp-idf-sys = { version = "0.37.2", features = ["binstart"] }
+esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+
+[build-dependencies]
+embuild = "0.33"

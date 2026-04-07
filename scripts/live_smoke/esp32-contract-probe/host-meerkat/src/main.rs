@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         HostProbeAgentBuilder {
             peer_name: args.peer_name.clone(),
             scenario: args.scenario.clone(),
+            exchanges: args.exchanges,
             model: args.model.clone(),
             stream: args.stream,
             openai_api_key: args.openai_api_key.clone(),
@@ -297,13 +298,16 @@ async fn main() -> anyhow::Result<()> {
         exchange_count,
         transcript.len()
     );
-    Ok(())
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
 }
 
 #[derive(Clone)]
 struct HostProbeAgentBuilder {
     peer_name: String,
     scenario: String,
+    exchanges: usize,
     model: String,
     stream: bool,
     openai_api_key: String,
@@ -329,9 +333,7 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
         let inner = CompositeDispatcher::new(
             task_store,
             &BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .with_mode(ToolMode::DenyAll)
-                    .enable_tool("datetime"),
+                policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
                 ..Default::default()
             },
             None,
@@ -349,6 +351,7 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
         let tools: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
             wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime)),
             Arc::clone(&self.inbound_epoch),
+            Arc::new(AtomicUsize::new(0)),
         ));
         let llm: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::new(
@@ -373,10 +376,13 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
             .system_prompt(
                 req.system_prompt
                     .clone()
-                    .unwrap_or_else(|| host_system_prompt(&self.peer_name, &self.scenario)),
+                    .unwrap_or_else(|| {
+                        host_system_prompt(&self.peer_name, &self.scenario, self.exchanges)
+                    }),
             )
             .budget(BudgetLimits::default())
             .max_tokens_per_turn(req.max_tokens.unwrap_or(256))
+            .max_turns(1)
             .with_comms_runtime(comms_runtime)
             .build(llm, tools, store)
             .await;
@@ -399,15 +405,19 @@ struct PendingPrompt {
 struct HostSendGuardDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
     inbound_epoch: Arc<AtomicUsize>,
-    sent_epoch: AtomicUsize,
+    sent_epoch: Arc<AtomicUsize>,
 }
 
 impl HostSendGuardDispatcher {
-    fn new(inner: Arc<dyn AgentToolDispatcher>, inbound_epoch: Arc<AtomicUsize>) -> Self {
+    fn new(
+        inner: Arc<dyn AgentToolDispatcher>,
+        inbound_epoch: Arc<AtomicUsize>,
+        sent_epoch: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             inner,
             inbound_epoch,
-            sent_epoch: AtomicUsize::new(0),
+            sent_epoch,
         }
     }
 }
@@ -421,8 +431,8 @@ impl AgentToolDispatcher for HostSendGuardDispatcher {
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         if call.name == "send" {
             let epoch = self.inbound_epoch.load(Ordering::SeqCst);
-            let last = self.sent_epoch.load(Ordering::SeqCst);
-            if epoch == last {
+            let previous = self.sent_epoch.swap(epoch, Ordering::SeqCst);
+            if epoch == previous {
                 println!("MKT:HOST_MEERKAT:SEND_SUPPRESSED epoch={epoch}");
                 return Ok(ToolDispatchOutcome::from(ToolResult::new(
                     call.id.to_string(),
@@ -430,9 +440,11 @@ impl AgentToolDispatcher for HostSendGuardDispatcher {
                     false,
                 )));
             }
-            let outcome = self.inner.dispatch(call).await?;
-            self.sent_epoch.store(epoch, Ordering::SeqCst);
-            return Ok(outcome);
+            let outcome = self.inner.dispatch(call).await;
+            if outcome.is_err() {
+                self.sent_epoch.store(previous, Ordering::SeqCst);
+            }
+            return outcome;
         }
         self.inner.dispatch(call).await
     }
@@ -452,6 +464,7 @@ impl AgentToolDispatcher for HostSendGuardDispatcher {
         let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
             inner,
             Arc::clone(&self.inbound_epoch),
+            Arc::clone(&self.sent_epoch),
         ));
         Ok(if bound {
             BindOutcome::Bound(wrapped)
@@ -471,6 +484,7 @@ impl AgentToolDispatcher for HostSendGuardDispatcher {
         let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
             inner,
             Arc::clone(&self.inbound_epoch),
+            Arc::clone(&self.sent_epoch),
         ));
         Ok(if bound {
             BindOutcome::Bound(wrapped)
@@ -565,11 +579,10 @@ fn kickoff_prompt(peer_name: &str, scenario: &str) -> String {
     match scenario {
         "micropython" => format!(
             "Start the conversation with {peer_name}. \
-             Your goal is to make {peer_name} run embedded micropython_exec snippets on the ESP32. \
-             You are not done until you have observed many successful micropython_exec replies across the session. \
-             In your opening line, instruct {peer_name} to run micropython_exec exactly once with short Python that prints a tiny fact and sets result to a small integer. \
-             Ask for the observed print output and result in the reply. \
-             Use the send tool exactly once and do not answer with plain assistant text."
+             In this interaction, call the send tool exactly once with this exact body and nothing else:\n{}\n\
+             After that single send call, stop immediately. \
+             Do not answer with plain assistant text.",
+            micropython_step_message(1)
         ),
         _ => format!(
             "Start the conversation with {peer_name}. Collaboratively write the greatest LLM joke ever. \
@@ -582,8 +595,7 @@ fn kickoff_prompt(peer_name: &str, scenario: &str) -> String {
 fn stop_prompt(peer_name: &str, scenario: &str) -> String {
     match scenario {
         "micropython" => format!(
-            "Stop now. Use the send tool exactly once to send a short closing line to {peer_name}. \
-             Include the word STOP and mention that the micropython validation is complete. \
+            "Stop now. Use the send tool exactly once with this exact body and nothing else:\nSTOP - micropython validation is complete. Thanks, {peer_name}.\n\
              Do not continue afterward and do not answer with plain assistant text."
         ),
         _ => format!(
@@ -594,20 +606,21 @@ fn stop_prompt(peer_name: &str, scenario: &str) -> String {
     }
 }
 
-fn host_system_prompt(peer_name: &str, scenario: &str) -> String {
+fn host_system_prompt(peer_name: &str, scenario: &str, exchanges: usize) -> String {
     match scenario {
         "micropython" => format!(
             "You are the host Meerkat coordinating validation with {peer_name}. \
-             Each turn, read the latest peer message and send exactly one short instruction or follow-up to {peer_name}. \
-             Your job is to get {peer_name} to call micropython_exec on the ESP32 repeatedly with short safe snippets. \
-             Continue until you have observed at least ten successful micropython_exec replies from {peer_name}; do not stop early. \
-             Prefer snippets that print something simple and set result to a small integer or string. \
-             Ask for varied snippets across turns so the peer performs multiple micropython_exec calls over the session. \
-             After every successful reply, immediately ask for the next micropython_exec snippet unless the latest peer message contains STOP or DISMISS. \
-             You must respond by calling the send tool exactly once per turn with kind=peer_message and to={peer_name}. \
-             Do not finish a turn with plain assistant text and do not skip the send call. \
-             Never say validation is complete on your own; wait for an explicit stop prompt from the runtime harness. \
-             If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
+             The micropython scenario is fully scripted. \
+             Count how many incoming transcript messages from {peer_name} you have already observed in this session. \
+             Let N be that inbound message count. \
+             If the latest peer message contains STOP or DISMISS, call the send tool exactly once with the exact body `STOP - micropython validation is complete. Thanks, {peer_name}.` and then stop. \
+             Otherwise, if N is less than {exchanges}, call the send tool exactly once with the exact scheduled body for step N+1. \
+             After you receive the first inbound message from {peer_name}, the next scheduled body is step 2; after the second inbound message, the next scheduled body is step 3; and so on. \
+             Use the scheduled body verbatim. Do not paraphrase it, shorten it, expand it, or swap in a different snippet. \
+             Never ask for a generic 'another short safe snippet'. Never preview future steps. Never send twice in one interaction. \
+             After the single send call, stop immediately for this interaction. Do not answer with plain assistant text.\n\n\
+             Scheduled bodies:\n{}",
+            micropython_schedule_block(exchanges)
         ),
         _ => format!(
             "You are the host half of a two-agent comedy duo talking to {peer_name}. \
@@ -619,6 +632,43 @@ fn host_system_prompt(peer_name: &str, scenario: &str) -> String {
              If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
         ),
     }
+}
+
+fn micropython_step_message(step: usize) -> String {
+    match step {
+        1 => "Please run micropython_exec exactly once with this short snippet:\nprint('hi')\nresult = 1\nReply with the printed output and the result.".to_string(),
+        2 => "Run micropython_exec once with: print('ok'); result = 2. Reply with output and result.".to_string(),
+        3 => "Run micropython_exec once with: print(3*3); result = 'nine'. Reply with output and result.".to_string(),
+        4 => "Run micropython_exec once with: print('ESP32'); result = 4. Reply with output and result.".to_string(),
+        5 => "Run micropython_exec once with: print(sum([1,2])); result = 5. Reply with output and result.".to_string(),
+        6 => "Run micropython_exec once with: print('pong'); result = 6. Reply with output and result.".to_string(),
+        7 => "Run micropython_exec once with: print(7); result = 7. Reply with output and result.".to_string(),
+        8 => "Run micropython_exec once with: print('x'); result = 8. Reply with output and result.".to_string(),
+        9 => "Run micropython_exec once with: print(2**5); result = '32'. Reply with output and result.".to_string(),
+        10 => "Run micropython_exec once with: print('a'); result = 9. Reply with output and result.".to_string(),
+        11 => "Run micropython_exec once with: print(10-3); result = 10. Reply with output and result.".to_string(),
+        12 => "Run micropython_exec once with: print('bee'); result = 11. Reply with output and result.".to_string(),
+        13 => "Run micropython_exec once with: print(len('cat')); result = 12. Reply with output and result.".to_string(),
+        14 => "Run micropython_exec once with: print('z'); result = 13. Reply with output and result.".to_string(),
+        15 => "Run micropython_exec once with: print(14); result = 14. Reply with output and result.".to_string(),
+        16 => "Run micropython_exec once with: print('emu'); result = 15. Reply with output and result.".to_string(),
+        17 => "Run micropython_exec once with: print(16//2); result = 16. Reply with output and result.".to_string(),
+        18 => "Run micropython_exec once with: print('go'); result = 17. Reply with output and result.".to_string(),
+        19 => "Run micropython_exec once with: print(18%5); result = 18. Reply with output and result.".to_string(),
+        20 => "Run micropython_exec once with: print('last'); result = 19. Reply with output and result.".to_string(),
+        21 => "Run micropython_exec once with: print(20); result = 20. Reply with output and result.".to_string(),
+        other => format!(
+            "Run micropython_exec once with: print({other}); result = {other}. Reply with output and result."
+        ),
+    }
+}
+
+fn micropython_schedule_block(exchanges: usize) -> String {
+    let mut lines = Vec::with_capacity(exchanges);
+    for step in 1..=exchanges {
+        lines.push(format!("{step}. {}", micropython_step_message(step)));
+    }
+    lines.join("\n")
 }
 
 struct Args {

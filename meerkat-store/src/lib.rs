@@ -24,7 +24,7 @@ pub mod index;
     not(target_os = "espidf")
 ))]
 pub mod realm;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub mod schedule_redb_store;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod schedule_sqlite_store;
@@ -80,7 +80,7 @@ pub use realm::{
     not(target_os = "espidf")
 ))]
 pub use redb_store::RedbSessionStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
 pub use schedule_redb_store::RedbScheduleStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use schedule_sqlite_store::SqliteScheduleStore;

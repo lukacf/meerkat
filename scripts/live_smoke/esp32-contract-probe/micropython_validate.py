@@ -6,12 +6,18 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
+from glob import glob
 
 import serial
+
+import esp32_contract_probe as probe
 
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
@@ -55,6 +61,137 @@ class SerialState:
                         self.peer_addr = json.loads(match.group(1))
 
 
+def resolve_port(explicit: str | None) -> str:
+    if explicit and pathlib.Path(explicit).exists():
+        return explicit
+    candidates = sorted(glob("/dev/cu.usbmodem*")) or sorted(glob("/dev/tty.usbmodem*"))
+    if not candidates:
+        raise SystemExit(f"no ESP32 serial device found (requested={explicit!r})")
+    return candidates[-1]
+
+
+def resolve_host_listen() -> str:
+    explicit = os.environ.get("ESP32_HOST_LISTEN")
+    if explicit:
+        return explicit
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+    finally:
+        sock.close()
+    return f"{ip}:4220"
+
+
+def build_and_flash(
+    artifact_dir: pathlib.Path,
+    port: str,
+    host_listen: str,
+) -> None:
+    if os.environ.get("ESP32_SKIP_BUILD_FLASH", "0") == "1":
+        print("MKT:VALIDATOR:SKIP_BUILD_FLASH", flush=True)
+        return
+
+    provider_key = os.environ["OPENAI_API_KEY"]
+    args = SimpleNamespace(
+        wifi_ssid=os.environ.get("WIFI_SSID"),
+        wifi_password=os.environ.get("WIFI_PASS"),
+        openai_model=os.environ.get("OPENAI_MODEL", "gpt-5.4-mini"),
+    )
+    context = SimpleNamespace(
+        artifact_dir=artifact_dir,
+        dry_run=False,
+        emit=lambda line: print(line, flush=True),
+    )
+
+    probe.wait_for_serial_port(port)
+    env = probe.firmware_env(context, args, provider_key, port)
+    target_dir = pathlib.Path("/tmp") / f"esp32v-{artifact_dir.name}"
+    shutil.rmtree(target_dir, ignore_errors=True)
+    env["CARGO_TARGET_DIR"] = str(target_dir)
+    env["ENABLE_COMMS"] = "1"
+    env["SKIP_SINGLE_NODE"] = "1"
+    env["HOST_PEER_NAME"] = "phase0-host"
+    env["HOST_PEER_ADDR"] = f"tcp://{host_listen}"
+    env["COMMS_LISTEN_PORT"] = "4210"
+    env["OPENAI_STREAM_DEVICE"] = os.environ.get(
+        "OPENAI_STREAM_DEVICE", os.environ.get("OPENAI_STREAM", "0")
+    )
+
+    probe.host_usb_reset(context, port)
+    active_port = probe.wait_for_serial_port(port)
+    build_spec = probe.CommandSpec(
+        label="build_rust_firmware",
+        command=(
+            "rustup",
+            "run",
+            "esp",
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            "xtensa-esp32s3-espidf",
+            "-Zbuild-std=std,panic_abort",
+            "--ignore-rust-version",
+        ),
+        cwd=probe.FIRMWARE_RUST_ROOT,
+    )
+    probe.run_command_with_env(context, build_spec, 1, env)
+
+    image_path = (
+        pathlib.Path(env["CARGO_TARGET_DIR"])
+        / "xtensa-esp32s3-espidf"
+        / "release"
+        / "esp32-contract-probe-fw"
+    )
+    if not image_path.exists():
+        raise SystemExit(f"built firmware image missing: {image_path}")
+
+    flash_spec = probe.CommandSpec(
+        label="flash_rust_firmware",
+        command=(
+            "espflash",
+            "flash",
+            str(image_path),
+            "--chip",
+            "esp32s3",
+            "--port",
+            active_port,
+            "--before",
+            "usb-reset",
+            "--after",
+            "hard-reset",
+            "--non-interactive",
+        ),
+        cwd=probe.FIRMWARE_RUST_ROOT,
+    )
+    probe.run_command_with_env(context, flash_spec, 2, env)
+    probe.wait_for_serial_port(active_port)
+
+
+def monitor_udp(udp_log: pathlib.Path, state: SerialState, stop_event: threading.Event) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 42424))
+    sock.settimeout(0.2)
+    with udp_log.open("w", encoding="utf-8") as sink:
+        while not stop_event.is_set():
+            try:
+                payload, addr = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            text = payload.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            line = f"{addr[0]} {text}\n"
+            sink.write(line)
+            sink.flush()
+            state.update(text)
+            sys.stdout.write(f"MKT:VALIDATOR:UDP {line}")
+            sys.stdout.flush()
+    sock.close()
+
+
 def monitor_serial(
     ser: serial.Serial,
     serial_log: pathlib.Path,
@@ -75,7 +212,9 @@ def monitor_serial(
                 time.sleep(0.05)
 
 
-def reset_and_monitor(port: str, serial_log: pathlib.Path) -> tuple[serial.Serial, SerialState, threading.Event, threading.Thread]:
+def reset_and_monitor(
+    port: str, serial_log: pathlib.Path, state: SerialState
+) -> tuple[serial.Serial, threading.Event, threading.Thread]:
     last_error: Exception | None = None
     for attempt in range(1, 4):
         try:
@@ -90,7 +229,6 @@ def reset_and_monitor(port: str, serial_log: pathlib.Path) -> tuple[serial.Seria
             ser.rts = False
             time.sleep(0.2)
 
-            state = SerialState()
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=monitor_serial,
@@ -107,7 +245,7 @@ def reset_and_monitor(port: str, serial_log: pathlib.Path) -> tuple[serial.Seria
                             f"MKT:VALIDATOR:DEVICE_READY peer_id={state.peer_id} peer_addr={state.peer_addr}",
                             flush=True,
                         )
-                        return ser, state, stop_event, thread
+                        return ser, stop_event, thread
                 time.sleep(0.1)
 
             stop_event.set()
@@ -127,6 +265,7 @@ def run_host(
     artifact_dir: pathlib.Path,
     peer_id: str,
     peer_addr: str,
+    host_listen: str,
     exchanges: int,
     timeout_secs: int,
 ) -> tuple[str, int, bool]:
@@ -145,7 +284,7 @@ def run_host(
         "--peer-addr",
         peer_addr,
         "--listen-addr",
-        os.environ.get("ESP32_HOST_LISTEN", "192.168.0.197:4220"),
+        host_listen,
         "--exchanges",
         str(exchanges),
     ]
@@ -156,6 +295,8 @@ def run_host(
     host_env["ESP32_SCENARIO"] = "micropython"
     lines: list[str] = []
     timed_out = False
+    pass_seen = False
+    pass_grace_deadline: float | None = None
     with host_log.open("w", encoding="utf-8") as sink:
         proc = subprocess.Popen(
             host_cmd,
@@ -176,8 +317,20 @@ def run_host(
                 sink.flush()
                 sys.stdout.write(line)
                 sys.stdout.flush()
+                if "MKT:HOST_MEERKAT:PASS" in line and not pass_seen:
+                    pass_seen = True
+                    pass_grace_deadline = time.time() + 5
             elif proc.poll() is not None:
                 return "".join(lines), proc.wait(), timed_out
+
+            if pass_grace_deadline is not None and time.time() > pass_grace_deadline:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                return "".join(lines), 0, timed_out
 
             if time.time() - start > timeout_secs:
                 timed_out = True
@@ -197,10 +350,36 @@ def run_host(
                 return "".join(lines), proc.returncode or 124, timed_out
 
 
+def wait_for_device_ready(
+    state: SerialState,
+    timeout_secs: int,
+    label: str,
+) -> None:
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        with state.lock:
+            if state.ready and state.peer_id and state.peer_addr:
+                print(
+                    f"MKT:VALIDATOR:DEVICE_READY via={label} peer_id={state.peer_id} peer_addr={state.peer_addr}",
+                    flush=True,
+                )
+                return
+        time.sleep(0.1)
+    raise SystemExit(
+        f"device did not reach COMMS:READY via {label}; peer_id={state.peer_id} peer_addr={state.peer_addr}"
+    )
+
+
 def main() -> int:
-    port = os.environ.get("ESP32_PORT", "/dev/cu.usbmodem101")
+    port = resolve_port(os.environ.get("ESP32_PORT"))
+    host_listen = resolve_host_listen()
     exchanges = int(os.environ.get("ESP32_EXCHANGES", "10"))
-    host_timeout_secs = int(os.environ.get("ESP32_HOST_TIMEOUT_SECS", "180"))
+    default_host_timeout_secs = max(300, exchanges * 15)
+    host_timeout_secs = int(
+        os.environ.get("ESP32_HOST_TIMEOUT_SECS", str(default_host_timeout_secs))
+    )
+    ready_timeout_secs = int(os.environ.get("ESP32_READY_TIMEOUT_SECS", "60"))
+    skip_reset = os.environ.get("ESP32_SKIP_RESET", "0") == "1"
     artifact_dir = (
         REPO
         / "artifacts"
@@ -211,12 +390,36 @@ def main() -> int:
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     serial_log = artifact_dir / "serial.log"
+    udp_log = artifact_dir / "udp.log"
 
-    ser, serial_state, stop_event, thread = reset_and_monitor(port, serial_log)
+    serial_state = SerialState()
+    udp_stop = threading.Event()
+    udp_thread = threading.Thread(
+        target=monitor_udp,
+        args=(udp_log, serial_state, udp_stop),
+        daemon=True,
+    )
+    udp_thread.start()
+
+    build_and_flash(artifact_dir, port, host_listen)
+
+    ser = None
+    stop_event = None
+    thread = None
+    if skip_reset:
+        serial_log.write_text("", encoding="utf-8")
+        print(
+            f"MKT:VALIDATOR:PASSIVE_WAIT port={port} timeout_secs={ready_timeout_secs}",
+            flush=True,
+        )
+        wait_for_device_ready(serial_state, ready_timeout_secs, "udp")
+    else:
+        ser, stop_event, thread = reset_and_monitor(port, serial_log, serial_state)
     host_output, host_code, host_timed_out = run_host(
         artifact_dir,
         serial_state.peer_id or "",
         serial_state.peer_addr or "",
+        host_listen,
         exchanges,
         host_timeout_secs,
     )
@@ -226,9 +429,12 @@ def main() -> int:
             if serial_state.comms_pass:
                 break
         time.sleep(0.1)
-    stop_event.set()
-    thread.join(timeout=2)
-    ser.close()
+    if stop_event is not None and thread is not None and ser is not None:
+        stop_event.set()
+        thread.join(timeout=2)
+        ser.close()
+    udp_stop.set()
+    udp_thread.join(timeout=2)
 
     with serial_state.lock:
         peer_id = serial_state.peer_id
@@ -248,11 +454,13 @@ def main() -> int:
         ),
         "peer_id": peer_id,
         "peer_addr": peer_addr,
+        "host_listen": host_listen,
         "host_code": host_code,
         "host_timed_out": host_timed_out,
         "py_calls": py_calls,
         "host_log": str(artifact_dir / "host.log"),
         "serial_log": str(serial_log),
+        "udp_log": str(udp_log),
     }
     (artifact_dir / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"

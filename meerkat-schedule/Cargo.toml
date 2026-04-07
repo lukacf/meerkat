@@ -24,8 +24,11 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 schemars = { workspace = true, optional = true, features = ["chrono04"] }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
 tokio = { workspace = true }
+
+[target.'cfg(target_os = "espidf")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["sync", "time", "rt"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

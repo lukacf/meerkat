@@ -14,6 +14,7 @@ use crate::state::LoopState;
 use crate::tokio;
 use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope};
 use crate::types::{Message, OutputSchema};
+use portable_atomic::AtomicU64;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -41,7 +42,7 @@ pub struct AgentBuilder {
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     pub(super) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
-    pub(super) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub(super) interrupt_baseline: Option<Arc<AtomicU64>>,
     pub(super) completion_enrichment:
         Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
@@ -112,6 +113,12 @@ impl AgentBuilder {
     /// Set max tokens per turn
     pub fn max_tokens_per_turn(mut self, tokens: u32) -> Self {
         self.config.max_tokens_per_turn = tokens;
+        self
+    }
+
+    /// Set maximum LLM turns per run loop invocation.
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.config.max_turns = Some(turns);
         self
     }
 
@@ -360,7 +367,7 @@ impl AgentBuilder {
     }
 
     /// Set the shared interrupt baseline for the wait tool.
-    pub fn with_interrupt_baseline(mut self, baseline: Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub fn with_interrupt_baseline(mut self, baseline: Arc<AtomicU64>) -> Self {
         self.interrupt_baseline = Some(baseline);
         self
     }

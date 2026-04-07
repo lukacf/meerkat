@@ -1,0 +1,20 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+target-dir = "/tmp/ws147-smoke-target"
+
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+rustflags = [
+    "--cfg",
+    "espidf_time64",
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+ESP_IDF_TOOLS_INSTALL_DIR = "global"
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+ESP_IDF_GLOB_CMAKE_BASE = { value = ".", relative = true }
+ESP_IDF_GLOB_CMAKE_1 = "sdkconfig.defaults"

@@ -6,10 +6,10 @@ use meerkat_core::ToolDef;
 use meerkat_core::completion_feed::{CompletionFeed, CompletionSeq};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::wait_interrupt::WaitInterruptReceiver;
+use portable_atomic::AtomicU64;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 // Re-export for backward compatibility
 pub use meerkat_core::wait_interrupt::WaitInterrupt;

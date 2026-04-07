@@ -1,6 +1,11 @@
-use std::io::Write as _;
-use std::path::PathBuf;
 use std::ffi::{CString, c_char};
+use std::convert::Infallible;
+use std::io::Write as _;
+use std::net::UdpSocket;
+use std::path::PathBuf;
+use std::ptr;
+use std::ptr::NonNull;
+use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -20,9 +25,7 @@ use embedded_svc::io::Write as _;
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration as WifiConfiguration};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::FreeRtos;
-use esp_idf_svc::hal::gpio::{AnyInputPin, Output, PinDriver, Pins};
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::spi::{self, SpiDeviceDriver, SpiDriver, SpiDriverConfig, SPI2};
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection, Response};
 use esp_idf_svc::log::EspLogger;
@@ -41,11 +44,11 @@ use meerkat_core::event::EventEnvelope;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::{
-    AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookCapability, HookEntryConfig,
+    AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BindOutcome, HookCapability, HookEntryConfig,
     HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, RetryPolicy,
 };
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::SessionServiceCommsExt;
@@ -57,9 +60,6 @@ use meerkat_session::PersistentSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder};
 use meerkat_store::{MemoryBlobStore, MemoryStore};
 use meerkat_tools::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer};
-use mipidsi::interface::SpiInterface;
-use mipidsi::models::ST7789;
-use mipidsi::Builder;
 use serde_json::json;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -96,26 +96,92 @@ const HOST_PEER_ADDR: &str = match option_env!("HOST_PEER_ADDR") {
     Some(value) => value,
     None => "tcp://127.0.0.1:4220",
 };
-const LCD_WIDTH: u16 = 170;
+const LCD_WIDTH: u16 = 172;
 const LCD_HEIGHT: u16 = 320;
-const LCD_OFFSET_X: u16 = 35;
+const LCD_OFFSET_X: u16 = 34;
 const LCD_OFFSET_Y: u16 = 0;
+const LCD_PIXEL_CLOCK_HZ: u32 = 12_000_000;
+const LCD_PIN_SCLK: i32 = 40;
+const LCD_PIN_MOSI: i32 = 45;
+const LCD_PIN_DC: i32 = 41;
+const LCD_PIN_RST: i32 = 39;
+const LCD_PIN_CS: i32 = 42;
+const LCD_PIN_BL: i32 = 48;
 const MEERKAT_WORKER_STACK_BYTES: &[usize] =
     &[56 * 1024, 48 * 1024, 40 * 1024, 32 * 1024];
+const COMMS_WORKER_STACK_BYTES: &[usize] = &[64 * 1024, 56 * 1024];
 const PHASE0_HOST_SECRET: [u8; 32] = [7; 32];
 const PHASE0_DEVICE_SECRET: [u8; 32] = [9; 32];
 const OPENAI_WE1_PEM: &[u8] =
     concat!(include_str!("../../../../../meerkat-client/src/openai_we1.pem"), "\0").as_bytes();
+const MARKER_BROADCAST_ADDR: &str = "255.255.255.255:42424";
 
-type LcdSpi<'d> = SpiDeviceDriver<'d, SpiDriver<'d>>;
-type LcdDc<'d> = PinDriver<'d, Output>;
-type LcdReset<'d> = PinDriver<'d, Output>;
-type LcdInterface<'d> = SpiInterface<'static, LcdSpi<'d>, LcdDc<'d>>;
-type LcdPanel<'d> = mipidsi::Display<LcdInterface<'d>, ST7789, LcdReset<'d>>;
+static MARKER_UDP_SOCKET: OnceLock<UdpSocket> = OnceLock::new();
 
-struct StatusDisplay<'d> {
-    panel: LcdPanel<'d>,
-    _backlight: PinDriver<'d, Output>,
+struct StatusDisplay {
+    io: sys::esp_lcd_panel_io_handle_t,
+    framebuffer: DisplayFramebuffer,
+}
+
+struct DisplayFramebuffer {
+    ptr: NonNull<u16>,
+    len: usize,
+    storage_kind: &'static str,
+}
+
+impl DisplayFramebuffer {
+    fn new(len: usize) -> anyhow::Result<Self> {
+        let byte_len = len
+            .checked_mul(std::mem::size_of::<u16>())
+            .context("framebuffer size overflow")?;
+        let (raw, storage_kind) = unsafe {
+            let psram_caps = (sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT) as u32;
+            let psram = sys::heap_caps_malloc(byte_len, psram_caps);
+            if !psram.is_null() {
+                (psram, "psram")
+            } else {
+                let heap_caps = sys::MALLOC_CAP_8BIT as u32;
+                let heap = sys::heap_caps_malloc(byte_len, heap_caps);
+                (heap, "heap")
+            }
+        };
+        let ptr = NonNull::new(raw.cast::<u16>()).context("failed to allocate lcd framebuffer")?;
+        let mut framebuffer = Self {
+            ptr,
+            len,
+            storage_kind,
+        };
+        framebuffer.as_mut_slice().fill(0);
+        Ok(framebuffer)
+    }
+
+    fn storage_kind(&self) -> &'static str {
+        self.storage_kind
+    }
+
+    fn as_slice(&self) -> &[u16] {
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u16] {
+        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for DisplayFramebuffer {
+    fn drop(&mut self) {
+        unsafe {
+            sys::heap_caps_free(self.ptr.as_ptr().cast());
+        }
+    }
+}
+
+fn esp_ok(code: i32, context: &str) -> anyhow::Result<()> {
+    if code == 0 {
+        Ok(())
+    } else {
+        bail!("{context} failed with esp_err={code}");
+    }
 }
 
 fn openai_stream_enabled() -> bool {
@@ -188,6 +254,105 @@ struct DeviceProbeAgentBuilder {
     openai_api_key: String,
     openai_base_url: String,
     comms_runtime: Arc<CommsRuntime>,
+    inbound_epoch: Arc<AtomicUsize>,
+}
+
+struct DeviceSendGuardDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    inbound_epoch: Arc<AtomicUsize>,
+    sent_epoch: Arc<AtomicUsize>,
+}
+
+impl DeviceSendGuardDispatcher {
+    fn new(
+        inner: Arc<dyn AgentToolDispatcher>,
+        inbound_epoch: Arc<AtomicUsize>,
+        sent_epoch: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            inner,
+            inbound_epoch,
+            sent_epoch,
+        }
+    }
+}
+
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
+impl AgentToolDispatcher for DeviceSendGuardDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.inner.tools()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if call.name == "send" {
+            let epoch = self.inbound_epoch.load(Ordering::SeqCst);
+            let previous = self.sent_epoch.swap(epoch, Ordering::SeqCst);
+            if epoch == previous {
+                emit_marker(
+                    "MKT:COMMS:SEND_SUPPRESSED",
+                    &[("epoch", &epoch.to_string())],
+                );
+                return Ok(ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "{\"kind\":\"peer_message\",\"status\":\"sent\"}".to_string(),
+                    false,
+                )));
+            }
+            let outcome = self.inner.dispatch(call).await;
+            if outcome.is_err() {
+                self.sent_epoch.store(previous, Ordering::SeqCst);
+            }
+            return outcome;
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
+        let outcome = Arc::clone(&self.inner).bind_wait_interrupt(rx)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(DeviceSendGuardDispatcher::new(
+            inner,
+            Arc::clone(&self.inbound_epoch),
+            Arc::clone(&self.sent_epoch),
+        ));
+        Ok(if bound {
+            BindOutcome::Bound(wrapped)
+        } else {
+            BindOutcome::Skipped(wrapped)
+        })
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
+        let outcome = Arc::clone(&self.inner).bind_ops_lifecycle(registry, owner_session_id)?;
+        let bound = outcome.was_bound();
+        let inner = outcome.into_dispatcher();
+        let wrapped: Arc<dyn AgentToolDispatcher> = Arc::new(DeviceSendGuardDispatcher::new(
+            inner,
+            Arc::clone(&self.inbound_epoch),
+            Arc::clone(&self.sent_epoch),
+        ));
+        Ok(if bound {
+            BindOutcome::Bound(wrapped)
+        } else {
+            BindOutcome::Skipped(wrapped)
+        })
+    }
 }
 
 struct MicroPythonToolArgs {
@@ -457,45 +622,14 @@ fn run_probe() -> anyhow::Result<()> {
 
     let peripherals = Peripherals::take().context("failed to take peripherals")?;
     let modem = peripherals.modem;
-    let spi2 = peripherals.spi2;
-    let pins = peripherals.pins;
     let sys_loop = EspSystemEventLoop::take().context("failed to take system event loop")?;
     let nvs = EspDefaultNvsPartition::take().context("failed to take default nvs partition")?;
 
-    let mut status_display = match StatusDisplay::try_new(spi2, pins) {
-        Ok(mut display) => {
-            emit_marker("MKT:DISPLAY:OK", &[("mode", "\"st7789-status\"")]);
-            let _ = display.show_stage(
-                "boot",
-                "phase 0 contract probe",
-                Some("bringing up board"),
-                Rgb565::new(0, 32, 72),
-            );
-            Some(display)
-        }
-        Err(error) => {
-            emit_marker(
-                "MKT:DISPLAY:FAIL",
-                &[(
-                    "error",
-                    &json_quote(&short_display_line(&error.to_string(), 40)),
-                )],
-            );
-            eprintln!("display init failed: {error:#}");
-            None
-        }
-    };
+    let mut display_boot_status = String::from("deferred");
+    let mut status_display: Option<StatusDisplay> = None;
 
     if park_only {
         emit_marker("MKT:PARK:ENABLED", &[]);
-        if let Some(display) = status_display.as_mut() {
-            let _ = display.show_stage(
-                "parked",
-                "provider loop off",
-                Some("phase 0 board parked"),
-                Rgb565::new(0, 24, 0),
-            );
-        }
         loop {
             thread::sleep(Duration::from_secs(60));
         }
@@ -507,10 +641,72 @@ fn run_probe() -> anyhow::Result<()> {
     )
     .context("failed to wrap blocking wifi")?;
 
-    if let Some(display) = status_display.as_mut() {
-        let _ = display.show_stage("wifi", "connecting", Some(wifi_ssid), Rgb565::new(0, 0, 80));
+    let wifi_ip = connect_wifi(&mut wifi, wifi_ssid, wifi_pass, None)?;
+    if let Err(error) = init_marker_broadcast() {
+        emit_marker(
+            "MKT:NETMARKER:INIT_FAIL",
+            &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+        );
+    } else {
+        emit_marker(
+            "MKT:NETMARKER:READY",
+            &[
+                ("wifi_ip", &json_quote(&wifi_ip)),
+                ("display_status", &json_quote(&display_boot_status)),
+            ],
+        );
     }
-    let wifi_ip = connect_wifi(&mut wifi, wifi_ssid, wifi_pass, status_display.as_mut())?;
+
+    status_display = match StatusDisplay::try_new() {
+        Ok(mut display) => {
+            emit_marker("MKT:DISPLAY:OK", &[("mode", "\"waveshare-147-status\"")]);
+            display_boot_status = String::from("init_ok");
+            match display.show_stage(
+                "boot",
+                "phase 0 contract probe",
+                Some("bringing up board"),
+                Rgb565::new(0, 32, 72),
+            ) {
+                Ok(()) => {
+                    display_boot_status = String::from("stage_ok");
+                }
+                Err(error) => {
+                    display_boot_status = format!(
+                        "stage_fail:{}",
+                        short_display_line(&error.to_string(), 80)
+                    );
+                    emit_marker(
+                        "MKT:DISPLAY:STAGE_FAIL",
+                        &[("error", &json_quote(&error.to_string()))],
+                    );
+                }
+            }
+            emit_marker(
+                "MKT:DISPLAY:BOOT_STATUS",
+                &[("status", &json_quote(&display_boot_status))],
+            );
+            Some(display)
+        }
+        Err(error) => {
+            display_boot_status = format!(
+                "init_fail:{}",
+                short_display_line(&error.to_string(), 80)
+            );
+            emit_marker(
+                "MKT:DISPLAY:FAIL",
+                &[(
+                    "error",
+                    &json_quote(&short_display_line(&error.to_string(), 40)),
+                )],
+            );
+            emit_marker(
+                "MKT:DISPLAY:BOOT_STATUS",
+                &[("status", &json_quote(&display_boot_status))],
+            );
+            eprintln!("display init failed: {error:#}");
+            None
+        }
+    };
 
     let _sntp = EspSntp::new_default().context("failed to start SNTP")?;
     if let Some(display) = status_display.as_mut() {
@@ -658,9 +854,7 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
         let inner = CompositeDispatcher::new_wasm(
             task_store,
             &BuiltinToolConfig {
-                policy: ToolPolicyLayer::new()
-                    .with_mode(ToolMode::DenyAll)
-                    .enable_tool("datetime"),
+                policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
                 ..Default::default()
             },
             Some(external_tools),
@@ -669,8 +863,11 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
         .context("failed to construct ESP32 comms dispatcher")
         .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))?;
 
-        let tools: Arc<dyn AgentToolDispatcher> =
-            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime));
+        let tools: Arc<dyn AgentToolDispatcher> = Arc::new(DeviceSendGuardDispatcher::new(
+            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime)),
+            Arc::clone(&self.inbound_epoch),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         let llm: Arc<dyn AgentLlmClient> = Arc::new(
             LlmClientAdapter::new(
                 Arc::new(OpenAiClient::new_with_base_url(
@@ -697,6 +894,7 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
                     .unwrap_or_else(|| device_system_prompt(&self.host_peer_name)),
             )
             .max_tokens_per_turn(req.max_tokens.unwrap_or(256))
+            .max_turns(2)
             .with_comms_runtime(comms_runtime)
             .build(llm, tools, store)
             .await;
@@ -709,7 +907,7 @@ fn connect_wifi(
     wifi: &mut BlockingWifi<EspWifi<'static>>,
     wifi_ssid: &str,
     wifi_pass: &str,
-    status_display: Option<&mut StatusDisplay<'_>>,
+    status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<String> {
     let configuration = WifiConfiguration::Client(ClientConfiguration {
         ssid: wifi_ssid
@@ -746,7 +944,7 @@ fn connect_wifi(
     Ok(ip_info.ip.to_string())
 }
 
-fn wait_for_time_sync(status_display: Option<&mut StatusDisplay<'_>>) -> anyhow::Result<()> {
+fn wait_for_time_sync(status_display: Option<&mut StatusDisplay>) -> anyhow::Result<()> {
     let mut status_display = status_display;
     for _ in 0..30 {
         let now = unix_time_secs();
@@ -858,6 +1056,16 @@ fn run_meerkat_turn(openai_api_key: &str) -> anyhow::Result<MeerkatRunSummary> {
     );
 
     emit_meerkat_step("before_runtime_build");
+    emit_marker(
+        "MKT:MEERKAT:THREAD_FALLBACK",
+        &[
+            ("mode", "\"main_task_first\""),
+            ("reason", "\"waveshare-147-inline-runtime-probe\""),
+        ],
+    );
+    return run_meerkat_turn_inner(openai_api_key.to_string(), memory_before);
+
+    #[allow(unreachable_code)]
     let mut last_spawn_error: Option<anyhow::Error> = None;
 
     for stack_bytes in MEERKAT_WORKER_STACK_BYTES {
@@ -929,9 +1137,7 @@ fn run_meerkat_turn_inner(
         let task_store = Arc::new(MemoryTaskStore::new());
         emit_meerkat_step("after_task_store");
         let builtin_config = BuiltinToolConfig {
-            policy: ToolPolicyLayer::new()
-                .with_mode(ToolMode::DenyAll)
-                .enable_tool("datetime"),
+            policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
             ..Default::default()
         };
         let external_tools: Arc<dyn AgentToolDispatcher> =
@@ -1178,7 +1384,7 @@ fn run_meerkat_turn_inner(
 fn run_comms_probe(
     openai_api_key: &str,
     wifi_ip: &str,
-    mut status_display: Option<&mut StatusDisplay<'_>>,
+    mut status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<()> {
     let memory_before = capture_memory_snapshot();
     emit_marker(
@@ -1200,6 +1406,21 @@ fn run_comms_probe(
         );
     }
 
+    #[cfg(target_os = "espidf")]
+    let summary = {
+        emit_marker(
+            "MKT:COMMS:THREAD_FALLBACK",
+            &[("mode", "\"main_task_local_runtime\"")],
+        );
+        run_comms_probe_inner(
+            openai_api_key.to_string(),
+            wifi_ip.to_string(),
+            memory_before,
+            status_display.as_deref_mut(),
+        )?
+    };
+
+    #[cfg(not(target_os = "espidf"))]
     let summary = run_comms_probe_inner(
         openai_api_key.to_string(),
         wifi_ip.to_string(),
@@ -1221,20 +1442,31 @@ fn run_comms_probe(
     Ok(())
 }
 
+#[inline(never)]
 fn run_comms_probe_inner(
     openai_api_key: String,
     wifi_ip: String,
     memory_before: MemorySnapshot,
-    mut status_display: Option<&mut StatusDisplay<'_>>,
+    mut status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<CommsRunSummary> {
     emit_marker(
         "MKT:COMMS:RUNTIME_MODE",
         &[("mode", "\"current_thread_runtime_backed_keep_alive_inline\"")],
     );
+    #[cfg(target_os = "espidf")]
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build_local(tokio::runtime::LocalOptions::default())
+        .context("failed to build tokio local runtime for comms probe")?;
+    #[cfg(not(target_os = "espidf"))]
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .context("failed to build tokio runtime for comms probe")?;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"runtime_built\"")]);
     let public_addr = format!("tcp://{wifi_ip}:{COMMS_LISTEN_PORT}");
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"public_addr_ready\""), ("addr", &json_quote(&public_addr))],
+    );
 
     emit_marker(
         "MKT:COMMS:LISTENING",
@@ -1259,220 +1491,266 @@ fn run_comms_probe_inner(
         );
     }
 
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
-        let (display_tx, mut display_rx) = tokio::sync::mpsc::unbounded_channel::<DisplayEvent>();
-        let mut transcript = Vec::new();
-        let trusted = TrustedPeers {
-            peers: vec![phase0_host_trusted_peer()],
-        };
-        let mut comms_runtime = CommsRuntime::new_with_state(
-            device_comms_config(),
-            phase0_device_keypair(),
-            trusted,
-        )
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"before_local_block_on\"")]);
+    let comms_future = Box::pin(run_comms_probe_async(
+        openai_api_key,
+        public_addr,
+        memory_before,
+        status_display.take(),
+    ));
+    #[cfg(target_os = "espidf")]
+    {
+        runtime.block_on(comms_future)
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, comms_future)
+    }
+}
+
+#[inline(never)]
+async fn run_comms_probe_async(
+    openai_api_key: String,
+    public_addr: String,
+    memory_before: MemorySnapshot,
+    mut status_display: Option<&mut StatusDisplay>,
+) -> anyhow::Result<CommsRunSummary> {
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"inside_local_block_on\"")]);
+    let (display_tx, mut display_rx) = tokio::sync::mpsc::unbounded_channel::<DisplayEvent>();
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"display_channel_ready\"")]);
+    let mut transcript = Vec::new();
+    let trusted = TrustedPeers {
+        peers: vec![phase0_host_trusted_peer()],
+    };
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"before_comms_runtime_new\"")]);
+    let mut comms_runtime = CommsRuntime::new_with_state(
+        device_comms_config(),
+        phase0_device_keypair(),
+        trusted,
+    )
+    .await
+    .context("failed to build ESP32 comms runtime")?;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_comms_runtime_new\"")]);
+    comms_runtime
+        .start_listeners()
         .await
-        .context("failed to build ESP32 comms runtime")?;
-        comms_runtime
-            .start_listeners()
-            .await
-            .context("failed to start ESP32 comms listeners")?;
-        let comms_runtime = Arc::new(comms_runtime);
-        let session_store: Arc<dyn meerkat_core::SessionStore> = Arc::new(MemoryStore::new());
-        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-            Arc::new(InMemoryRuntimeStore::new());
-        let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
-        let service = Arc::new(PersistentSessionService::new(
-            DeviceProbeAgentBuilder {
-                host_peer_name: HOST_PEER_NAME.to_string(),
-                model: OPENAI_MODEL.to_string(),
-                openai_api_key,
-                openai_base_url: OPENAI_BASE_URL.to_string(),
-                comms_runtime: Arc::clone(&comms_runtime),
-            },
-            1,
-            session_store,
-            Some(runtime_store.clone()),
-            blob_store.clone(),
-        ));
-        let runtime_adapter = Arc::new(RuntimeSessionAdapter::persistent(
-            runtime_store,
-            blob_store,
-        ));
-        let session_id = create_device_keep_alive_session(&service).await?;
+        .context("failed to start ESP32 comms listeners")?;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_start_listeners\"")]);
+    let comms_runtime = Arc::new(comms_runtime);
+    let inbound_epoch = Arc::new(AtomicUsize::new(1));
+    let session_store: Arc<dyn meerkat_core::SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"before_persistent_service_new\"")]);
+    let service = Arc::new(PersistentSessionService::new(
+        DeviceProbeAgentBuilder {
+            host_peer_name: HOST_PEER_NAME.to_string(),
+            model: OPENAI_MODEL.to_string(),
+            openai_api_key,
+            openai_base_url: OPENAI_BASE_URL.to_string(),
+            comms_runtime: Arc::clone(&comms_runtime),
+            inbound_epoch: Arc::clone(&inbound_epoch),
+        },
+        1,
+        session_store,
+        Some(runtime_store.clone()),
+        blob_store.clone(),
+    ));
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_persistent_service_new\"")]);
+    let runtime_adapter = Arc::new(RuntimeSessionAdapter::persistent(
+        runtime_store,
+        blob_store,
+    ));
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_runtime_adapter\"")]);
+    let session_id = create_device_keep_alive_session(&service).await?;
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[
+            ("name", "\"after_create_keep_alive_session\""),
+            ("session_id", &json_quote(&session_id.to_string())),
+        ],
+    );
 
-        runtime_adapter
-            .ensure_session_with_executor(
-                session_id.clone(),
-                Box::new(ProbeSessionRuntimeExecutor::new(
-                    Arc::clone(&service),
-                    session_id.clone(),
-                )),
-            )
-            .await;
-
-        let session_comms = service
-            .comms_runtime(&session_id)
-            .await
-            .context("device session missing comms runtime")?;
-
-        let incoming_messages = Arc::new(AtomicUsize::new(0));
-        let outgoing_messages = Arc::new(AtomicUsize::new(0));
-        let incoming_counter = Arc::clone(&incoming_messages);
-        let incoming_display = display_tx.clone();
-        let drain = spawn_comms_drain_with_observer(
-            Arc::clone(&runtime_adapter),
+    runtime_adapter
+        .ensure_session_with_executor(
             session_id.clone(),
-            session_comms.clone(),
-            None,
-            Some(Arc::new(move |ci| {
-                if let Some(text) = inbound_text(&ci) {
-                    incoming_counter.fetch_add(1, Ordering::SeqCst);
+            Box::new(ProbeSessionRuntimeExecutor::new(
+                Arc::clone(&service),
+                session_id.clone(),
+            )),
+        )
+        .await;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_ensure_session_with_executor\"")]);
+
+    let session_comms = service
+        .comms_runtime(&session_id)
+        .await
+        .context("device session missing comms runtime")?;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_session_comms_lookup\"")]);
+
+    let incoming_messages = Arc::new(AtomicUsize::new(0));
+    let outgoing_messages = Arc::new(AtomicUsize::new(0));
+    let incoming_counter = Arc::clone(&incoming_messages);
+    let inbound_epoch_for_observer = Arc::clone(&inbound_epoch);
+    let incoming_display = display_tx.clone();
+    let drain = spawn_comms_drain_with_observer(
+        Arc::clone(&runtime_adapter),
+        session_id.clone(),
+        session_comms.clone(),
+        None,
+        Some(Arc::new(move |ci| {
+            if let Some(text) = inbound_text(&ci) {
+                inbound_epoch_for_observer.fetch_add(1, Ordering::SeqCst);
+                incoming_counter.fetch_add(1, Ordering::SeqCst);
+                emit_marker(
+                    "MKT:COMMS:INCOMING",
+                    &[("text", &json_quote(&short_display_line(&text, 120)))],
+                );
+                let _ = incoming_display.send(DisplayEvent::Transcript {
+                    prefix: "host".to_string(),
+                    text,
+                });
+            }
+        })),
+    );
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_spawn_comms_drain\"")]);
+
+    let mut events = service
+        .subscribe_session_events(&session_id)
+        .await
+        .context("failed to subscribe to device session events")?;
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_subscribe_session_events\"")]);
+    let outgoing_counter = Arc::clone(&outgoing_messages);
+    let outgoing_display = display_tx.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(envelope) = events.next().await {
+            match &envelope.payload {
+                AgentEvent::ToolCallRequested { name, args, .. } if name == "send" => {
+                    if let Some(text) = args
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                    {
+                        emit_marker(
+                            "MKT:COMMS:SEND_REQUESTED",
+                            &[("text", &json_quote(&short_display_line(&text, 120)))],
+                        );
+                        outgoing_counter.fetch_add(1, Ordering::SeqCst);
+                        emit_marker(
+                            "MKT:COMMS:OUTGOING",
+                            &[("text", &json_quote(&short_display_line(&text, 120)))],
+                        );
+                        let _ = outgoing_display.send(DisplayEvent::Transcript {
+                            prefix: "esp32".to_string(),
+                            text,
+                        });
+                    }
+                }
+                AgentEvent::ToolExecutionCompleted {
+                    name,
+                    result,
+                    is_error,
+                    ..
+                } if name == "send" => {
                     emit_marker(
-                        "MKT:COMMS:INCOMING",
-                        &[("text", &json_quote(&short_display_line(&text, 120)))],
+                        "MKT:COMMS:SEND_COMPLETED",
+                        &[
+                            ("is_error", &is_error.to_string()),
+                            ("result", &json_quote(&short_display_line(&result, 120))),
+                        ],
                     );
-                    let _ = incoming_display.send(DisplayEvent::Transcript {
-                        prefix: "host".to_string(),
-                        text,
-                    });
                 }
-            })),
-        );
-
-        let mut events = service
-            .subscribe_session_events(&session_id)
-            .await
-            .context("failed to subscribe to device session events")?;
-        let outgoing_counter = Arc::clone(&outgoing_messages);
-        let outgoing_display = display_tx.clone();
-        tokio::task::spawn_local(async move {
-            while let Some(envelope) = events.next().await {
-                match &envelope.payload {
-                    AgentEvent::ToolCallRequested { name, args, .. } if name == "send" => {
-                        if let Some(text) = args
-                            .get("body")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string)
-                        {
-                            emit_marker(
-                                "MKT:COMMS:SEND_REQUESTED",
-                                &[("text", &json_quote(&short_display_line(&text, 120)))],
-                            );
-                            outgoing_counter.fetch_add(1, Ordering::SeqCst);
-                            emit_marker(
-                                "MKT:COMMS:OUTGOING",
-                                &[("text", &json_quote(&short_display_line(&text, 120)))],
-                            );
-                            let _ = outgoing_display.send(DisplayEvent::Transcript {
-                                prefix: "esp32".to_string(),
-                                text,
-                            });
-                        }
-                    }
-                    AgentEvent::ToolExecutionCompleted {
-                        name,
-                        result,
-                        is_error,
-                        ..
-                    } if name == "send" => {
-                        emit_marker(
-                            "MKT:COMMS:SEND_COMPLETED",
-                            &[
-                                ("is_error", &is_error.to_string()),
-                                ("result", &json_quote(&short_display_line(&result, 120))),
-                            ],
-                        );
-                    }
-                    AgentEvent::ToolResultReceived { name, is_error, .. } if name == "send" => {
-                        emit_marker(
-                            "MKT:COMMS:SEND_RESULT_RECEIVED",
-                            &[("is_error", &is_error.to_string())],
-                        );
-                    }
-                    AgentEvent::InteractionComplete { interaction_id, result } => {
-                        emit_marker(
-                            "MKT:COMMS:INTERACTION_COMPLETE",
-                            &[
-                                ("id", &json_quote(&interaction_id.0.to_string())),
-                                ("result", &json_quote(&short_display_line(&result, 120))),
-                            ],
-                        );
-                    }
-                    AgentEvent::InteractionFailed { interaction_id, error } => {
-                        emit_marker(
-                            "MKT:COMMS:INTERACTION_FAILED",
-                            &[
-                                ("id", &json_quote(&interaction_id.0.to_string())),
-                                ("error", &json_quote(&short_display_line(&error, 120))),
-                            ],
-                        );
-                    }
-                    _ => {}
+                AgentEvent::ToolResultReceived { name, is_error, .. } if name == "send" => {
+                    emit_marker(
+                        "MKT:COMMS:SEND_RESULT_RECEIVED",
+                        &[("is_error", &is_error.to_string())],
+                    );
                 }
-            }
-        });
-
-        emit_marker(
-            "MKT:COMMS:READY",
-            &[
-                ("session_id", &json_quote(&session_id.to_string())),
-                ("peer_name", &json_quote("esp32-probe")),
-                ("addr", &json_quote(&public_addr)),
-            ],
-        );
-
-        let mut drain = Box::pin(drain);
-        loop {
-            tokio::select! {
-                event = display_rx.recv() => {
-                    match event {
-                        Some(event) => {
-                            if let Some(display) = status_display.as_deref_mut() {
-                                let _ = handle_display_event(display, &mut transcript, event);
-                            }
-                        }
-                        None => {
-                            let _ = (&mut drain).await;
-                            break;
-                        }
-                    }
+                AgentEvent::InteractionComplete { interaction_id, result } => {
+                    emit_marker(
+                        "MKT:COMMS:INTERACTION_COMPLETE",
+                        &[
+                            ("id", &json_quote(&interaction_id.0.to_string())),
+                            ("result", &json_quote(&short_display_line(&result, 120))),
+                        ],
+                    );
                 }
-                result = &mut drain => {
-                    let _ = result;
-                    break;
+                AgentEvent::InteractionFailed { interaction_id, error } => {
+                    emit_marker(
+                        "MKT:COMMS:INTERACTION_FAILED",
+                        &[
+                            ("id", &json_quote(&interaction_id.0.to_string())),
+                            ("error", &json_quote(&short_display_line(&error, 120))),
+                        ],
+                    );
                 }
+                _ => {}
             }
         }
+    });
+    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_spawn_local_events\"")]);
 
-        while let Ok(event) = display_rx.try_recv() {
-            if let Some(display) = status_display.as_deref_mut() {
-                let _ = handle_display_event(display, &mut transcript, event);
+    emit_marker(
+        "MKT:COMMS:READY",
+        &[
+            ("session_id", &json_quote(&session_id.to_string())),
+            ("peer_name", &json_quote("esp32-probe")),
+            ("addr", &json_quote(&public_addr)),
+        ],
+    );
+
+    let mut drain = Box::pin(drain);
+    loop {
+        tokio::select! {
+            event = display_rx.recv() => {
+                match event {
+                    Some(event) => {
+                        if let Some(display) = status_display.as_deref_mut() {
+                            let _ = handle_display_event(display, &mut transcript, event);
+                        }
+                    }
+                    None => {
+                        let _ = (&mut drain).await;
+                        break;
+                    }
+                }
+            }
+            result = &mut drain => {
+                let _ = result;
+                break;
             }
         }
+    }
 
-        let memory_after = capture_memory_snapshot();
-        emit_marker(
-            "MKT:COMMS:PASS",
-            &[
-                ("incoming", &incoming_messages.load(Ordering::SeqCst).to_string()),
-                ("outgoing", &outgoing_messages.load(Ordering::SeqCst).to_string()),
-                ("heap_before", &memory_before.heap_free.to_string()),
-                ("heap_after", &memory_after.heap_free.to_string()),
-                ("internal_after", &memory_after.internal_free.to_string()),
-                ("spiram_after", &memory_after.spiram_free.to_string()),
-            ],
-        );
+    while let Ok(event) = display_rx.try_recv() {
+        if let Some(display) = status_display.as_deref_mut() {
+            let _ = handle_display_event(display, &mut transcript, event);
+        }
+    }
 
-        let _ = service.archive(&session_id).await;
-        runtime_adapter.unregister_session(&session_id).await;
+    let memory_after = capture_memory_snapshot();
+    emit_marker(
+        "MKT:COMMS:PASS",
+        &[
+            ("incoming", &incoming_messages.load(Ordering::SeqCst).to_string()),
+            ("outgoing", &outgoing_messages.load(Ordering::SeqCst).to_string()),
+            ("heap_before", &memory_before.heap_free.to_string()),
+            ("heap_after", &memory_after.heap_free.to_string()),
+            ("internal_after", &memory_after.internal_free.to_string()),
+            ("spiram_after", &memory_after.spiram_free.to_string()),
+        ],
+    );
 
-        Ok(CommsRunSummary {
-            incoming_messages: incoming_messages.load(Ordering::SeqCst),
-            outgoing_messages: outgoing_messages.load(Ordering::SeqCst),
-            memory_before,
-            memory_after,
-        })
+    let _ = service.archive(&session_id).await;
+    runtime_adapter.unregister_session(&session_id).await;
+
+    Ok(CommsRunSummary {
+        incoming_messages: incoming_messages.load(Ordering::SeqCst),
+        outgoing_messages: outgoing_messages.load(Ordering::SeqCst),
+        memory_before,
+        memory_after,
     })
 }
 
@@ -1506,6 +1784,7 @@ async fn create_device_keep_alive_session(
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 keep_alive: true,
                 comms_name: Some("esp32-probe".to_string()),
@@ -1546,10 +1825,17 @@ fn device_system_prompt(host_peer_name: &str) -> String {
         "You are the ESP32 peer talking to {host_peer_name}. \
          Each turn, read the latest peer message and respond by calling the send tool exactly once with kind=peer_message and to={host_peer_name}. \
          Do not finish a turn with plain assistant text and do not skip the send call. \
+         Treat STOP or DISMISS as a stop command only when the latest peer message itself starts with `STOP` or `DISMISS`. \
+         Only in that exact case, send one short farewell via send and then stop. \
+         For every other peer message, never send `Farewell.`, `Goodbye.`, or any other closing message. \
          If the latest peer message asks you to run Python, micropython, code, or a snippet, you must call micropython_exec exactly once before your send call. \
-         Use short safe embedded Python only, then summarize the observed print output or result in your outgoing send message. \
-         Call the datetime tool only when it materially helps. \
-         If the latest peer message contains STOP or DISMISS, send one short farewell via send and then stop sending further messages."
+         When the peer message includes an explicit snippet after `with:` or on the following lines, run that exact snippet unchanged. \
+         After micropython_exec completes, send exactly one reply in this format and nothing else: `Printed output: <printed text>\\nResult: <result>`. \
+         Never send `Acknowledged.`, `Working on it.`, or any other prelude, placeholder, or follow-up. \
+         Never call send before micropython_exec for a snippet request, and never call send more than once for the same incoming peer message. \
+         After the single normal reply for a snippet request, the interaction is complete; do not send any second reply, summary, or farewell for that same peer message. \
+         Do not call datetime in the micropython validation flow. \
+         Never infer a stop command from your own instructions or from prior conversation context."
     )
 }
 
@@ -1573,7 +1859,7 @@ fn outgoing_send_text(envelope: &EventEnvelope<AgentEvent>) -> Option<String> {
 }
 
 fn handle_display_event(
-    display: &mut StatusDisplay<'_>,
+    display: &mut StatusDisplay,
     transcript: &mut Vec<String>,
     event: DisplayEvent,
 ) -> anyhow::Result<()> {
@@ -1822,63 +2108,249 @@ fn unix_time_secs() -> u64 {
 }
 
 fn emit_marker(marker: &str, fields: &[(&str, &str)]) {
-    if fields.is_empty() {
-        println!("{marker}");
-        log::info!("{marker}");
+    let line = if fields.is_empty() {
+        marker.to_string()
     } else {
         let suffix = fields
             .iter()
             .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("{marker} {suffix}");
-        log::info!("{marker} {suffix}");
-    }
+        format!("{marker} {suffix}")
+    };
+    println!("{line}");
+    log::info!("{line}");
     let _ = std::io::stdout().flush();
+    if let Some(socket) = MARKER_UDP_SOCKET.get() {
+        let _ = socket.send_to(line.as_bytes(), MARKER_BROADCAST_ADDR);
+    }
 }
 
 fn json_quote(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<encoding-error>\"".to_string())
 }
 
-impl<'d> StatusDisplay<'d> {
-    fn try_new(spi: SPI2<'d>, pins: Pins) -> anyhow::Result<Self> {
-        let dc = PinDriver::output(pins.gpio11).context("failed to configure lcd dc")?;
-        let rst = PinDriver::output(pins.gpio9).context("failed to configure lcd rst")?;
-        let mut backlight =
-            PinDriver::output(pins.gpio14).context("failed to configure lcd backlight")?;
-        let spi_device = SpiDeviceDriver::new_single(
-            spi,
-            pins.gpio10,
-            pins.gpio13,
-            None::<AnyInputPin>,
-            Some(pins.gpio12),
-            &SpiDriverConfig::new(),
-            &spi::config::Config::new().baudrate(40.MHz().into()),
-        )
-        .context("failed to configure lcd spi")?;
+fn init_marker_broadcast() -> anyhow::Result<()> {
+    if MARKER_UDP_SOCKET.get().is_some() {
+        return Ok(());
+    }
+    let socket = UdpSocket::bind("0.0.0.0:0").context("failed to bind marker udp socket")?;
+    socket
+        .set_broadcast(true)
+        .context("failed to enable udp broadcast")?;
+    let _ = MARKER_UDP_SOCKET.set(socket);
+    Ok(())
+}
 
-        let buffer = Box::leak(Box::new([0_u8; 1024]));
-        let interface = SpiInterface::new(spi_device, dc, buffer);
-        let mut delay = FreeRtos;
-        let mut panel = Builder::new(ST7789, interface)
-            .reset_pin(rst)
-            .display_size(LCD_WIDTH, LCD_HEIGHT)
-            .display_offset(LCD_OFFSET_X, LCD_OFFSET_Y)
-            .init(&mut delay)
-            .map_err(|error| anyhow!("failed to init st7789 panel: {error:?}"))?;
+impl StatusDisplay {
+    fn try_new() -> anyhow::Result<Self> {
+        emit_marker("MKT:DISPLAY:TRY_NEW_START", &[]);
+        unsafe {
+            let mut cfg = sys::gpio_config_t::default();
+            cfg.pin_bit_mask = (1u64 << LCD_PIN_BL) | (1u64 << LCD_PIN_RST);
+            cfg.mode = sys::gpio_mode_t_GPIO_MODE_OUTPUT;
+            esp_ok(sys::gpio_config(&cfg), "lcd gpio_config")
+                .context("failed to configure lcd control pins")?;
+            emit_marker("MKT:DISPLAY:GPIO_OK", &[]);
 
-        panel
-            .clear(Rgb565::BLACK)
-            .map_err(|error| anyhow!("failed to clear lcd: {error:?}"))?;
-        backlight
-            .set_low()
-            .map_err(|error| anyhow!("failed to enable lcd backlight: {error:?}"))?;
+            esp_ok(
+                sys::gpio_set_level(LCD_PIN_BL as sys::gpio_num_t, 1),
+                "lcd backlight on",
+            )
+            .context("failed to enable lcd backlight")?;
+            emit_marker("MKT:DISPLAY:BACKLIGHT_OK", &[]);
 
-        Ok(Self {
-            panel,
-            _backlight: backlight,
-        })
+            esp_ok(
+                sys::gpio_set_level(LCD_PIN_RST as sys::gpio_num_t, 0),
+                "lcd reset low",
+            )
+            .context("failed to drive lcd reset low")?;
+            thread::sleep(Duration::from_millis(20));
+            esp_ok(
+                sys::gpio_set_level(LCD_PIN_RST as sys::gpio_num_t, 1),
+                "lcd reset high",
+            )
+            .context("failed to drive lcd reset high")?;
+            thread::sleep(Duration::from_millis(20));
+            emit_marker("MKT:DISPLAY:RESET_OK", &[]);
+
+            let mut buscfg = sys::spi_bus_config_t::default();
+            buscfg.__bindgen_anon_1.mosi_io_num = LCD_PIN_MOSI;
+            buscfg.__bindgen_anon_2.miso_io_num = -1;
+            buscfg.sclk_io_num = LCD_PIN_SCLK;
+            buscfg.__bindgen_anon_3.quadwp_io_num = -1;
+            buscfg.__bindgen_anon_4.quadhd_io_num = -1;
+            buscfg.data4_io_num = -1;
+            buscfg.data5_io_num = -1;
+            buscfg.data6_io_num = -1;
+            buscfg.data7_io_num = -1;
+            buscfg.max_transfer_sz = (usize::from(LCD_WIDTH) * usize::from(LCD_HEIGHT) * 2) as i32;
+
+            esp_ok(
+                sys::spi_bus_initialize(
+                    sys::spi_host_device_t_SPI3_HOST,
+                    &buscfg,
+                    sys::spi_common_dma_t_SPI_DMA_CH_AUTO,
+                ),
+                "lcd spi_bus_initialize",
+            )
+            .context("failed to initialize lcd spi bus")?;
+            emit_marker("MKT:DISPLAY:SPI_OK", &[]);
+
+            let mut io_cfg = sys::esp_lcd_panel_io_spi_config_t::default();
+            io_cfg.cs_gpio_num = LCD_PIN_CS;
+            io_cfg.dc_gpio_num = LCD_PIN_DC;
+            io_cfg.spi_mode = 0;
+            io_cfg.pclk_hz = LCD_PIXEL_CLOCK_HZ;
+            io_cfg.trans_queue_depth = 10;
+            io_cfg.lcd_cmd_bits = 8;
+            io_cfg.lcd_param_bits = 8;
+
+            let mut io: sys::esp_lcd_panel_io_handle_t = ptr::null_mut();
+            esp_ok(
+                sys::esp_lcd_new_panel_io_spi(
+                    sys::spi_host_device_t_SPI3_HOST as sys::esp_lcd_spi_bus_handle_t,
+                    &io_cfg,
+                    &mut io,
+                ),
+                "esp_lcd_new_panel_io_spi",
+            )
+            .context("failed to create lcd panel io")?;
+            emit_marker("MKT:DISPLAY:PANEL_IO_OK", &[]);
+
+            if io.is_null() {
+                bail!("lcd panel io handle is null");
+            }
+
+            let memory_before_fb = capture_memory_snapshot();
+            emit_marker(
+                "MKT:DISPLAY:FB_ALLOC_BEGIN",
+                &[
+                    ("heap_free", &memory_before_fb.heap_free.to_string()),
+                    ("internal_free", &memory_before_fb.internal_free.to_string()),
+                    ("spiram_free", &memory_before_fb.spiram_free.to_string()),
+                ],
+            );
+
+            let mut display = Self {
+                io,
+                framebuffer: DisplayFramebuffer::new(
+                    usize::from(LCD_WIDTH) * usize::from(LCD_HEIGHT),
+                )?,
+            };
+            let memory_after_fb = capture_memory_snapshot();
+            emit_marker(
+                "MKT:DISPLAY:FB_ALLOC_OK",
+                &[
+                    ("heap_free", &memory_after_fb.heap_free.to_string()),
+                    ("internal_free", &memory_after_fb.internal_free.to_string()),
+                    ("spiram_free", &memory_after_fb.spiram_free.to_string()),
+                    ("storage", display.framebuffer.storage_kind()),
+                ],
+            );
+            display.init_panel()?;
+            emit_marker("MKT:DISPLAY:PANEL_INIT_OK", &[]);
+            display.clear_framebuffer(Rgb565::BLACK);
+            display.flush()?;
+            emit_marker("MKT:DISPLAY:FLUSH_OK", &[]);
+            Ok(display)
+        }
+    }
+
+    fn tx(&self, cmd: u32, params: &[u8]) -> anyhow::Result<()> {
+        unsafe {
+            esp_ok(
+                sys::esp_lcd_panel_io_tx_param(
+                    self.io,
+                    cmd as i32,
+                    if params.is_empty() {
+                        ptr::null()
+                    } else {
+                        params.as_ptr().cast()
+                    },
+                    params.len(),
+                ),
+                "esp_lcd_panel_io_tx_param",
+            )
+        }
+    }
+
+    fn init_panel(&mut self) -> anyhow::Result<()> {
+        self.tx(sys::LCD_CMD_SLPOUT, &[])?;
+        thread::sleep(Duration::from_millis(100));
+        // Waveshare's reference driver applies mirror_x=true, mirror_y=false
+        // after init, which maps to MADCTL MX on this panel.
+        self.tx(0x36, &[0x40])?;
+        self.tx(0x3A, &[0x55])?;
+        self.tx(0xB0, &[0x00, 0xE8])?;
+        self.tx(0xB2, &[0x0c, 0x0c, 0x00, 0x33, 0x33])?;
+        self.tx(0xB7, &[0x75])?;
+        self.tx(0xBB, &[0x1A])?;
+        self.tx(0xC0, &[0x80])?;
+        self.tx(0xC2, &[0x01, 0xff])?;
+        self.tx(0xC3, &[0x13])?;
+        self.tx(0xC4, &[0x20])?;
+        self.tx(0xC6, &[0x0F])?;
+        self.tx(0xD0, &[0xA4, 0xA1])?;
+        self.tx(
+            0xE0,
+            &[0xD0, 0x0D, 0x14, 0x0D, 0x0D, 0x09, 0x38, 0x44, 0x4E, 0x3A, 0x17, 0x18, 0x2F, 0x30],
+        )?;
+        self.tx(
+            0xE1,
+            &[0xD0, 0x09, 0x0F, 0x08, 0x07, 0x14, 0x37, 0x44, 0x4D, 0x38, 0x15, 0x16, 0x2C, 0x2E],
+        )?;
+        self.tx(0x21, &[])?;
+        self.tx(0x29, &[])?;
+        self.tx(0x2C, &[])?;
+        Ok(())
+    }
+
+    fn clear_framebuffer(&mut self, color: Rgb565) {
+        self.framebuffer.as_mut_slice().fill(color.into_storage());
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        let x_start = LCD_OFFSET_X;
+        let x_end = LCD_OFFSET_X + LCD_WIDTH - 1;
+        let case = [
+            (x_start >> 8) as u8,
+            (x_start & 0xFF) as u8,
+            (x_end >> 8) as u8,
+            (x_end & 0xFF) as u8,
+        ];
+        self.tx(sys::LCD_CMD_CASET, &case)?;
+
+        let mut line = vec![0u8; usize::from(LCD_WIDTH) * 2];
+        for y in 0..usize::from(LCD_HEIGHT) {
+            let y_u16 = y as u16 + LCD_OFFSET_Y;
+            let ras = [
+                (y_u16 >> 8) as u8,
+                (y_u16 & 0xFF) as u8,
+                (y_u16 >> 8) as u8,
+                (y_u16 & 0xFF) as u8,
+            ];
+            self.tx(sys::LCD_CMD_RASET, &ras)?;
+
+            let row = &self.framebuffer.as_slice()
+                [y * usize::from(LCD_WIDTH)..(y + 1) * usize::from(LCD_WIDTH)];
+            for (i, px) in row.iter().enumerate() {
+                line[i * 2] = (px >> 8) as u8;
+                line[i * 2 + 1] = (px & 0xFF) as u8;
+            }
+            unsafe {
+                esp_ok(
+                    sys::esp_lcd_panel_io_tx_color(
+                        self.io,
+                        sys::LCD_CMD_RAMWR as i32,
+                        line.as_ptr().cast(),
+                        line.len(),
+                    ),
+                    "esp_lcd_panel_io_tx_color",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn show_stage(
@@ -1888,13 +2360,10 @@ impl<'d> StatusDisplay<'d> {
         detail: Option<&str>,
         background: Rgb565,
     ) -> anyhow::Result<()> {
-        Rectangle::new(
-            Point::zero(),
-            Size::new(LCD_WIDTH.into(), LCD_HEIGHT.into()),
-        )
-        .into_styled(PrimitiveStyle::with_fill(background))
-        .draw(&mut self.panel)
-        .map_err(|error| anyhow!("failed to paint lcd background: {error:?}"))?;
+        Rectangle::new(Point::zero(), self.size())
+            .into_styled(PrimitiveStyle::with_fill(background))
+            .draw(self)
+            .map_err(|error| anyhow!("failed to paint lcd background: {error:?}"))?;
 
         let header_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
         let body_style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
@@ -1905,7 +2374,7 @@ impl<'d> StatusDisplay<'d> {
             header_style,
             Baseline::Top,
         )
-        .draw(&mut self.panel)
+        .draw(self)
         .map_err(|error| anyhow!("failed to draw lcd stage: {error:?}"))?;
 
         Text::with_baseline(
@@ -1914,7 +2383,7 @@ impl<'d> StatusDisplay<'d> {
             body_style,
             Baseline::Top,
         )
-        .draw(&mut self.panel)
+        .draw(self)
         .map_err(|error| anyhow!("failed to draw lcd headline: {error:?}"))?;
 
         if let Some(detail) = detail {
@@ -1924,40 +2393,67 @@ impl<'d> StatusDisplay<'d> {
                 body_style,
                 Baseline::Top,
             )
-            .draw(&mut self.panel)
+            .draw(self)
             .map_err(|error| anyhow!("failed to draw lcd detail: {error:?}"))?;
         }
 
-        Ok(())
+        self.flush()
     }
 
     fn show_chat(&mut self, title: &str, lines: &[String]) -> anyhow::Result<()> {
-        Rectangle::new(
-            Point::zero(),
-            Size::new(LCD_WIDTH.into(), LCD_HEIGHT.into()),
-        )
+        Rectangle::new(Point::zero(), self.size())
         .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 8, 20)))
-        .draw(&mut self.panel)
+        .draw(self)
         .map_err(|error| anyhow!("failed to paint lcd chat background: {error:?}"))?;
 
         let header_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
         let body_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(180, 220, 255));
 
         Text::with_baseline(title, Point::new(8, 12), header_style, Baseline::Top)
-            .draw(&mut self.panel)
+            .draw(self)
             .map_err(|error| anyhow!("failed to draw lcd chat title: {error:?}"))?;
 
         let mut y = 42;
         for line in lines.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev() {
             Text::with_baseline(line, Point::new(8, y), body_style, Baseline::Top)
-                .draw(&mut self.panel)
+                .draw(self)
                 .map_err(|error| anyhow!("failed to draw lcd chat line: {error:?}"))?;
             y += 14;
         }
 
-        Ok(())
+        self.flush()
     }
 
+}
+
+impl OriginDimensions for StatusDisplay {
+    fn size(&self) -> Size {
+        Size::new(LCD_WIDTH.into(), LCD_HEIGHT.into())
+    }
+}
+
+impl DrawTarget for StatusDisplay {
+    type Color = Rgb565;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(point, color) in pixels {
+            if point.x < 0 || point.y < 0 {
+                continue;
+            }
+            let x = point.x as u16;
+            let y = point.y as u16;
+            if x >= LCD_WIDTH || y >= LCD_HEIGHT {
+                continue;
+            }
+            let idx = usize::from(y) * usize::from(LCD_WIDTH) + usize::from(x);
+            self.framebuffer.as_mut_slice()[idx] = color.into_storage();
+        }
+        Ok(())
+    }
 }
 
 fn short_display_line(input: &str, max_chars: usize) -> String {

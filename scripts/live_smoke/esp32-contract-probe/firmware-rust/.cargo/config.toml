@@ -9,6 +9,8 @@ rustflags = [
     "espidf_time64",
     "--cfg",
     "mio_unsupported_force_poll_poll",
+    "--cfg",
+    "tokio_unstable",
 ]
 
 [unstable]

@@ -7,13 +7,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
 
 use meerkat_core::completion_feed::{
     CompletionBatch, CompletionEntry, CompletionFeed, CompletionSeq,
 };
+use portable_atomic::{AtomicU64, Ordering};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;

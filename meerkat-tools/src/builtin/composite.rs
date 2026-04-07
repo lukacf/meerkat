@@ -14,6 +14,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
+use portable_atomic::AtomicU64;
 use serde_json::Value;
 use std::collections::HashSet;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))]
@@ -61,7 +62,7 @@ pub struct CompositeDispatcher {
     /// Stashed completion feed for carry-forward across dispatcher rebuilds.
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     /// Shared interrupt baseline for the wait tool (stamped by agent before dispatch).
-    interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    interrupt_baseline: Option<std::sync::Arc<AtomicU64>>,
 }
 
 impl CompositeDispatcher {
@@ -519,7 +520,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
-        baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        baseline: std::sync::Arc<AtomicU64>,
     ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;

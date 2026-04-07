@@ -12,6 +12,31 @@ set(ENV{CC} /usr/bin/clang)
 set(ENV{CXX} /usr/bin/clang++)
 set(ENV{MICROPY_MPYCROSS} /usr/bin/true)
 set(ENV{SDKROOT} /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk)
+if(DEFINED ENV{PROJECT_DIR})
+    get_filename_component(PHASE0_FIRMWARE_PROJECT_DIR "$ENV{PROJECT_DIR}" ABSOLUTE)
+else()
+    get_filename_component(PHASE0_FIRMWARE_PROJECT_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+endif()
+set(PHASE0_PARTITION_CSV_SOURCE "${PHASE0_FIRMWARE_PROJECT_DIR}/partitions-phase0.csv")
+set(PHASE0_PARTITION_CSV_BUILD_DIR "${CMAKE_BINARY_DIR}")
+set(PHASE0_PARTITION_CSV_BUILD "${PHASE0_PARTITION_CSV_BUILD_DIR}/partitions-phase0.csv")
+get_filename_component(PHASE0_PARTITION_CSV_PARENT_DIR "${CMAKE_BINARY_DIR}/.." ABSOLUTE)
+set(PHASE0_PARTITION_CSV_PARENT_BUILD "${PHASE0_PARTITION_CSV_PARENT_DIR}/partitions-phase0.csv")
+
+if(EXISTS "${PHASE0_PARTITION_CSV_SOURCE}")
+    file(MAKE_DIRECTORY "${PHASE0_PARTITION_CSV_BUILD_DIR}")
+    configure_file(
+        "${PHASE0_PARTITION_CSV_SOURCE}"
+        "${PHASE0_PARTITION_CSV_BUILD}"
+        COPYONLY
+    )
+    file(MAKE_DIRECTORY "${PHASE0_PARTITION_CSV_PARENT_DIR}")
+    configure_file(
+        "${PHASE0_PARTITION_CSV_SOURCE}"
+        "${PHASE0_PARTITION_CSV_PARENT_BUILD}"
+        COPYONLY
+    )
+endif()
 
 if(NOT MICROPY_HELPER_DIR)
     get_filename_component(
@@ -112,7 +137,6 @@ if(EXISTS ${MICROPY_HELPER_DIR})
             "    esp32_rmt.c|"
             "    mpthreadport.c|"
             "    usb.c|"
-            "    usb_serial_jtag.c|"
             "    bt|"
             "    esp_eth|"
             "    esp_event|"
@@ -151,7 +175,6 @@ if(EXISTS ${MICROPY_HELPER_DIR})
             "esp32_rmt\\.c"
             "mpthreadport\\.c"
             "usb\\.c"
-            "usb_serial_jtag\\.c"
         )
             string(REGEX REPLACE
                 "[ \t]*${line}\n"
@@ -306,9 +329,65 @@ if(EXISTS ${MICROPY_HELPER_DIR})
                 "CONFIG_SPIRAM_IGNORE_NOTFOUND=y"
                 "CONFIG_SPIRAM_USE_MALLOC=y"
                 "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192"
+                "CONFIG_ESP_CONSOLE_UART_DEFAULT=y"
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y"
+                "CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y"
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y"
+                "CONFIG_ESP_CONSOLE_UART=y"
+                "CONFIG_ESP_CONSOLE_UART_NUM=0"
+                "CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200"
+                "CONFIG_ESP_CONSOLE_SECONDARY_NONE=y"
             )
                 string(REPLACE "${line}" "" MICROPY_GENERATED_SDKCONFIG_CONTENTS "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}")
             endforeach()
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_UART_DEFAULT=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_UART=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_UART_NUM=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_UART_BAUDRATE=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
+            string(REGEX REPLACE
+                "CONFIG_ESP_CONSOLE_SECONDARY_NONE=[^\n]*\n?"
+                ""
+                MICROPY_GENERATED_SDKCONFIG_CONTENTS
+                "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}"
+            )
             string(REGEX REPLACE
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"[^\"]*partitions-4MiB\\.csv\"\n?"
                 ""
@@ -339,6 +418,12 @@ if(EXISTS ${MICROPY_HELPER_DIR})
                 "CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=\n"
                 "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions-phase0.csv\"\n"
+                "CONFIG_ESP_CONSOLE_UART_DEFAULT=\n"
+                "CONFIG_ESP_CONSOLE_UART=\n"
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y\n"
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y\n"
+                "CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=\n"
+                "CONFIG_ESP_CONSOLE_SECONDARY_NONE=y\n"
             )
             file(WRITE ${micropy_generated_sdkconfig} "${MICROPY_GENERATED_SDKCONFIG_CONTENTS}")
         endif()
@@ -352,7 +437,10 @@ function(phase0_force_patch_generated_micropy_helper helper_dir)
 
     set(board_dir ${helper_dir}/micropython/ports/esp32/boards/${MICROPY_BOARD})
     set(port_config ${helper_dir}/micropython/ports/esp32/mpconfigport.h)
-    set(common_cmake ${helper_dir}/esp32_common.cmake)
+    set(common_cmake_candidates
+        ${helper_dir}/micropython/ports/esp32/esp32_common.cmake
+        ${helper_dir}/esp32_common.cmake
+    )
 
     if(EXISTS ${port_config})
         file(READ ${port_config} port_config_contents)
@@ -390,72 +478,73 @@ function(phase0_force_patch_generated_micropy_helper helper_dir)
         file(WRITE ${port_config} "${port_config_contents}")
     endif()
 
-    if(EXISTS ${common_cmake})
-        file(READ ${common_cmake} common_cmake_contents)
-        string(REPLACE
-            "set(MICROPY_PY_BTREE ON)"
-            "set(MICROPY_PY_BTREE OFF)"
-            common_cmake_contents
-            "${common_cmake_contents}"
-        )
-        foreach(line
-            "\\$\\{MICROPY_DIR\\}/shared/netutils/netutils\\.c"
-            "ppp_set_auth\\.c"
-            "network_common\\.c"
-            "network_lan\\.c"
-            "network_ppp\\.c"
-            "network_wlan\\.c"
-            "mpnimbleport\\.c"
-            "modsocket\\.c"
-            "modesp\\.c"
-            "machine_sdcard\\.c"
-            "machine_bitstream\\.c"
-            "modespnow\\.c"
-            "esp32_ulp\\.c"
-            "esp32_rmt\\.c"
-            "mpthreadport\\.c"
-            "usb\\.c"
-            "usb_serial_jtag\\.c"
-        )
+    foreach(common_cmake ${common_cmake_candidates})
+        if(EXISTS ${common_cmake})
+            file(READ ${common_cmake} common_cmake_contents)
+            string(REPLACE
+                "set(MICROPY_PY_BTREE ON)"
+                "set(MICROPY_PY_BTREE OFF)"
+                common_cmake_contents
+                "${common_cmake_contents}"
+            )
+            foreach(line
+                "\\$\\{MICROPY_DIR\\}/shared/netutils/netutils\\.c"
+                "ppp_set_auth\\.c"
+                "network_common\\.c"
+                "network_lan\\.c"
+                "network_ppp\\.c"
+                "network_wlan\\.c"
+                "mpnimbleport\\.c"
+                "modsocket\\.c"
+                "modesp\\.c"
+                "machine_sdcard\\.c"
+                "machine_bitstream\\.c"
+                "modespnow\\.c"
+                "esp32_ulp\\.c"
+                "esp32_rmt\\.c"
+                "mpthreadport\\.c"
+                "usb\\.c"
+            )
+                string(REGEX REPLACE
+                    "[ \t]*${line}\n"
+                    ""
+                    common_cmake_contents
+                    "${common_cmake_contents}"
+                )
+            endforeach()
+            foreach(line
+                "bt"
+                "esp_eth"
+                "esp_event"
+                "esp_netif"
+                "esp_ringbuf"
+                "esp_wifi"
+                "lwip"
+                "sdmmc"
+                "ulp"
+            )
+                string(REGEX REPLACE
+                    "[ \t]*${line}\n"
+                    ""
+                    common_cmake_contents
+                    "${common_cmake_contents}"
+                )
+            endforeach()
             string(REGEX REPLACE
-                "[ \t]*${line}\n"
+                "[ \t]*target_link_libraries\\(\\$\\{MICROPY_TARGET\\}[ \t]+micropy_extmod_btree\\)\n"
                 ""
                 common_cmake_contents
                 "${common_cmake_contents}"
             )
-        endforeach()
-        foreach(line
-            "bt"
-            "esp_eth"
-            "esp_event"
-            "esp_netif"
-            "esp_ringbuf"
-            "esp_wifi"
-            "lwip"
-            "sdmmc"
-            "ulp"
-        )
-            string(REGEX REPLACE
-                "[ \t]*${line}\n"
+            string(REPLACE
+                "target_link_libraries(${MICROPY_TARGET} micropy_extmod_btree)"
                 ""
                 common_cmake_contents
                 "${common_cmake_contents}"
             )
-        endforeach()
-        string(REGEX REPLACE
-            "[ \t]*target_link_libraries\\(\\$\\{MICROPY_TARGET\\}[ \t]+micropy_extmod_btree\\)\n"
-            ""
-            common_cmake_contents
-            "${common_cmake_contents}"
-        )
-        string(REPLACE
-            "target_link_libraries(${MICROPY_TARGET} micropy_extmod_btree)"
-            ""
-            common_cmake_contents
-            "${common_cmake_contents}"
-        )
-        file(WRITE ${common_cmake} "${common_cmake_contents}")
-    endif()
+            file(WRITE ${common_cmake} "${common_cmake_contents}")
+        endif()
+    endforeach()
 
     if(TARGET __idf_mr9you__micropython-helper AND EXISTS ${board_dir})
         target_include_directories(__idf_mr9you__micropython-helper PUBLIC ${board_dir})
@@ -497,6 +586,7 @@ if(EXISTS ${MICROPY_HELPER_DIR})
     set(MICROPY_ESP32_COMMON_CMAKE ${MICROPY_HELPER_DIR}/esp32_common.cmake)
     set(MICROPY_PORT_CONFIG ${MICROPY_HELPER_DIR}/micropython/ports/esp32/mpconfigport.h)
     set(MICROPY_STARTUP_SOURCE ${MICROPY_HELPER_DIR}/mpy_startup.c)
+    set(MICROPY_USB_SERIAL_JTAG_SOURCE ${MICROPY_HELPER_DIR}/micropython/ports/esp32/usb_serial_jtag.c)
     set(MICROPY_MODESP32_SOURCE ${MICROPY_HELPER_DIR}/micropython/ports/esp32/modesp32.c)
     set(MICROPY_MODSOCKET_SOURCE ${MICROPY_HELPER_DIR}/micropython/ports/esp32/modsocket.c)
     set(MICROPY_MODESP_SOURCE ${MICROPY_HELPER_DIR}/micropython/ports/esp8266/modesp.c)
@@ -536,7 +626,6 @@ if(EXISTS ${MICROPY_HELPER_DIR})
             "    esp32_rmt.c|"
             "    mpthreadport.c|"
             "    usb.c|"
-            "    usb_serial_jtag.c|"
             "    bt|"
             "    esp_eth|"
             "    esp_event|"
@@ -569,7 +658,6 @@ if(EXISTS ${MICROPY_HELPER_DIR})
             "esp32_rmt\\.c"
             "mpthreadport\\.c"
             "usb\\.c"
-            "usb_serial_jtag\\.c"
         )
             string(REGEX REPLACE
                 "[ \t]*${line}\n"
@@ -656,20 +744,23 @@ if(EXISTS ${MICROPY_HELPER_DIR})
             "#include \"modnetwork.h\"|/* phase0 micropython spike: network disabled */"
             "#include \"mpthreadport.h\"|/* phase0 micropython spike: thread port disabled */"
             "#include \"usb.h\"|/* phase0 micropython spike: usb disabled */"
-            "#include \"usb_serial_jtag.h\"|/* phase0 micropython spike: usb serial jtag disabled */"
         )
             string(REPLACE "|" ";" rewrite_parts "${rewrite}")
             list(GET rewrite_parts 0 rewrite_from)
             list(GET rewrite_parts 1 rewrite_to)
             string(REPLACE "${rewrite_from}" "${rewrite_to}" MICROPY_STARTUP_CONTENTS "${MICROPY_STARTUP_CONTENTS}")
         endforeach()
-        string(REPLACE
-            "    #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG\n    usb_serial_jtag_init();\n    #elif CONFIG_USB_OTG_SUPPORTED\n    usb_init();\n    #endif"
-            "    /* phase0 micropython spike: usb repl disabled */"
-            MICROPY_STARTUP_CONTENTS
-            "${MICROPY_STARTUP_CONTENTS}"
-        )
         file(WRITE ${MICROPY_STARTUP_SOURCE} "${MICROPY_STARTUP_CONTENTS}")
+    endif()
+    if(EXISTS ${MICROPY_USB_SERIAL_JTAG_SOURCE})
+        file(READ ${MICROPY_USB_SERIAL_JTAG_SOURCE} MICROPY_USB_SERIAL_JTAG_CONTENTS)
+        string(REPLACE
+            "#include \"freertos/portmacro.h\""
+            "#include \"freertos/portmacro.h\"\n#ifndef USB_SERIAL_JTAG_PACKET_SZ_BYTES\n#define USB_SERIAL_JTAG_PACKET_SZ_BYTES 64\n#endif"
+            MICROPY_USB_SERIAL_JTAG_CONTENTS
+            "${MICROPY_USB_SERIAL_JTAG_CONTENTS}"
+        )
+        file(WRITE ${MICROPY_USB_SERIAL_JTAG_SOURCE} "${MICROPY_USB_SERIAL_JTAG_CONTENTS}")
     endif()
     if(EXISTS ${MICROPY_MODESP32_SOURCE})
         file(READ ${MICROPY_MODESP32_SOURCE} MICROPY_MODESP32_CONTENTS)
@@ -723,7 +814,6 @@ if(EXISTS ${MICROPY_HELPER_DIR})
         mpthreadport.c
         ppp_set_auth.c
         usb.c
-        usb_serial_jtag.c
     )
         set(stub_path ${MICROPY_HELPER_DIR}/micropython/ports/esp32/${stub_source})
         if(EXISTS ${stub_path})

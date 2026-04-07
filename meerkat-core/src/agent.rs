@@ -34,6 +34,7 @@ use crate::types::{
     ToolDef, Usage,
 };
 use async_trait::async_trait;
+use portable_atomic::AtomicU64;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -294,7 +295,7 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn bind_completion_feed(
         self: Arc<Self>,
         _feed: Arc<dyn crate::completion_feed::CompletionFeed>,
-        _baseline: Arc<std::sync::atomic::AtomicU64>,
+        _baseline: Arc<AtomicU64>,
     ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
@@ -437,7 +438,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: Arc<dyn crate::completion_feed::CompletionFeed>,
-        baseline: Arc<std::sync::atomic::AtomicU64>,
+        baseline: Arc<AtomicU64>,
     ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
@@ -767,7 +768,7 @@ where
     pub(crate) applied_cursor: crate::completion_feed::CompletionSeq,
     /// Shared baseline for the wait tool's interrupt check.
     /// Stamped to `applied_cursor` before each tool dispatch.
-    pub(crate) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub(crate) interrupt_baseline: Option<Arc<AtomicU64>>,
     /// Optional enrichment provider for completion display details.
     pub(crate) completion_enrichment:
         Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,

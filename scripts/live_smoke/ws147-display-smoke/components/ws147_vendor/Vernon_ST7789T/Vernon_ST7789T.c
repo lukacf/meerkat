@@ -165,15 +165,15 @@ static esp_err_t panel_st7789t_init(esp_lcd_panel_t *panel)
     vTaskDelay(pdMS_TO_TICKS(100));
     // esp_lcd_panel_io_tx_param(io, LCD_CMD_MADCTL, (uint8_t[]) {st7789t->madctl_val,}, 1);
     // esp_lcd_panel_io_tx_param(io, LCD_CMD_COLMOD, (uint8_t[]) {st7789t->colmod_cal,}, 1);
-    
+
     /* Memory Data Access Control, MX=MV=1, MY=ML=MH=0, RGB=0 */
     esp_lcd_panel_io_tx_param(io, 0x36, (uint8_t []){0x00}, 1);                           // 0x36: 接口像素格式 X镜像，Y镜像
     /* Interface Pixel Format, 16bits/pixel for RGB/MCU interface */
     esp_lcd_panel_io_tx_param(io, 0x3A, (uint8_t []){0x55}, 1);                           // 0x3A: Porch 设置
-    
-    esp_lcd_panel_io_tx_param(io, 0xB0, (uint8_t []){0x00, 0xE8}, 2);   
+
+    esp_lcd_panel_io_tx_param(io, 0xB0, (uint8_t []){0x00, 0xE8}, 2);
     /* Porch Setting */
-    esp_lcd_panel_io_tx_param(io, 0xB2, (uint8_t []){0x0c, 0x0c, 0x00, 0x33, 0x33}, 5);      
+    esp_lcd_panel_io_tx_param(io, 0xB2, (uint8_t []){0x0c, 0x0c, 0x00, 0x33, 0x33}, 5);
     /* Gate Control, Vgh=13.65V, Vgl=-10.43V */
     esp_lcd_panel_io_tx_param(io, 0xB7, (uint8_t []){0x75}, 1);
     /* VCOM Setting, VCOM=1.175V */

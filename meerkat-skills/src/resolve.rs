@@ -254,6 +254,7 @@ pub async fn resolve_repositories_with_roots(
 }
 
 /// Sanitize a repo URL into a valid directory name.
+#[cfg(feature = "skills-git")]
 fn sanitize_repo_name(url: &str) -> String {
     url.chars()
         .map(|c| {

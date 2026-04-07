@@ -45,20 +45,18 @@ impl DefaultPolicyTable {
     /// Resolve a policy decision for the given input and runtime state.
     ///
     /// If the input carries an explicit `handling_mode`, the override is
-    /// honored for actionable input kinds only. Response conventions
-    /// (`peer_response_progress`, `peer_response_terminal`) always fall
-    /// through to kind-based defaults — the policy table does not apply
-    /// handling_mode overrides for those kinds.
+    /// honored for actionable input kinds only. Response progress
+    /// (`peer_response_progress`) always falls through to kind-based
+    /// defaults — the policy table does not apply handling_mode overrides
+    /// for progress updates. Response terminal inputs honor handling_mode
+    /// normally.
     pub fn resolve(input: &Input, runtime_idle: bool) -> PolicyDecision {
         let kind = input.kind_id();
-        // Response conventions must not have their policy overridden by
+        // ResponseProgress must not have its policy overridden by
         // handling_mode. Admission validation rejects this combination,
         // but the policy table also refuses to honor it so the contract
         // holds for any caller of resolve(), not just the driver path.
-        let is_response_convention = matches!(
-            kind.0.as_str(),
-            "peer_response_progress" | "peer_response_terminal"
-        );
+        let is_response_convention = matches!(kind.0.as_str(), "peer_response_progress");
         if !is_response_convention && let Some(mode) = input.handling_mode() {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
@@ -782,13 +780,47 @@ mod tests {
     }
 
     #[test]
-    fn response_terminal_with_handling_mode_falls_through_to_kind_default() {
+    fn response_terminal_with_steer_gets_steer_semantics() {
         let input = make_peer_input(
             Some(PeerConvention::ResponseTerminal {
                 request_id: "r".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             Some(HandlingMode::Steer),
+        );
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(
+            decision.interrupt_policy,
+            InterruptPolicy::InterruptYielding
+        );
+        assert!(decision.record_transcript);
+    }
+
+    #[test]
+    fn response_terminal_with_queue_handling_mode_gets_queue_semantics() {
+        let input = make_peer_input(
+            Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            Some(HandlingMode::Queue),
+        );
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
+
+    #[test]
+    fn response_terminal_without_handling_mode_keeps_kind_default() {
+        let input = make_peer_input(
+            Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            None,
         );
         let decision = DefaultPolicyTable::resolve(&input, true);
         // Kind default for peer_response_terminal idle: Queue, StageRunStart, WakeIfIdle

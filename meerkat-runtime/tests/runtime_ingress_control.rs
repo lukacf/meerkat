@@ -207,9 +207,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
 #[tokio::test]
 #[ignore = "Phase 3 runtime input taxonomy closure"]
 async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_operation_inputs() {
-    let continuation = Input::Continuation(ContinuationInput::terminal_peer_response(
-        "terminal peer response injected into session state",
-    ));
+    let continuation = Input::Continuation(ContinuationInput::detached_background_op_completed());
     let continuation_policy = meerkat_runtime::DefaultPolicyTable::resolve(&continuation, true);
     assert_eq!(continuation.kind_id().0, "continuation");
     assert_eq!(continuation_policy.apply_mode, ApplyMode::StageRunBoundary);

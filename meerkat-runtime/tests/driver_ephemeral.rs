@@ -78,9 +78,7 @@ fn make_peer_progress() -> Input {
 }
 
 fn make_continuation() -> Input {
-    Input::Continuation(ContinuationInput::terminal_peer_response(
-        "driver test continuation",
-    ))
+    Input::Continuation(ContinuationInput::detached_background_op_completed())
 }
 
 fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
@@ -659,7 +657,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
 }
 
 #[tokio::test]
-async fn accept_peer_response_terminal_with_handling_mode_returns_rejected() {
+async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
         header: InputHeader {
@@ -685,8 +683,8 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_rejected() {
     });
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(
-        outcome.is_rejected(),
-        "ResponseTerminal with handling_mode must be rejected"
+        outcome.is_accepted(),
+        "ResponseTerminal with handling_mode=Steer must be accepted"
     );
 }
 

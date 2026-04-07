@@ -75,6 +75,21 @@ pub struct ConversationContextAppend {
     pub content: CoreRenderable,
 }
 
+/// Typed execution intent classified by the runtime layer.
+///
+/// The runtime stamps this on `RuntimeTurnMetadata` so the session layer can
+/// dispatch `run_turn` vs `run_pending` from typed intent rather than inferring
+/// from prompt emptiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExecutionKind {
+    /// Ordinary content turn: prompts, peer messages/requests/terminal-responses,
+    /// external events, flow steps.
+    ContentTurn,
+    /// Explicit continuation that resumes pending work at a boundary.
+    ResumePending,
+}
+
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
@@ -102,6 +117,14 @@ pub struct RuntimeTurnMetadata {
     /// Optional normalized rendering metadata for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
+    /// Typed execution intent classified by the runtime layer.
+    ///
+    /// `None` means the session layer should use its existing heuristic
+    /// (backward compat for non-runtime substrate-direct paths).
+    /// `Some(ContentTurn)` forces `run_turn`.
+    /// `Some(ResumePending)` forces `run_pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_kind: Option<RuntimeExecutionKind>,
 }
 
 /// An input staged for application at a run boundary.
@@ -208,6 +231,54 @@ mod tests {
         assert_eq!(json["type"], "reference");
         let parsed: CoreRenderable = serde_json::from_value(json).unwrap();
         assert_eq!(r, parsed);
+    }
+
+    #[test]
+    fn execution_kind_serde_round_trip() {
+        for kind in [
+            RuntimeExecutionKind::ContentTurn,
+            RuntimeExecutionKind::ResumePending,
+        ] {
+            let json = serde_json::to_value(kind).unwrap();
+            let parsed: RuntimeExecutionKind = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(kind, parsed);
+        }
+        // Verify snake_case naming
+        assert_eq!(
+            serde_json::to_value(RuntimeExecutionKind::ContentTurn).unwrap(),
+            serde_json::Value::String("content_turn".into())
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeExecutionKind::ResumePending).unwrap(),
+            serde_json::Value::String("resume_pending".into())
+        );
+    }
+
+    #[test]
+    fn turn_metadata_execution_kind_defaults_to_none() {
+        let meta = RuntimeTurnMetadata::default();
+        assert_eq!(meta.execution_kind, None);
+    }
+
+    #[test]
+    fn turn_metadata_execution_kind_round_trips() {
+        let mut meta = RuntimeTurnMetadata::default();
+        meta.execution_kind = Some(RuntimeExecutionKind::ContentTurn);
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["execution_kind"], "content_turn");
+        let parsed: RuntimeTurnMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.execution_kind,
+            Some(RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn turn_metadata_without_execution_kind_deserializes() {
+        // Backward compat: old payloads without execution_kind deserialize to None
+        let json = serde_json::json!({});
+        let parsed: RuntimeTurnMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.execution_kind, None);
     }
 
     #[test]

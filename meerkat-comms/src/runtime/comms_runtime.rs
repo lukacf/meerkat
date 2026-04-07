@@ -447,6 +447,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 in_reply_to,
                 status,
                 result,
+                handling_mode,
             } => {
                 let status = match status {
                     meerkat_core::ResponseStatus::Accepted => crate::Status::Accepted,
@@ -460,6 +461,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         in_reply_to: in_reply_to.0,
                         status,
                         result,
+                        handling_mode,
                     },
                 )
                 .await
@@ -646,6 +648,13 @@ impl CoreCommsRuntime for CommsRuntime {
                                 return None;
                             }
 
+                        // Extract handling_mode from Response envelopes before
+                        // consuming the kind in the content match.
+                        let envelope_handling_mode = match &envelope.kind {
+                            MessageKind::Response { handling_mode: Some(mode), .. } => *mode,
+                            _ => meerkat_core::types::HandlingMode::Queue,
+                        };
+
                         let (content, rendered_text) = match envelope.kind {
                             MessageKind::Message { body, blocks } => {
                                 let rendered = format!(
@@ -688,6 +697,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 in_reply_to,
                                 status,
                                 result,
+                                handling_mode: _,
                             } => {
                                 let core_status = match status {
                                     crate::types::Status::Accepted => {
@@ -740,7 +750,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 from: from_peer,
                                 content,
                                 rendered_text,
-                                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                                handling_mode: envelope_handling_mode,
                                 render_metadata: None,
                             },
                             class: entry.class,
@@ -2071,6 +2081,7 @@ mod tests {
                 in_reply_to: reply_to,
                 status: Status::Completed,
                 result: serde_json::json!({"ok": true}),
+                handling_mode: None,
             },
         );
 
@@ -3256,6 +3267,7 @@ mod tests {
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                         status: meerkat_core::ResponseStatus::Completed,
                         result: serde_json::json!({}),
+                        handling_mode: None,
                     },
                     _ => continue,
                 };

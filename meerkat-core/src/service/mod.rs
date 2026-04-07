@@ -668,6 +668,12 @@ pub struct StartTurnRequest {
     /// This distinction means create-time instructions persist across turns (system prompt)
     /// while turn-level instructions are per-turn only (conversation history).
     pub additional_instructions: Option<Vec<String>>,
+    /// Typed execution intent from the runtime layer.
+    ///
+    /// `Some(ContentTurn)` forces `run_turn`, `Some(ResumePending)` forces
+    /// `run_pending`. `None` preserves the existing `has_prompt` heuristic
+    /// for non-runtime substrate-direct paths.
+    pub execution_kind: Option<crate::lifecycle::run_primitive::RuntimeExecutionKind>,
 }
 
 /// Request to append runtime system context to an existing session.

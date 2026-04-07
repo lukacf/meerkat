@@ -102,6 +102,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         in_reply_to: request_id,
         status: meerkat_core::ResponseStatus::Completed,
         result: serde_json::json!({"pong": true}),
+        handling_mode: None,
     };
     let resp_receipt = CoreCommsRuntime::send(&receiver, response_cmd)
         .await
@@ -689,6 +690,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                execution_kind: None,
             },
         )
         .await
@@ -762,6 +764,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                execution_kind: None,
             },
         )
         .await;

@@ -687,18 +687,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         contributing_input_ids: Vec<InputId>,
     ) -> Result<(RunResult, CoreApplyOutput), SessionError> {
         let _ = self.discard_stale_live_session_if_needed(id).await?;
-        let run_result = self.inner.start_turn(id, req).await?;
-        let output = self
-            .build_runtime_output(
-                id,
-                run_id,
-                boundary,
-                contributing_input_ids,
-                Some(CoreApplyTerminal::RunResult(run_result.clone())),
-            )
-            .await?;
-
-        Ok((run_result, output))
+        match self.inner.start_turn(id, req).await {
+            Ok(run_result) => {
+                let output = self
+                    .build_runtime_output(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::RunResult(run_result.clone())),
+                    )
+                    .await?;
+                Ok((run_result, output))
+            }
+            Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                // ResumePending with no boundary — no-op through canonical path.
+                // Callers (CLI, RPC) discard the RunResult — this is a legacy
+                // placeholder.
+                let output = self
+                    .build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+                    .await?;
+                let noop_result = RunResult {
+                    text: String::new(),
+                    session_id: id.clone(),
+                    usage: meerkat_core::types::Usage::default(),
+                    turns: 0,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                };
+                Ok((noop_result, output))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn apply_runtime_turn_outcome(
@@ -720,6 +742,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     Some(CoreApplyTerminal::RunResult(run_result)),
                 )
                 .await
+            }
+            Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                // ResumePending with no boundary — no-op through canonical path.
+                self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+                    .await
             }
             Err(error) => {
                 if let Some(terminal) = Self::callback_pending_terminal(&error) {
@@ -2189,6 +2216,7 @@ mod tests {
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,
+            execution_kind: None,
         }
     }
 
@@ -2205,6 +2233,7 @@ mod tests {
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,
+            execution_kind: None,
         }
     }
 

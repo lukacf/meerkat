@@ -809,6 +809,7 @@ impl MobBuilder {
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,
+                                execution_kind: None,
                             },
                         )
                         .await?;

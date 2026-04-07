@@ -354,6 +354,7 @@ impl Router {
                 in_reply_to,
                 status,
                 result,
+                handling_mode: None,
             },
         )
         .await

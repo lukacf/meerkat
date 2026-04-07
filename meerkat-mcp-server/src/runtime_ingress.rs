@@ -452,6 +452,7 @@ async fn apply_runtime_turn(
         additional_instructions: primitive
             .turn_metadata()
             .and_then(|meta| meta.additional_instructions.clone()),
+        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
     };
 
     match context
@@ -542,6 +543,7 @@ async fn apply_runtime_turn(
                         additional_instructions: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.additional_instructions.clone()),
+                        execution_kind: None,
                     },
                     boundary,
                     contributing_input_ids,

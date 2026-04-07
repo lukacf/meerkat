@@ -264,6 +264,17 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     // Later inputs override scalar fields; collection fields accumulate.
     let turn_metadata = merge_batch_turn_metadata(inputs);
 
+    // Stamp typed execution intent from the first input in the batch.
+    // Batch homogeneity is enforced by debug_assert in process_queue.
+    let execution_kind = inputs
+        .first()
+        .map(|(_, input)| crate::input::classify_execution_kind(input));
+    let turn_metadata = {
+        let mut meta = turn_metadata.unwrap_or_default();
+        meta.execution_kind = execution_kind;
+        Some(meta)
+    };
+
     RunPrimitive::StagedInput(StagedRunInput {
         boundary,
         appends,
@@ -639,6 +650,17 @@ async fn process_queue(
             if staged_inputs.is_empty() {
                 return false;
             }
+
+            // Defensive: assert batch execution-kind homogeneity.
+            // Mixed ContentTurn + ResumePending batches should never form
+            // because they arrive from different sources at different times.
+            debug_assert!(
+                staged_inputs.windows(2).all(|w| {
+                    crate::input::classify_execution_kind(&w[0].1)
+                        == crate::input::classify_execution_kind(&w[1].1)
+                }),
+                "batch has mixed execution kinds — batching bug in drain_next_batch"
+            );
 
             let run_id = RunId::new();
 
@@ -1325,5 +1347,70 @@ mod tests {
             }
             other => panic!("Expected CallbackPending, got {other:?}"),
         }
+    }
+
+    // --- execution_kind stamping tests ---
+
+    #[test]
+    fn primitive_from_prompt_has_content_turn() {
+        let input = make_prompt("hello");
+        let id = input.id().clone();
+        let primitive = input_to_primitive(&input, id);
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn primitive_from_continuation_has_resume_pending() {
+        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
+        let id = input.id().clone();
+        let primitive = input_to_primitive(&input, id);
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+        );
+    }
+
+    #[test]
+    fn primitive_from_peer_terminal_has_content_turn() {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "p".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: "done".into(),
+            blocks: None,
+            handling_mode: None,
+        });
+        let id = input.id().clone();
+        let primitive = input_to_primitive(&input, id);
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
     }
 }

@@ -37,6 +37,8 @@ pub enum MessageKind {
         in_reply_to: Uuid,
         status: Status,
         result: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
     },
     /// Acknowledgment of message receipt.
     Ack { in_reply_to: Uuid },
@@ -205,11 +207,13 @@ mod tests {
             in_reply_to: id,
             status: Status::Completed,
             result: serde_json::json!({"approved": true}),
+            handling_mode: None,
         };
         if let MessageKind::Response {
             in_reply_to,
             status,
             result,
+            ..
         } = resp
         {
             assert_eq!(in_reply_to, id);
@@ -273,6 +277,7 @@ mod tests {
                 in_reply_to: Uuid::new_v4(),
                 status: Status::Completed,
                 result: serde_json::json!(null),
+                handling_mode: None,
             },
             MessageKind::Ack {
                 in_reply_to: Uuid::new_v4(),

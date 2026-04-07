@@ -289,6 +289,7 @@ impl CommsMessage {
                 in_reply_to,
                 status,
                 result,
+                ..
             } => CommsContent::Response {
                 in_reply_to: *in_reply_to,
                 status: (*status).into(),
@@ -341,6 +342,7 @@ impl CommsMessage {
                 in_reply_to,
                 status,
                 result,
+                ..
             } => CommsContent::Response {
                 in_reply_to: *in_reply_to,
                 status: (*status).into(),
@@ -621,6 +623,7 @@ mod tests {
                 in_reply_to: orig_request_id,
                 status: crate::Status::Completed,
                 result: serde_json::json!({"approved": true}),
+                handling_mode: None,
             },
         );
 

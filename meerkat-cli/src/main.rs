@@ -2658,6 +2658,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             additional_instructions: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.additional_instructions.clone()),
+            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
         };
 
         // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.

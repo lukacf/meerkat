@@ -226,6 +226,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.session_with_system_context_state()
     }
 
+    fn has_pending_boundary(&self) -> bool {
+        self.agent.session().has_pending_boundary()
+    }
+
     fn apply_runtime_system_context(
         &mut self,
         appends: &[meerkat_core::PendingSystemContextAppend],

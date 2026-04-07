@@ -4530,6 +4530,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                execution_kind: None,
             },
         )
         .await

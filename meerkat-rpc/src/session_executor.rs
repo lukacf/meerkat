@@ -237,6 +237,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             additional_instructions: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.additional_instructions.clone()),
+            execution_kind: None,
         };
 
         let result = self

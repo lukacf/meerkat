@@ -463,38 +463,6 @@ impl ContinuationInput {
             request_id: None,
         }
     }
-
-    /// Build the common runtime-owned continuation used after terminal peer
-    /// response injection.
-    pub fn terminal_peer_response(reason: impl Into<String>) -> Self {
-        Self::terminal_peer_response_for_request(reason, None)
-    }
-
-    /// Build the common runtime-owned continuation used after terminal peer
-    /// response injection, preserving the correlated request when known.
-    pub fn terminal_peer_response_for_request(
-        reason: impl Into<String>,
-        request_id: Option<String>,
-    ) -> Self {
-        Self {
-            header: InputHeader {
-                id: meerkat_core::lifecycle::InputId::new(),
-                timestamp: chrono::Utc::now(),
-                source: InputOrigin::System,
-                durability: InputDurability::Ephemeral,
-                visibility: InputVisibility {
-                    transcript_eligible: false,
-                    operator_eligible: false,
-                },
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            reason: reason.into(),
-            handling_mode: HandlingMode::Steer,
-            request_id,
-        }
-    }
 }
 
 /// Explicit operation/lifecycle input admitted through runtime instead of
@@ -506,6 +474,19 @@ pub struct OperationInput {
     pub operation_id: OperationId,
     /// Typed lifecycle event for the operation.
     pub event: OpEvent,
+}
+
+/// Classify an input's execution intent for the runtime loop.
+///
+/// `Continuation` inputs map to `ResumePending`; everything else is `ContentTurn`.
+/// Terminal peer responses are always `ContentTurn` regardless of handling_mode.
+pub(crate) fn classify_execution_kind(
+    input: &Input,
+) -> meerkat_core::lifecycle::RuntimeExecutionKind {
+    match input {
+        Input::Continuation(_) => meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+        _ => meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+    }
 }
 
 #[cfg(test)]
@@ -692,18 +673,14 @@ mod tests {
 
     #[test]
     fn continuation_input_serde() {
-        let input = Input::Continuation(ContinuationInput::terminal_peer_response_for_request(
-            "terminal peer response",
-            Some("req-1".into()),
-        ));
+        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "continuation");
-        assert_eq!(json["request_id"], "req-1");
         let parsed: Input = serde_json::from_value(json).unwrap();
         match parsed {
             Input::Continuation(continuation) => {
-                assert_eq!(continuation.request_id.as_deref(), Some("req-1"));
                 assert_eq!(continuation.handling_mode, HandlingMode::Steer);
+                assert_eq!(continuation.reason, "detached_background_op_completed");
             }
             other => panic!("Expected Continuation, got {other:?}"),
         }
@@ -711,16 +688,13 @@ mod tests {
 
     #[test]
     fn continuation_input_accepts_legacy_system_generated_tag() {
-        let input = Input::Continuation(ContinuationInput::terminal_peer_response_for_request(
-            "legacy system generated",
-            Some("req-legacy".into()),
-        ));
+        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
         let mut json = serde_json::to_value(&input).unwrap();
         json["input_type"] = serde_json::Value::String("system_generated".into());
         let parsed: Input = serde_json::from_value(json).unwrap();
         match parsed {
             Input::Continuation(continuation) => {
-                assert_eq!(continuation.request_id.as_deref(), Some("req-legacy"));
+                assert_eq!(continuation.reason, "detached_background_op_completed");
             }
             other => panic!("Expected Continuation, got {other:?}"),
         }
@@ -911,5 +885,81 @@ mod tests {
         });
         let json = serde_json::to_value(&input).unwrap();
         assert!(json.get("handling_mode").is_none());
+    }
+
+    // --- classify_execution_kind tests ---
+
+    #[test]
+    fn classify_prompt_is_content_turn() {
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: "hello".into(),
+            blocks: None,
+            turn_metadata: None,
+        });
+        assert_eq!(
+            classify_execution_kind(&input),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+        );
+    }
+
+    #[test]
+    fn classify_peer_terminal_is_content_turn() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: "done".into(),
+            blocks: None,
+            handling_mode: None,
+        });
+        assert_eq!(
+            classify_execution_kind(&input),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+        );
+    }
+
+    #[test]
+    fn classify_peer_terminal_with_steer_is_content_turn() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: "done".into(),
+            blocks: None,
+            handling_mode: Some(HandlingMode::Steer),
+        });
+        assert_eq!(
+            classify_execution_kind(&input),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+        );
+    }
+
+    #[test]
+    fn classify_continuation_is_resume_pending() {
+        let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
+        assert_eq!(
+            classify_execution_kind(&input),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
+        );
+    }
+
+    #[test]
+    fn classify_peer_message_is_content_turn() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            blocks: None,
+            handling_mode: None,
+        });
+        assert_eq!(
+            classify_execution_kind(&input),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+        );
     }
 }

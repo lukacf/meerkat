@@ -85,7 +85,10 @@ pub fn interaction_to_peer_input(
         convention: Some(convention),
         body: peer_rendered_body(interaction),
         blocks: peer_blocks(interaction),
-        handling_mode: None,
+        handling_mode: match interaction.handling_mode {
+            meerkat_core::types::HandlingMode::Queue => None,
+            mode => Some(mode),
+        },
     })
 }
 

@@ -262,6 +262,19 @@ impl CommsCommandRequest {
                         return Err(errors);
                     }
                 };
+                let handling_mode = match self.handling_mode.as_deref() {
+                    Some("steer") => Some(HandlingMode::Steer),
+                    Some("queue") => Some(HandlingMode::Queue),
+                    None => None,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "handling_mode",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
                 if errors.is_empty() {
                     let Some(to) = to else {
                         return Err(errors);
@@ -271,6 +284,7 @@ impl CommsCommandRequest {
                         in_reply_to,
                         status,
                         result: self.result.clone().unwrap_or(serde_json::Value::Null),
+                        handling_mode,
                     })
                 } else {
                     Err(errors)
@@ -400,6 +414,7 @@ pub enum CommsCommand {
         in_reply_to: InteractionId,
         status: ResponseStatus,
         result: serde_json::Value,
+        handling_mode: Option<HandlingMode>,
     },
 }
 

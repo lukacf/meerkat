@@ -82,6 +82,7 @@ enum SessionCommand {
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
+        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
     },
     ReplaceClient {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
@@ -304,6 +305,14 @@ pub trait SessionAgent: Send {
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
+
+    /// Whether the session has a pending user/tool-results boundary.
+    ///
+    /// Lightweight check used by the ResumePending no-op guard to avoid
+    /// calling `session_clone()` just to inspect the last message.
+    fn has_pending_boundary(&self) -> bool {
+        false // default: no pending boundary
+    }
 
     /// Update the `keep_alive` flag in the session's durable metadata.
     ///
@@ -655,6 +664,13 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     Some(CoreApplyTerminal::RunResult(run_result)),
                 )
                 .await
+            }
+            Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
+                // ResumePending with no boundary — succeed as no-op through
+                // the canonical boundary-apply path. contributing_input_ids
+                // are consumed normally.
+                self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+                    .await
             }
             Err(error) => {
                 if let Some(terminal) = Self::callback_pending_terminal(&error) {
@@ -1010,6 +1026,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 result_tx,
                 skill_references: req.skill_references,
                 flow_tool_overlay: None,
+                execution_kind: None, // non-runtime substrate-direct path
             })
             .await
             .is_err()
@@ -1129,6 +1146,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     result_tx,
                     skill_references: req.skill_references,
                     flow_tool_overlay: req.flow_tool_overlay,
+                    execution_kind: req.execution_kind,
                 })
                 .await
                 .map_err(|_| {
@@ -1649,6 +1667,7 @@ async fn session_task<A: SessionAgent>(
                 result_tx,
                 skill_references,
                 flow_tool_overlay,
+                execution_kind,
             } => {
                 let (restore_first_turn_pending, pending_initial_prompt, pending_tool_results) = {
                     let mut guard = lock_deferred_turn_state(&deferred_turn_state);
@@ -1668,6 +1687,28 @@ async fn session_task<A: SessionAgent>(
                     .iter()
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
+
+                // ResumePending no-boundary check: must happen BEFORE any session
+                // mutation (set_skill_references, set_flow_tool_overlay,
+                // apply_pending_tool_results). These three calls mutate session
+                // state and cannot be rolled back.
+                if matches!(
+                    execution_kind,
+                    Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+                ) && !agent.has_pending_boundary()
+                {
+                    restore_deferred_turn_inputs(
+                        &deferred_turn_state,
+                        restore_first_turn_pending,
+                        pending_initial_prompt,
+                        pending_tool_results,
+                    );
+                    control.turn_lock.store(false, Ordering::Release);
+                    control.interrupt_requested.store(false, Ordering::Release);
+                    let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
+                    continue;
+                }
+
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(
@@ -1717,17 +1758,47 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let has_prompt =
-                        prompt.has_images() || !prompt.text_content().trim().is_empty();
-                    let run_fut: RunFut<'_> = if has_prompt {
-                        Box::pin(agent.run_turn_with_events(
-                            prompt,
-                            handling_mode,
-                            render_metadata,
-                            agent_event_tx.clone(),
-                        ))
-                    } else {
-                        Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
+                    let run_fut: RunFut<'_> = match execution_kind {
+                        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn) => {
+                            Box::pin(agent.run_turn_with_events(
+                                prompt,
+                                handling_mode,
+                                render_metadata,
+                                agent_event_tx.clone(),
+                            ))
+                        }
+                        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending) => {
+                            // Boundary verified by no-op guard above.
+                            Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
+                        }
+                        None => {
+                            // Non-runtime substrate-direct paths only.
+                            let has_prompt = prompt.has_non_text_content()
+                                || !prompt.text_content().trim().is_empty();
+                            if has_prompt {
+                                Box::pin(agent.run_turn_with_events(
+                                    prompt,
+                                    handling_mode,
+                                    render_metadata,
+                                    agent_event_tx.clone(),
+                                ))
+                            } else if agent.has_pending_boundary() {
+                                Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
+                            } else {
+                                // No prompt and no boundary — nothing to do.
+                                restore_deferred_turn_inputs(
+                                    &deferred_turn_state,
+                                    restore_first_turn_pending,
+                                    pending_initial_prompt,
+                                    pending_tool_results,
+                                );
+                                control.turn_lock.store(false, Ordering::Release);
+                                control.interrupt_requested.store(false, Ordering::Release);
+                                let _ = result_tx
+                                    .send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
+                                continue;
+                            }
+                        }
                     };
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;

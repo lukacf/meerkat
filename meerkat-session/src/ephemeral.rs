@@ -1578,6 +1578,67 @@ fn lock_deferred_turn_state(
     }
 }
 
+/// Canonical turn-admissibility disposition.
+///
+/// This is the single owner of the "can this turn request legally proceed?"
+/// decision. It reads both the live session state (has_pending_boundary)
+/// AND deferred staging state (has_staged_tool_results) to produce a typed
+/// outcome. No shell code should re-derive this from partial projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartTurnDisposition {
+    /// Run a content turn (prompt → LLM).
+    RunContentTurn,
+    /// Resume a pending continuation boundary (ToolResults or User).
+    RunPending,
+    /// No pending boundary exists and no staged tool results will create one.
+    /// The caller should return NoPendingBoundary.
+    NoPendingBoundary,
+}
+
+/// Evaluate turn admissibility from the canonical inputs.
+///
+/// This function is the single source of truth for deciding how a StartTurn
+/// request should be dispatched. It considers:
+/// - `execution_kind`: typed intent from the runtime layer (or None for substrate-direct)
+/// - `prompt`: the content to send (for the None/substrate-direct fallback)
+/// - `session_has_pending_boundary`: whether the live session ends in User/ToolResults
+/// - `has_staged_tool_results`: whether deferred tool results will create a boundary
+fn evaluate_start_turn_disposition(
+    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+    prompt: &meerkat_core::types::ContentInput,
+    session_has_pending_boundary: bool,
+    has_staged_tool_results: bool,
+) -> StartTurnDisposition {
+    // A pending boundary exists if the live session has one OR if staged
+    // tool results will materialize one when applied.
+    let effective_pending_boundary = session_has_pending_boundary || has_staged_tool_results;
+
+    match execution_kind {
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn) => {
+            StartTurnDisposition::RunContentTurn
+        }
+        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending) => {
+            if effective_pending_boundary {
+                StartTurnDisposition::RunPending
+            } else {
+                StartTurnDisposition::NoPendingBoundary
+            }
+        }
+        None => {
+            // Non-runtime substrate-direct paths: infer from prompt content.
+            let has_prompt =
+                prompt.has_non_text_content() || !prompt.text_content().trim().is_empty();
+            if has_prompt {
+                StartTurnDisposition::RunContentTurn
+            } else if effective_pending_boundary {
+                StartTurnDisposition::RunPending
+            } else {
+                StartTurnDisposition::NoPendingBoundary
+            }
+        }
+    }
+}
+
 fn merge_content_inputs(
     deferred: meerkat_core::types::ContentInput,
     turn: meerkat_core::types::ContentInput,
@@ -1688,20 +1749,17 @@ async fn session_task<A: SessionAgent>(
                     .flat_map(|pending| pending.results.clone())
                     .collect::<Vec<_>>();
 
-                // ResumePending no-boundary check: must happen BEFORE any session
-                // mutation (set_skill_references, set_flow_tool_overlay,
-                // apply_pending_tool_results). These three calls mutate session
-                // state and cannot be rolled back.
-                //
-                // Staged tool results (flattened_tool_results) will create a
-                // ToolResults boundary once applied, so they count as a pending
-                // boundary even if the session's current last message is Assistant.
-                if matches!(
+                // Canonical turn-preflight: evaluate whether this turn request
+                // can legally proceed. This is the single owner of the
+                // admissibility decision — it reads both the live session state
+                // AND deferred staging state to produce a typed disposition.
+                let disposition = evaluate_start_turn_disposition(
                     execution_kind,
-                    Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
-                ) && !agent.has_pending_boundary()
-                    && flattened_tool_results.is_empty()
-                {
+                    &prompt,
+                    agent.has_pending_boundary(),
+                    !flattened_tool_results.is_empty(),
+                );
+                if matches!(disposition, StartTurnDisposition::NoPendingBoundary) {
                     restore_deferred_turn_inputs(
                         &deferred_turn_state,
                         restore_first_turn_pending,
@@ -1763,8 +1821,10 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let run_fut: RunFut<'_> = match execution_kind {
-                        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn) => {
+                    // Dispatch based on the canonical disposition computed above.
+                    // NoPendingBoundary was already handled before Running state.
+                    let run_fut: RunFut<'_> = match disposition {
+                        StartTurnDisposition::RunContentTurn => {
                             Box::pin(agent.run_turn_with_events(
                                 prompt,
                                 handling_mode,
@@ -1772,37 +1832,12 @@ async fn session_task<A: SessionAgent>(
                                 agent_event_tx.clone(),
                             ))
                         }
-                        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending) => {
-                            // Boundary verified by no-op guard above.
+                        StartTurnDisposition::RunPending => {
                             Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
                         }
-                        None => {
-                            // Non-runtime substrate-direct paths only.
-                            let has_prompt = prompt.has_non_text_content()
-                                || !prompt.text_content().trim().is_empty();
-                            if has_prompt {
-                                Box::pin(agent.run_turn_with_events(
-                                    prompt,
-                                    handling_mode,
-                                    render_metadata,
-                                    agent_event_tx.clone(),
-                                ))
-                            } else if agent.has_pending_boundary() {
-                                Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
-                            } else {
-                                // No prompt and no boundary — nothing to do.
-                                restore_deferred_turn_inputs(
-                                    &deferred_turn_state,
-                                    restore_first_turn_pending,
-                                    pending_initial_prompt,
-                                    pending_tool_results,
-                                );
-                                control.turn_lock.store(false, Ordering::Release);
-                                control.interrupt_requested.store(false, Ordering::Release);
-                                let _ = result_tx
-                                    .send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
-                                continue;
-                            }
+                        StartTurnDisposition::NoPendingBoundary => {
+                            // Already handled above — unreachable here.
+                            unreachable!("NoPendingBoundary handled before Running state")
                         }
                     };
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
@@ -1920,5 +1955,99 @@ async fn session_task<A: SessionAgent>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod disposition_tests {
+    use super::*;
+    use meerkat_core::lifecycle::RuntimeExecutionKind;
+
+    #[test]
+    fn content_turn_always_runs() {
+        let d = evaluate_start_turn_disposition(
+            Some(RuntimeExecutionKind::ContentTurn),
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            false,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::RunContentTurn);
+    }
+
+    #[test]
+    fn resume_pending_with_session_boundary() {
+        let d = evaluate_start_turn_disposition(
+            Some(RuntimeExecutionKind::ResumePending),
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            true,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::RunPending);
+    }
+
+    #[test]
+    fn resume_pending_with_staged_tool_results() {
+        let d = evaluate_start_turn_disposition(
+            Some(RuntimeExecutionKind::ResumePending),
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            false,
+            true,
+        );
+        assert_eq!(d, StartTurnDisposition::RunPending);
+    }
+
+    #[test]
+    fn resume_pending_no_boundary_no_staged() {
+        let d = evaluate_start_turn_disposition(
+            Some(RuntimeExecutionKind::ResumePending),
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            false,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
+    }
+
+    #[test]
+    fn none_with_prompt_runs_content_turn() {
+        let d = evaluate_start_turn_disposition(
+            None,
+            &meerkat_core::types::ContentInput::Text("hello".into()),
+            false,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::RunContentTurn);
+    }
+
+    #[test]
+    fn none_empty_prompt_with_boundary_runs_pending() {
+        let d = evaluate_start_turn_disposition(
+            None,
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            true,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::RunPending);
+    }
+
+    #[test]
+    fn none_empty_prompt_no_boundary_is_no_pending() {
+        let d = evaluate_start_turn_disposition(
+            None,
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            false,
+            false,
+        );
+        assert_eq!(d, StartTurnDisposition::NoPendingBoundary);
+    }
+
+    #[test]
+    fn none_empty_prompt_staged_tool_results_runs_pending() {
+        let d = evaluate_start_turn_disposition(
+            None,
+            &meerkat_core::types::ContentInput::Text(String::new()),
+            false,
+            true,
+        );
+        assert_eq!(d, StartTurnDisposition::RunPending);
     }
 }

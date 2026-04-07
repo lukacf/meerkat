@@ -135,6 +135,7 @@ async fn integration_real_router_send() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -167,6 +168,7 @@ async fn integration_real_router_resolves_peer_name() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -208,6 +210,7 @@ async fn integration_real_router_connects_to_peer() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -268,6 +271,7 @@ async fn integration_real_router_signs_envelope() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -325,6 +329,7 @@ async fn integration_real_router_waits_for_ack() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -371,6 +376,7 @@ async fn integration_real_router_timeout_returns_offline() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -438,6 +444,7 @@ async fn integration_real_send() {
             MessageKind::Message {
                 body: "test body".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -479,7 +486,7 @@ async fn integration_real_send_request() {
         let envelope = read_envelope_async(&mut stream).await.unwrap();
 
         match envelope.kind {
-            MessageKind::Request { intent, params } => {
+            MessageKind::Request { intent, params, .. } => {
                 assert_eq!(intent, "review-pr");
                 assert_eq!(params["pr"], 42);
             }
@@ -667,6 +674,7 @@ async fn integration_real_router_inproc_send() {
             MessageKind::Message {
                 body: "hello via inproc".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -726,6 +734,7 @@ async fn integration_real_router_inproc_peer_not_found() {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;

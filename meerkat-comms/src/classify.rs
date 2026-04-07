@@ -181,6 +181,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -200,6 +201,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -253,6 +255,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -271,6 +274,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -289,6 +293,7 @@ mod tests {
             MessageKind::Request {
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -308,6 +313,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -325,6 +331,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -376,6 +383,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };

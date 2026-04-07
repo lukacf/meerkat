@@ -241,7 +241,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 to: agent_b.comms_manager().keypair().public_key(),
                 kind: match msg.content {
                     meerkat_comms::agent::CommsContent::Message { body, .. } => {
-                        meerkat_comms::MessageKind::Message { body, blocks: None }
+                        meerkat_comms::MessageKind::Message {
+                            body,
+                            blocks: None,
+                            handling_mode: None,
+                        }
                     }
                     _ => continue,
                 },

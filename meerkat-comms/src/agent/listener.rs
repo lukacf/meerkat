@@ -240,6 +240,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello from test".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -324,6 +325,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello from tcp test".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -406,6 +408,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello via manager".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };

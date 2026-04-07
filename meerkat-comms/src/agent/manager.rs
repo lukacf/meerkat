@@ -241,6 +241,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello from sender".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };

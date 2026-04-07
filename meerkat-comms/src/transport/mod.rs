@@ -131,7 +131,11 @@ mod tests {
             id: Uuid::new_v4(),
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
-            kind: MessageKind::Message { blocks: None, body },
+            kind: MessageKind::Message {
+                blocks: None,
+                body,
+                handling_mode: None,
+            },
             sig: crate::identity::Signature::new([0u8; 64]),
         };
         envelope.sign(&keypair);

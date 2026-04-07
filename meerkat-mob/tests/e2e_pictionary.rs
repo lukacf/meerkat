@@ -592,6 +592,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                     to: meerkat_core::comms::PeerName::new(&peer_name).unwrap(),
                     body: format!("Pictionary {label} — guess what I drew!"),
                     blocks: Some(image_blocks.clone()),
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                 })
                 .await
                 .unwrap_or_else(|e| panic!("artist→{peer_name} peer send: {e}"));

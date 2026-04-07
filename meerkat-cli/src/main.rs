@@ -7841,7 +7841,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let session_id = SessionId::new();
         let cmd = parse_comms_send_payload(
-            r#"{"kind":"peer_request","to":"agent-b","intent":"help","params":{"topic":"x"},"stream":"reserve_interaction"}"#,
+            r#"{"kind":"peer_request","to":"agent-b","intent":"help","params":{"topic":"x"},"handling_mode":"queue","stream":"reserve_interaction"}"#,
             &session_id,
         )
         .expect("peer request payload should parse");
@@ -7849,6 +7849,7 @@ mod tests {
             to,
             intent,
             params,
+            handling_mode,
             stream,
         } = cmd
         else {
@@ -7857,6 +7858,7 @@ mod tests {
         assert_eq!(to.to_string(), "agent-b");
         assert_eq!(intent, "help");
         assert_eq!(params["topic"], "x");
+        assert_eq!(handling_mode, meerkat_core::types::HandlingMode::Queue);
         assert_eq!(
             stream,
             meerkat_core::comms::InputStreamMode::ReserveInteraction

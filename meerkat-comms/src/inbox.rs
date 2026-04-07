@@ -185,8 +185,8 @@ impl InboxSender {
                 from_peer: result.from_peer,
                 lifecycle_peer: result.lifecycle_peer,
             };
-            // Enqueue only on classified channel (no raw double-enqueue).
-            // drain_classified_inbox_interactions() is the sole consumer.
+            // Enqueue only on the candidate channel (no raw double-enqueue).
+            // drain_peer_input_candidates() is the sole consumer.
             classified_tx.try_send(entry).map_err(|err| match err {
                 mpsc::error::TrySendError::Closed(_) => InboxError::Closed,
                 mpsc::error::TrySendError::Full(_) => InboxError::Full,
@@ -226,6 +226,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "test".to_string(),
+                handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
         }
@@ -435,8 +436,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_classified_send_does_not_populate_raw_channel() {
-        // Classified send only enqueues on the classified channel.
-        // No raw double-enqueue; drain_classified_inbox_interactions() is the sole consumer.
+        // Classified send only enqueues on the candidate channel.
+        // No raw double-enqueue; drain_peer_input_candidates() is the sole consumer.
         let sender_pubkey = PubKey::new([1u8; 32]);
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let (mut inbox, sender) = Inbox::new_classified(ctx);

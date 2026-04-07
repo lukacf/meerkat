@@ -13364,6 +13364,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                     data: "aGVsbG8=".into(),
                 },
             ]),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         },
     )
     .await
@@ -13614,6 +13615,7 @@ async fn test_wire_enables_peer_request_delivery() {
         to: peer_name,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
     let receipt = CoreCommsRuntime::send(&*comms_a, cmd)

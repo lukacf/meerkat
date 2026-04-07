@@ -247,6 +247,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let envelope_id = envelope.id;
@@ -284,6 +285,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]), // Invalid signature
         };
@@ -320,6 +322,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let bytes = envelope_to_bytes(&envelope).await;
@@ -354,6 +357,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]), // Invalid signature
         };
@@ -399,6 +403,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let bytes = envelope_to_bytes(&envelope).await;
@@ -442,6 +447,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let original_id = envelope.id;
@@ -487,6 +493,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let envelope_id = envelope.id;
@@ -530,6 +537,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let original_id = envelope.id;
@@ -569,6 +577,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let original_id = envelope.id;
@@ -680,6 +689,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]), // Invalid
         };
@@ -719,6 +729,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let bytes = envelope_to_bytes(&envelope).await;

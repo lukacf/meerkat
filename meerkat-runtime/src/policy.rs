@@ -195,11 +195,10 @@ mod tests {
 
     #[test]
     fn interrupt_policy_serde() {
-        for policy in [InterruptPolicy::None] {
-            let json = serde_json::to_value(policy).unwrap();
-            let parsed: InterruptPolicy = serde_json::from_value(json).unwrap();
-            assert_eq!(policy, parsed);
-        }
+        let policy = InterruptPolicy::None;
+        let json = serde_json::to_value(policy).unwrap();
+        let parsed: InterruptPolicy = serde_json::from_value(json).unwrap();
+        assert_eq!(policy, parsed);
     }
 
     #[test]

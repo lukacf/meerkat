@@ -67,6 +67,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         intent: "mob.ping".to_string(),
         params: serde_json::json!({"seq": 1}),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: InputStreamMode::None,
     };
     let receipt = CoreCommsRuntime::send(&sender, request_cmd)
@@ -270,6 +271,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "before removal".to_string(),
         blocks: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
     };
     let receipt = CoreCommsRuntime::send(&sender, cmd).await;
     assert!(
@@ -299,6 +301,7 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
         to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
         body: "after removal".to_string(),
         blocks: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
     };
     let result = CoreCommsRuntime::send(&sender, cmd_after).await;
     assert!(
@@ -661,6 +664,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         to: PeerName::new(b_name.clone()).expect("valid peer name"),
         intent: "mob.contract.before".to_string(),
         params: serde_json::json!({"step": "before_turn"}),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: InputStreamMode::None,
     };
     let before_receipt = CoreCommsRuntime::send(&*comms_a, before_cmd)
@@ -701,6 +705,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         to: PeerName::new(a_name.clone()).expect("valid peer name"),
         intent: "mob.contract.after".to_string(),
         params: serde_json::json!({"step": "after_turn"}),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: InputStreamMode::None,
     };
     let after_receipt = CoreCommsRuntime::send(&*comms_b, after_cmd)

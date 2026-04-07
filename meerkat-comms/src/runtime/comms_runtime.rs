@@ -2065,6 +2065,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let req = signed_envelope(
@@ -2073,6 +2074,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 19}),
+                handling_mode: None,
             },
         );
         let mut req = req;
@@ -2161,6 +2163,7 @@ mod tests {
             MessageKind::Message {
                 body: "please inspect this".to_string(),
                 blocks: Some(blocks.clone()),
+                handling_mode: None,
             },
         );
 
@@ -2395,9 +2398,9 @@ mod tests {
             })
             .unwrap();
 
-        let interactions = runtime.drain_classified_inbox_interactions().await.unwrap();
-        assert_eq!(interactions.len(), 1);
-        let interaction = &interactions[0].interaction;
+        let candidates = runtime.drain_peer_input_candidates().await;
+        assert_eq!(candidates.len(), 1);
+        let interaction = &candidates[0].interaction;
         assert_eq!(
             interaction.handling_mode,
             meerkat_core::types::HandlingMode::Steer
@@ -2606,6 +2609,7 @@ mod tests {
             to: PeerName::new("missing-peer".to_string())
                 .expect("missing-peer is a valid peer name"),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let result = CoreCommsRuntime::send(&runtime, cmd).await;
@@ -2643,6 +2647,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
             body: "greeting".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
@@ -2699,6 +2704,7 @@ mod tests {
             }]),
             to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
             body: "blob-backed image".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
@@ -2733,6 +2739,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "inproc-only hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
@@ -2796,6 +2803,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello without trusted".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
 
         let receipt = CoreCommsRuntime::send(&sender, cmd).await;
@@ -2860,6 +2868,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("receiver_name is a valid peer name"),
             body: "hello trusted peer".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
         let receipt = CoreCommsRuntime::send(&sender, send_cmd).await;
         assert!(matches!(receipt, Ok(SendReceipt::PeerMessageSent { .. })));
@@ -3092,6 +3101,7 @@ mod tests {
                 blocks: None,
                 to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
                 body: "hello".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )
         .await
@@ -3127,6 +3137,7 @@ mod tests {
                 blocks: None,
                 to: PeerName::new(peer_name.clone()).expect("valid peer name"),
                 body: "hello".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )
         .await;
@@ -3159,6 +3170,7 @@ mod tests {
                 blocks: None,
                 to: PeerName::new(missing_name.clone()).expect("valid peer name"),
                 body: "hello".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )
         .await;
@@ -3202,6 +3214,7 @@ mod tests {
                 blocks: None,
                 to: PeerName::new(missing_name.clone()).expect("valid peer name"),
                 body: "hello".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
             },
         )
         .await;
@@ -3259,11 +3272,13 @@ mod tests {
                         blocks: None,
                         to: entry.name.clone(),
                         body: "truthfulness test".to_string(),
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                     },
                     "peer_request" => CommsCommand::PeerRequest {
                         to: entry.name.clone(),
                         intent: "test".to_string(),
                         params: serde_json::json!({}),
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                         stream: InputStreamMode::None,
                     },
                     "peer_response" => CommsCommand::PeerResponse {
@@ -3406,6 +3421,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(peer_name).expect("peer_name is a valid peer name"),
             body: "not streamable".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
         let result = CoreCommsRuntime::send_and_stream(&runtime, cmd).await;
         match result {
@@ -3569,6 +3585,7 @@ mod tests {
             blocks: None,
             to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
             body: "should fail".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         };
         let result = CoreCommsRuntime::send(&sender, cmd).await;
         assert!(

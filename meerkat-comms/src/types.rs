@@ -472,6 +472,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };

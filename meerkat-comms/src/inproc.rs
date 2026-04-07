@@ -12,7 +12,14 @@
 //! InprocRegistry::global().register("my-agent", pubkey, sender);
 //!
 //! // Send to an inproc peer (via Router with inproc:// address)
-//! router.send("my-agent", MessageKind::Message { blocks: None, body: "hello".into() }).await?;
+//! router.send(
+//!     "my-agent",
+//!     MessageKind::Message {
+//!         blocks: None,
+//!         body: "hello".into(),
+//!         handling_mode: None,
+//!     },
+//! ).await?;
 //!
 //! // Unregister when done
 //! InprocRegistry::global().unregister(&pubkey);
@@ -700,6 +707,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello inproc".to_string(),
+                handling_mode: None,
             },
         );
         assert!(result.is_ok());
@@ -713,7 +721,9 @@ mod tests {
                 assert_eq!(envelope.from, sender_keypair.public_key());
                 assert_eq!(envelope.to, receiver_keypair.public_key());
                 match &envelope.kind {
-                    MessageKind::Message { blocks: None, body } => {
+                    MessageKind::Message {
+                        blocks: None, body, ..
+                    } => {
                         assert_eq!(body, "hello inproc");
                     }
                     _ => panic!("expected Message kind"),
@@ -736,6 +746,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
 
@@ -760,6 +771,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
 
@@ -797,6 +809,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello scoped".to_string(),
+                handling_mode: None,
             },
             true,
         );
@@ -810,6 +823,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "should not deliver".to_string(),
+                handling_mode: None,
             },
             true,
         );
@@ -944,6 +958,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
             false,
         );
@@ -959,6 +974,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
             false,
         );

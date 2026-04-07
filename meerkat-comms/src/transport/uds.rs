@@ -103,6 +103,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "hello from uds".to_string(),
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };

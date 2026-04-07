@@ -223,6 +223,7 @@ async fn integration_real_uds_message_exchange() {
             MessageKind::Message {
                 body: "Hello from A!".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await
@@ -289,6 +290,7 @@ async fn integration_real_tcp_message_exchange() {
             MessageKind::Message {
                 body: "Hello via TCP!".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await
@@ -437,6 +439,7 @@ async fn integration_real_untrusted_rejected() {
             MessageKind::Message {
                 body: "Hello!".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         )
         .await;
@@ -559,6 +562,7 @@ async fn integration_real_concurrent_multi_peer() {
         MessageKind::Message {
             body: "Hello B!".to_string(),
             blocks: None,
+            handling_mode: None,
         },
     );
     let send_c = router_a.send(
@@ -566,6 +570,7 @@ async fn integration_real_concurrent_multi_peer() {
         MessageKind::Message {
             body: "Hello C!".to_string(),
             blocks: None,
+            handling_mode: None,
         },
     );
 

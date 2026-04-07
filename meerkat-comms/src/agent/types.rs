@@ -529,6 +529,7 @@ mod tests {
             MessageKind::Message {
                 body: "hello world".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         );
 
@@ -560,6 +561,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 123}),
+                handling_mode: None,
             },
         );
         let request_id = envelope.id;
@@ -594,6 +596,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review-pr".to_string(),
                 params: serde_json::json!({"pr": 456}),
+                handling_mode: None,
             },
         );
 
@@ -680,6 +683,7 @@ mod tests {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         );
 
@@ -709,6 +713,7 @@ mod tests {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -879,6 +884,7 @@ mod tests {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };

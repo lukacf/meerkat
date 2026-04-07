@@ -719,7 +719,7 @@ mod tests {
 
         // Builtin JSON outputs should be serialized into text content without
         // losing object structure.
-        let call_json = serde_json::value::RawValue::from_string(r#"{}"#.to_string()).unwrap();
+        let call_json = serde_json::value::RawValue::from_string(r"{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-str",
             name: "datetime",

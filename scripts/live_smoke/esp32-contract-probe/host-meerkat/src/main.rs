@@ -28,7 +28,7 @@ use meerkat_runtime::input::{Input, InputDurability, InputHeader, InputOrigin, I
 use meerkat_runtime::RuntimeSessionAdapter;
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::SessionAgentBuilder;
-use meerkat_tools::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer};
+use meerkat_tools::EmptyToolDispatcher;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -329,27 +329,8 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, meerkat_core::service::SessionError> {
-        let task_store = Arc::new(MemoryTaskStore::new());
-        let inner = CompositeDispatcher::new(
-            task_store,
-            &BuiltinToolConfig {
-                policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
-                ..Default::default()
-            },
-            None,
-            None,
-            None,
-            Some("phase0-host-runtime".to_string()),
-            true,
-        )
-        .map_err(|error| {
-            meerkat_core::service::SessionError::Agent(
-                meerkat_core::error::AgentError::ConfigError(error.to_string()),
-            )
-        })?;
-
         let tools: Arc<dyn AgentToolDispatcher> = Arc::new(HostSendGuardDispatcher::new(
-            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime)),
+            wrap_with_comms(Arc::new(EmptyToolDispatcher), Arc::clone(&self.comms_runtime)),
             Arc::clone(&self.inbound_epoch),
             Arc::new(AtomicUsize::new(0)),
         ));
@@ -394,12 +375,6 @@ impl SessionAgentBuilder for HostProbeAgentBuilder {
 enum TranscriptEvent {
     Incoming { from: String, text: String },
     Outgoing { to: String, text: String },
-}
-
-struct PendingPrompt {
-    step: usize,
-    prompt: String,
-    retries: usize,
 }
 
 struct HostSendGuardDispatcher {

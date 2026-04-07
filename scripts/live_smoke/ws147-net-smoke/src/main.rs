@@ -7,7 +7,8 @@ use esp_idf_svc::wifi::{
     BlockingWifi, Configuration, EspWifi,
 };
 use esp_idf_sys as sys;
-use std::net::UdpSocket;
+use std::io::Write;
+use std::net::{TcpListener, UdpSocket};
 use std::ptr;
 use std::thread;
 use std::time::Duration;
@@ -23,6 +24,10 @@ const LCD_H_RES: usize = 172;
 const LCD_V_RES: usize = 320;
 const LCD_PIXEL_CLOCK_HZ: u32 = 12_000_000;
 const OFFSET_X: u16 = 34;
+const TCP_LISTEN_PORT: &str = match option_env!("TCP_LISTEN_PORT") {
+    Some(value) => value,
+    None => "4210",
+};
 const WIFI_SSID: &str = match option_env!("WIFI_SSID") {
     Some(value) => value,
     None => "L&L",
@@ -262,7 +267,35 @@ unsafe fn run() -> Result<()> {
     fill_color(io, 0x07E0)?;
     let _ = marker.send_to(b"WS147:DISPLAY:FILL_OK", MARKER_BROADCAST_ADDR);
 
+    let tcp_listen_addr = format!("0.0.0.0:{TCP_LISTEN_PORT}");
+    let listener = TcpListener::bind(&tcp_listen_addr)
+        .map_err(|e| anyhow!("tcp bind {tcp_listen_addr}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| anyhow!("tcp nonblocking {tcp_listen_addr}: {e}"))?;
+    let _ = marker.send_to(
+        format!("WS147:TCP:LISTENING addr={tcp_listen_addr}").as_bytes(),
+        MARKER_BROADCAST_ADDR,
+    );
+
     loop {
+        match listener.accept() {
+            Ok((mut stream, addr)) => {
+                let _ = marker.send_to(
+                    format!("WS147:TCP:ACCEPT addr={addr}").as_bytes(),
+                    MARKER_BROADCAST_ADDR,
+                );
+                let _ = stream.write_all(b"WS147 TCP SMOKE\n");
+                let _ = stream.flush();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                let _ = marker.send_to(
+                    format!("WS147:TCP:ERROR error={error}").as_bytes(),
+                    MARKER_BROADCAST_ADDR,
+                );
+            }
+        }
         let _ = marker.send_to(
             format!("WS147:HEARTBEAT ip={ip}").as_bytes(),
             MARKER_BROADCAST_ADDR,

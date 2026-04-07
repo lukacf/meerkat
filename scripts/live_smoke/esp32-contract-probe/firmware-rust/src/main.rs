@@ -1,13 +1,13 @@
-use std::ffi::{CString, c_char};
 use std::convert::Infallible;
-use std::io::Write as _;
+use std::ffi::{c_char, CString};
+use std::io::{BufRead as _, Write as _};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::ptr;
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,11 +22,13 @@ use embedded_graphics::text::{Baseline, Text};
 use embedded_svc::http::client::Client as HttpClient;
 use embedded_svc::http::Method;
 use embedded_svc::io::Write as _;
-use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration as WifiConfiguration};
+use embedded_svc::wifi::{
+    AccessPointInfo, AuthMethod, ClientConfiguration, Configuration as WifiConfiguration,
+    PmfConfiguration,
+};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::units::*;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection, Response};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
@@ -35,31 +37,30 @@ use esp_idf_svc::sys;
 use esp_idf_svc::tls::X509;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use futures::StreamExt;
+use meerkat_client::{LlmClientAdapter, OpenAiClient};
 use meerkat_comms::agent::wrap_with_comms;
 use meerkat_comms::{
     CommsConfig, CommsRuntime, Keypair, ResolvedCommsConfig, TrustedPeer, TrustedPeers,
 };
-use meerkat_client::{LlmClientAdapter, OpenAiClient};
-use meerkat_core::event::EventEnvelope;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
-use meerkat_core::{
-    AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, BindOutcome, HookCapability, HookEntryConfig,
-    HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, RetryPolicy,
-};
 use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
+    SessionError, SessionService,
 };
-use meerkat_core::SessionServiceCommsExt;
-use meerkat_core::types::{HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::{
+    AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    BindOutcome, HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint,
+    HookRuntimeConfig, HooksConfig,
+};
 use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
-use meerkat_runtime::{InMemoryRuntimeStore, RuntimeSessionAdapter};
 use meerkat_runtime::comms_drain::spawn_comms_drain_with_observer;
+use meerkat_runtime::input::{Input, InputOrigin, PromptInput};
+use meerkat_runtime::{CompletionOutcome, InMemoryRuntimeStore, RuntimeSessionAdapter};
+use meerkat_session::ephemeral::SessionAgentBuilder;
 use meerkat_session::PersistentSessionService;
-use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder};
 use meerkat_store::{MemoryBlobStore, MemoryStore};
-use meerkat_tools::{BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolMode, ToolPolicyLayer};
 use serde_json::json;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -92,9 +93,14 @@ const HOST_PEER_NAME: &str = match option_env!("HOST_PEER_NAME") {
     None => "phase0-host",
 };
 const MICROPYTHON_TOOL_NAME: &str = "micropython_exec";
+const HOST_PROMPT_LISTEN_PORT: u16 = 4311;
 const HOST_PEER_ADDR: &str = match option_env!("HOST_PEER_ADDR") {
     Some(value) => value,
     None => "tcp://127.0.0.1:4220",
+};
+const HOST_INPUT_MODE: &str = match option_env!("HOST_INPUT_MODE") {
+    Some(value) => value,
+    None => "comms",
 };
 const LCD_WIDTH: u16 = 172;
 const LCD_HEIGHT: u16 = 320;
@@ -107,13 +113,14 @@ const LCD_PIN_DC: i32 = 41;
 const LCD_PIN_RST: i32 = 39;
 const LCD_PIN_CS: i32 = 42;
 const LCD_PIN_BL: i32 = 48;
-const MEERKAT_WORKER_STACK_BYTES: &[usize] =
-    &[56 * 1024, 48 * 1024, 40 * 1024, 32 * 1024];
-const COMMS_WORKER_STACK_BYTES: &[usize] = &[64 * 1024, 56 * 1024];
+const MEERKAT_WORKER_STACK_BYTES: &[usize] = &[56 * 1024, 48 * 1024, 40 * 1024, 32 * 1024];
 const PHASE0_HOST_SECRET: [u8; 32] = [7; 32];
 const PHASE0_DEVICE_SECRET: [u8; 32] = [9; 32];
-const OPENAI_WE1_PEM: &[u8] =
-    concat!(include_str!("../../../../../meerkat-client/src/openai_we1.pem"), "\0").as_bytes();
+const OPENAI_WE1_PEM: &[u8] = concat!(
+    include_str!("../../../../../meerkat-client/src/openai_we1.pem"),
+    "\0"
+)
+.as_bytes();
 const MARKER_BROADCAST_ADDR: &str = "255.255.255.255:42424";
 
 static MARKER_UDP_SOCKET: OnceLock<UdpSocket> = OnceLock::new();
@@ -211,7 +218,6 @@ struct MeerkatEvidence {
     tool_requested: usize,
     tool_completed: usize,
     text_bytes: usize,
-    saw_datetime: bool,
     saw_micropython: bool,
 }
 
@@ -234,7 +240,9 @@ struct CommsRunSummary {
     memory_after: MemorySnapshot,
 }
 
-enum DisplayEvent {
+/// Board-local UI signals. The probe firmware owns how these are rendered;
+/// Meerkat only emits generic hooks, tool calls, and session events.
+enum BoardUiSignal {
     Stage {
         stage: String,
         headline: String,
@@ -247,6 +255,169 @@ enum DisplayEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostInputMode {
+    Comms,
+    Serial,
+}
+
+enum SerialHostCommand {
+    Prompt { text: String },
+    Stop,
+    Ping,
+}
+
+#[derive(Clone, Default)]
+struct BoardUiEmitter {
+    tx: Option<mpsc::UnboundedSender<BoardUiSignal>>,
+}
+
+impl BoardUiEmitter {
+    fn new(tx: mpsc::UnboundedSender<BoardUiSignal>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    fn stage(
+        &self,
+        stage: impl Into<String>,
+        headline: impl Into<String>,
+        detail: Option<String>,
+        background: Rgb565,
+    ) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(BoardUiSignal::Stage {
+                stage: stage.into(),
+                headline: headline.into(),
+                detail,
+                background,
+            });
+        }
+    }
+
+    fn transcript(&self, prefix: impl Into<String>, text: impl Into<String>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(BoardUiSignal::Transcript {
+                prefix: prefix.into(),
+                text: text.into(),
+            });
+        }
+    }
+}
+
+fn build_probe_hook_engine(board_ui: BoardUiEmitter, scope: &'static str) -> DefaultHookEngine {
+    let hooks = vec![
+        ("run-started", HookPoint::RunStarted),
+        ("run-completed", HookPoint::RunCompleted),
+        ("run-failed", HookPoint::RunFailed),
+        ("pre-tool", HookPoint::PreToolExecution),
+        ("post-tool", HookPoint::PostToolExecution),
+    ];
+
+    let config = HooksConfig {
+        entries: hooks
+            .iter()
+            .map(|(name, point)| HookEntryConfig {
+                id: HookId::new(format!("phase0-{scope}-{name}")),
+                point: *point,
+                mode: HookExecutionMode::Foreground,
+                capability: HookCapability::Observe,
+                runtime: HookRuntimeConfig::new(
+                    "in_process",
+                    Some(json!({ "name": format!("phase0-{scope}-{name}") })),
+                )
+                .unwrap_or_default(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+
+    hooks
+        .into_iter()
+        .fold(DefaultHookEngine::new(config), |engine, (name, point)| {
+            let handler_name = format!("phase0-{scope}-{name}");
+            let board_ui = board_ui.clone();
+            engine.with_in_process_handler(
+                handler_name,
+                Arc::new(move |invocation| {
+                    let board_ui = board_ui.clone();
+                    Box::pin(async move {
+                        emit_marker(
+                            "MKT:BOARD_HOOK",
+                            &[
+                                ("scope", &json_quote(scope)),
+                                ("point", &json_quote(&format!("{point:?}").to_lowercase())),
+                            ],
+                        );
+                        match point {
+                            HookPoint::RunStarted => board_ui.stage(
+                                "run",
+                                "agent started",
+                                invocation
+                                    .prompt
+                                    .as_deref()
+                                    .map(|prompt| short_display_line(prompt, 26)),
+                                Rgb565::new(0, 32, 64),
+                            ),
+                            HookPoint::RunCompleted => board_ui.stage(
+                                "run",
+                                "agent complete",
+                                Some("awaiting next input".to_string()),
+                                Rgb565::new(0, 72, 0),
+                            ),
+                            HookPoint::RunFailed => board_ui.stage(
+                                "fail",
+                                "agent failed",
+                                invocation
+                                    .error
+                                    .as_deref()
+                                    .map(|error| short_display_line(error, 26)),
+                                Rgb565::new(88, 0, 0),
+                            ),
+                            HookPoint::PreToolExecution => board_ui.stage(
+                                "tool",
+                                invocation
+                                    .tool_call
+                                    .as_ref()
+                                    .map(|tool| tool.name.as_str())
+                                    .unwrap_or("tool"),
+                                Some("running".to_string()),
+                                Rgb565::new(0, 24, 72),
+                            ),
+                            HookPoint::PostToolExecution => board_ui.stage(
+                                "tool",
+                                invocation
+                                    .tool_result
+                                    .as_ref()
+                                    .map(|tool| tool.name.as_str())
+                                    .unwrap_or("tool"),
+                                invocation.tool_result.as_ref().map(|tool| {
+                                    if tool.is_error {
+                                        short_display_line("error", 26)
+                                    } else {
+                                        short_display_line("completed", 26)
+                                    }
+                                }),
+                                if invocation
+                                    .tool_result
+                                    .as_ref()
+                                    .map(|tool| tool.is_error)
+                                    .unwrap_or(false)
+                                {
+                                    Rgb565::new(88, 0, 0)
+                                } else {
+                                    Rgb565::new(0, 56, 40)
+                                },
+                            ),
+                            _ => {}
+                        }
+                        Ok(RuntimeHookResponse::default())
+                    })
+                }),
+            )
+        })
+}
+
 #[derive(Clone)]
 struct DeviceProbeAgentBuilder {
     host_peer_name: String,
@@ -255,6 +426,15 @@ struct DeviceProbeAgentBuilder {
     openai_base_url: String,
     comms_runtime: Arc<CommsRuntime>,
     inbound_epoch: Arc<AtomicUsize>,
+    board_ui: BoardUiEmitter,
+}
+
+#[derive(Clone)]
+struct SerialProbeAgentBuilder {
+    model: String,
+    openai_api_key: String,
+    openai_base_url: String,
+    board_ui: BoardUiEmitter,
 }
 
 struct DeviceSendGuardDispatcher {
@@ -360,15 +540,24 @@ struct MicroPythonToolArgs {
     background: bool,
 }
 
+#[derive(Debug)]
+struct SerialRunSummary {
+    prompts_completed: usize,
+    memory_before: MemorySnapshot,
+    memory_after: MemorySnapshot,
+}
+
 impl MicroPythonToolArgs {
     fn parse(call: ToolCallView<'_>) -> Result<Self, ToolError> {
-        let raw: Value = call
-            .parse_args()
-            .map_err(|error| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, error.to_string()))?;
+        let raw: Value = call.parse_args().map_err(|error| {
+            ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, error.to_string())
+        })?;
         let code = raw
             .get("code")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "missing string field 'code'"))?
+            .ok_or_else(|| {
+                ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "missing string field 'code'")
+            })?
             .to_string();
         let background = raw
             .get("background")
@@ -440,17 +629,24 @@ impl EspMicroPythonToolDispatcher {
                 emit_marker("MKT:MICROPY:INIT_OK", &[]);
                 Ok(())
             } else {
-                Err(format!("embedded MicroPython init failed with esp_err={err}"))
+                Err(format!(
+                    "embedded MicroPython init failed with esp_err={err}"
+                ))
             }
         });
         init.clone().map_err(ToolError::execution_failed)
     }
 
-    fn exec_sync(&self, call: ToolCallView<'_>, args: MicroPythonToolArgs) -> Result<ToolDispatchOutcome, ToolError> {
+    fn exec_sync(
+        &self,
+        call: ToolCallView<'_>,
+        args: MicroPythonToolArgs,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         if args.background {
             return Err(ToolError::Unavailable {
                 name: MICROPYTHON_TOOL_NAME.to_string(),
-                reason: "background micropython execution is not enabled in this phase-0 firmware".to_string(),
+                reason: "background micropython execution is not enabled in this phase-0 firmware"
+                    .to_string(),
             });
         }
         Self::ensure_ready()?;
@@ -458,8 +654,9 @@ impl EspMicroPythonToolDispatcher {
             .exec_lock
             .lock()
             .map_err(|_| ToolError::execution_failed("micropython execution lock poisoned"))?;
-        let code = CString::new(args.code.clone())
-            .map_err(|_| ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "code contains interior NUL byte"))?;
+        let code = CString::new(args.code.clone()).map_err(|_| {
+            ToolError::invalid_arguments(MICROPYTHON_TOOL_NAME, "code contains interior NUL byte")
+        })?;
         let mut result = Phase0MpyResult {
             job_id: 0,
             background: false,
@@ -469,7 +666,10 @@ impl EspMicroPythonToolDispatcher {
             payload_len: 0,
             payload: [0; 2048],
         };
-        emit_marker("MKT:MICROPY:REQUESTED", &[("bytes", &args.code.len().to_string())]);
+        emit_marker(
+            "MKT:MICROPY:REQUESTED",
+            &[("bytes", &args.code.len().to_string())],
+        );
         let err = unsafe { phase0_mpy_exec_sync(code.as_ptr(), 15_000, &mut result) };
         if err != 0 {
             emit_marker("MKT:MICROPY:FAILED", &[("esp_err", &err.to_string())]);
@@ -478,9 +678,12 @@ impl EspMicroPythonToolDispatcher {
             )));
         }
 
-        let payload_len = result.payload_len.min(result.payload.len().saturating_sub(1));
+        let payload_len = result
+            .payload_len
+            .min(result.payload.len().saturating_sub(1));
         let payload = unsafe {
-            let bytes = std::slice::from_raw_parts(result.payload.as_ptr() as *const u8, payload_len);
+            let bytes =
+                std::slice::from_raw_parts(result.payload.as_ptr() as *const u8, payload_len);
             String::from_utf8_lossy(bytes).to_string()
         };
         emit_marker(
@@ -577,7 +780,10 @@ fn main() {
         if let Err(error) = worker.join() {
             emit_marker(
                 "MKT:RUST_STACK:FAIL",
-                &[("error", &json_quote(&format!("probe-main panicked: {error:?}")))],
+                &[(
+                    "error",
+                    &json_quote(&format!("probe-main panicked: {error:?}")),
+                )],
             );
             std::process::exit(1);
         }
@@ -604,7 +810,10 @@ fn run_probe() -> anyhow::Result<()> {
     emit_marker(
         "MKT:BOOT:OK",
         &[
-            ("heap_free", &unsafe { sys::esp_get_free_heap_size() }.to_string()),
+            (
+                "heap_free",
+                &unsafe { sys::esp_get_free_heap_size() }.to_string(),
+            ),
             (
                 "internal_free",
                 &heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL).to_string(),
@@ -645,7 +854,10 @@ fn run_probe() -> anyhow::Result<()> {
     if let Err(error) = init_marker_broadcast() {
         emit_marker(
             "MKT:NETMARKER:INIT_FAIL",
-            &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+            &[(
+                "error",
+                &json_quote(&short_display_line(&error.to_string(), 80)),
+            )],
         );
     } else {
         emit_marker(
@@ -671,10 +883,8 @@ fn run_probe() -> anyhow::Result<()> {
                     display_boot_status = String::from("stage_ok");
                 }
                 Err(error) => {
-                    display_boot_status = format!(
-                        "stage_fail:{}",
-                        short_display_line(&error.to_string(), 80)
-                    );
+                    display_boot_status =
+                        format!("stage_fail:{}", short_display_line(&error.to_string(), 80));
                     emit_marker(
                         "MKT:DISPLAY:STAGE_FAIL",
                         &[("error", &json_quote(&error.to_string()))],
@@ -688,10 +898,8 @@ fn run_probe() -> anyhow::Result<()> {
             Some(display)
         }
         Err(error) => {
-            display_boot_status = format!(
-                "init_fail:{}",
-                short_display_line(&error.to_string(), 80)
-            );
+            display_boot_status =
+                format!("init_fail:{}", short_display_line(&error.to_string(), 80));
             emit_marker(
                 "MKT:DISPLAY:FAIL",
                 &[(
@@ -773,10 +981,19 @@ fn run_probe() -> anyhow::Result<()> {
                 ("elapsed_ms", &elapsed_ms.to_string()),
                 ("meerkat_elapsed_ms", &meerkat_elapsed_ms.to_string()),
                 ("meerkat_turns", &meerkat_summary.turns.to_string()),
-                ("meerkat_tool_calls", &meerkat_summary.tool_calls.to_string()),
+                (
+                    "meerkat_tool_calls",
+                    &meerkat_summary.tool_calls.to_string(),
+                ),
                 ("meerkat_tasks", &meerkat_summary.task_count.to_string()),
-                ("meerkat_heap_before", &meerkat_summary.memory_before.heap_free.to_string()),
-                ("meerkat_heap_after", &meerkat_summary.memory_after.heap_free.to_string()),
+                (
+                    "meerkat_heap_before",
+                    &meerkat_summary.memory_before.heap_free.to_string(),
+                ),
+                (
+                    "meerkat_heap_after",
+                    &meerkat_summary.memory_after.heap_free.to_string(),
+                ),
                 (
                     "meerkat_heap_min_after",
                     &meerkat_summary.memory_after.heap_min_free.to_string(),
@@ -819,16 +1036,30 @@ fn run_probe() -> anyhow::Result<()> {
         emit_marker("MKT:SINGLE_NODE:SKIPPED", &[]);
     }
 
-    if enable_comms() {
-        if let Some(display) = status_display.as_mut() {
-            let _ = display.show_stage(
-                "comms",
-                "starting listener",
-                Some("awaiting peer"),
-                Rgb565::new(0, 24, 72),
-            );
+    match host_input_mode() {
+        HostInputMode::Comms if enable_comms() => {
+            if let Some(display) = status_display.as_mut() {
+                let _ = display.show_stage(
+                    "comms",
+                    "starting listener",
+                    Some("awaiting peer"),
+                    Rgb565::new(0, 24, 72),
+                );
+            }
+            run_comms_probe(openai_api_key, &wifi_ip, status_display.as_mut())?;
         }
-        run_comms_probe(openai_api_key, &wifi_ip, status_display.as_mut())?;
+        HostInputMode::Serial => {
+            if let Some(display) = status_display.as_mut() {
+                let _ = display.show_stage(
+                    "serial",
+                    "arming usb host",
+                    Some("awaiting prompt"),
+                    Rgb565::new(0, 24, 72),
+                );
+            }
+            run_serial_probe(openai_api_key, status_display.as_mut())?;
+        }
+        HostInputMode::Comms => {}
     }
 
     thread::sleep(Duration::from_secs(2));
@@ -848,23 +1079,10 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
         req: &CreateSessionRequest,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
-        let task_store = Arc::new(MemoryTaskStore::new());
         let external_tools: Arc<dyn AgentToolDispatcher> =
             Arc::new(EspMicroPythonToolDispatcher::new());
-        let inner = CompositeDispatcher::new_wasm(
-            task_store,
-            &BuiltinToolConfig {
-                policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
-                ..Default::default()
-            },
-            Some(external_tools),
-            Some("esp32-phase0-runtime".to_string()),
-        )
-        .context("failed to construct ESP32 comms dispatcher")
-        .map_err(|error| SessionError::Agent(AgentError::ConfigError(error.to_string())))?;
-
         let tools: Arc<dyn AgentToolDispatcher> = Arc::new(DeviceSendGuardDispatcher::new(
-            wrap_with_comms(Arc::new(inner), Arc::clone(&self.comms_runtime)),
+            wrap_with_comms(external_tools, Arc::clone(&self.comms_runtime)),
             Arc::clone(&self.inbound_epoch),
             Arc::new(AtomicUsize::new(0)),
         ));
@@ -883,8 +1101,8 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
         );
         let store: Arc<dyn AgentSessionStore> = Arc::new(ProbeNoopStore);
 
-        let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> =
-            self.comms_runtime.clone();
+        let comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = self.comms_runtime.clone();
+        let hooks = build_probe_hook_engine(self.board_ui.clone(), "comms");
 
         let agent: ProbeDynAgent = AgentBuilder::new()
             .model(req.model.clone())
@@ -896,6 +1114,54 @@ impl SessionAgentBuilder for DeviceProbeAgentBuilder {
             .max_tokens_per_turn(req.max_tokens.unwrap_or(256))
             .max_turns(2)
             .with_comms_runtime(comms_runtime)
+            .with_hook_engine(Arc::new(hooks))
+            .build(llm, tools, store)
+            .await;
+
+        Ok(ProbeSessionAgent::new(agent))
+    }
+}
+
+#[cfg_attr(any(target_arch = "wasm32", target_os = "espidf"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    all(not(target_arch = "wasm32"), not(target_os = "espidf")),
+    async_trait::async_trait
+)]
+impl SessionAgentBuilder for SerialProbeAgentBuilder {
+    type Agent = ProbeSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EspMicroPythonToolDispatcher::new());
+        let llm: Arc<dyn AgentLlmClient> = Arc::new(
+            LlmClientAdapter::new(
+                Arc::new(OpenAiClient::new_with_base_url(
+                    self.openai_api_key.clone(),
+                    self.openai_base_url.clone(),
+                )),
+                self.model.clone(),
+            )
+            .with_provider_params(Some(json!({
+                "reasoning_effort": "low",
+                "stream": openai_stream_enabled()
+            }))),
+        );
+        let store: Arc<dyn AgentSessionStore> = Arc::new(ProbeNoopStore);
+        let hooks = build_probe_hook_engine(self.board_ui.clone(), "serial");
+
+        let agent: ProbeDynAgent = AgentBuilder::new()
+            .model(req.model.clone())
+            .system_prompt(
+                req.system_prompt
+                    .clone()
+                    .unwrap_or_else(serial_system_prompt),
+            )
+            .max_tokens_per_turn(req.max_tokens.unwrap_or(256))
+            .max_turns(2)
+            .with_hook_engine(Arc::new(hooks))
             .build(llm, tools, store)
             .await;
 
@@ -909,39 +1175,153 @@ fn connect_wifi(
     wifi_pass: &str,
     status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<String> {
-    let configuration = WifiConfiguration::Client(ClientConfiguration {
-        ssid: wifi_ssid
-            .try_into()
-            .map_err(|_| anyhow!("wifi ssid is too long"))?,
-        bssid: None,
-        auth_method: AuthMethod::WPA2Personal,
-        password: wifi_pass
-            .try_into()
-            .map_err(|_| anyhow!("wifi password is too long"))?,
-        channel: None,
-        ..Default::default()
-    });
-
-    wifi.set_configuration(&configuration)
-        .context("failed to set wifi configuration")?;
+    let scan_configuration = WifiConfiguration::Client(ClientConfiguration::default());
+    wifi.set_configuration(&scan_configuration)
+        .context("failed to set initial wifi configuration")?;
     wifi.start().context("failed to start wifi")?;
-    wifi.connect().context("failed to connect wifi")?;
-    wifi.wait_netif_up().context("wifi netif did not come up")?;
 
-    let ip_info = wifi
-        .wifi()
-        .sta_netif()
-        .get_ip_info()
-        .context("failed to read station ip info")?;
+    let scan_results = wifi.scan().context("failed to scan wifi access points")?;
+    let matching_aps: Vec<AccessPointInfo> = scan_results
+        .into_iter()
+        .filter(|ap| ap.ssid.as_str() == wifi_ssid)
+        .collect();
     emit_marker(
-        "MKT:WIFI:OK",
-        &[("ip", &json_quote(&ip_info.ip.to_string()))],
+        "MKT:WIFI:SCAN",
+        &[("matches", &matching_aps.len().to_string())],
     );
-    if let Some(display) = status_display {
-        let detail = format!("ip {}", ip_info.ip);
-        let _ = display.show_stage("wifi", "connected", Some(&detail), Rgb565::new(0, 72, 0));
+    for ap in matching_aps.iter().take(4) {
+        emit_marker(
+            "MKT:WIFI:AP",
+            &[
+                ("channel", &ap.channel.to_string()),
+                ("signal", &ap.signal_strength.to_string()),
+                (
+                    "auth",
+                    &json_quote(&format!("{:?}", ap.auth_method.unwrap_or(AuthMethod::None))),
+                ),
+            ],
+        );
     }
-    Ok(ip_info.ip.to_string())
+
+    let selected_ap = matching_aps
+        .iter()
+        .filter(|ap| ap.channel <= 14)
+        .max_by_key(|ap| ap.signal_strength)
+        .cloned()
+        .or_else(|| matching_aps.iter().max_by_key(|ap| ap.signal_strength).cloned())
+        .ok_or_else(|| anyhow!("wifi ssid {wifi_ssid:?} not found during scan"))?;
+
+    if selected_ap.channel > 14 {
+        bail!(
+            "wifi ssid {wifi_ssid:?} is only visible on unsupported 5GHz channel {}",
+            selected_ap.channel
+        );
+    }
+
+    let selected_auth = selected_ap.auth_method.unwrap_or(AuthMethod::WPA2Personal);
+    emit_marker(
+        "MKT:WIFI:SELECTED",
+        &[
+            ("channel", &selected_ap.channel.to_string()),
+            ("signal", &selected_ap.signal_strength.to_string()),
+            ("auth", &json_quote(&format!("{selected_auth:?}"))),
+        ],
+    );
+
+    let mut attempts: Vec<(AuthMethod, PmfConfiguration)> = Vec::new();
+    match selected_auth {
+        AuthMethod::WPA3Personal => {
+            attempts.push((AuthMethod::WPA3Personal, PmfConfiguration::Capable { required: true }));
+        }
+        AuthMethod::WPA2WPA3Personal => {
+            attempts.push((
+                AuthMethod::WPA2WPA3Personal,
+                PmfConfiguration::Capable { required: false },
+            ));
+            attempts.push((AuthMethod::WPA2Personal, PmfConfiguration::NotCapable));
+        }
+        other => {
+            attempts.push((other, PmfConfiguration::NotCapable));
+        }
+    }
+
+    let mut last_error: Option<anyhow::Error> = None;
+    for (attempt_index, (auth_method, pmf_cfg)) in attempts.into_iter().enumerate() {
+        emit_marker(
+            "MKT:WIFI:ATTEMPT",
+            &[
+                ("index", &(attempt_index + 1).to_string()),
+                ("auth", &json_quote(&format!("{auth_method:?}"))),
+                (
+                    "pmf",
+                    &json_quote(match pmf_cfg {
+                        PmfConfiguration::NotCapable => "NotCapable",
+                        PmfConfiguration::Capable { required: true } => "CapableRequired",
+                        PmfConfiguration::Capable { required: false } => "CapableOptional",
+                    }),
+                ),
+            ],
+        );
+
+        let configuration = WifiConfiguration::Client(ClientConfiguration {
+            ssid: wifi_ssid
+                .try_into()
+                .map_err(|_| anyhow!("wifi ssid is too long"))?,
+            bssid: Some(selected_ap.bssid),
+            auth_method,
+            password: wifi_pass
+                .try_into()
+                .map_err(|_| anyhow!("wifi password is too long"))?,
+            channel: Some(selected_ap.channel),
+            pmf_cfg,
+            ..Default::default()
+        });
+
+        wifi.set_configuration(&configuration)
+            .context("failed to set wifi client configuration")?;
+        let _ = wifi.disconnect();
+        wifi.connect().context("failed to connect wifi")?;
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let connected = wifi
+                .is_connected()
+                .context("failed to query wifi connection state")?;
+            let ip_info = wifi
+                .wifi()
+                .sta_netif()
+                .get_ip_info()
+                .context("failed to read station ip info")?;
+            if connected && ip_info.ip.to_string() != "0.0.0.0" {
+                emit_marker(
+                    "MKT:WIFI:OK",
+                    &[("ip", &json_quote(&ip_info.ip.to_string()))],
+                );
+                if let Some(display) = status_display {
+                    let detail = format!("ip {}", ip_info.ip);
+                    let _ = display.show_stage(
+                        "wifi",
+                        "connected",
+                        Some(&detail),
+                        Rgb565::new(0, 72, 0),
+                    );
+                }
+                return Ok(ip_info.ip.to_string());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+
+        emit_marker(
+            "MKT:WIFI:ATTEMPT_FAIL",
+            &[("index", &(attempt_index + 1).to_string())],
+        );
+        last_error = Some(anyhow!(
+            "wifi attempt {} timed out before netif ip came up",
+            attempt_index + 1
+        ));
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("wifi did not come up")))
 }
 
 fn wait_for_time_sync(status_display: Option<&mut StatusDisplay>) -> anyhow::Result<()> {
@@ -965,6 +1345,148 @@ fn wait_for_time_sync(status_display: Option<&mut StatusDisplay>) -> anyhow::Res
     }
 
     bail!("timed out waiting for SNTP time sync")
+}
+
+fn host_input_mode() -> HostInputMode {
+    match HOST_INPUT_MODE {
+        "serial" | "SERIAL" => HostInputMode::Serial,
+        _ => HostInputMode::Comms,
+    }
+}
+
+fn serial_system_prompt() -> String {
+    "You are the ESP32 embedded probe. \
+     Respond directly to the latest host prompt. \
+     If the prompt asks you to run Python, micropython, code, or a snippet, you must call micropython_exec exactly once before you answer. \
+     When the prompt includes a snippet after `with:` or on following lines, run that exact snippet unchanged. \
+     After micropython_exec completes, answer exactly in this format and nothing else: `Printed output: <printed text>\\nResult: <result>`. \
+     Never call micropython_exec more than once per prompt. \
+     If the prompt does not ask for code, do not call micropython_exec.".to_string()
+}
+
+fn parse_serial_host_command(line: &str) -> anyhow::Result<SerialHostCommand> {
+    let raw: Value =
+        serde_json::from_str(line).context("serial host command must be valid JSON object")?;
+    let command = raw
+        .get("cmd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("serial host command missing string field 'cmd'"))?;
+    match command {
+        "prompt" => {
+            let text = raw
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("serial host prompt missing string field 'text'"))?;
+            Ok(SerialHostCommand::Prompt {
+                text: text.to_string(),
+            })
+        }
+        "stop" => Ok(SerialHostCommand::Stop),
+        "ping" => Ok(SerialHostCommand::Ping),
+        other => bail!("unsupported serial host command {other:?}"),
+    }
+}
+
+fn spawn_host_command_reader(
+    tx: mpsc::UnboundedSender<SerialHostCommand>,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("phase0-hostlink".to_string())
+        .spawn(move || {
+            let socket = match UdpSocket::bind(("0.0.0.0", HOST_PROMPT_LISTEN_PORT)) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    emit_marker(
+                        "MKT:SERIAL:LISTEN_FAIL",
+                        &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+                    );
+                    return;
+                }
+            };
+            emit_marker(
+                "MKT:SERIAL:LISTENING",
+                &[
+                    ("port", &HOST_PROMPT_LISTEN_PORT.to_string()),
+                    ("transport", "\"udp-broadcast\""),
+                ],
+            );
+            let mut buffer = [0u8; 2048];
+            loop {
+                let (len, peer_addr) = match socket.recv_from(&mut buffer) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        emit_marker(
+                            "MKT:SERIAL:READ_FAIL",
+                            &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+                        );
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                };
+                emit_marker(
+                    "MKT:SERIAL:CLIENT_CONNECTED",
+                    &[("peer", &json_quote(&peer_addr.to_string()))],
+                );
+                let payload = match std::str::from_utf8(&buffer[..len]) {
+                    Ok(payload) => payload.trim(),
+                    Err(error) => {
+                        emit_marker(
+                            "MKT:SERIAL:CMD_PARSE_FAIL",
+                            &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+                        );
+                        continue;
+                    }
+                };
+                if payload.is_empty() {
+                    continue;
+                }
+                match parse_serial_host_command(payload) {
+                    Ok(command) => {
+                        match &command {
+                            SerialHostCommand::Prompt { text } => emit_marker(
+                                "MKT:SERIAL:CMD_RX",
+                                &[("kind", "\"prompt\""), ("bytes", &text.len().to_string())],
+                            ),
+                            SerialHostCommand::Stop => {
+                                emit_marker("MKT:SERIAL:CMD_RX", &[("kind", "\"stop\"")])
+                            }
+                            SerialHostCommand::Ping => {
+                                emit_marker("MKT:SERIAL:CMD_RX", &[("kind", "\"ping\"")])
+                            }
+                        }
+                        if tx.send(command).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => emit_marker(
+                        "MKT:SERIAL:CMD_PARSE_FAIL",
+                        &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
+                    ),
+                }
+            }
+        })
+        .context("failed to spawn host command reader")
+}
+
+fn make_serial_prompt_input(text: impl Into<String>) -> Input {
+    let mut prompt = PromptInput::new(text.into(), None);
+    prompt.header.source = InputOrigin::External {
+        source_name: "tcp_host_link".to_string(),
+    };
+    Input::Prompt(prompt)
+}
+
+fn drain_board_ui_queue(
+    board_ui_rx: &mut mpsc::UnboundedReceiver<BoardUiSignal>,
+    mut status_display: Option<&mut StatusDisplay>,
+    transcript: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    while let Ok(event) = board_ui_rx.try_recv() {
+        if let Some(display) = status_display.as_deref_mut() {
+            handle_board_ui_signal(display, transcript, event)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_openai_stream(openai_api_key: &str) -> anyhow::Result<usize> {
@@ -1122,9 +1644,7 @@ fn run_meerkat_turn_inner(
     emit_meerkat_step("thread_enter");
     emit_marker(
         "MKT:MEERKAT:RUNTIME_MODE",
-        &[
-            ("mode", "\"current_thread_no_time\""),
-        ],
+        &[("mode", "\"current_thread_no_time\"")],
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1134,88 +1654,18 @@ fn run_meerkat_turn_inner(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         emit_meerkat_step("inside_block_on");
-        let task_store = Arc::new(MemoryTaskStore::new());
-        emit_meerkat_step("after_task_store");
-        let builtin_config = BuiltinToolConfig {
-            policy: ToolPolicyLayer::new().with_mode(ToolMode::DenyAll),
-            ..Default::default()
-        };
-        let external_tools: Arc<dyn AgentToolDispatcher> =
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
             Arc::new(EspMicroPythonToolDispatcher::new());
-        let dispatcher = CompositeDispatcher::new_wasm(
-            task_store.clone(),
-            &builtin_config,
-            Some(external_tools),
-            Some("esp32-phase0".to_string()),
-        )
-        .context("failed to construct embedded builtin dispatcher")?;
         emit_meerkat_step("after_dispatcher");
         emit_marker(
             "MKT:MEERKAT:TOOLS_EXPOSED",
             &[
                 ("count", &dispatcher.tools().len().to_string()),
-                ("names", &json_quote("datetime,micropython_exec")),
+                ("names", &json_quote("micropython_exec")),
             ],
         );
 
-        let hooks = DefaultHookEngine::new(HooksConfig {
-            entries: vec![
-                HookEntryConfig {
-                    id: HookId::new("phase0-pre-llm"),
-                    point: HookPoint::PreLlmRequest,
-                    mode: HookExecutionMode::Foreground,
-                    capability: HookCapability::Observe,
-                    runtime: HookRuntimeConfig::new(
-                        "in_process",
-                        Some(json!({ "name": "phase0-pre-llm" })),
-                    )
-                    .unwrap_or_default(),
-                    ..Default::default()
-                },
-                HookEntryConfig {
-                    id: HookId::new("phase0-pre-tool"),
-                    point: HookPoint::PreToolExecution,
-                    mode: HookExecutionMode::Foreground,
-                    capability: HookCapability::Observe,
-                    runtime: HookRuntimeConfig::new(
-                        "in_process",
-                        Some(json!({ "name": "phase0-pre-tool" })),
-                    )
-                    .unwrap_or_default(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        })
-        .with_in_process_handler(
-            "phase0-pre-llm",
-            Arc::new(|invocation| {
-                Box::pin(async move {
-                    emit_marker(
-                        "MKT:MEERKAT:HOOK_PRE_LLM",
-                        &[("turn", &invocation.turn_number.unwrap_or(0).to_string())],
-                    );
-                    Ok(RuntimeHookResponse::default())
-                })
-            }),
-        )
-        .with_in_process_handler(
-            "phase0-pre-tool",
-            Arc::new(|invocation| {
-                Box::pin(async move {
-                    let tool_name = invocation
-                        .tool_call
-                        .as_ref()
-                        .map(|tool| tool.name.as_str())
-                        .unwrap_or("unknown");
-                    emit_marker(
-                        "MKT:MEERKAT:HOOK_PRE_TOOL",
-                        &[("tool", &json_quote(tool_name))],
-                    );
-                    Ok(RuntimeHookResponse::default())
-                })
-            }),
-        );
+        let hooks = build_probe_hook_engine(BoardUiEmitter::default(), "single-node");
         emit_meerkat_step("after_hooks");
 
         let client = Arc::new(OpenAiClient::new_with_base_url(
@@ -1247,9 +1697,7 @@ fn run_meerkat_turn_inner(
                             "MKT:MEERKAT:EVENT_TOOL_REQUESTED",
                             &[("name", &json_quote(&name))],
                         );
-                        if name == "datetime" {
-                            evidence.saw_datetime = true;
-                        } else if name == MICROPYTHON_TOOL_NAME {
+                        if name == MICROPYTHON_TOOL_NAME {
                             evidence.saw_micropython = true;
                         }
                     }
@@ -1280,13 +1728,13 @@ fn run_meerkat_turn_inner(
             .model(OPENAI_MODEL)
             .system_prompt(
                 "You are the Meerkat Phase 0 embedded probe. \
-                 You must call the datetime tool exactly once and the micropython_exec tool exactly once. \
+                 You must call the micropython_exec tool exactly once. \
                  Use micropython_exec to run short Python that prints 'hello from micropython' and sets result = 6 * 7. \
-                 After both tools complete, answer in one short sentence that includes the observed date or time and the python result.",
+                 After the tool completes, answer in one short sentence that includes the python result.",
             )
             .max_tokens_per_turn(96)
             .with_hook_engine(Arc::new(hooks))
-            .build(llm, Arc::new(dispatcher), Arc::new(ProbeNoopStore))
+            .build(llm, dispatcher, Arc::new(ProbeNoopStore))
             .await;
         emit_meerkat_step("after_agent_build");
 
@@ -1296,7 +1744,7 @@ fn run_meerkat_turn_inner(
         );
         let result = agent
             .run_with_events(
-                "Call datetime exactly once. Then call micropython_exec exactly once with code that prints 'hello from micropython' and sets result = 6 * 7. Finally answer in one short sentence confirming embedded Meerkat is alive, include the observed date or time, and include the python result."
+                "Call micropython_exec exactly once with code that prints 'hello from micropython' and sets result = 6 * 7. Then answer in one short sentence confirming embedded Meerkat is alive and include the python result."
                     .into(),
                 event_tx.clone(),
             )
@@ -1311,17 +1759,16 @@ fn run_meerkat_turn_inner(
             .await
             .map_err(|error| anyhow!("failed joining event collector: {error}"))?;
         emit_meerkat_step("after_collector_join");
-        let task_count = task_store.len();
+        let task_count = 0usize;
 
         emit_marker(
             "MKT:MEERKAT:SKILLS_OK",
             &[("resolved", &evidence.skill_resolved.to_string())],
         );
 
-        if !evidence.saw_datetime || !evidence.saw_micropython {
+        if !evidence.saw_micropython {
             bail!(
-                "meerkat run did not exercise required tools (datetime={}, micropython={}, tasks={task_count})",
-                evidence.saw_datetime,
+                "meerkat run did not exercise required tools (micropython={}, tasks={task_count})",
                 evidence.saw_micropython,
             );
         }
@@ -1434,8 +1881,14 @@ fn run_comms_probe(
             ("incoming", &summary.incoming_messages.to_string()),
             ("outgoing", &summary.outgoing_messages.to_string()),
             ("heap_after", &summary.memory_after.heap_free.to_string()),
-            ("internal_after", &summary.memory_after.internal_free.to_string()),
-            ("spiram_after", &summary.memory_after.spiram_free.to_string()),
+            (
+                "internal_after",
+                &summary.memory_after.internal_free.to_string(),
+            ),
+            (
+                "spiram_after",
+                &summary.memory_after.spiram_free.to_string(),
+            ),
         ],
     );
 
@@ -1451,7 +1904,10 @@ fn run_comms_probe_inner(
 ) -> anyhow::Result<CommsRunSummary> {
     emit_marker(
         "MKT:COMMS:RUNTIME_MODE",
-        &[("mode", "\"current_thread_runtime_backed_keep_alive_inline\"")],
+        &[(
+            "mode",
+            "\"current_thread_runtime_backed_keep_alive_inline\"",
+        )],
     );
     #[cfg(target_os = "espidf")]
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1465,14 +1921,20 @@ fn run_comms_probe_inner(
     let public_addr = format!("tcp://{wifi_ip}:{COMMS_LISTEN_PORT}");
     emit_marker(
         "MKT:COMMS:STEP",
-        &[("name", "\"public_addr_ready\""), ("addr", &json_quote(&public_addr))],
+        &[
+            ("name", "\"public_addr_ready\""),
+            ("addr", &json_quote(&public_addr)),
+        ],
     );
 
     emit_marker(
         "MKT:COMMS:LISTENING",
         &[
             ("peer_name", &json_quote("esp32-probe")),
-            ("peer_id", &json_quote(&phase0_device_keypair().public_key().to_peer_id())),
+            (
+                "peer_id",
+                &json_quote(&phase0_device_keypair().public_key().to_peer_id()),
+            ),
             ("addr", &json_quote(&public_addr)),
             ("trusted_host", &json_quote(HOST_PEER_NAME)),
         ],
@@ -1517,20 +1979,21 @@ async fn run_comms_probe_async(
     mut status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<CommsRunSummary> {
     emit_marker("MKT:COMMS:STEP", &[("name", "\"inside_local_block_on\"")]);
-    let (display_tx, mut display_rx) = tokio::sync::mpsc::unbounded_channel::<DisplayEvent>();
+    let (board_ui_tx, mut board_ui_rx) = tokio::sync::mpsc::unbounded_channel::<BoardUiSignal>();
+    let board_ui = BoardUiEmitter::new(board_ui_tx);
     emit_marker("MKT:COMMS:STEP", &[("name", "\"display_channel_ready\"")]);
     let mut transcript = Vec::new();
     let trusted = TrustedPeers {
         peers: vec![phase0_host_trusted_peer()],
     };
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"before_comms_runtime_new\"")]);
-    let mut comms_runtime = CommsRuntime::new_with_state(
-        device_comms_config(),
-        phase0_device_keypair(),
-        trusted,
-    )
-    .await
-    .context("failed to build ESP32 comms runtime")?;
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"before_comms_runtime_new\"")],
+    );
+    let mut comms_runtime =
+        CommsRuntime::new_with_state(device_comms_config(), phase0_device_keypair(), trusted)
+            .await
+            .context("failed to build ESP32 comms runtime")?;
     emit_marker("MKT:COMMS:STEP", &[("name", "\"after_comms_runtime_new\"")]);
     comms_runtime
         .start_listeners()
@@ -1543,7 +2006,10 @@ async fn run_comms_probe_async(
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
         Arc::new(InMemoryRuntimeStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"before_persistent_service_new\"")]);
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"before_persistent_service_new\"")],
+    );
     let service = Arc::new(PersistentSessionService::new(
         DeviceProbeAgentBuilder {
             host_peer_name: HOST_PEER_NAME.to_string(),
@@ -1552,17 +2018,18 @@ async fn run_comms_probe_async(
             openai_base_url: OPENAI_BASE_URL.to_string(),
             comms_runtime: Arc::clone(&comms_runtime),
             inbound_epoch: Arc::clone(&inbound_epoch),
+            board_ui: board_ui.clone(),
         },
         1,
         session_store,
         Some(runtime_store.clone()),
         blob_store.clone(),
     ));
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_persistent_service_new\"")]);
-    let runtime_adapter = Arc::new(RuntimeSessionAdapter::persistent(
-        runtime_store,
-        blob_store,
-    ));
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"after_persistent_service_new\"")],
+    );
+    let runtime_adapter = Arc::new(RuntimeSessionAdapter::persistent(runtime_store, blob_store));
     emit_marker("MKT:COMMS:STEP", &[("name", "\"after_runtime_adapter\"")]);
     let session_id = create_device_keep_alive_session(&service).await?;
     emit_marker(
@@ -1582,19 +2049,25 @@ async fn run_comms_probe_async(
             )),
         )
         .await;
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_ensure_session_with_executor\"")]);
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"after_ensure_session_with_executor\"")],
+    );
 
     let session_comms = service
         .comms_runtime(&session_id)
         .await
         .context("device session missing comms runtime")?;
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_session_comms_lookup\"")]);
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"after_session_comms_lookup\"")],
+    );
 
     let incoming_messages = Arc::new(AtomicUsize::new(0));
     let outgoing_messages = Arc::new(AtomicUsize::new(0));
     let incoming_counter = Arc::clone(&incoming_messages);
     let inbound_epoch_for_observer = Arc::clone(&inbound_epoch);
-    let incoming_display = display_tx.clone();
+    let incoming_display = board_ui.clone();
     let drain = spawn_comms_drain_with_observer(
         Arc::clone(&runtime_adapter),
         session_id.clone(),
@@ -1608,10 +2081,7 @@ async fn run_comms_probe_async(
                     "MKT:COMMS:INCOMING",
                     &[("text", &json_quote(&short_display_line(&text, 120)))],
                 );
-                let _ = incoming_display.send(DisplayEvent::Transcript {
-                    prefix: "host".to_string(),
-                    text,
-                });
+                incoming_display.transcript("host", text);
             }
         })),
     );
@@ -1621,9 +2091,15 @@ async fn run_comms_probe_async(
         .subscribe_session_events(&session_id)
         .await
         .context("failed to subscribe to device session events")?;
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_subscribe_session_events\"")]);
+    // Lifecycle/status can ride generic hooks, but transcript mirroring still
+    // needs plain session events because hook payloads do not expose peer
+    // message bodies.
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"after_subscribe_session_events\"")],
+    );
     let outgoing_counter = Arc::clone(&outgoing_messages);
-    let outgoing_display = display_tx.clone();
+    let outgoing_display = board_ui.clone();
     tokio::task::spawn_local(async move {
         while let Some(envelope) = events.next().await {
             match &envelope.payload {
@@ -1642,10 +2118,7 @@ async fn run_comms_probe_async(
                             "MKT:COMMS:OUTGOING",
                             &[("text", &json_quote(&short_display_line(&text, 120)))],
                         );
-                        let _ = outgoing_display.send(DisplayEvent::Transcript {
-                            prefix: "esp32".to_string(),
-                            text,
-                        });
+                        outgoing_display.transcript("esp32", text);
                     }
                 }
                 AgentEvent::ToolExecutionCompleted {
@@ -1668,7 +2141,10 @@ async fn run_comms_probe_async(
                         &[("is_error", &is_error.to_string())],
                     );
                 }
-                AgentEvent::InteractionComplete { interaction_id, result } => {
+                AgentEvent::InteractionComplete {
+                    interaction_id,
+                    result,
+                } => {
                     emit_marker(
                         "MKT:COMMS:INTERACTION_COMPLETE",
                         &[
@@ -1677,7 +2153,10 @@ async fn run_comms_probe_async(
                         ],
                     );
                 }
-                AgentEvent::InteractionFailed { interaction_id, error } => {
+                AgentEvent::InteractionFailed {
+                    interaction_id,
+                    error,
+                } => {
                     emit_marker(
                         "MKT:COMMS:INTERACTION_FAILED",
                         &[
@@ -1690,7 +2169,10 @@ async fn run_comms_probe_async(
             }
         }
     });
-    emit_marker("MKT:COMMS:STEP", &[("name", "\"after_spawn_local_events\"")]);
+    emit_marker(
+        "MKT:COMMS:STEP",
+        &[("name", "\"after_spawn_local_events\"")],
+    );
 
     emit_marker(
         "MKT:COMMS:READY",
@@ -1704,11 +2186,11 @@ async fn run_comms_probe_async(
     let mut drain = Box::pin(drain);
     loop {
         tokio::select! {
-            event = display_rx.recv() => {
+            event = board_ui_rx.recv() => {
                 match event {
                     Some(event) => {
                         if let Some(display) = status_display.as_deref_mut() {
-                            let _ = handle_display_event(display, &mut transcript, event);
+                            let _ = handle_board_ui_signal(display, &mut transcript, event);
                         }
                     }
                     None => {
@@ -1724,9 +2206,9 @@ async fn run_comms_probe_async(
         }
     }
 
-    while let Ok(event) = display_rx.try_recv() {
+    while let Ok(event) = board_ui_rx.try_recv() {
         if let Some(display) = status_display.as_deref_mut() {
-            let _ = handle_display_event(display, &mut transcript, event);
+            let _ = handle_board_ui_signal(display, &mut transcript, event);
         }
     }
 
@@ -1734,8 +2216,14 @@ async fn run_comms_probe_async(
     emit_marker(
         "MKT:COMMS:PASS",
         &[
-            ("incoming", &incoming_messages.load(Ordering::SeqCst).to_string()),
-            ("outgoing", &outgoing_messages.load(Ordering::SeqCst).to_string()),
+            (
+                "incoming",
+                &incoming_messages.load(Ordering::SeqCst).to_string(),
+            ),
+            (
+                "outgoing",
+                &outgoing_messages.load(Ordering::SeqCst).to_string(),
+            ),
             ("heap_before", &memory_before.heap_free.to_string()),
             ("heap_after", &memory_after.heap_free.to_string()),
             ("internal_after", &memory_after.internal_free.to_string()),
@@ -1752,6 +2240,339 @@ async fn run_comms_probe_async(
         memory_before,
         memory_after,
     })
+}
+
+fn run_serial_probe(
+    openai_api_key: &str,
+    mut status_display: Option<&mut StatusDisplay>,
+) -> anyhow::Result<()> {
+    let memory_before = capture_memory_snapshot();
+    emit_marker(
+        "MKT:SERIAL:BOOTSTRAP_OK",
+        &[
+            ("heap_free", &memory_before.heap_free.to_string()),
+            ("internal_free", &memory_before.internal_free.to_string()),
+            ("spiram_free", &memory_before.spiram_free.to_string()),
+        ],
+    );
+
+    if let Some(display) = status_display.as_deref_mut() {
+        let _ = display.show_stage(
+            "serial",
+            "arming host link",
+            Some("awaiting udp prompt"),
+            Rgb565::new(0, 20, 64),
+        );
+    }
+
+    #[cfg(target_os = "espidf")]
+    let summary = run_serial_probe_inner(
+        openai_api_key.to_string(),
+        memory_before,
+        status_display.as_deref_mut(),
+    )?;
+
+    #[cfg(not(target_os = "espidf"))]
+    let summary = run_serial_probe_inner(
+        openai_api_key.to_string(),
+        memory_before,
+        status_display.as_deref_mut(),
+    )?;
+
+    emit_marker(
+        "MKT:SERIAL:SUMMARY",
+        &[
+            ("prompts", &summary.prompts_completed.to_string()),
+            ("heap_after", &summary.memory_after.heap_free.to_string()),
+            ("internal_after", &summary.memory_after.internal_free.to_string()),
+            ("spiram_after", &summary.memory_after.spiram_free.to_string()),
+        ],
+    );
+    Ok(())
+}
+
+#[inline(never)]
+fn run_serial_probe_inner(
+    openai_api_key: String,
+    memory_before: MemorySnapshot,
+    mut status_display: Option<&mut StatusDisplay>,
+) -> anyhow::Result<SerialRunSummary> {
+    emit_marker(
+        "MKT:SERIAL:RUNTIME_MODE",
+        &[("mode", "\"current_thread_runtime_backed_serial_host\"")],
+    );
+    #[cfg(target_os = "espidf")]
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build_local(tokio::runtime::LocalOptions::default())
+        .context("failed to build tokio local runtime for serial probe")?;
+    #[cfg(not(target_os = "espidf"))]
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .context("failed to build tokio runtime for serial probe")?;
+
+    let serial_future = Box::pin(run_serial_probe_async(
+        openai_api_key,
+        memory_before,
+        status_display.take(),
+    ));
+    #[cfg(target_os = "espidf")]
+    {
+        runtime.block_on(serial_future)
+    }
+    #[cfg(not(target_os = "espidf"))]
+    {
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, serial_future)
+    }
+}
+
+#[inline(never)]
+async fn run_serial_probe_async(
+    openai_api_key: String,
+    memory_before: MemorySnapshot,
+    mut status_display: Option<&mut StatusDisplay>,
+) -> anyhow::Result<SerialRunSummary> {
+    let (board_ui_tx, mut board_ui_rx) = mpsc::unbounded_channel::<BoardUiSignal>();
+    let board_ui = BoardUiEmitter::new(board_ui_tx);
+    let mut transcript = Vec::new();
+
+    let session_store: Arc<dyn meerkat_core::SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::new());
+    let service = Arc::new(PersistentSessionService::new(
+        SerialProbeAgentBuilder {
+            model: OPENAI_MODEL.to_string(),
+            openai_api_key,
+            openai_base_url: OPENAI_BASE_URL.to_string(),
+            board_ui: board_ui.clone(),
+        },
+        1,
+        session_store,
+        Some(runtime_store.clone()),
+        blob_store.clone(),
+    ));
+    let runtime_adapter = Arc::new(RuntimeSessionAdapter::persistent(runtime_store, blob_store));
+    let session_id = create_serial_keep_alive_session(&service).await?;
+
+    runtime_adapter
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(ProbeSessionRuntimeExecutor::new(
+                Arc::clone(&service),
+                session_id.clone(),
+            )),
+        )
+        .await;
+
+    let mut events = service
+        .subscribe_session_events(&session_id)
+        .await
+        .context("failed to subscribe to serial probe session events")?;
+    tokio::task::spawn_local(async move {
+        while let Some(envelope) = events.next().await {
+            match &envelope.payload {
+                AgentEvent::ToolCallRequested { name, .. } if name == MICROPYTHON_TOOL_NAME => {
+                    emit_marker(
+                        "MKT:SERIAL:TOOL_REQUESTED",
+                        &[("name", &json_quote(name))],
+                    );
+                }
+                AgentEvent::InteractionComplete {
+                    interaction_id,
+                    result,
+                } => emit_marker(
+                    "MKT:SERIAL:INTERACTION_COMPLETE",
+                    &[
+                        ("id", &json_quote(&interaction_id.0.to_string())),
+                        ("result", &json_quote(&short_display_line(result, 120))),
+                    ],
+                ),
+                AgentEvent::InteractionFailed {
+                    interaction_id,
+                    error,
+                } => emit_marker(
+                    "MKT:SERIAL:INTERACTION_FAILED",
+                    &[
+                        ("id", &json_quote(&interaction_id.0.to_string())),
+                        ("error", &json_quote(&short_display_line(error, 120))),
+                    ],
+                ),
+                _ => {}
+            }
+        }
+    });
+
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SerialHostCommand>();
+    let _reader = spawn_host_command_reader(command_tx)?;
+    board_ui.stage(
+        "serial",
+        "host ready",
+        Some(format!("udp {HOST_PROMPT_LISTEN_PORT} json")),
+        Rgb565::new(0, 24, 72),
+    );
+    drain_board_ui_queue(
+        &mut board_ui_rx,
+        status_display.as_deref_mut(),
+        &mut transcript,
+    )?;
+    emit_marker(
+        "MKT:SERIAL:READY",
+        &[
+            ("session_id", &json_quote(&session_id.to_string())),
+            ("transport", "\"udp-broadcast\""),
+            ("port", &HOST_PROMPT_LISTEN_PORT.to_string()),
+        ],
+    );
+
+    let mut prompts_completed = 0usize;
+    loop {
+        tokio::select! {
+            event = board_ui_rx.recv() => {
+                if let Some(event) = event {
+                    if let Some(display) = status_display.as_deref_mut() {
+                        let _ = handle_board_ui_signal(display, &mut transcript, event);
+                    }
+                }
+            }
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    SerialHostCommand::Prompt { text } => {
+                        board_ui.transcript("host", text.clone());
+                        drain_board_ui_queue(
+                            &mut board_ui_rx,
+                            status_display.as_deref_mut(),
+                            &mut transcript,
+                        )?;
+                        let (accept_outcome, completion) = runtime_adapter
+                            .accept_input_with_completion(&session_id, make_serial_prompt_input(text))
+                            .await
+                            .context("failed to accept serial host prompt")?;
+                        match accept_outcome {
+                            meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => emit_marker(
+                                "MKT:SERIAL:PROMPT_ACCEPTED",
+                                &[("input_id", &json_quote(&input_id.to_string()))],
+                            ),
+                            meerkat_runtime::accept::AcceptOutcome::Deduplicated { input_id, existing_id } => emit_marker(
+                                "MKT:SERIAL:PROMPT_DEDUP",
+                                &[
+                                    ("input_id", &json_quote(&input_id.to_string())),
+                                    ("existing_id", &json_quote(&existing_id.to_string())),
+                                ],
+                            ),
+                            meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+                                bail!("serial host prompt rejected: {reason}");
+                            }
+                            _ => {
+                                bail!("serial host prompt reached unsupported accept outcome");
+                            }
+                        }
+
+                        let outcome = match completion {
+                            Some(handle) => handle.wait().await,
+                            None => CompletionOutcome::CompletedWithoutResult,
+                        };
+                        drain_board_ui_queue(
+                            &mut board_ui_rx,
+                            status_display.as_deref_mut(),
+                            &mut transcript,
+                        )?;
+                        match outcome {
+                            CompletionOutcome::Completed(result) => {
+                                prompts_completed += 1;
+                                board_ui.transcript("esp32", result.text.clone());
+                                drain_board_ui_queue(
+                                    &mut board_ui_rx,
+                                    status_display.as_deref_mut(),
+                                    &mut transcript,
+                                )?;
+                                emit_marker(
+                                    "MKT:SERIAL:RUN_RESULT",
+                                    &[
+                                        ("turns", &result.turns.to_string()),
+                                        ("tool_calls", &result.tool_calls.to_string()),
+                                        ("text", &json_quote(&short_display_line(&result.text, 120))),
+                                    ],
+                                );
+                            }
+                            CompletionOutcome::CompletedWithoutResult => {
+                                bail!("serial host prompt completed without result");
+                            }
+                            CompletionOutcome::CallbackPending { tool_name, .. } => {
+                                bail!("serial host prompt hit callback boundary at tool {tool_name}");
+                            }
+                            CompletionOutcome::Abandoned(reason)
+                            | CompletionOutcome::RuntimeTerminated(reason) => {
+                                bail!("serial host prompt did not complete: {reason}");
+                            }
+                        }
+                    }
+                    SerialHostCommand::Stop => {
+                        emit_marker("MKT:SERIAL:STOP", &[]);
+                        break;
+                    }
+                    SerialHostCommand::Ping => {
+                        emit_marker("MKT:SERIAL:PONG", &[]);
+                    }
+                }
+            }
+        }
+    }
+
+    drain_board_ui_queue(
+        &mut board_ui_rx,
+        status_display.as_deref_mut(),
+        &mut transcript,
+    )?;
+
+    let memory_after = capture_memory_snapshot();
+    emit_marker(
+        "MKT:SERIAL:PASS",
+        &[
+            ("prompts", &prompts_completed.to_string()),
+            ("heap_before", &memory_before.heap_free.to_string()),
+            ("heap_after", &memory_after.heap_free.to_string()),
+            ("internal_after", &memory_after.internal_free.to_string()),
+            ("spiram_after", &memory_after.spiram_free.to_string()),
+        ],
+    );
+
+    let _ = service.archive(&session_id).await;
+    runtime_adapter.unregister_session(&session_id).await;
+
+    Ok(SerialRunSummary {
+        prompts_completed,
+        memory_before,
+        memory_after,
+    })
+}
+
+async fn create_serial_keep_alive_session(
+    service: &Arc<impl SessionService>,
+) -> anyhow::Result<SessionId> {
+    let result = service
+        .create_session(CreateSessionRequest {
+            model: OPENAI_MODEL.to_string(),
+            prompt: "".into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: Some(256),
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                keep_alive: true,
+                ..Default::default()
+            }),
+            labels: None,
+        })
+        .await
+        .context("failed to create serial keep-alive session")?;
+    Ok(result.session_id)
 }
 
 fn phase0_host_trusted_peer() -> TrustedPeer {
@@ -1834,43 +2655,30 @@ fn device_system_prompt(host_peer_name: &str) -> String {
          Never send `Acknowledged.`, `Working on it.`, or any other prelude, placeholder, or follow-up. \
          Never call send before micropython_exec for a snippet request, and never call send more than once for the same incoming peer message. \
          After the single normal reply for a snippet request, the interaction is complete; do not send any second reply, summary, or farewell for that same peer message. \
-         Do not call datetime in the micropython validation flow. \
          Never infer a stop command from your own instructions or from prior conversation context."
     )
 }
 
-fn inbound_text(
-    ci: &meerkat_core::interaction::ClassifiedInboxInteraction,
-) -> Option<String> {
+fn inbound_text(ci: &meerkat_core::interaction::ClassifiedInboxInteraction) -> Option<String> {
     match &ci.interaction.content {
         meerkat_core::interaction::InteractionContent::Message { body, .. } => Some(body.clone()),
         _ => None,
     }
 }
 
-fn outgoing_send_text(envelope: &EventEnvelope<AgentEvent>) -> Option<String> {
-    match &envelope.payload {
-        AgentEvent::ToolCallRequested { name, args, .. } if name == "send" => args
-            .get("body")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        _ => None,
-    }
-}
-
-fn handle_display_event(
+fn handle_board_ui_signal(
     display: &mut StatusDisplay,
     transcript: &mut Vec<String>,
-    event: DisplayEvent,
+    event: BoardUiSignal,
 ) -> anyhow::Result<()> {
     let result = match event {
-        DisplayEvent::Stage {
+        BoardUiSignal::Stage {
             stage,
             headline,
             detail,
             background,
         } => display.show_stage(&stage, &headline, detail.as_deref(), background),
-        DisplayEvent::Transcript { prefix, text } => {
+        BoardUiSignal::Transcript { prefix, text } => {
             for line in wrap_display_text(&format!("{prefix}: {text}"), 26) {
                 transcript.push(line);
             }
@@ -2294,11 +3102,15 @@ impl StatusDisplay {
         self.tx(0xD0, &[0xA4, 0xA1])?;
         self.tx(
             0xE0,
-            &[0xD0, 0x0D, 0x14, 0x0D, 0x0D, 0x09, 0x38, 0x44, 0x4E, 0x3A, 0x17, 0x18, 0x2F, 0x30],
+            &[
+                0xD0, 0x0D, 0x14, 0x0D, 0x0D, 0x09, 0x38, 0x44, 0x4E, 0x3A, 0x17, 0x18, 0x2F, 0x30,
+            ],
         )?;
         self.tx(
             0xE1,
-            &[0xD0, 0x09, 0x0F, 0x08, 0x07, 0x14, 0x37, 0x44, 0x4D, 0x38, 0x15, 0x16, 0x2C, 0x2E],
+            &[
+                0xD0, 0x09, 0x0F, 0x08, 0x07, 0x14, 0x37, 0x44, 0x4D, 0x38, 0x15, 0x16, 0x2C, 0x2E,
+            ],
         )?;
         self.tx(0x21, &[])?;
         self.tx(0x29, &[])?;
@@ -2402,9 +3214,9 @@ impl StatusDisplay {
 
     fn show_chat(&mut self, title: &str, lines: &[String]) -> anyhow::Result<()> {
         Rectangle::new(Point::zero(), self.size())
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 8, 20)))
-        .draw(self)
-        .map_err(|error| anyhow!("failed to paint lcd chat background: {error:?}"))?;
+            .into_styled(PrimitiveStyle::with_fill(Rgb565::new(0, 8, 20)))
+            .draw(self)
+            .map_err(|error| anyhow!("failed to paint lcd chat background: {error:?}"))?;
 
         let header_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
         let body_style = MonoTextStyle::new(&FONT_6X10, Rgb565::new(180, 220, 255));
@@ -2414,7 +3226,14 @@ impl StatusDisplay {
             .map_err(|error| anyhow!("failed to draw lcd chat title: {error:?}"))?;
 
         let mut y = 42;
-        for line in lines.iter().rev().take(18).collect::<Vec<_>>().into_iter().rev() {
+        for line in lines
+            .iter()
+            .rev()
+            .take(18)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             Text::with_baseline(line, Point::new(8, y), body_style, Baseline::Top)
                 .draw(self)
                 .map_err(|error| anyhow!("failed to draw lcd chat line: {error:?}"))?;
@@ -2423,7 +3242,6 @@ impl StatusDisplay {
 
         self.flush()
     }
-
 }
 
 impl OriginDimensions for StatusDisplay {

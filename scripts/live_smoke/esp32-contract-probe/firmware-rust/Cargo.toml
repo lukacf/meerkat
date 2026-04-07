@@ -35,6 +35,7 @@ async-trait = "0.1"
 ciborium = "0.2"
 embedded-svc = "0.29.0"
 embedded-graphics = "0.8.2"
+esp-idf-sys = { version = "0.37.2", features = ["binstart"] }
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 futures = "0.3"
 log = "0.4"

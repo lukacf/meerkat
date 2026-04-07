@@ -120,12 +120,17 @@ impl PersistentRuntimeDriver {
         self.inner.drain_events()
     }
 
-    /// Check and clear wake flag (delegates to inner).
+    /// Drain the typed post-admission signal (delegates to inner).
+    pub fn take_post_admission_signal(&mut self) -> crate::driver::ephemeral::PostAdmissionSignal {
+        self.inner.take_post_admission_signal()
+    }
+
+    /// Check and clear wake flag (backward-compat, delegates to inner).
     pub fn take_wake_requested(&mut self) -> bool {
         self.inner.take_wake_requested()
     }
 
-    /// Check and clear immediate processing flag (delegates to inner).
+    /// Check and clear immediate processing flag (backward-compat, delegates to inner).
     pub fn take_process_requested(&mut self) -> bool {
         self.inner.take_process_requested()
     }

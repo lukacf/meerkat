@@ -980,6 +980,7 @@ impl SessionRuntime {
                 provider: overrides.as_ref().and_then(|ov| ov.provider.clone()),
                 provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
                 render_metadata: None,
+                execution_kind: None,
             },
         );
 
@@ -1109,10 +1110,8 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
-        if let RunPrimitive::StagedInput(staged) = primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-            && staged.boundary == RunApplyBoundary::Immediate
+        if primitive.is_context_only_immediate()
+            && let RunPrimitive::StagedInput(staged) = primitive
         {
             return self
                 .service
@@ -1209,6 +1208,7 @@ impl SessionRuntime {
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
                 additional_instructions: additional_instructions.clone(),
+                execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
             };
 
             match self
@@ -1406,6 +1406,7 @@ impl SessionRuntime {
                         skill_references,
                         flow_tool_overlay,
                         additional_instructions,
+                        execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -1564,6 +1565,7 @@ impl SessionRuntime {
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
+                    execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -1957,6 +1959,7 @@ impl SessionRuntime {
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
             additional_instructions: additional_instructions.clone(),
+            execution_kind: None,
         };
 
         if self.live_session_is_stale(session_id).await? {

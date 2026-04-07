@@ -63,7 +63,7 @@ pub use coalescing::{
     check_supersession, create_aggregate_input, is_coalescing_eligible,
 };
 pub use completion::{CompletionHandle, CompletionOutcome};
-pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
+pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,

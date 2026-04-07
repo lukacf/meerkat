@@ -1217,6 +1217,7 @@ mod scenario_09_session_service {
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,
+            execution_kind: None,
         };
 
         let turn_result = service
@@ -1681,6 +1682,7 @@ mod scenario_22_runtime_host_comms {
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                execution_kind: None,
             };
 
             let result = self

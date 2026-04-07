@@ -219,6 +219,7 @@ mod tests {
                 in_reply_to: Uuid::new_v4(),
                 status: crate::types::Status::Completed,
                 result: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };

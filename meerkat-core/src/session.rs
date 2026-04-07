@@ -486,6 +486,17 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Whether the conversation has a pending turn boundary.
+    ///
+    /// Returns `true` if the last message is `User` or `ToolResults`, meaning
+    /// the conversation is waiting for an assistant turn and `run_pending` can
+    /// resume without a new user message.
+    pub fn has_pending_boundary(&self) -> bool {
+        self.messages
+            .last()
+            .is_some_and(|m| matches!(m, Message::User(_) | Message::ToolResults { .. }))
+    }
+
     /// Get the last N messages
     pub fn last_n(&self, n: usize) -> &[Message] {
         let start = self.messages.len().saturating_sub(n);
@@ -967,7 +978,9 @@ impl From<&Session> for SessionMeta {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::types::{AssistantMessage, StopReason, SystemMessage, UserMessage};
+    use crate::types::{
+        AssistantMessage, BlockAssistantMessage, StopReason, SystemMessage, UserMessage,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -1166,5 +1179,46 @@ mod tests {
         assert_eq!(meta.id, *session.id());
         assert_eq!(meta.message_count, 2);
         assert_eq!(meta.total_tokens, 15);
+    }
+
+    #[test]
+    fn has_pending_boundary_empty_session() {
+        let session = Session::new();
+        assert!(!session.has_pending_boundary());
+    }
+
+    #[test]
+    fn has_pending_boundary_after_user_message() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello")));
+        assert!(session.has_pending_boundary());
+    }
+
+    #[test]
+    fn has_pending_boundary_after_assistant_message() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello")));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![],
+            stop_reason: StopReason::EndTurn,
+        }));
+        assert!(!session.has_pending_boundary());
+    }
+
+    #[test]
+    fn has_pending_boundary_after_tool_results() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello")));
+        session.push(Message::ToolResults { results: vec![] });
+        assert!(session.has_pending_boundary());
+    }
+
+    #[test]
+    fn has_pending_boundary_after_system() {
+        let mut session = Session::new();
+        session.push(Message::System(SystemMessage {
+            content: "system".into(),
+        }));
+        assert!(!session.has_pending_boundary());
     }
 }

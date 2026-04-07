@@ -186,6 +186,12 @@ pub enum RuntimeIngressEffect {
     },
     /// The runtime should be woken (idle -> running).
     WakeRuntime,
+    /// Interrupt cooperative yielding points within an active turn.
+    ///
+    /// Distinct from `WakeRuntime`: WakeRuntime wakes an idle loop,
+    /// InterruptYielding signals a running agent to break out of a
+    /// cooperative yield (e.g., wait tool). Both may be emitted together.
+    InterruptYielding,
     /// Immediate processing requested (steer/immediate drain).
     RequestImmediateProcessing,
     /// An input reached a terminal outcome.
@@ -811,10 +817,11 @@ impl RuntimeIngressAuthority {
             }
             crate::WakeMode::InterruptYielding => {
                 // Queue-mode inputs still need a wake so the runtime loop
-                // processes them after the current turn completes. Without
-                // this, the input sits in the queue with no pending wake
-                // signal and the runtime idles forever.
+                // processes them after the current turn completes.
                 effects.push(RuntimeIngressEffect::WakeRuntime);
+                // Typed InterruptYielding signal for the running agent's
+                // cooperative yield points (wait tool, etc.).
+                effects.push(RuntimeIngressEffect::InterruptYielding);
                 if handling_mode == HandlingMode::Steer {
                     effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
                 }

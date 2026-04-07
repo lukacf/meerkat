@@ -436,10 +436,7 @@ mod tests {
     fn input_state_deserializes_legacy_persisted_input_tags() {
         let mut continuation_state = InputState::new_accepted(InputId::new());
         continuation_state.persisted_input = Some(Input::Continuation(
-            crate::input::ContinuationInput::terminal_peer_response_for_request(
-                "legacy continuation",
-                Some("req-legacy".into()),
-            ),
+            crate::input::ContinuationInput::detached_background_op_completed(),
         ));
         let mut continuation_json = serde_json::to_value(&continuation_state).unwrap();
         continuation_json["persisted_input"]["input_type"] =

@@ -469,3 +469,124 @@ async fn terminal_response_while_running_no_wake() {
     assert!(outcome.is_accepted());
     assert!(!driver.take_wake_requested());
 }
+
+// ---------------------------------------------------------------------------
+// §13: Terminal response produces exactly one Peer input — no synthetic Continuation
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn drain_terminal_response_produces_exactly_one_peer_input() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Build a terminal response interaction and convert to runtime input.
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    // The bridge must produce a Peer input, not a Continuation.
+    assert!(
+        matches!(&input, Input::Peer(_)),
+        "terminal response must map to Peer, got {:?}",
+        input.kind_id()
+    );
+
+    // Accept through the driver.
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+
+    // Exactly 1 input in the queue — zero Continuations.
+    assert_eq!(
+        driver.queue().len(),
+        1,
+        "terminal response must produce exactly 1 queued input"
+    );
+
+    // Verify the queued input is a Peer with ResponseTerminal convention.
+    let queued_ids = driver.queue().input_ids();
+    let queued_state = driver.input_state(&queued_ids[0]).unwrap();
+    if let Some(Input::Peer(peer)) = &queued_state.persisted_input {
+        assert!(
+            matches!(
+                peer.convention,
+                Some(PeerConvention::ResponseTerminal { .. })
+            ),
+            "queued input must be ResponseTerminal"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §14: Terminal response + Steer handling_mode while running
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn terminal_response_with_steer_policy_while_running() {
+    // Build a terminal response with Steer handling_mode.
+    let in_reply_to = iid();
+    let interaction = InboxInteraction {
+        id: iid(),
+        from: "peer-1".into(),
+        content: InteractionContent::Response {
+            in_reply_to,
+            status: ResponseStatus::Completed,
+            result: serde_json::json!({"ok": true}),
+        },
+        rendered_text: "[peer-1]: response (Completed)".into(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        render_metadata: None,
+    };
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    // While running: should get InterruptYielding + Steer.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
+    assert_eq!(
+        policy.routing_disposition,
+        meerkat_runtime::RoutingDisposition::Steer
+    );
+
+    // Verify driver behavior while running.
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    driver
+        .start_run(meerkat_core::lifecycle::RunId::new())
+        .unwrap();
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert!(driver.take_wake_requested()); // InterruptYielding emits wake
+}
+
+// ---------------------------------------------------------------------------
+// §15: Terminal response + Steer handling_mode while idle
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn terminal_response_with_steer_policy_while_idle() {
+    // Build a terminal response with Steer handling_mode.
+    let in_reply_to = iid();
+    let interaction = InboxInteraction {
+        id: iid(),
+        from: "peer-1".into(),
+        content: InteractionContent::Response {
+            in_reply_to,
+            status: ResponseStatus::Completed,
+            result: serde_json::json!({"ok": true}),
+        },
+        rendered_text: "[peer-1]: response (Completed)".into(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        render_metadata: None,
+    };
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    // While idle: should get WakeIfIdle + Steer.
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+    assert_eq!(
+        policy.routing_disposition,
+        meerkat_runtime::RoutingDisposition::Steer
+    );
+
+    // Verify driver behavior while idle.
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert!(driver.take_wake_requested());
+}

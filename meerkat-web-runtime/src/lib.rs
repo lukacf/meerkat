@@ -1471,6 +1471,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: options.additional_instructions,
+                execution_kind: None,
             },
         )
         .await;

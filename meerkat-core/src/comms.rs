@@ -262,6 +262,31 @@ impl CommsCommandRequest {
                         return Err(errors);
                     }
                 };
+                let handling_mode = match self.handling_mode.as_deref() {
+                    Some("steer") => Some(HandlingMode::Steer),
+                    Some("queue") => Some(HandlingMode::Queue),
+                    None => None,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "handling_mode",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+                // handling_mode is forbidden on "accepted" (progress) responses.
+                // Runtime admission rejects PeerInput(ResponseProgress) with
+                // handling_mode, so reject at parse time to avoid a sender-side
+                // success path for a combination the receiver will drop.
+                if status == crate::ResponseStatus::Accepted && handling_mode.is_some() {
+                    errors.push(CommsCommandValidationError::new(
+                        "handling_mode",
+                        "forbidden_for_accepted_response",
+                        self.handling_mode.clone(),
+                    ));
+                    return Err(errors);
+                }
                 if errors.is_empty() {
                     let Some(to) = to else {
                         return Err(errors);
@@ -271,6 +296,7 @@ impl CommsCommandRequest {
                         in_reply_to,
                         status,
                         result: self.result.clone().unwrap_or(serde_json::Value::Null),
+                        handling_mode,
                     })
                 } else {
                     Err(errors)
@@ -400,6 +426,7 @@ pub enum CommsCommand {
         in_reply_to: InteractionId,
         status: ResponseStatus,
         result: serde_json::Value,
+        handling_mode: Option<HandlingMode>,
     },
 }
 
@@ -690,5 +717,46 @@ mod tests {
             }
             other => panic!("expected PeerRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn peer_response_accepted_with_handling_mode_rejected() {
+        let req = CommsCommandRequest {
+            kind: "peer_response".to_string(),
+            to: Some("peer-1".to_string()),
+            in_reply_to: Some(uuid::Uuid::now_v7().to_string()),
+            status: Some("accepted".to_string()),
+            handling_mode: Some("steer".to_string()),
+            ..Default::default()
+        };
+        let result = req.parse(&crate::SessionId::new());
+        assert!(
+            result.is_err(),
+            "accepted response with handling_mode must be rejected"
+        );
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.issue == "forbidden_for_accepted_response"),
+            "should have forbidden_for_accepted_response error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn peer_response_completed_with_handling_mode_accepted() {
+        let req = CommsCommandRequest {
+            kind: "peer_response".to_string(),
+            to: Some("peer-1".to_string()),
+            in_reply_to: Some(uuid::Uuid::now_v7().to_string()),
+            status: Some("completed".to_string()),
+            handling_mode: Some("steer".to_string()),
+            ..Default::default()
+        };
+        let result = req.parse(&crate::SessionId::new());
+        assert!(
+            result.is_ok(),
+            "completed response with handling_mode=steer should be accepted"
+        );
     }
 }

@@ -61,6 +61,9 @@ pub struct SendInput {
     /// Response result data (optional for peer_response)
     #[serde(default)]
     pub result: Option<Value>,
+    /// Handling mode override: "queue" or "steer" (optional for peer_response)
+    #[serde(default)]
+    pub handling_mode: Option<String>,
 }
 
 /// Input schema for `peers` tool
@@ -126,7 +129,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         source: None,
         stream: None,
         allow_self_session: None,
-        handling_mode: None,
+        handling_mode: input.handling_mode,
     };
     let command = request
         .parse(&meerkat_core::SessionId::new())
@@ -186,6 +189,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
             in_reply_to,
             status,
             result,
+            handling_mode,
         } => {
             let status = match status {
                 meerkat_core::ResponseStatus::Accepted => Status::Accepted,
@@ -199,6 +203,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
                         in_reply_to: in_reply_to.0,
                         status,
                         result,
+                        handling_mode,
                     },
                 )
                 .await

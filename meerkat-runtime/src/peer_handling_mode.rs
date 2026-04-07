@@ -1,8 +1,8 @@
-//! Peer handling-mode validation — reject handling_mode on response conventions.
+//! Peer handling-mode validation — reject handling_mode on response progress conventions.
 //!
 //! Rules:
-//! - handling_mode is FORBIDDEN for: PeerInput(ResponseProgress), PeerInput(ResponseTerminal)
-//! - handling_mode is ALLOWED for: PeerInput(Message), PeerInput(Request), PeerInput(no convention)
+//! - handling_mode is FORBIDDEN for: PeerInput(ResponseProgress)
+//! - handling_mode is ALLOWED for: PeerInput(Message), PeerInput(Request), PeerInput(ResponseTerminal), PeerInput(no convention)
 //! - Non-peer inputs are always accepted (validation is a no-op)
 
 use crate::input::{Input, PeerConvention};
@@ -14,10 +14,6 @@ pub enum PeerHandlingModeError {
     /// handling_mode is not allowed on ResponseProgress peer inputs.
     #[error("handling_mode is forbidden on ResponseProgress peer inputs")]
     ForbiddenForResponseProgress,
-
-    /// handling_mode is not allowed on ResponseTerminal peer inputs.
-    #[error("handling_mode is forbidden on ResponseTerminal peer inputs")]
-    ForbiddenForResponseTerminal,
 }
 
 /// Validate that a peer input does not carry handling_mode on response conventions.
@@ -31,9 +27,6 @@ pub fn validate_peer_handling_mode(input: &Input) -> Result<(), PeerHandlingMode
     match &peer.convention {
         Some(PeerConvention::ResponseProgress { .. }) => {
             Err(PeerHandlingModeError::ForbiddenForResponseProgress)
-        }
-        Some(PeerConvention::ResponseTerminal { .. }) => {
-            Err(PeerHandlingModeError::ForbiddenForResponseTerminal)
         }
         _ => Ok(()),
     }
@@ -84,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn response_terminal_with_handling_mode_rejected() {
+    fn response_terminal_with_handling_mode_accepted() {
         let input = Input::Peer(PeerInput {
             header: make_header(),
             convention: Some(PeerConvention::ResponseTerminal {
@@ -95,11 +88,22 @@ mod tests {
             blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
-        let err = validate_peer_handling_mode(&input).unwrap_err();
-        assert!(matches!(
-            err,
-            PeerHandlingModeError::ForbiddenForResponseTerminal
-        ));
+        assert!(validate_peer_handling_mode(&input).is_ok());
+    }
+
+    #[test]
+    fn response_terminal_with_queue_handling_mode_accepted() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: "done".into(),
+            blocks: None,
+            handling_mode: Some(HandlingMode::Queue),
+        });
+        assert!(validate_peer_handling_mode(&input).is_ok());
     }
 
     #[test]

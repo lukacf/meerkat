@@ -117,6 +117,7 @@ mod scenario_22_session_service_lifecycle {
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
+                    execution_kind: None,
                 },
             )
             .await

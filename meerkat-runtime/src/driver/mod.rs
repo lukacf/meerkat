@@ -3,5 +3,5 @@
 pub mod ephemeral;
 pub mod persistent;
 
-pub use ephemeral::EphemeralRuntimeDriver;
+pub use ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
 pub use persistent::PersistentRuntimeDriver;

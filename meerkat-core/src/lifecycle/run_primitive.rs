@@ -75,6 +75,21 @@ pub struct ConversationContextAppend {
     pub content: CoreRenderable,
 }
 
+/// Typed execution intent classified by the runtime layer.
+///
+/// The runtime stamps this on `RuntimeTurnMetadata` so the session layer can
+/// dispatch `run_turn` vs `run_pending` from typed intent rather than inferring
+/// from prompt emptiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExecutionKind {
+    /// Ordinary content turn: prompts, peer messages/requests/terminal-responses,
+    /// external events, flow steps.
+    ContentTurn,
+    /// Explicit continuation that resumes pending work at a boundary.
+    ResumePending,
+}
+
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
@@ -102,6 +117,14 @@ pub struct RuntimeTurnMetadata {
     /// Optional normalized rendering metadata for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
+    /// Typed execution intent classified by the runtime layer.
+    ///
+    /// `None` means the session layer should use its existing heuristic
+    /// (backward compat for non-runtime substrate-direct paths).
+    /// `Some(ContentTurn)` forces `run_turn`.
+    /// `Some(ResumePending)` forces `run_pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_kind: Option<RuntimeExecutionKind>,
 }
 
 /// An input staged for application at a run boundary.
@@ -155,6 +178,63 @@ impl RunPrimitive {
             RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
         }
     }
+
+    /// Extract content input from this primitive's conversation appends.
+    ///
+    /// Consolidates the 5 near-identical `extract_prompt` / `extract_runtime_prompt`
+    /// functions that were duplicated across RPC, REST, MCP, mob, and CLI surfaces.
+    pub fn extract_content_input(&self) -> crate::types::ContentInput {
+        use crate::types::{ContentBlock, ContentInput};
+        match self {
+            RunPrimitive::StagedInput(staged) => {
+                let mut all_blocks = Vec::new();
+                for append in &staged.appends {
+                    match &append.content {
+                        CoreRenderable::Text { text } => {
+                            all_blocks.push(ContentBlock::Text { text: text.clone() });
+                        }
+                        CoreRenderable::Blocks { blocks } => {
+                            all_blocks.extend(blocks.iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
+                if all_blocks.is_empty() {
+                    ContentInput::Text(String::new())
+                } else if all_blocks.len() == 1 {
+                    if let ContentBlock::Text { text } = &all_blocks[0] {
+                        ContentInput::Text(text.clone())
+                    } else {
+                        ContentInput::Blocks(all_blocks)
+                    }
+                } else {
+                    ContentInput::Blocks(all_blocks)
+                }
+            }
+            RunPrimitive::ImmediateAppend(append) => match &append.content {
+                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+                _ => ContentInput::Text(String::new()),
+            },
+            RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
+                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+                _ => ContentInput::Text(String::new()),
+            },
+        }
+    }
+
+    /// Whether this primitive is a context-only staged input that should be
+    /// routed to `apply_runtime_context_appends` rather than a full turn.
+    pub fn is_context_only_immediate(&self) -> bool {
+        matches!(
+            self,
+            RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty()
+                && !staged.context_appends.is_empty()
+                && staged.boundary == RunApplyBoundary::Immediate
+        )
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +278,134 @@ mod tests {
         assert_eq!(r, parsed);
     }
 
+    // --- extract_content_input tests ---
+
+    fn make_staged(appends: Vec<ConversationAppend>) -> RunPrimitive {
+        RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends,
+            context_appends: vec![],
+            contributing_input_ids: vec![],
+            turn_metadata: None,
+        })
+    }
+
+    #[test]
+    fn extract_content_from_staged_text() {
+        let p = make_staged(vec![ConversationAppend {
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Text {
+                text: "hello".into(),
+            },
+        }]);
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text("hello".into())
+        );
+    }
+
+    #[test]
+    fn extract_content_from_staged_blocks() {
+        let p = make_staged(vec![ConversationAppend {
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Blocks {
+                blocks: vec![
+                    crate::types::ContentBlock::Text { text: "a".into() },
+                    crate::types::ContentBlock::Text { text: "b".into() },
+                ],
+            },
+        }]);
+        let result = p.extract_content_input();
+        assert!(
+            matches!(&result, crate::types::ContentInput::Blocks(blocks) if blocks.len() == 2),
+            "expected Blocks with 2 elements, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn extract_content_from_staged_empty() {
+        let p = make_staged(vec![]);
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
+        );
+    }
+
+    #[test]
+    fn extract_content_single_text_block_collapses() {
+        let p = make_staged(vec![ConversationAppend {
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Blocks {
+                blocks: vec![crate::types::ContentBlock::Text {
+                    text: "single".into(),
+                }],
+            },
+        }]);
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text("single".into())
+        );
+    }
+
+    // --- is_context_only_immediate tests ---
+
+    #[test]
+    fn context_only_immediate_true() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: vec![],
+            context_appends: vec![ConversationContextAppend {
+                key: "k".into(),
+                content: CoreRenderable::Text { text: "ctx".into() },
+            }],
+            contributing_input_ids: vec![],
+            turn_metadata: None,
+        });
+        assert!(p.is_context_only_immediate());
+    }
+
+    #[test]
+    fn context_only_immediate_false_with_appends() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: vec![ConversationAppend {
+                role: ConversationAppendRole::User,
+                content: CoreRenderable::Text { text: "hi".into() },
+            }],
+            context_appends: vec![ConversationContextAppend {
+                key: "k".into(),
+                content: CoreRenderable::Text { text: "ctx".into() },
+            }],
+            contributing_input_ids: vec![],
+            turn_metadata: None,
+        });
+        assert!(!p.is_context_only_immediate());
+    }
+
+    #[test]
+    fn context_only_immediate_false_wrong_boundary() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: vec![],
+            context_appends: vec![ConversationContextAppend {
+                key: "k".into(),
+                content: CoreRenderable::Text { text: "ctx".into() },
+            }],
+            contributing_input_ids: vec![],
+            turn_metadata: None,
+        });
+        assert!(!p.is_context_only_immediate());
+    }
+
+    #[test]
+    fn non_staged_is_not_context_only() {
+        let p = RunPrimitive::ImmediateAppend(ConversationAppend {
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Text { text: "hi".into() },
+        });
+        assert!(!p.is_context_only_immediate());
+    }
+
     #[test]
     fn core_renderable_reference_serde() {
         let r = CoreRenderable::Reference {
@@ -208,6 +416,56 @@ mod tests {
         assert_eq!(json["type"], "reference");
         let parsed: CoreRenderable = serde_json::from_value(json).unwrap();
         assert_eq!(r, parsed);
+    }
+
+    #[test]
+    fn execution_kind_serde_round_trip() {
+        for kind in [
+            RuntimeExecutionKind::ContentTurn,
+            RuntimeExecutionKind::ResumePending,
+        ] {
+            let json = serde_json::to_value(kind).unwrap();
+            let parsed: RuntimeExecutionKind = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(kind, parsed);
+        }
+        // Verify snake_case naming
+        assert_eq!(
+            serde_json::to_value(RuntimeExecutionKind::ContentTurn).unwrap(),
+            serde_json::Value::String("content_turn".into())
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeExecutionKind::ResumePending).unwrap(),
+            serde_json::Value::String("resume_pending".into())
+        );
+    }
+
+    #[test]
+    fn turn_metadata_execution_kind_defaults_to_none() {
+        let meta = RuntimeTurnMetadata::default();
+        assert_eq!(meta.execution_kind, None);
+    }
+
+    #[test]
+    fn turn_metadata_execution_kind_round_trips() {
+        let meta = RuntimeTurnMetadata {
+            execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["execution_kind"], "content_turn");
+        let parsed: RuntimeTurnMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.execution_kind,
+            Some(RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn turn_metadata_without_execution_kind_deserializes() {
+        // Backward compat: old payloads without execution_kind deserialize to None
+        let json = serde_json::json!({});
+        let parsed: RuntimeTurnMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.execution_kind, None);
     }
 
     #[test]

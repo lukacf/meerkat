@@ -548,6 +548,7 @@ async fn integration_real_send_response() {
                 in_reply_to,
                 status,
                 result,
+                ..
             } => {
                 assert_eq!(in_reply_to, request_id);
                 assert!(matches!(status, Status::Completed));

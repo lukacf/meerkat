@@ -38,6 +38,47 @@ use crate::traits::{
     RuntimeDriverError,
 };
 
+/// Typed post-admission signal that the runtime loop should act on.
+///
+/// Replaces the boolean `wake_requested` / `process_requested` flags with
+/// an ordered enum where each variant is strictly stronger than the previous.
+/// The driver accumulates the maximum signal across ingress effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PostAdmissionSignal {
+    /// No action needed.
+    None,
+    /// Wake the runtime loop to process queued work (idle → running).
+    WakeLoop,
+    /// Interrupt cooperative yielding points within an active turn.
+    ///
+    /// Sent when an input arrives while a turn is running and the policy
+    /// specifies `WakeMode::InterruptYielding`. The runtime delivers this
+    /// through the per-session `RunControlCommand` channel so the agent
+    /// can break out of a wait-tool yield and process the queued input.
+    /// Also wakes the loop (implies WakeLoop).
+    InterruptYielding,
+    /// Request immediate steer/checkpoint processing within the current turn.
+    /// Implies WakeLoop and InterruptYielding — strictly strongest.
+    RequestImmediateProcessing,
+}
+
+impl PostAdmissionSignal {
+    /// Whether the runtime loop should be woken.
+    pub fn should_wake(self) -> bool {
+        self >= Self::WakeLoop
+    }
+
+    /// Whether cooperative yield points should be interrupted.
+    pub fn should_interrupt_yielding(self) -> bool {
+        self >= Self::InterruptYielding
+    }
+
+    /// Whether immediate in-turn processing was requested.
+    pub fn should_process_immediately(self) -> bool {
+        self == Self::RequestImmediateProcessing
+    }
+}
+
 /// Derive the handling mode from a policy decision's routing disposition.
 pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
@@ -57,8 +98,11 @@ pub struct EphemeralRuntimeDriver {
     queue: InputQueue,
     steer_queue: InputQueue,
     events: Vec<RuntimeEventEnvelope>,
-    wake_requested: bool,
-    process_requested: bool,
+    /// Typed post-admission signal replacing boolean wake/process flags.
+    ///
+    /// Accumulates the strongest signal across all ingress effects since last
+    /// drain. `RequestImmediateProcessing` is strictly stronger than `WakeLoop`.
+    post_admission_signal: PostAdmissionSignal,
     silent_comms_intents: Vec<String>,
     /// Canonical ingress authority -- coarse-grained ingress orchestration
     /// (queues, current run, wake/process flags, ingress phase).
@@ -75,8 +119,7 @@ impl EphemeralRuntimeDriver {
             queue: InputQueue::new(),
             steer_queue: InputQueue::new(),
             events: Vec::new(),
-            wake_requested: false,
-            process_requested: false,
+            post_admission_signal: PostAdmissionSignal::None,
             silent_comms_intents: Vec::new(),
             ingress: RuntimeIngressAuthority::new(),
         }
@@ -205,10 +248,17 @@ impl EphemeralRuntimeDriver {
         for effect in effects {
             match effect {
                 RuntimeIngressEffect::WakeRuntime => {
-                    self.wake_requested = true;
+                    if self.post_admission_signal < PostAdmissionSignal::WakeLoop {
+                        self.post_admission_signal = PostAdmissionSignal::WakeLoop;
+                    }
+                }
+                RuntimeIngressEffect::InterruptYielding => {
+                    if self.post_admission_signal < PostAdmissionSignal::InterruptYielding {
+                        self.post_admission_signal = PostAdmissionSignal::InterruptYielding;
+                    }
                 }
                 RuntimeIngressEffect::RequestImmediateProcessing => {
-                    self.process_requested = true;
+                    self.post_admission_signal = PostAdmissionSignal::RequestImmediateProcessing;
                 }
                 RuntimeIngressEffect::IngressAccepted { work_id } => {
                     tracing::debug!(
@@ -424,11 +474,30 @@ impl EphemeralRuntimeDriver {
         })?;
         Ok(run_id)
     }
-    pub fn take_wake_requested(&mut self) -> bool {
-        std::mem::take(&mut self.wake_requested)
+    /// Drain and return the accumulated post-admission signal.
+    ///
+    /// Returns the strongest signal seen since the last drain and resets to `None`.
+    pub fn take_post_admission_signal(&mut self) -> PostAdmissionSignal {
+        std::mem::replace(&mut self.post_admission_signal, PostAdmissionSignal::None)
     }
+
+    /// Drain the typed signal and return whether wake is needed (backward-compat).
+    ///
+    /// **Deprecated**: prefer `take_post_admission_signal()` for typed semantics.
+    /// This drains the signal and returns `should_wake()`.
+    pub fn take_wake_requested(&mut self) -> bool {
+        // Note: we DON'T drain here — take_process_requested is always
+        // called immediately after and expects to see the same signal.
+        self.post_admission_signal.should_wake()
+    }
+
+    /// Return whether immediate processing was requested and drain (backward-compat).
+    ///
+    /// **Deprecated**: prefer `take_post_admission_signal()` for typed semantics.
+    /// Must be called after `take_wake_requested()`. Drains the signal.
     pub fn take_process_requested(&mut self) -> bool {
-        std::mem::take(&mut self.process_requested)
+        let signal = std::mem::replace(&mut self.post_admission_signal, PostAdmissionSignal::None);
+        signal.should_process_immediately()
     }
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         std::mem::take(&mut self.events)
@@ -746,8 +815,7 @@ impl EphemeralRuntimeDriver {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
         self.queue.drain();
         self.steer_queue.drain();
-        self.wake_requested = false;
-        self.process_requested = false;
+        self.post_admission_signal = PostAdmissionSignal::None;
         match self.control.apply(RuntimeControlInput::ResetRequested) {
             Ok(transition) => {
                 self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
@@ -946,8 +1014,7 @@ impl EphemeralRuntimeDriver {
         let abandoned = self.abandon_all_non_terminal(reason);
         self.queue.drain();
         self.steer_queue.drain();
-        self.wake_requested = false;
-        self.process_requested = false;
+        self.post_admission_signal = PostAdmissionSignal::None;
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
         abandoned

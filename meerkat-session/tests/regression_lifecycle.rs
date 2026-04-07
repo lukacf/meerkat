@@ -448,10 +448,10 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
-
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,
+        execution_kind: None,
     }
 }
 
@@ -991,10 +991,10 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 }),
                 handling_mode: HandlingMode::Steer,
                 event_tx: None,
-
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
+                execution_kind: None,
             },
         )
         .await

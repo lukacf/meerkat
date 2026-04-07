@@ -775,6 +775,7 @@ async fn handle_target_message(
                         skill_references: None,
                         flow_tool_overlay: None,
                         additional_instructions: None,
+                        execution_kind: None,
                     };
                     if let Err(e) = service
                         .start_turn(active_session_id(session_binding_state), req)
@@ -1378,6 +1379,7 @@ impl CoreExecutor for TargetCoreExecutor {
             additional_instructions: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.additional_instructions.clone()),
+            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
         };
 
         let boundary = match &primitive {
@@ -2613,6 +2615,7 @@ mod tests {
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
+                    execution_kind: None,
                 },
             )
             .await

@@ -373,47 +373,6 @@ impl RestSessionRuntimeExecutor {
     }
 }
 
-fn extract_runtime_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.len() == 1
-                && let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0]
-            {
-                return ContentInput::Text(text.clone());
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -482,20 +441,18 @@ async fn apply_runtime_turn(
     primitive: &RunPrimitive,
     prompt: ContentInput,
 ) -> Result<CoreApplyOutput, SessionError> {
-    if let RunPrimitive::StagedInput(staged) = primitive
-        && staged.appends.is_empty()
-        && !staged.context_appends.is_empty()
-        && staged.boundary == RunApplyBoundary::Immediate
-    {
-        return context
-            .session_service
-            .apply_runtime_context_appends(
-                session_id,
-                run_id,
-                pending_system_context_appends(&staged.context_appends),
-                staged.contributing_input_ids.clone(),
-            )
-            .await;
+    if primitive.is_context_only_immediate() {
+        if let RunPrimitive::StagedInput(staged) = primitive {
+            return context
+                .session_service
+                .apply_runtime_context_appends(
+                    session_id,
+                    run_id,
+                    pending_system_context_appends(&staged.context_appends),
+                    staged.contributing_input_ids.clone(),
+                )
+                .await;
+        }
     }
 
     let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -678,7 +635,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_runtime_prompt(&primitive);
+        let prompt = primitive.extract_content_input();
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await

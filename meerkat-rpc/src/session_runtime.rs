@@ -1110,21 +1110,19 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
-        if let RunPrimitive::StagedInput(staged) = primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-            && staged.boundary == RunApplyBoundary::Immediate
-        {
-            return self
-                .service
-                .apply_runtime_context_appends(
-                    session_id,
-                    run_id,
-                    pending_system_context_appends(&staged.context_appends),
-                    staged.contributing_input_ids.clone(),
-                )
-                .await
-                .map_err(session_error_to_rpc);
+        if primitive.is_context_only_immediate() {
+            if let RunPrimitive::StagedInput(staged) = primitive {
+                return self
+                    .service
+                    .apply_runtime_context_appends(
+                        session_id,
+                        run_id,
+                        pending_system_context_appends(&staged.context_appends),
+                        staged.contributing_input_ids.clone(),
+                    )
+                    .await
+                    .map_err(session_error_to_rpc);
+            }
         }
 
         let effective_identity = self

@@ -2599,39 +2599,6 @@ struct CliRuntimeExecutor {
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
-fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
-    match primitive {
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
-            .appends
-            .iter()
-            .filter_map(|a| match &a.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    Some(text.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(append) => {
-            match &append.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    text.clone()
-                }
-                _ => String::new(),
-            }
-        }
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateContextAppend(ctx) => {
-            match &ctx.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    text.clone()
-                }
-                _ => String::new(),
-            }
-        }
-        _ => String::new(),
-    }
-}
-
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     async fn apply(
@@ -2642,9 +2609,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
-        let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
-            prompt: prompt.into(),
+            prompt: primitive.extract_content_input(),
             system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,

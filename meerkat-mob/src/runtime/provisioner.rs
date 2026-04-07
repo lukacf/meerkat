@@ -10,7 +10,7 @@ use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event_injector::SubscribableInjector;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::{OperationStatus, OpsLifecycleRegistry};
@@ -486,48 +486,6 @@ impl MobSessionRuntimeExecutor {
     }
 }
 
-fn extract_prompt_input(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.len() == 1 {
-                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
-                    ContentInput::Text(text.clone())
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
-            } else if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
@@ -542,7 +500,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
         let req = StartTurnRequest {
-            prompt: extract_prompt_input(&primitive),
+            prompt: primitive.extract_content_input(),
             system_prompt: None,
             render_metadata: primitive
                 .turn_metadata()

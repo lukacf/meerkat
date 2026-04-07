@@ -7,12 +7,11 @@
 
 use std::sync::Arc;
 
-use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
@@ -70,49 +69,6 @@ impl SessionRuntimeExecutor {
     }
 }
 
-/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
-fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else if all_blocks.len() == 1 {
-                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
-                    ContentInput::Text(text.clone())
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
     async fn apply(
@@ -120,7 +76,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
+        let prompt = primitive.extract_content_input();
 
         // Create an event channel and forward events to the notification sink
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
@@ -212,7 +168,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
+        let prompt = primitive.extract_content_input();
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();

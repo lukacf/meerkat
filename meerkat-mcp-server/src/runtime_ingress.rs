@@ -15,7 +15,7 @@ use meerkat_core::lifecycle::run_primitive::{
 };
 use meerkat_core::service::{SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::{HandlingMode, SessionId};
-use meerkat_core::{ConfigRuntime, ContentInput, EventEnvelope, PendingSystemContextAppend};
+use meerkat_core::{ConfigRuntime, EventEnvelope, PendingSystemContextAppend};
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{AcceptOutcome, Input, RuntimeSessionAdapter};
@@ -330,47 +330,6 @@ impl McpSessionRuntimeExecutor {
     }
 }
 
-fn extract_runtime_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.len() == 1
-                && let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0]
-            {
-                return ContentInput::Text(text.clone());
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -408,23 +367,21 @@ async fn apply_runtime_turn(
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
 ) -> Result<CoreApplyOutput, SessionError> {
-    if let RunPrimitive::StagedInput(staged) = primitive
-        && staged.appends.is_empty()
-        && !staged.context_appends.is_empty()
-        && staged.boundary == RunApplyBoundary::Immediate
-    {
-        return context
-            .service
-            .apply_runtime_context_appends(
-                session_id,
-                run_id,
-                pending_system_context_appends(&staged.context_appends),
-                staged.contributing_input_ids.clone(),
-            )
-            .await;
+    if primitive.is_context_only_immediate() {
+        if let RunPrimitive::StagedInput(staged) = primitive {
+            return context
+                .service
+                .apply_runtime_context_appends(
+                    session_id,
+                    run_id,
+                    pending_system_context_appends(&staged.context_appends),
+                    staged.contributing_input_ids.clone(),
+                )
+                .await;
+        }
     }
 
-    let prompt = extract_runtime_prompt(primitive);
+    let prompt = primitive.extract_content_input();
     let boundary = match primitive {
         RunPrimitive::StagedInput(staged) => staged.boundary,
         _ => RunApplyBoundary::Immediate,

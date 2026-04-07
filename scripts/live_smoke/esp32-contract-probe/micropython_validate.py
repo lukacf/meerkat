@@ -54,11 +54,11 @@ class SerialState:
             self.py_calls += text.count("MKT:MICROPY:COMPLETED is_error=false")
             if "MKT:COMMS:PASS" in text:
                 self.comms_pass = True
-            if "MKT:SERIAL:READY" in text:
+            if "MKT:HOSTLINK:READY" in text:
                 self.serial_ready = True
-            if "MKT:SERIAL:PASS" in text:
+            if "MKT:HOSTLINK:PASS" in text:
                 self.serial_pass = True
-            self.serial_results += text.count("MKT:SERIAL:RUN_RESULT")
+            self.serial_results += text.count("MKT:HOSTLINK:RUN_RESULT")
             for raw in text.splitlines():
                 line = raw.strip()
                 if line.startswith("MKT:COMMS:LISTENING"):
@@ -78,7 +78,7 @@ class SerialState:
                     match = re.search(r'ip=(".*?")', line)
                     if match:
                         self.wifi_ip = json.loads(match.group(1))
-                elif line.startswith("MKT:SERIAL:READY"):
+                elif line.startswith("MKT:HOSTLINK:READY"):
                     match = re.search(r'port=(\d+)', line)
                     if match:
                         self.serial_port = int(match.group(1))
@@ -129,7 +129,7 @@ def resolve_host_listen() -> str:
 
 
 def resolve_host_mode() -> str:
-    return os.environ.get("ESP32_HOST_MODE", "serial").strip().lower() or "serial"
+    return os.environ.get("ESP32_HOST_MODE", "hostlink").strip().lower() or "hostlink"
 
 
 def serial_prompt(index: int) -> str:
@@ -318,9 +318,9 @@ def reset_and_monitor(
             deadline = time.time() + 35
             while time.time() < deadline:
                 with state.lock:
-                    if host_mode == "serial" and state.serial_ready:
+                    if host_mode == "hostlink" and state.serial_ready:
                         print(
-                            "MKT:VALIDATOR:DEVICE_READY mode=serial",
+                            "MKT:VALIDATOR:DEVICE_READY mode=hostlink",
                             flush=True,
                         )
                         return ser, stop_event, thread
@@ -340,9 +340,9 @@ def reset_and_monitor(
             stop_event.set()
             thread.join(timeout=2)
             ser.close()
-            if host_mode == "serial":
+            if host_mode == "hostlink":
                 last_error = RuntimeError(
-                    f"attempt {attempt}: device did not reach SERIAL:READY on {port}"
+                    f"attempt {attempt}: device did not reach HOSTLINK:READY on {port}"
                 )
             else:
                 last_error = RuntimeError(
@@ -467,6 +467,7 @@ def run_serial_host(
     host_log.write_text("", encoding="utf-8")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    targets = [(host_ip, host_port), ("255.255.255.255", host_port)]
 
     try:
         for index in range(1, exchanges + 1):
@@ -474,9 +475,11 @@ def run_serial_host(
             payload = json.dumps({"cmd": "prompt", "text": prompt}) + "\n"
             with state.lock:
                 target_results = state.serial_results + 1
-            sock.sendto(payload.encode("utf-8"), ("255.255.255.255", host_port))
+            encoded = payload.encode("utf-8")
+            for target in targets:
+                sock.sendto(encoded, target)
             log(
-                f"MKT:HOST_SERIAL:PROMPT index={index} target=255.255.255.255:{host_port} device_ip={host_ip} text={json.dumps(prompt)}\n"
+                f"MKT:HOST_LINK:PROMPT index={index} targets={json.dumps([f'{ip}:{port}' for ip, port in targets])} device_ip={host_ip} text={json.dumps(prompt)}\n"
             )
 
             deadline = time.time() + timeout_secs
@@ -487,24 +490,25 @@ def run_serial_host(
                 time.sleep(0.1)
             else:
                 timed_out = True
-                log(f"MKT:HOST_SERIAL:TIMEOUT index={index} seconds={timeout_secs}\n")
+                log(f"MKT:HOST_LINK:TIMEOUT index={index} seconds={timeout_secs}\n")
                 return "".join(lines), 124, timed_out
 
-        sock.sendto(b'{"cmd":"stop"}\n', ("255.255.255.255", host_port))
-        log("MKT:HOST_SERIAL:STOP\n")
+        for target in targets:
+            sock.sendto(b'{"cmd":"stop"}\n', target)
+        log("MKT:HOST_LINK:STOP\n")
 
         deadline = time.time() + max(20, timeout_secs)
         while time.time() < deadline:
             with state.lock:
                 if state.serial_pass:
                     log(
-                        f"MKT:HOST_SERIAL:PASS prompts={exchanges} elapsed_ms={int((time.time() - start) * 1000)}\n"
+                        f"MKT:HOST_LINK:PASS prompts={exchanges} elapsed_ms={int((time.time() - start) * 1000)}\n"
                     )
                     return "".join(lines), 0, timed_out
             time.sleep(0.1)
 
         timed_out = True
-        log(f"MKT:HOST_SERIAL:TIMEOUT stop_wait seconds={max(20, timeout_secs)}\n")
+        log(f"MKT:HOST_LINK:TIMEOUT stop_wait seconds={max(20, timeout_secs)}\n")
         return "".join(lines), 124, timed_out
     finally:
         sock.close()
@@ -519,9 +523,9 @@ def wait_for_device_ready(
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         with state.lock:
-            if host_mode == "serial" and state.serial_ready:
+            if host_mode == "hostlink" and state.serial_ready:
                 print(
-                    f"MKT:VALIDATOR:DEVICE_READY via={label} mode=serial",
+                    f"MKT:VALIDATOR:DEVICE_READY via={label} mode=hostlink",
                     flush=True,
                 )
                 return
@@ -532,8 +536,8 @@ def wait_for_device_ready(
                 )
                 return
         time.sleep(0.1)
-    if host_mode == "serial":
-        raise SystemExit(f"device did not reach SERIAL:READY via {label}")
+    if host_mode == "hostlink":
+        raise SystemExit(f"device did not reach HOSTLINK:READY via {label}")
     raise SystemExit(
         f"device did not reach COMMS:READY via {label}; peer_id={state.peer_id} peer_addr={state.peer_addr}"
     )
@@ -652,12 +656,12 @@ def main() -> int:
         print("SUMMARY", json.dumps(summary))
         return 1
 
-    if host_mode == "serial":
+    if host_mode == "hostlink":
         with serial_state.lock:
             host_ip = serial_state.wifi_ip
             host_port = serial_state.serial_port or 4311
         if not host_ip:
-            raise SystemExit("serial host mode missing device wifi_ip from UDP markers")
+            raise SystemExit("host-link mode missing device wifi_ip from UDP markers")
         host_output, host_code, host_timed_out = run_serial_host(
             artifact_dir,
             host_ip,
@@ -700,9 +704,9 @@ def main() -> int:
         "status": (
             "pass"
             if (
-                host_mode == "serial"
+                host_mode == "hostlink"
                 and host_code == 0
-                and "MKT:HOST_SERIAL:PASS" in host_output
+                and "MKT:HOST_LINK:PASS" in host_output
                 and serial_pass
                 and micropy_init_ok
                 and py_calls >= exchanges

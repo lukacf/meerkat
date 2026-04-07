@@ -1349,7 +1349,9 @@ fn wait_for_time_sync(status_display: Option<&mut StatusDisplay>) -> anyhow::Res
 
 fn host_input_mode() -> HostInputMode {
     match HOST_INPUT_MODE {
-        "serial" | "SERIAL" => HostInputMode::Serial,
+        "hostlink" | "HOSTLINK" | "host_link" | "HOST_LINK" | "serial" | "SERIAL" => {
+            HostInputMode::Serial
+        }
         _ => HostInputMode::Comms,
     }
 }
@@ -1366,24 +1368,24 @@ fn serial_system_prompt() -> String {
 
 fn parse_serial_host_command(line: &str) -> anyhow::Result<SerialHostCommand> {
     let raw: Value =
-        serde_json::from_str(line).context("serial host command must be valid JSON object")?;
+        serde_json::from_str(line).context("host-link command must be valid JSON object")?;
     let command = raw
         .get("cmd")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("serial host command missing string field 'cmd'"))?;
+        .ok_or_else(|| anyhow!("host-link command missing string field 'cmd'"))?;
     match command {
         "prompt" => {
             let text = raw
                 .get("text")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("serial host prompt missing string field 'text'"))?;
+                .ok_or_else(|| anyhow!("host-link prompt missing string field 'text'"))?;
             Ok(SerialHostCommand::Prompt {
                 text: text.to_string(),
             })
         }
         "stop" => Ok(SerialHostCommand::Stop),
         "ping" => Ok(SerialHostCommand::Ping),
-        other => bail!("unsupported serial host command {other:?}"),
+        other => bail!("unsupported host-link command {other:?}"),
     }
 }
 
@@ -1397,14 +1399,14 @@ fn spawn_host_command_reader(
                 Ok(socket) => socket,
                 Err(error) => {
                     emit_marker(
-                        "MKT:SERIAL:LISTEN_FAIL",
+                        "MKT:HOSTLINK:LISTEN_FAIL",
                         &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
                     );
                     return;
                 }
             };
             emit_marker(
-                "MKT:SERIAL:LISTENING",
+                "MKT:HOSTLINK:LISTENING",
                 &[
                     ("port", &HOST_PROMPT_LISTEN_PORT.to_string()),
                     ("transport", "\"udp-broadcast\""),
@@ -1416,7 +1418,7 @@ fn spawn_host_command_reader(
                     Ok(result) => result,
                     Err(error) => {
                         emit_marker(
-                            "MKT:SERIAL:READ_FAIL",
+                            "MKT:HOSTLINK:READ_FAIL",
                             &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
                         );
                         thread::sleep(Duration::from_millis(200));
@@ -1424,14 +1426,14 @@ fn spawn_host_command_reader(
                     }
                 };
                 emit_marker(
-                    "MKT:SERIAL:CLIENT_CONNECTED",
+                    "MKT:HOSTLINK:CLIENT_CONNECTED",
                     &[("peer", &json_quote(&peer_addr.to_string()))],
                 );
                 let payload = match std::str::from_utf8(&buffer[..len]) {
                     Ok(payload) => payload.trim(),
                     Err(error) => {
                         emit_marker(
-                            "MKT:SERIAL:CMD_PARSE_FAIL",
+                            "MKT:HOSTLINK:CMD_PARSE_FAIL",
                             &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
                         );
                         continue;
@@ -1444,14 +1446,14 @@ fn spawn_host_command_reader(
                     Ok(command) => {
                         match &command {
                             SerialHostCommand::Prompt { text } => emit_marker(
-                                "MKT:SERIAL:CMD_RX",
+                                "MKT:HOSTLINK:CMD_RX",
                                 &[("kind", "\"prompt\""), ("bytes", &text.len().to_string())],
                             ),
                             SerialHostCommand::Stop => {
-                                emit_marker("MKT:SERIAL:CMD_RX", &[("kind", "\"stop\"")])
+                                emit_marker("MKT:HOSTLINK:CMD_RX", &[("kind", "\"stop\"")])
                             }
                             SerialHostCommand::Ping => {
-                                emit_marker("MKT:SERIAL:CMD_RX", &[("kind", "\"ping\"")])
+                                emit_marker("MKT:HOSTLINK:CMD_RX", &[("kind", "\"ping\"")])
                             }
                         }
                         if tx.send(command).is_err() {
@@ -1459,7 +1461,7 @@ fn spawn_host_command_reader(
                         }
                     }
                     Err(error) => emit_marker(
-                        "MKT:SERIAL:CMD_PARSE_FAIL",
+                        "MKT:HOSTLINK:CMD_PARSE_FAIL",
                         &[("error", &json_quote(&short_display_line(&error.to_string(), 80)))],
                     ),
                 }
@@ -1471,7 +1473,7 @@ fn spawn_host_command_reader(
 fn make_serial_prompt_input(text: impl Into<String>) -> Input {
     let mut prompt = PromptInput::new(text.into(), None);
     prompt.header.source = InputOrigin::External {
-        source_name: "tcp_host_link".to_string(),
+        source_name: "host_link".to_string(),
     };
     Input::Prompt(prompt)
 }
@@ -2248,7 +2250,7 @@ fn run_serial_probe(
 ) -> anyhow::Result<()> {
     let memory_before = capture_memory_snapshot();
     emit_marker(
-        "MKT:SERIAL:BOOTSTRAP_OK",
+        "MKT:HOSTLINK:BOOTSTRAP_OK",
         &[
             ("heap_free", &memory_before.heap_free.to_string()),
             ("internal_free", &memory_before.internal_free.to_string()),
@@ -2258,7 +2260,7 @@ fn run_serial_probe(
 
     if let Some(display) = status_display.as_deref_mut() {
         let _ = display.show_stage(
-            "serial",
+            "hostlink",
             "arming host link",
             Some("awaiting udp prompt"),
             Rgb565::new(0, 20, 64),
@@ -2280,7 +2282,7 @@ fn run_serial_probe(
     )?;
 
     emit_marker(
-        "MKT:SERIAL:SUMMARY",
+        "MKT:HOSTLINK:SUMMARY",
         &[
             ("prompts", &summary.prompts_completed.to_string()),
             ("heap_after", &summary.memory_after.heap_free.to_string()),
@@ -2298,8 +2300,8 @@ fn run_serial_probe_inner(
     mut status_display: Option<&mut StatusDisplay>,
 ) -> anyhow::Result<SerialRunSummary> {
     emit_marker(
-        "MKT:SERIAL:RUNTIME_MODE",
-        &[("mode", "\"current_thread_runtime_backed_serial_host\"")],
+        "MKT:HOSTLINK:RUNTIME_MODE",
+        &[("mode", "\"current_thread_runtime_backed_host_link\"")],
     );
     #[cfg(target_os = "espidf")]
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2374,7 +2376,7 @@ async fn run_serial_probe_async(
             match &envelope.payload {
                 AgentEvent::ToolCallRequested { name, .. } if name == MICROPYTHON_TOOL_NAME => {
                     emit_marker(
-                        "MKT:SERIAL:TOOL_REQUESTED",
+                        "MKT:HOSTLINK:TOOL_REQUESTED",
                         &[("name", &json_quote(name))],
                     );
                 }
@@ -2382,7 +2384,7 @@ async fn run_serial_probe_async(
                     interaction_id,
                     result,
                 } => emit_marker(
-                    "MKT:SERIAL:INTERACTION_COMPLETE",
+                    "MKT:HOSTLINK:INTERACTION_COMPLETE",
                     &[
                         ("id", &json_quote(&interaction_id.0.to_string())),
                         ("result", &json_quote(&short_display_line(result, 120))),
@@ -2392,7 +2394,7 @@ async fn run_serial_probe_async(
                     interaction_id,
                     error,
                 } => emit_marker(
-                    "MKT:SERIAL:INTERACTION_FAILED",
+                    "MKT:HOSTLINK:INTERACTION_FAILED",
                     &[
                         ("id", &json_quote(&interaction_id.0.to_string())),
                         ("error", &json_quote(&short_display_line(error, 120))),
@@ -2406,7 +2408,7 @@ async fn run_serial_probe_async(
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<SerialHostCommand>();
     let _reader = spawn_host_command_reader(command_tx)?;
     board_ui.stage(
-        "serial",
+        "hostlink",
         "host ready",
         Some(format!("udp {HOST_PROMPT_LISTEN_PORT} json")),
         Rgb565::new(0, 24, 72),
@@ -2417,7 +2419,7 @@ async fn run_serial_probe_async(
         &mut transcript,
     )?;
     emit_marker(
-        "MKT:SERIAL:READY",
+        "MKT:HOSTLINK:READY",
         &[
             ("session_id", &json_quote(&session_id.to_string())),
             ("transport", "\"udp-broadcast\""),
@@ -2450,24 +2452,24 @@ async fn run_serial_probe_async(
                         let (accept_outcome, completion) = runtime_adapter
                             .accept_input_with_completion(&session_id, make_serial_prompt_input(text))
                             .await
-                            .context("failed to accept serial host prompt")?;
+                            .context("failed to accept host-link prompt")?;
                         match accept_outcome {
                             meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => emit_marker(
-                                "MKT:SERIAL:PROMPT_ACCEPTED",
+                                "MKT:HOSTLINK:PROMPT_ACCEPTED",
                                 &[("input_id", &json_quote(&input_id.to_string()))],
                             ),
                             meerkat_runtime::accept::AcceptOutcome::Deduplicated { input_id, existing_id } => emit_marker(
-                                "MKT:SERIAL:PROMPT_DEDUP",
+                                "MKT:HOSTLINK:PROMPT_DEDUP",
                                 &[
                                     ("input_id", &json_quote(&input_id.to_string())),
                                     ("existing_id", &json_quote(&existing_id.to_string())),
                                 ],
                             ),
                             meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-                                bail!("serial host prompt rejected: {reason}");
+                                bail!("host-link prompt rejected: {reason}");
                             }
                             _ => {
-                                bail!("serial host prompt reached unsupported accept outcome");
+                                bail!("host-link prompt reached unsupported accept outcome");
                             }
                         }
 
@@ -2490,7 +2492,7 @@ async fn run_serial_probe_async(
                                     &mut transcript,
                                 )?;
                                 emit_marker(
-                                    "MKT:SERIAL:RUN_RESULT",
+                                    "MKT:HOSTLINK:RUN_RESULT",
                                     &[
                                         ("turns", &result.turns.to_string()),
                                         ("tool_calls", &result.tool_calls.to_string()),
@@ -2499,23 +2501,23 @@ async fn run_serial_probe_async(
                                 );
                             }
                             CompletionOutcome::CompletedWithoutResult => {
-                                bail!("serial host prompt completed without result");
+                                bail!("host-link prompt completed without result");
                             }
                             CompletionOutcome::CallbackPending { tool_name, .. } => {
-                                bail!("serial host prompt hit callback boundary at tool {tool_name}");
+                                bail!("host-link prompt hit callback boundary at tool {tool_name}");
                             }
                             CompletionOutcome::Abandoned(reason)
                             | CompletionOutcome::RuntimeTerminated(reason) => {
-                                bail!("serial host prompt did not complete: {reason}");
+                                bail!("host-link prompt did not complete: {reason}");
                             }
                         }
                     }
                     SerialHostCommand::Stop => {
-                        emit_marker("MKT:SERIAL:STOP", &[]);
+                        emit_marker("MKT:HOSTLINK:STOP", &[]);
                         break;
                     }
                     SerialHostCommand::Ping => {
-                        emit_marker("MKT:SERIAL:PONG", &[]);
+                        emit_marker("MKT:HOSTLINK:PONG", &[]);
                     }
                 }
             }
@@ -2530,7 +2532,7 @@ async fn run_serial_probe_async(
 
     let memory_after = capture_memory_snapshot();
     emit_marker(
-        "MKT:SERIAL:PASS",
+        "MKT:HOSTLINK:PASS",
         &[
             ("prompts", &prompts_completed.to_string()),
             ("heap_before", &memory_before.heap_free.to_string()),

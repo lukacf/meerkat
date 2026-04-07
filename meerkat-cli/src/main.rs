@@ -2695,6 +2695,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 let _ = self.service.interrupt(&self.session_id).await;
                 Ok(())
             }
+            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding => {
+                let _ = self.service.interrupt_yielding(&self.session_id).await;
+                Ok(())
+            }
             meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                 ..
             } => {

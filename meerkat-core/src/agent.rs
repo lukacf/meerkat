@@ -722,6 +722,12 @@ where
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
+    /// Out-of-band sender for cooperative wait/yield interrupts.
+    ///
+    /// This is a transport handle, not semantic authority. The live session
+    /// handle owns when to signal it; the wait tool owns how the signal is
+    /// observed within a running turn.
+    pub(crate) wait_interrupt_sender: Option<crate::wait_interrupt::WaitInterruptSender>,
     /// Optional session checkpointer for host-mode persistence.
     #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,

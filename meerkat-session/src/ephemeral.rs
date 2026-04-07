@@ -24,7 +24,7 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
     InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState, WaitInterrupt,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -156,6 +156,8 @@ struct SessionHandle {
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
     /// Shared control state for deferred first-turn prompt and staged tool results.
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+    /// Out-of-band sender for cooperative wait/yield interrupts.
+    wait_interrupt_sender: Option<meerkat_core::WaitInterruptSender>,
     /// Out-of-band interrupt signal consumed by the running turn loop.
     interrupt_requested: Arc<AtomicBool>,
     /// Wakes the running turn loop when an interrupt is requested.
@@ -371,6 +373,15 @@ pub trait SessionAgent: Send {
     /// runtime is stored in the session handle for surfaces that need comms
     /// command execution and stream attachment.
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        None
+    }
+
+    /// Get the cooperative wait-interrupt sender used by this agent, if any.
+    ///
+    /// Called once before the agent moves into its dedicated task. The sender
+    /// is stored in the session handle for out-of-band cooperative-yield
+    /// interrupts from runtime-backed control paths.
+    fn wait_interrupt_sender(&self) -> Option<meerkat_core::WaitInterruptSender> {
         None
     }
 }
@@ -920,6 +931,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
         let system_context_state = agent.system_context_state();
+        let wait_interrupt_sender = agent.wait_interrupt_sender();
 
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
@@ -972,6 +984,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             comms_runtime,
             system_context_state,
             deferred_turn_state,
+            wait_interrupt_sender,
             interrupt_requested,
             interrupt_notify,
             session_event_tx,
@@ -1271,6 +1284,25 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // immediately (without waiting for command-channel polling).
         handle.interrupt_requested.store(true, Ordering::Release);
         handle.interrupt_notify.notify_waiters();
+        Ok(())
+    }
+
+    async fn interrupt_yielding(&self, id: &SessionId) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        if !handle.turn_lock.load(Ordering::Acquire) {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+
+        if let Some(sender) = &handle.wait_interrupt_sender {
+            let _ = sender.send(Some(WaitInterrupt {
+                reason: "Runtime requested cooperative yield interrupt".to_string(),
+            }));
+        }
+
         Ok(())
     }
 

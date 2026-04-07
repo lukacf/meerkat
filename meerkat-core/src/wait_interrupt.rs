@@ -14,6 +14,10 @@ pub struct WaitInterrupt {
 
 /// Receiver alias, cfg-gated for wasm32 compatibility.
 #[cfg(not(target_arch = "wasm32"))]
+pub type WaitInterruptSender = tokio::sync::watch::Sender<Option<WaitInterrupt>>;
+#[cfg(target_arch = "wasm32")]
+pub type WaitInterruptSender = tokio_with_wasm::alias::sync::watch::Sender<Option<WaitInterrupt>>;
+#[cfg(not(target_arch = "wasm32"))]
 pub type WaitInterruptReceiver = tokio::sync::watch::Receiver<Option<WaitInterrupt>>;
 #[cfg(target_arch = "wasm32")]
 pub type WaitInterruptReceiver =

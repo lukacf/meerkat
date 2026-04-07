@@ -212,4 +212,6 @@ pub use types::{
     ToolResult, Usage, UserMessage, VideoData, has_images, has_non_text_content, has_video,
     is_supported_video_media_type, validate_inline_video_blocks,
 };
-pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};
+pub use wait_interrupt::{
+    WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver, WaitInterruptSender,
+};

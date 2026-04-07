@@ -142,6 +142,11 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 .interrupt(&self.session_id)
                 .await
                 .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message }),
+            RunControlCommand::InterruptYielding => self
+                .runtime
+                .interrupt_yielding(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.runtime.discard_live_session(&self.session_id).await;
                 self.runtime
@@ -221,6 +226,13 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             RunControlCommand::CancelCurrentRun { .. } => self
                 .session_service
                 .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::ControlFailed {
+                    reason: e.to_string(),
+                }),
+            RunControlCommand::InterruptYielding => self
+                .session_service
+                .interrupt_yielding(&self.session_id)
                 .await
                 .map_err(|e| CoreExecutorError::ControlFailed {
                     reason: e.to_string(),

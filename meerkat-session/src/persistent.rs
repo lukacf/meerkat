@@ -935,6 +935,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.interrupt(id).await
     }
 
+    async fn interrupt_yielding(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.interrupt_yielding(id).await
+    }
+
     async fn set_session_client(
         &self,
         id: &SessionId,

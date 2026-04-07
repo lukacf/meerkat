@@ -259,6 +259,10 @@ impl SessionAgent for FactoryAgent {
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
     }
+
+    fn wait_interrupt_sender(&self) -> Option<meerkat_core::WaitInterruptSender> {
+        self.agent.wait_interrupt_sender()
+    }
 }
 
 /// Implements [`SessionAgentBuilder`] by delegating to [`AgentFactory::build_agent()`].

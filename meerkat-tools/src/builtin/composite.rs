@@ -520,12 +520,21 @@ impl AgentToolDispatcher for CompositeDispatcher {
     ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        // Swap the wait tool with a feed-aware version (no comms rx).
+        // Swap the wait tool with a feed-aware version, preserving any
+        // previously-bound cooperative interrupt receiver.
         use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_feed_only(
-            Arc::clone(&feed),
-            Arc::clone(&baseline),
-        ));
+        let new_wait: Arc<dyn BuiltinTool> = if let Some(rx) = owned.wait_interrupt_rx.clone() {
+            Arc::new(WaitTool::with_interrupt_and_feed(
+                rx,
+                Some(Arc::clone(&feed)),
+                Some(Arc::clone(&baseline)),
+            ))
+        } else {
+            Arc::new(WaitTool::with_feed_only(
+                Arc::clone(&feed),
+                Arc::clone(&baseline),
+            ))
+        };
         for tool in &mut owned.builtin_tools {
             if tool.name() == "wait" {
                 *tool = new_wait;
@@ -790,6 +799,94 @@ mod tests {
             Ok(_) => panic!("expected SharedOwnership error, got Ok"),
             Err(e) => panic!("expected SharedOwnership, got {e:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn bind_completion_feed_preserves_existing_wait_interrupt_receiver() {
+        use crate::builtin::utility::WaitInterrupt;
+        use meerkat_core::completion_feed::{CompletionBatch, CompletionFeed, CompletionSeq};
+        use meerkat_core::time_compat::Duration;
+
+        #[derive(Debug)]
+        struct EmptyFeed;
+
+        impl CompletionFeed for EmptyFeed {
+            fn watermark(&self) -> CompletionSeq {
+                0
+            }
+
+            fn list_since(&self, _after_seq: CompletionSeq) -> CompletionBatch {
+                CompletionBatch {
+                    entries: Vec::new(),
+                    watermark: 0,
+                }
+            }
+
+            fn wait_for_advance(
+                &self,
+                _after_seq: CompletionSeq,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CompletionSeq> + Send + '_>>
+            {
+                Box::pin(async { futures::future::pending::<CompletionSeq>().await })
+            }
+        }
+
+        let store = Arc::new(MemoryTaskStore::new());
+        let dispatcher = Arc::new(
+            CompositeDispatcher::new(
+                store,
+                &BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .expect("composite dispatcher should build"),
+        );
+
+        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
+        let rebound = dispatcher
+            .bind_wait_interrupt(rx)
+            .expect("bind_wait_interrupt should succeed")
+            .into_dispatcher();
+        let rebound = rebound
+            .bind_completion_feed(
+                Arc::new(EmptyFeed),
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            )
+            .expect("bind_completion_feed should succeed")
+            .into_dispatcher();
+
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"seconds": 30.0}"#.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-id",
+            name: "wait",
+            args: &call_json,
+        };
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(Some(WaitInterrupt {
+                reason: "post-feed bind interrupt".to_string(),
+            }));
+        });
+
+        let start = std::time::Instant::now();
+        let result = rebound
+            .dispatch(call)
+            .await
+            .expect("dispatch should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wait should still be interrupted quickly after feed binding, took {elapsed:?}"
+        );
+        let content: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).unwrap();
+        assert_eq!(content["status"], "interrupted");
     }
 
     #[tokio::test]

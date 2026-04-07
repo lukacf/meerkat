@@ -656,6 +656,14 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::ControlFailed {
                     reason: err.to_string(),
                 }),
+            RunControlCommand::InterruptYielding => self
+                .context
+                .session_service
+                .interrupt_yielding(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::ControlFailed {
+                    reason: err.to_string(),
+                }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .context

@@ -504,6 +504,7 @@ async fn integration_real_send_request() {
             "test-peer",
             "review-pr".to_string(),
             serde_json::json!({"pr": 42}),
+            meerkat_core::types::HandlingMode::Queue,
         )
         .await;
     assert!(result.is_ok());
@@ -775,6 +776,7 @@ async fn integration_real_router_inproc_request_response() {
             "service-agent",
             "analyze".to_string(),
             serde_json::json!({"file": "main.rs"}),
+            meerkat_core::types::HandlingMode::Queue,
         )
         .await;
     assert!(result.is_ok());
@@ -785,7 +787,7 @@ async fn integration_real_router_inproc_request_response() {
 
     match &items[0] {
         meerkat_comms::InboxItem::External { envelope } => match &envelope.kind {
-            MessageKind::Request { intent, params } => {
+            MessageKind::Request { intent, params, .. } => {
                 assert_eq!(intent, "analyze");
                 assert_eq!(params["file"], "main.rs");
             }

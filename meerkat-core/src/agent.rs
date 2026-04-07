@@ -655,30 +655,10 @@ pub trait CommsRuntime: Send + Sync {
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 
-    /// Drain classified inbox interactions.
+    /// Drain machine-authored peer/event ingress candidates.
     ///
-    /// Returns interactions with pre-computed classification from ingress.
-    /// The host loop routes on the stored `PeerInputClass` instead of
-    /// re-classifying after drain.
-    ///
-    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
-    async fn drain_classified_inbox_interactions(
-        &self,
-    ) -> Result<Vec<crate::interaction::ClassifiedInboxInteraction>, CommsCapabilityError> {
-        Err(CommsCapabilityError::Unsupported(
-            "drain_classified_inbox_interactions".to_string(),
-        ))
-    }
-
-    /// Get a notification that fires only for actionable peer input.
-    ///
-    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
-    /// Used by the factory to bridge into `WaitTool` interrupt.
-    fn actionable_input_notify(&self) -> Result<Arc<tokio::sync::Notify>, CommsCapabilityError> {
-        Err(CommsCapabilityError::Unsupported(
-            "actionable_input_notify".to_string(),
-        ))
-    }
+    /// Runtime-backed peer ingress must route through this canonical seam.
+    async fn drain_peer_input_candidates(&self) -> Vec<crate::interaction::PeerInputCandidate>;
 }
 
 /// The main Agent struct
@@ -722,12 +702,6 @@ where
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
-    /// Out-of-band sender for cooperative wait/yield interrupts.
-    ///
-    /// This is a transport handle, not semantic authority. The live session
-    /// handle owns when to signal it; the wait tool owns how the signal is
-    /// observed within a running turn.
-    pub(crate) wait_interrupt_sender: Option<crate::wait_interrupt::WaitInterruptSender>,
     /// Optional session checkpointer for host-mode persistence.
     #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
@@ -808,6 +782,10 @@ mod tests {
 
         fn inbox_notify(&self) -> std::sync::Arc<Notify> {
             self.notify.clone()
+        }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<crate::interaction::PeerInputCandidate> {
+            Vec::new()
         }
     }
 

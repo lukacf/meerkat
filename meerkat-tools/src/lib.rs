@@ -44,7 +44,6 @@ pub use builder::McpDispatcherConfig;
 pub use builder::{BuiltinDispatcherConfig, ToolDispatcherBuilder, build_builtin_dispatcher};
 #[cfg(feature = "comms")]
 pub use builtin::CommsToolSurface;
-pub use builtin::utility::WaitInterrupt;
 pub use builtin::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,
@@ -67,7 +66,7 @@ pub use schema::{empty_object_schema, schema_for};
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Builtins,
-        description: "Built-in tools: task_list, task_create, task_get, task_update, wait, datetime, apply_patch",
+        description: "Built-in tools: task_list, task_create, task_get, task_update, datetime, apply_patch",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],

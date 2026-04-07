@@ -2695,10 +2695,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 let _ = self.service.interrupt(&self.session_id).await;
                 Ok(())
             }
-            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding => {
-                let _ = self.service.interrupt_yielding(&self.session_id).await;
-                Ok(())
-            }
             meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                 ..
             } => {
@@ -7192,6 +7188,10 @@ mod tests {
 
         fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
             self.notify.clone()
+        }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+            Vec::new()
         }
     }
 

@@ -29,9 +29,16 @@ pub enum MessageKind {
         /// multimodal content; `body` remains the canonical text projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
     },
     /// A request for the peer to perform an action.
-    Request { intent: String, params: JsonValue },
+    Request {
+        intent: String,
+        params: JsonValue,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+    },
     /// A response to a previous request.
     Response {
         in_reply_to: Uuid,
@@ -177,10 +184,17 @@ mod tests {
         let msg = MessageKind::Message {
             body: "hello".to_string(),
             blocks: None,
+            handling_mode: None,
         };
-        if let MessageKind::Message { body, blocks } = msg {
+        if let MessageKind::Message {
+            body,
+            blocks,
+            handling_mode,
+        } = msg
+        {
             assert_eq!(body, "hello");
             assert_eq!(blocks, None);
+            assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Message variant");
         }
@@ -191,10 +205,17 @@ mod tests {
         let req = MessageKind::Request {
             intent: "review-pr".to_string(),
             params: serde_json::json!({"pr": 42}),
+            handling_mode: None,
         };
-        if let MessageKind::Request { intent, params } = req {
+        if let MessageKind::Request {
+            intent,
+            params,
+            handling_mode,
+        } = req
+        {
             assert_eq!(intent, "review-pr");
             assert_eq!(params["pr"], 42);
+            assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Request variant");
         }
@@ -244,6 +265,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -268,10 +290,12 @@ mod tests {
             MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             MessageKind::Request {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
             MessageKind::Response {
                 in_reply_to: Uuid::new_v4(),
@@ -300,6 +324,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -382,6 +407,7 @@ mod tests {
         let msg = MessageKind::Message {
             body: "test".to_string(),
             blocks: None,
+            handling_mode: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&msg, &mut buf).unwrap();
@@ -404,6 +430,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -424,6 +451,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "test".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -460,6 +488,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -497,6 +526,7 @@ mod tests {
             kind: MessageKind::Message {
                 body: "hello".to_string(),
                 blocks: None,
+                handling_mode: None,
             },
             sig: Signature::new([0u8; 64]),
         };
@@ -784,6 +814,7 @@ mod tests {
                     data: "iVBORw0KGgo=".into(),
                 },
             ]),
+            handling_mode: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&kind, &mut buf).unwrap();
@@ -801,6 +832,7 @@ mod tests {
         let kind = MessageKind::Message {
             body: "test".to_string(),
             blocks: None,
+            handling_mode: None,
         };
 
         // CBOR roundtrip preserves None

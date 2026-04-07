@@ -336,9 +336,17 @@ impl Router {
         peer_name: &str,
         intent: String,
         params: serde_json::Value,
+        handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<Uuid, SendError> {
-        self.send(peer_name, MessageKind::Request { intent, params })
-            .await
+        self.send(
+            peer_name,
+            MessageKind::Request {
+                intent,
+                params,
+                handling_mode: Some(handling_mode),
+            },
+        )
+        .await
     }
 
     pub async fn send_response(

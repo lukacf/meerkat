@@ -914,6 +914,10 @@ impl CoreCommsRuntime for LocalCommsRuntime {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.notify.clone()
     }
+
+    async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+        Vec::new()
+    }
 }
 
 struct LocalSessionService {
@@ -2199,6 +2203,10 @@ mod tests {
 
         fn inbox_notify(&self) -> Arc<Notify> {
             self.notify.clone()
+        }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+            Vec::new()
         }
     }
 

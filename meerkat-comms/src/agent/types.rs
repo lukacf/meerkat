@@ -276,11 +276,11 @@ impl CommsMessage {
 
         // Convert MessageKind to CommsContent
         let content = match &envelope.kind {
-            MessageKind::Message { body, blocks } => CommsContent::Message {
+            MessageKind::Message { body, blocks, .. } => CommsContent::Message {
                 body: body.clone(),
                 blocks: blocks.clone(),
             },
-            MessageKind::Request { intent, params } => CommsContent::Request {
+            MessageKind::Request { intent, params, .. } => CommsContent::Request {
                 request_id: envelope.id,
                 intent: MessageIntent::from(intent.as_str()),
                 params: params.clone(),
@@ -329,11 +329,11 @@ impl CommsMessage {
         });
 
         let content = match &envelope.kind {
-            MessageKind::Message { body, blocks } => CommsContent::Message {
+            MessageKind::Message { body, blocks, .. } => CommsContent::Message {
                 body: body.clone(),
                 blocks: blocks.clone(),
             },
-            MessageKind::Request { intent, params } => CommsContent::Request {
+            MessageKind::Request { intent, params, .. } => CommsContent::Request {
                 request_id: envelope.id,
                 intent: MessageIntent::from(intent.as_str()),
                 params: params.clone(),

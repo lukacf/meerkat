@@ -3,9 +3,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::ApplyPatchTool;
 use super::datetime::DateTimeTool;
-use super::wait::WaitTool;
 use crate::builtin::BuiltinTool;
-use meerkat_core::wait_interrupt::WaitInterruptReceiver;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
@@ -14,8 +12,6 @@ use std::path::PathBuf;
 /// Utility tools are enabled by default when built-in tools are enabled.
 #[derive(Debug)]
 pub struct UtilityToolSet {
-    /// Tool for pausing execution
-    pub wait: WaitTool,
     /// Tool for getting current date/time
     pub datetime: DateTimeTool,
     /// Tool for applying structured file edits
@@ -28,7 +24,6 @@ impl UtilityToolSet {
     #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
         Self {
-            wait: WaitTool::new(),
             datetime: DateTimeTool::new(),
         }
     }
@@ -37,28 +32,6 @@ impl UtilityToolSet {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(project_root: PathBuf) -> Self {
         Self {
-            wait: WaitTool::new(),
-            datetime: DateTimeTool::new(),
-            apply_patch: ApplyPatchTool::new(project_root),
-        }
-    }
-
-    /// Create a UtilityToolSet with interrupt support for the wait tool
-    ///
-    /// The wait tool will be interrupted when a message is sent on the channel.
-    #[cfg(target_arch = "wasm32")]
-    pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver) -> Self {
-        Self {
-            wait: WaitTool::with_interrupt(interrupt_rx),
-            datetime: DateTimeTool::new(),
-        }
-    }
-
-    /// Create a UtilityToolSet with interrupt support for the wait tool.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_interrupt(interrupt_rx: WaitInterruptReceiver, project_root: PathBuf) -> Self {
-        Self {
-            wait: WaitTool::with_interrupt(interrupt_rx),
             datetime: DateTimeTool::new(),
             apply_patch: ApplyPatchTool::new(project_root),
         }
@@ -67,17 +40,13 @@ impl UtilityToolSet {
     /// Get references to all tools as a vector
     #[cfg(target_arch = "wasm32")]
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
-        vec![
-            &self.wait as &dyn BuiltinTool,
-            &self.datetime as &dyn BuiltinTool,
-        ]
+        vec![&self.datetime as &dyn BuiltinTool]
     }
 
     /// Get references to all tools as a vector.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tools(&self) -> Vec<&dyn BuiltinTool> {
         vec![
-            &self.wait as &dyn BuiltinTool,
             &self.datetime as &dyn BuiltinTool,
             &self.apply_patch as &dyn BuiltinTool,
         ]
@@ -86,13 +55,13 @@ impl UtilityToolSet {
     /// Get tool names in this set
     #[cfg(target_arch = "wasm32")]
     pub fn tool_names() -> Vec<&'static str> {
-        vec!["wait", "datetime"]
+        vec!["datetime"]
     }
 
     /// Get tool names in this set.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tool_names() -> Vec<&'static str> {
-        vec!["wait", "datetime", "apply_patch"]
+        vec!["datetime", "apply_patch"]
     }
 
     /// Get usage instructions for the LLM on how to use utility tools
@@ -102,28 +71,11 @@ impl UtilityToolSet {
     pub fn usage_instructions() -> &'static str {
         r"# Utility Tools
 
-You have access to utility tools for timing and coordination.
+You have access to utility tools for time lookup and structured file edits.
 
 ## Available Tools
-- `wait` - Pause execution for a specified number of seconds (max 60)
 - `datetime` - Get the current date and time
 - `apply_patch` - Apply structured file edits inside the project root
-
-## Using the Wait Tool
-
-The `wait` tool is essential for async operations. Use it to:
-- **Wait between status checks**: After starting async delegated work, call `wait(15)` before checking status
-- **Rate limiting**: When making repeated API calls, wait between them
-- **Coordination**: When timing matters, use wait to synchronize operations
-
-Example pattern for delegated work:
-1. Start the async work or branch
-2. Do other useful work
-3. `wait(20)` - wait 20 seconds
-4. Check whether it is done
-5. If not done: `wait(15)` then check again
-
-**DO NOT** poll status in a tight loop without waiting. Always use `wait` between status checks.
 
 ## Using the DateTime Tool
 
@@ -157,7 +109,6 @@ mod tests {
         let tool_set = UtilityToolSet::new();
         #[cfg(not(target_arch = "wasm32"))]
         let tool_set = UtilityToolSet::new(PathBuf::from("/tmp/test"));
-        assert_eq!(tool_set.wait.name(), "wait");
         assert_eq!(tool_set.datetime.name(), "datetime");
         #[cfg(not(target_arch = "wasm32"))]
         assert_eq!(tool_set.apply_patch.name(), "apply_patch");
@@ -172,12 +123,11 @@ mod tests {
         let tools = tool_set.tools();
 
         #[cfg(target_arch = "wasm32")]
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 1);
         #[cfg(not(target_arch = "wasm32"))]
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 2);
 
         let names: Vec<_> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"wait"));
         assert!(names.contains(&"datetime"));
         #[cfg(not(target_arch = "wasm32"))]
         assert!(names.contains(&"apply_patch"));
@@ -187,10 +137,9 @@ mod tests {
     fn test_utility_tool_set_tool_names() {
         let names = UtilityToolSet::tool_names();
         #[cfg(target_arch = "wasm32")]
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), 1);
         #[cfg(not(target_arch = "wasm32"))]
-        assert_eq!(names.len(), 3);
-        assert!(names.contains(&"wait"));
+        assert_eq!(names.len(), 2);
         assert!(names.contains(&"datetime"));
         #[cfg(not(target_arch = "wasm32"))]
         assert!(names.contains(&"apply_patch"));
@@ -216,17 +165,16 @@ mod tests {
     #[test]
     fn test_utility_tool_set_usage_instructions() {
         let instructions = UtilityToolSet::usage_instructions();
-        assert!(instructions.contains("wait"));
         assert!(instructions.contains("datetime"));
-        assert!(instructions.contains("DO NOT"));
+        assert!(!instructions.contains("wait"));
     }
 
     #[test]
     fn test_utility_tool_set_default() {
         let tool_set = UtilityToolSet::default();
         #[cfg(target_arch = "wasm32")]
-        assert_eq!(tool_set.tools().len(), 2);
+        assert_eq!(tool_set.tools().len(), 1);
         #[cfg(not(target_arch = "wasm32"))]
-        assert_eq!(tool_set.tools().len(), 3);
+        assert_eq!(tool_set.tools().len(), 2);
     }
 }

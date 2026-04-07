@@ -543,14 +543,6 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
                 .map_err(|error| CoreExecutorError::ControlFailed {
                     reason: error.to_string(),
                 }),
-            RunControlCommand::InterruptYielding => self
-                .context
-                .service
-                .interrupt_yielding(&self.session_id)
-                .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .context

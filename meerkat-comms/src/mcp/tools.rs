@@ -162,23 +162,40 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         meerkat_core::comms::CommsCommand::Input { .. } => {
             Err("input command is not supported by MCP send".to_string())
         }
-        meerkat_core::comms::CommsCommand::PeerMessage { to, body, blocks } => {
+        meerkat_core::comms::CommsCommand::PeerMessage {
+            to,
+            body,
+            blocks,
+            handling_mode,
+        } => {
             ctx.router
                 .send(
                     to.as_str(),
-                    crate::types::MessageKind::Message { body, blocks },
+                    crate::types::MessageKind::Message {
+                        body,
+                        blocks,
+                        handling_mode: Some(handling_mode),
+                    },
                 )
                 .await
                 .map_err(|e| format_router_send_error(to.as_str(), e))?;
             Ok(json!({ "status": "sent", "kind": kind }))
         }
         meerkat_core::comms::CommsCommand::PeerRequest {
-            to, intent, params, ..
+            to,
+            intent,
+            params,
+            handling_mode,
+            ..
         } => {
             ctx.router
                 .send(
                     to.as_str(),
-                    crate::types::MessageKind::Request { intent, params },
+                    crate::types::MessageKind::Request {
+                        intent,
+                        params,
+                        handling_mode: Some(handling_mode),
+                    },
                 )
                 .await
                 .map_err(|e| format_router_send_error(to.as_str(), e))?;

@@ -808,7 +808,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
 }
 
 #[tokio::test]
-async fn post_admission_signal_interrupt_yielding_for_peer_message_while_running() {
+async fn post_admission_signal_queue_peer_message_while_running_stays_passive() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     // Admit a prompt to start a run
@@ -819,7 +819,7 @@ async fn post_admission_signal_interrupt_yielding_for_peer_message_while_running
     // Start a run so the runtime is in Running state
     driver.start_run(RunId::new()).unwrap();
 
-    // Now admit a peer message while running (InterruptYielding policy)
+    // Now admit a default queue-mode peer message while running.
     let peer = Input::Peer(PeerInput {
         header: InputHeader {
             id: InputId::new(),
@@ -842,25 +842,18 @@ async fn post_admission_signal_interrupt_yielding_for_peer_message_while_running
     let _ = driver.accept_input(peer).await.unwrap();
     let signal = driver.take_post_admission_signal();
 
-    // Peer message while running has WakeMode::InterruptYielding
-    // which should produce InterruptYielding (not just WakeLoop)
-    assert!(
-        signal.should_interrupt_yielding(),
-        "peer message while running should produce InterruptYielding signal, got {signal:?}"
-    );
-    assert!(
-        signal.should_wake(),
-        "InterruptYielding must also imply wake"
+    assert_eq!(
+        signal,
+        PostAdmissionSignal::None,
+        "queue-mode peer message while running should not request wake/process, got {signal:?}"
     );
 }
 
 #[test]
-fn post_admission_signal_interrupt_yielding_ordering() {
+fn post_admission_signal_request_immediate_ordering() {
     use meerkat_runtime::PostAdmissionSignal;
-    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::InterruptYielding);
-    assert!(
-        PostAdmissionSignal::InterruptYielding < PostAdmissionSignal::RequestImmediateProcessing
-    );
-    assert!(PostAdmissionSignal::InterruptYielding.should_interrupt_yielding());
-    assert!(!PostAdmissionSignal::WakeLoop.should_interrupt_yielding());
+    assert!(PostAdmissionSignal::None < PostAdmissionSignal::WakeLoop);
+    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::RequestImmediateProcessing);
+    assert!(!PostAdmissionSignal::WakeLoop.should_process_immediately());
+    assert!(PostAdmissionSignal::RequestImmediateProcessing.should_process_immediately());
 }

@@ -104,6 +104,7 @@ impl AgentMobToolSurface {
                     "role": role,
                     "description": description,
                 }),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::None,
             })
             .await
@@ -1102,6 +1103,7 @@ mod tests {
                     to,
                     intent,
                     params,
+                    handling_mode: _,
                     stream,
                 } => {
                     let trusted = self.trusted.read().await;
@@ -1165,6 +1167,18 @@ mod tests {
 
         fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
             self.notify.clone()
+        }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+            self.drain_inbox_interactions()
+                .await
+                .into_iter()
+                .map(|interaction| meerkat_core::PeerInputCandidate {
+                    interaction,
+                    class: meerkat_core::PeerInputClass::ActionableRequest,
+                    lifecycle_peer: None,
+                })
+                .collect()
         }
 
         async fn drain_inbox_interactions(&self) -> Vec<InboxInteraction> {

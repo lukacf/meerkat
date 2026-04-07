@@ -47,7 +47,6 @@ pub struct AgentBuilder {
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
-    pub(super) wait_interrupt_sender: Option<crate::wait_interrupt::WaitInterruptSender>,
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
@@ -80,7 +79,6 @@ impl AgentBuilder {
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
-            wait_interrupt_sender: None,
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
             epoch_cursor_state: None,
@@ -255,7 +253,6 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            wait_interrupt_sender: self.wait_interrupt_sender,
             ops_lifecycle: self.ops_lifecycle,
             // Seed from epoch cursor state if available (runtime-backed surfaces),
             // otherwise fall back to the feed watermark to avoid replaying retained
@@ -342,15 +339,6 @@ impl AgentBuilder {
     /// Set max peer-count threshold for inline peer lifecycle notification injection.
     pub fn with_max_inline_peer_notifications(mut self, threshold: Option<i32>) -> Self {
         self.max_inline_peer_notifications = threshold;
-        self
-    }
-
-    /// Set the out-of-band sender for cooperative wait/yield interrupts.
-    pub fn with_wait_interrupt_sender(
-        mut self,
-        sender: crate::wait_interrupt::WaitInterruptSender,
-    ) -> Self {
-        self.wait_interrupt_sender = Some(sender);
         self
     }
 

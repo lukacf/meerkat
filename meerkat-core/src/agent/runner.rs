@@ -215,11 +215,6 @@ where
         Arc::clone(&self.system_context_state)
     }
 
-    /// Get the cooperative wait/yield interrupt sender for this agent, if any.
-    pub fn wait_interrupt_sender(&self) -> Option<crate::wait_interrupt::WaitInterruptSender> {
-        self.wait_interrupt_sender.clone()
-    }
-
     /// Clone the current session with the latest shared system-context state merged into metadata.
     pub fn session_with_system_context_state(&self) -> Session {
         let mut session = self.session.clone();

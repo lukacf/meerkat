@@ -2264,24 +2264,6 @@ impl SessionRuntime {
         }
     }
 
-    /// Cooperatively interrupt wait/yield points within a running turn.
-    ///
-    /// If the session is idle, this is a no-op.
-    pub async fn interrupt_yielding(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        {
-            let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Ok(());
-            }
-        }
-
-        match self.service.interrupt_yielding(session_id).await {
-            Ok(()) => Ok(()),
-            Err(SessionError::NotRunning { .. }) => Ok(()),
-            Err(e) => Err(session_error_to_rpc(e)),
-        }
-    }
-
     /// Append runtime system context to a pending, live, or persisted session.
     pub async fn append_system_context(
         &self,

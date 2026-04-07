@@ -57,7 +57,7 @@ impl IngressClassificationContext {
                         from_peer: Some(from_name),
                         lifecycle_peer: None,
                     },
-                    MessageKind::Request { intent, params } => {
+                    MessageKind::Request { intent, params, .. } => {
                         let typed_intent = MessageIntent::from(intent.as_str());
                         match typed_intent {
                             MessageIntent::PeerAdded => {

@@ -371,16 +371,14 @@ fn variant(name: &str) -> VariantSchema {
 
 #[derive(Debug, Clone, Copy)]
 enum CommsDrainModeVariant {
-    PersistentHost,
     #[allow(dead_code)]
-    Timed,
+    AttachedSession,
+    PersistentHost,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum DrainExitReasonVariant {
     Failed,
-    #[allow(dead_code)]
-    IdleTimeout,
     #[allow(dead_code)]
     Dismissed,
     #[allow(dead_code)]
@@ -393,8 +391,8 @@ fn comms_drain_mode(variant: CommsDrainModeVariant) -> Expr {
     Expr::NamedVariant {
         enum_name: "CommsDrainMode".into(),
         variant: match variant {
+            CommsDrainModeVariant::AttachedSession => "AttachedSession".into(),
             CommsDrainModeVariant::PersistentHost => "PersistentHost".into(),
-            CommsDrainModeVariant::Timed => "Timed".into(),
         },
     }
 }
@@ -403,7 +401,6 @@ fn drain_exit_reason(variant: DrainExitReasonVariant) -> Expr {
     Expr::NamedVariant {
         enum_name: "DrainExitReason".into(),
         variant: match variant {
-            DrainExitReasonVariant::IdleTimeout => "IdleTimeout".into(),
             DrainExitReasonVariant::Dismissed => "Dismissed".into(),
             DrainExitReasonVariant::Failed => "Failed".into(),
             DrainExitReasonVariant::Aborted => "Aborted".into(),

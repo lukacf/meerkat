@@ -448,22 +448,5 @@
     ],
     "title": "ViewImageArgs",
     "type": "object"
-  },
-  "wait": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "properties": {
-      "seconds": {
-        "description": "Number of seconds to wait (0.1 to 60)",
-        "format": "double",
-        "maximum": 60.0,
-        "minimum": 0.1,
-        "type": "number"
-      }
-    },
-    "required": [
-      "seconds"
-    ],
-    "title": "WaitArgs",
-    "type": "object"
   }
 }

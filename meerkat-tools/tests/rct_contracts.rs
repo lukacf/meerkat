@@ -566,8 +566,8 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {
-                    name: "wait".to_string(),
-                    description: "Wait (safe)".to_string(),
+                    name: "datetime".to_string(),
+                    description: "Get current date and time (safe)".to_string(),
                     input_schema: json!({"type": "object"}),
                 }),
             ])
@@ -605,8 +605,8 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             "task_list should be available"
         );
         assert!(
-            tool_names.contains(&"wait".to_string()),
-            "wait should be available"
+            tool_names.contains(&"datetime".to_string()),
+            "datetime should be available"
         );
     }
 
@@ -638,8 +638,8 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             "agent_spawn should be blocked (not in allow list)"
         );
         assert!(
-            !tool_names.contains(&"wait".to_string()),
-            "wait should be blocked (not in allow list)"
+            !tool_names.contains(&"datetime".to_string()),
+            "datetime should be blocked (not in allow list)"
         );
     }
 

@@ -18,7 +18,7 @@
 //!   terminal_outcome, queue, steer_queue, current_run, current_run_contributors,
 //!   last_run, last_boundary_sequence, wake_requested, process_requested,
 //!   silent_intent_overrides
-//! - 8 effects: IngressAccepted, ReadyForRun, InputLifecycleNotice,
+//! - 7 effects: IngressAccepted, ReadyForRun, InputLifecycleNotice,
 //!   WakeRuntime, RequestImmediateProcessing, CompletionResolved,
 //!   IngressNotice, SilentIntentApplied
 
@@ -186,12 +186,6 @@ pub enum RuntimeIngressEffect {
     },
     /// The runtime should be woken (idle -> running).
     WakeRuntime,
-    /// Interrupt cooperative yielding points within an active turn.
-    ///
-    /// Distinct from `WakeRuntime`: WakeRuntime wakes an idle loop,
-    /// InterruptYielding signals a running agent to break out of a
-    /// cooperative yield (e.g., wait tool). Both may be emitted together.
-    InterruptYielding,
     /// Immediate processing requested (steer/immediate drain).
     RequestImmediateProcessing,
     /// An input reached a terminal outcome.
@@ -811,22 +805,11 @@ impl RuntimeIngressAuthority {
         match policy.wake_mode {
             crate::WakeMode::WakeIfIdle => {
                 effects.push(RuntimeIngressEffect::WakeRuntime);
-                if handling_mode == HandlingMode::Steer {
-                    effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
-                }
-            }
-            crate::WakeMode::InterruptYielding => {
-                // Queue-mode inputs still need a wake so the runtime loop
-                // processes them after the current turn completes.
-                effects.push(RuntimeIngressEffect::WakeRuntime);
-                // Typed InterruptYielding signal for the running agent's
-                // cooperative yield points (wait tool, etc.).
-                effects.push(RuntimeIngressEffect::InterruptYielding);
-                if handling_mode == HandlingMode::Steer {
-                    effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
-                }
             }
             crate::WakeMode::None => {}
+        }
+        if handling_mode == HandlingMode::Steer {
+            effects.push(RuntimeIngressEffect::RequestImmediateProcessing);
         }
 
         // --- Shell-directive effects ---

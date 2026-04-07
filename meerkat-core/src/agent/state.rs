@@ -2351,6 +2351,28 @@ mod tests {
         fn inbox_notify(&self) -> Arc<Notify> {
             self.notify.clone()
         }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<crate::interaction::PeerInputCandidate> {
+            self.drain_messages()
+                .await
+                .into_iter()
+                .map(|text| crate::interaction::PeerInputCandidate {
+                    interaction: crate::interaction::InboxInteraction {
+                        id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                        from: "unknown".into(),
+                        content: crate::interaction::InteractionContent::Message {
+                            body: text.clone(),
+                            blocks: None,
+                        },
+                        rendered_text: text,
+                        handling_mode: crate::types::HandlingMode::Queue,
+                        render_metadata: None,
+                    },
+                    class: crate::interaction::PeerInputClass::ActionableMessage,
+                    lifecycle_peer: None,
+                })
+                .collect()
+        }
     }
 
     async fn build_agent<C>(client: Arc<C>) -> crate::agent::Agent<C, NoTools, NoopStore>

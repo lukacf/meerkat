@@ -416,10 +416,10 @@ async fn no_input_no_wake() {
 }
 
 // ---------------------------------------------------------------------------
-// Additional: Message while running — checkpoint policy, wake buffered
+// Additional: Message while running — queue policy, no wake
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn message_while_running_checkpoint_wake_buffered() {
+async fn message_while_running_queues_without_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Start a run
@@ -430,20 +430,14 @@ async fn message_while_running_checkpoint_wake_buffered() {
     let interaction = make_message("peer-1", "hello");
     let input = interaction_to_peer_input(&interaction, &rid());
 
-    // peer_message + running → StageRunStart + InterruptYielding (per §17)
+    // peer_message + running → StageRunStart + NoWake (queue semantics)
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(
-        policy.wake_mode,
-        meerkat_runtime::WakeMode::InterruptYielding
-    );
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    // InterruptYielding emits WakeRuntime so the runtime loop processes the
-    // queued input after the current turn completes. Without this wake, the
-    // input would sit in the queue indefinitely.
-    assert!(driver.take_wake_requested()); // Running → wake buffered
+    assert!(!driver.take_wake_requested());
 }
 
 // ---------------------------------------------------------------------------
@@ -534,12 +528,10 @@ async fn terminal_response_with_steer_policy_while_running() {
     };
     let input = interaction_to_peer_input(&interaction, &rid());
 
-    // While running: should get InterruptYielding + Steer.
+    // While running: explicit steer keeps WakeMode::None at the policy layer,
+    // but ingress still requests immediate processing via the typed steer signal.
     let policy = DefaultPolicyTable::resolve(&input, false);
-    assert_eq!(
-        policy.wake_mode,
-        meerkat_runtime::WakeMode::InterruptYielding
-    );
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
     assert_eq!(
         policy.routing_disposition,
         meerkat_runtime::RoutingDisposition::Steer
@@ -552,7 +544,7 @@ async fn terminal_response_with_steer_policy_while_running() {
         .unwrap();
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested()); // InterruptYielding emits wake
+    assert!(driver.take_wake_requested());
 }
 
 // ---------------------------------------------------------------------------

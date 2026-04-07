@@ -358,7 +358,12 @@ async fn integration_real_request_response_flow() {
         true,
     );
     router_a
-        .send_request("peer-b", "review-pr".to_string(), json!({"pr": 42}))
+        .send_request(
+            "peer-b",
+            "review-pr".to_string(),
+            json!({"pr": 42}),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await
         .unwrap();
 

@@ -296,6 +296,10 @@ impl CoreCommsRuntime for MockCommsRuntime {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
     }
+
+    async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+        Vec::new()
+    }
 }
 
 // -----------------------------------------------------------------------

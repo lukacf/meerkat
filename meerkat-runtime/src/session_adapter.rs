@@ -256,6 +256,10 @@ struct RuntimeSessionEntry {
     /// Detached-wake state for background op completions.
     /// Shared with the runtime loop which selects on the Notify directly.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
+    /// Whether this session should remain hosted for peer ingress while idle.
+    keep_alive: bool,
+    /// Comms runtime used to realize peer ingress for this session, if any.
+    comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -365,6 +369,28 @@ fn abort_slot(slot: &mut CommsDrainSlot) {
                 handle.abort();
             }
         }
+    }
+}
+
+fn desired_peer_ingress_mode(
+    runtime_state: RuntimeState,
+    comms_enabled: bool,
+    keep_alive: bool,
+) -> Option<CommsDrainMode> {
+    if !comms_enabled {
+        return None;
+    }
+
+    match runtime_state {
+        RuntimeState::Attached | RuntimeState::Running | RuntimeState::Recovering => {
+            Some(CommsDrainMode::AttachedSession)
+        }
+        RuntimeState::Idle if keep_alive => Some(CommsDrainMode::PersistentHost),
+        RuntimeState::Initializing
+        | RuntimeState::Idle
+        | RuntimeState::Retired
+        | RuntimeState::Stopped
+        | RuntimeState::Destroyed => None,
     }
 }
 
@@ -542,6 +568,8 @@ impl RuntimeSessionAdapter {
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
             detached_wake: None,
+            keep_alive: false,
+            comms_runtime: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -648,6 +676,8 @@ impl RuntimeSessionAdapter {
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,
+                            keep_alive: false,
+                            comms_runtime: None,
                         },
                     );
                     (driver, completions, recovered_ops)
@@ -1116,7 +1146,7 @@ impl RuntimeSessionAdapter {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        let (driver, completions, wake_tx, control_tx) = {
+        let (driver, completions, wake_tx, _control_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -1192,13 +1222,6 @@ impl RuntimeSessionAdapter {
             && let Some(ref wake_tx) = wake_tx
         {
             let _ = wake_tx.try_send(());
-        }
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
-        {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
         }
 
         Ok((outcome, handle))
@@ -1277,46 +1300,64 @@ impl RuntimeSessionAdapter {
         })
     }
 
-    /// Manage the comms drain lifecycle for a session based on keep_alive intent.
+    /// Update the session's peer-ingress context, then reconcile the canonical
+    /// drain lifecycle.
     ///
-    /// When `keep_alive` is true, spawns a drain if one is not already running.
-    /// When `keep_alive` is false, aborts any running drain for the session.
-    /// Returns `true` if a new drain was spawned.
-    ///
-    /// All state transitions go through `CommsDrainLifecycleAuthority`.
+    /// Surfaces may call this when they learn or change keep_alive/comms
+    /// context, but the adapter owns the actual drain-mode decision.
     pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        if !keep_alive {
-            // Explicit disable: stop any running drain for this session.
-            self.abort_comms_drain(session_id).await;
-            return false;
+        {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                tracing::warn!(
+                    %session_id,
+                    "refusing to configure comms drain for unregistered session"
+                );
+                return false;
+            };
+            entry.keep_alive = keep_alive;
+            entry.comms_runtime = comms_runtime;
         }
+        self.reconcile_comms_drain(session_id).await
+    }
 
-        let mode = CommsDrainMode::PersistentHost;
-
-        let comms = match comms_runtime {
-            Some(c) => c,
-            None => return false,
+    async fn reconcile_comms_drain(self: &Arc<Self>, session_id: &SessionId) -> bool {
+        let (keep_alive, comms_runtime) = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return false;
+            };
+            entry.clear_dead_attachment();
+            (entry.keep_alive, entry.comms_runtime.clone())
         };
 
-        let sessions = self.sessions.read().await;
-        if !sessions.contains_key(session_id) {
-            tracing::warn!(
-                %session_id,
-                "refusing to spawn comms drain for unregistered session"
-            );
+        let state = match self.runtime_state(session_id).await {
+            Ok(state) => state,
+            Err(_) => RuntimeState::Destroyed,
+        };
+        let desired = desired_peer_ingress_mode(state, comms_runtime.is_some(), keep_alive);
+
+        let Some(comms) = comms_runtime else {
+            if desired.is_none() {
+                self.abort_comms_drain(session_id).await;
+            }
             return false;
-        }
-        // Keep the session read guard while mutating drain slots so unregister
-        // cannot race between registration check and slot publication.
+        };
+
         let mut slots = self.comms_drain_slots.write().await;
         let slot = slots
             .entry(session_id.clone())
             .or_insert_with(CommsDrainSlot::new);
+
+        let Some(mode) = desired else {
+            abort_slot(slot);
+            return false;
+        };
 
         let result =
             match protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode) {
@@ -1330,16 +1371,11 @@ impl RuntimeSessionAdapter {
         // Execute effects from the transition
         for effect in &result.effects {
             match effect {
-                CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
-                    let idle_timeout = match spawn_mode {
-                        CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
-                        CommsDrainMode::Timed => None,
-                    };
+                CommsDrainLifecycleEffect::SpawnDrainTask { .. } => {
                     let handle = crate::comms_drain::spawn_comms_drain(
                         Arc::clone(self),
                         session_id.clone(),
                         comms.clone(),
-                        idle_timeout,
                     );
                     slot.handle = Some(handle);
                 }
@@ -1375,17 +1411,24 @@ impl RuntimeSessionAdapter {
     /// Called from drain task exit paths (or by wrappers that detect task
     /// completion). The authority decides whether to enter ExitedRespawnable
     /// (PersistentHost + Failed) or Stopped.
-    pub async fn notify_comms_drain_exited(&self, session_id: &SessionId, reason: DrainExitReason) {
-        let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id) {
-            slot.handle.take(); // clean up finished handle
-            match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
-                Ok(_effects) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
+    pub async fn notify_comms_drain_exited(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        reason: DrainExitReason,
+    ) {
+        {
+            let mut slots = self.comms_drain_slots.write().await;
+            if let Some(slot) = slots.get_mut(session_id) {
+                slot.handle.take(); // clean up finished handle
+                match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
+                    Ok(_effects) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
+                    }
                 }
             }
         }
+        let _ = self.reconcile_comms_drain(session_id).await;
     }
 
     /// Abort all active comms drain tasks.
@@ -1459,7 +1502,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let (driver, wake_tx, control_tx) = {
+        let (driver, wake_tx, _control_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -1496,15 +1539,6 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
                     );
                 }
             }
-        }
-        // InterruptYielding: deliver through the per-session control channel
-        // so the running agent can break out of cooperative yield points.
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
-        {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
         }
 
         Ok(outcome)
@@ -1704,7 +1738,7 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         runtime_id: &LogicalRuntimeId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeControlPlaneError> {
-        let (session_id, driver, _completions, wake_tx, control_tx) = {
+        let (session_id, driver, _completions, wake_tx, _control_tx) = {
             let (sid, d, c, w) = self.lookup_entry(runtime_id).await?;
             let ctrl = {
                 let sessions = self.sessions.read().await;
@@ -1731,13 +1765,6 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
             && let Some(ref tx) = wake_tx
         {
             let _ = tx.try_send(());
-        }
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
-        {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
         }
 
         Ok(outcome)
@@ -1953,7 +1980,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use meerkat_core::agent::CommsRuntime;
     use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
     use tokio::sync::Notify;
 
@@ -1992,11 +2019,10 @@ mod tests {
             self.dismiss.load(Ordering::Acquire)
         }
 
-        async fn drain_classified_inbox_interactions(
+        async fn drain_peer_input_candidates(
             &self,
-        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
-        {
-            Ok(Vec::new())
+        ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
+            Vec::new()
         }
     }
 
@@ -2005,7 +2031,6 @@ mod tests {
         session_id: &SessionId,
         mode: CommsDrainMode,
         comms_runtime: Arc<dyn CommsRuntime>,
-        idle_timeout: Duration,
     ) {
         adapter.register_session(session_id.clone()).await;
         let mut slots = adapter.comms_drain_slots.write().await;
@@ -2025,7 +2050,6 @@ mod tests {
                     Arc::clone(adapter),
                     session_id.clone(),
                     Arc::clone(&comms_runtime),
-                    Some(idle_timeout),
                 ));
             }
         }
@@ -2080,7 +2104,6 @@ mod tests {
             &session_id,
             CommsDrainMode::PersistentHost,
             comms_runtime,
-            Duration::from_millis(25),
         )
         .await;
 
@@ -2097,31 +2120,47 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn idle_timeout_updates_authority_before_join() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
-        let session_id = SessionId::new();
-        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
-
-        spawn_test_comms_drain(
-            &adapter,
-            &session_id,
-            CommsDrainMode::Timed,
-            comms_runtime,
-            Duration::from_millis(25),
-        )
-        .await;
-
-        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
-        assert!(
-            !handle_present(&adapter, &session_id).await,
-            "drain task should clear its slot before wait_comms_drain joins"
-        );
-
-        adapter.wait_comms_drain(&session_id).await;
+    #[test]
+    fn desired_peer_ingress_mode_tracks_live_attachment_and_keep_alive() {
         assert_eq!(
-            current_phase(&adapter, &session_id).await,
-            Some(CommsDrainPhase::Stopped)
+            desired_peer_ingress_mode(RuntimeState::Attached, true, false),
+            Some(CommsDrainMode::AttachedSession)
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Running, true, false),
+            Some(CommsDrainMode::AttachedSession)
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Recovering, true, false),
+            Some(CommsDrainMode::AttachedSession)
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Idle, true, true),
+            Some(CommsDrainMode::PersistentHost)
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Idle, true, false),
+            None
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Attached, false, true),
+            None
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Initializing, true, true),
+            None
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Retired, true, true),
+            None
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Stopped, true, true),
+            None
+        );
+        assert_eq!(
+            desired_peer_ingress_mode(RuntimeState::Destroyed, true, true),
+            None
         );
     }
 
@@ -2137,7 +2176,6 @@ mod tests {
             &session_id,
             CommsDrainMode::PersistentHost,
             comms_runtime,
-            Duration::from_secs(60),
         )
         .await;
 

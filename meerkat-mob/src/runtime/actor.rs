@@ -5226,6 +5226,7 @@ impl MobActor {
                 "role": new_peer_entry.profile.as_str(),
                 "description": peer_description,
             }),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: InputStreamMode::None,
         };
 
@@ -5266,6 +5267,7 @@ impl MobActor {
                 "peer": other_peer_id.as_str(),
                 "role": other_peer_entry.profile.as_str(),
             }),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: InputStreamMode::None,
         };
 

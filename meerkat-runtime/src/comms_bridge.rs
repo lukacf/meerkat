@@ -5,8 +5,7 @@
 
 use chrono::Utc;
 use meerkat_core::interaction::{
-    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, PeerInputClass,
-    ResponseStatus,
+    InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass, ResponseStatus,
 };
 use meerkat_core::lifecycle::InputId;
 
@@ -18,8 +17,8 @@ use crate::input::{
 
 /// Convert a classified comms interaction into the appropriate runtime-owned
 /// input family.
-pub fn classified_interaction_to_runtime_input(
-    classified: &ClassifiedInboxInteraction,
+pub fn peer_input_candidate_to_runtime_input(
+    classified: &PeerInputCandidate,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
     let interaction = &classified.interaction;
@@ -249,7 +248,7 @@ mod tests {
 
     #[test]
     fn plain_event_to_external_event_input() {
-        let classified = ClassifiedInboxInteraction {
+        let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
             lifecycle_peer: None,
             interaction: InboxInteraction {
@@ -265,7 +264,7 @@ mod tests {
             },
         };
         let input =
-            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         match input {
             Input::ExternalEvent(event) => {
                 assert_eq!(event.event_type, "webhook");
@@ -283,7 +282,7 @@ mod tests {
 
     #[test]
     fn peer_named_event_prefix_stays_peer_without_plain_event_class() {
-        let classified = ClassifiedInboxInteraction {
+        let classified = PeerInputCandidate {
             class: PeerInputClass::ActionableMessage,
             lifecycle_peer: None,
             interaction: InboxInteraction {
@@ -299,7 +298,7 @@ mod tests {
             },
         };
         let input =
-            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         match input {
             Input::Peer(peer) => {
                 assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
@@ -412,7 +411,7 @@ mod tests {
                 data: "abc".into(),
             },
         ];
-        let classified = ClassifiedInboxInteraction {
+        let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
             lifecycle_peer: None,
             interaction: InboxInteraction {
@@ -428,7 +427,7 @@ mod tests {
             },
         };
         let input =
-            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         match input {
             Input::ExternalEvent(event) => {
                 assert_eq!(event.payload["body"], "see image");
@@ -450,7 +449,7 @@ mod tests {
             class: meerkat_core::types::RenderClass::ExternalEvent,
             salience: meerkat_core::types::RenderSalience::Urgent,
         };
-        let classified = ClassifiedInboxInteraction {
+        let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
             lifecycle_peer: None,
             interaction: InboxInteraction {
@@ -466,7 +465,7 @@ mod tests {
             },
         };
 
-        match classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test")) {
+        match peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("test")) {
             Input::ExternalEvent(event) => {
                 assert_eq!(
                     event.handling_mode,

@@ -870,16 +870,6 @@ pub trait SessionService: Send + Sync {
     /// Returns `NotRunning` if no turn is active.
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError>;
 
-    /// Cooperatively interrupt yield points within an in-flight turn.
-    ///
-    /// Unlike `interrupt()`, this is not a hard cancel. Implementations should
-    /// signal the running session's cooperative wait/yield path so the turn can
-    /// break out of `wait`-style pauses and continue to the next runtime
-    /// checkpoint. Returns `NotRunning` if no turn is active.
-    async fn interrupt_yielding(&self, _id: &SessionId) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported("interrupt_yielding".to_string()))
-    }
-
     /// Replace the LLM client on a live session.
     ///
     /// Enables mid-session model/provider hot-swap without rebuilding the

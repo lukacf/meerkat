@@ -385,10 +385,19 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                 }
             }
-            CommsCommand::PeerMessage { to, body, blocks } => self
+            CommsCommand::PeerMessage {
+                to,
+                body,
+                blocks,
+                handling_mode,
+            } => self
                 .send_peer_command(
                     to.as_str(),
-                    crate::types::MessageKind::Message { body, blocks },
+                    crate::types::MessageKind::Message {
+                        body,
+                        blocks,
+                        handling_mode: Some(handling_mode),
+                    },
                 )
                 .await
                 .map(|envelope_id| SendReceipt::PeerMessageSent {
@@ -400,6 +409,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 intent,
                 params,
                 stream,
+                handling_mode,
             } => {
                 let interaction_id = Uuid::new_v4();
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
@@ -419,7 +429,11 @@ impl CoreCommsRuntime for CommsRuntime {
                 let envelope_id = match self
                     .send_peer_command(
                         to.as_str(),
-                        crate::types::MessageKind::Request { intent, params },
+                        crate::types::MessageKind::Request {
+                            intent,
+                            params,
+                            handling_mode: Some(handling_mode),
+                        },
                     )
                     .await
                 {
@@ -520,6 +534,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 intent,
                 params,
                 stream: InputStreamMode::ReserveInteraction,
+                handling_mode,
             } => {
                 // Reserve a local interaction stream, then send the peer request.
                 let interaction_id = Uuid::new_v4();
@@ -535,7 +550,11 @@ impl CoreCommsRuntime for CommsRuntime {
                 let envelope_id = match self
                     .send_peer_command(
                         to.as_str(),
-                        crate::types::MessageKind::Request { intent, params },
+                        crate::types::MessageKind::Request {
+                            intent,
+                            params,
+                            handling_mode: Some(handling_mode),
+                        },
                     )
                     .await
                 {
@@ -584,13 +603,10 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn drain_inbox_interactions(&self) -> Vec<meerkat_core::InboxInteraction> {
-        // Delegate to classified drain and strip classification metadata.
-        // This ensures a single drain path: classified queue is the sole consumer.
-        self.drain_classified_inbox_interactions()
+        self.drain_peer_input_candidates()
             .await
-            .unwrap_or_default()
             .into_iter()
-            .map(|ci| ci.interaction)
+            .map(|candidate| candidate.interaction)
             .collect()
     }
 
@@ -618,10 +634,7 @@ impl CoreCommsRuntime for CommsRuntime {
         self.mark_interaction_complete(id.0);
     }
 
-    async fn drain_classified_inbox_interactions(
-        &self,
-    ) -> Result<Vec<meerkat_core::ClassifiedInboxInteraction>, meerkat_core::CommsCapabilityError>
-    {
+    async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
         use crate::agent::types::MessageIntent;
         use crate::types::MessageKind;
 
@@ -629,12 +642,12 @@ impl CoreCommsRuntime for CommsRuntime {
         let classified_entries = inbox.try_drain_classified();
 
         if classified_entries.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Use stored classification metadata — NO trust re-check.
         // Snapshot semantics: classification was fixed at enqueue time.
-        Ok(classified_entries
+        classified_entries
             .into_iter()
             .filter_map(|entry| {
                 let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
@@ -656,7 +669,11 @@ impl CoreCommsRuntime for CommsRuntime {
                         };
 
                         let (content, rendered_text) = match envelope.kind {
-                            MessageKind::Message { body, blocks } => {
+                            MessageKind::Message {
+                                body,
+                                blocks,
+                                handling_mode: _,
+                            } => {
                                 let rendered = format!(
                                     "[COMMS MESSAGE from {from_peer}]\n{body}"
                                 );
@@ -665,7 +682,11 @@ impl CoreCommsRuntime for CommsRuntime {
                                     rendered,
                                 )
                             }
-                            MessageKind::Request { intent, params } => {
+                            MessageKind::Request {
+                                intent,
+                                params,
+                                handling_mode: _,
+                            } => {
                                 let typed_intent = MessageIntent::from(intent.as_str());
                                 let params_str = if params.is_null()
                                     || params == serde_json::Value::Object(Default::default())
@@ -744,7 +765,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             }
                         };
 
-                        Some(meerkat_core::ClassifiedInboxInteraction {
+                        Some(meerkat_core::PeerInputCandidate {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(envelope.id),
                                 from: from_peer,
@@ -770,7 +791,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             &source.to_string(),
                             Some(&body),
                         );
-                        Some(meerkat_core::ClassifiedInboxInteraction {
+                        Some(meerkat_core::PeerInputCandidate {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(
                                     interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
@@ -787,17 +808,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                 }
             })
-            .collect())
-    }
-
-    fn actionable_input_notify(
-        &self,
-    ) -> Result<Arc<tokio::sync::Notify>, meerkat_core::CommsCapabilityError> {
-        self.actionable_notify.clone().ok_or_else(|| {
-            meerkat_core::CommsCapabilityError::Unsupported(
-                "actionable_input_notify: classified inbox not initialized".to_string(),
-            )
-        })
+            .collect()
     }
 }
 
@@ -890,9 +901,6 @@ pub struct CommsRuntime {
     peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
     #[allow(dead_code)] // Kept alive — shared with IngressClassificationContext via Arc
     silent_intents: Arc<HashSet<String>>,
-    /// Narrow notify that fires only for actionable peer input (messages/requests).
-    /// Set during construction when classified inbox is used.
-    actionable_notify: Option<Arc<tokio::sync::Notify>>,
     blob_store: Option<Arc<dyn BlobStore>>,
 }
 
@@ -928,7 +936,6 @@ impl CommsRuntime {
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
-        let actionable_notify = inbox.classified_actionable_notify();
 
         let router = Router::with_shared_peers(
             keypair.clone(),
@@ -958,7 +965,6 @@ impl CommsRuntime {
                 PeerDirectoryReachabilityAuthority::new(),
             )),
             silent_intents,
-            actionable_notify,
             blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
@@ -999,7 +1005,6 @@ impl CommsRuntime {
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
-        let actionable_notify = inbox.classified_actionable_notify();
         let comms_config = crate::CommsConfig::default();
         #[cfg(not(target_arch = "wasm32"))]
         let config = ResolvedCommsConfig {
@@ -1053,7 +1058,6 @@ impl CommsRuntime {
                 PeerDirectoryReachabilityAuthority::new(),
             )),
             silent_intents,
-            actionable_notify,
             blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
@@ -1089,7 +1093,6 @@ impl CommsRuntime {
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
-        let actionable_notify = inbox.classified_actionable_notify();
         let comms_config = crate::CommsConfig::default();
         let config = ResolvedCommsConfig {
             enabled: true,
@@ -1134,7 +1137,6 @@ impl CommsRuntime {
                 PeerDirectoryReachabilityAuthority::new(),
             )),
             silent_intents,
-            actionable_notify,
             blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
@@ -1173,6 +1175,7 @@ impl CommsRuntime {
             crate::types::MessageKind::Message {
                 body,
                 blocks: Some(mut blocks),
+                handling_mode,
             } => {
                 if blocks.iter().any(|block| {
                     matches!(
@@ -1199,6 +1202,7 @@ impl CommsRuntime {
                 Ok(crate::types::MessageKind::Message {
                     body,
                     blocks: Some(blocks),
+                    handling_mode,
                 })
             }
             other => Ok(other),

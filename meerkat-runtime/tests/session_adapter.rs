@@ -1889,7 +1889,7 @@ async fn retire_without_loop_resolves_waiters() {
 
 #[tokio::test]
 async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
-    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use meerkat_core::agent::CommsRuntime;
     use tokio::sync::Notify;
 
     struct IdleDrainRuntime {
@@ -1918,11 +1918,10 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
             false
         }
 
-        async fn drain_classified_inbox_interactions(
+        async fn drain_peer_input_candidates(
             &self,
-        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
-        {
-            Ok(Vec::new())
+        ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
+            Vec::new()
         }
     }
 
@@ -1950,8 +1949,8 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
 }
 
 #[tokio::test]
-async fn non_host_sessions_do_not_spawn_background_comms_drains() {
-    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+async fn idle_non_host_sessions_do_not_spawn_background_comms_drains() {
+    use meerkat_core::agent::CommsRuntime;
     use tokio::sync::Notify;
 
     struct IdleDrainRuntime {
@@ -1980,11 +1979,10 @@ async fn non_host_sessions_do_not_spawn_background_comms_drains() {
             false
         }
 
-        async fn drain_classified_inbox_interactions(
+        async fn drain_peer_input_candidates(
             &self,
-        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
-        {
-            Ok(Vec::new())
+        ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
+            Vec::new()
         }
     }
 
@@ -1999,8 +1997,100 @@ async fn non_host_sessions_do_not_spawn_background_comms_drains() {
 
     assert!(
         !spawned,
-        "non-host sessions must not leave a background comms drain alive"
+        "idle non-host sessions must not leave a background comms drain alive"
     );
+}
+
+#[tokio::test]
+async fn attached_sessions_spawn_attached_comms_drains_without_keep_alive() {
+    use meerkat_core::agent::CommsRuntime;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use tokio::sync::Notify;
+
+    struct IdleDrainRuntime {
+        notify: Arc<Notify>,
+    }
+
+    impl IdleDrainRuntime {
+        fn new() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for IdleDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn dismiss_received(&self) -> bool {
+            false
+        }
+
+        async fn drain_peer_input_candidates(
+            &self,
+        ) -> Vec<meerkat_core::interaction::PeerInputCandidate> {
+            Vec::new()
+        }
+    }
+
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let sid = SessionId::new();
+    adapter
+        .register_session_with_executor(sid.clone(), Box::new(NoopExecutor))
+        .await;
+
+    let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
+    let spawned = adapter
+        .maybe_spawn_comms_drain(&sid, false, Some(comms))
+        .await;
+
+    assert!(
+        spawned,
+        "attached sessions should spawn an AttachedSession comms drain even without keep_alive"
+    );
+
+    adapter.unregister_session(&sid).await;
 }
 
 /// Test that BoundaryApplied fires with correct receipt on success.

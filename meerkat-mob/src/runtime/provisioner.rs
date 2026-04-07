@@ -548,13 +548,6 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::ControlFailed {
                     reason: err.to_string(),
                 }),
-            RunControlCommand::InterruptYielding => self
-                .session_service
-                .interrupt_yielding(&self.session_id)
-                .await
-                .map_err(|err| CoreExecutorError::ControlFailed {
-                    reason: err.to_string(),
-                }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .session_service

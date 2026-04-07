@@ -55,13 +55,6 @@ pub struct CompositeDispatcher {
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     allowed_tools: HashSet<String>,
-    /// Stashed interrupt receiver for carry-forward across dispatcher rebuilds.
-    /// Set by `bind_wait_interrupt`, re-applied by `bind_ops_lifecycle`.
-    wait_interrupt_rx: Option<meerkat_core::wait_interrupt::WaitInterruptReceiver>,
-    /// Stashed completion feed for carry-forward across dispatcher rebuilds.
-    completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
-    /// Shared interrupt baseline for the wait tool (stamped by agent before dispatch).
-    interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl CompositeDispatcher {
@@ -129,8 +122,7 @@ impl CompositeDispatcher {
         )));
 
         // Add utility tools
-        use crate::builtin::utility::{ApplyPatchTool, DateTimeTool, ViewImageTool, WaitTool};
-        builtin_tools.push(Arc::new(WaitTool::new()));
+        use crate::builtin::utility::{ApplyPatchTool, DateTimeTool, ViewImageTool};
         builtin_tools.push(Arc::new(DateTimeTool::new()));
         builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root.clone())));
         builtin_tools.push(Arc::new(ViewImageTool::new(project_root.clone())));
@@ -196,9 +188,6 @@ impl CompositeDispatcher {
             image_tool_results: _image_tool_results,
             job_manager,
             allowed_tools,
-            wait_interrupt_rx: None,
-            completion_feed: None,
-            interrupt_baseline: None,
         })
     }
 
@@ -226,8 +215,7 @@ impl CompositeDispatcher {
         )));
 
         // Add utility tools
-        use crate::builtin::utility::{DateTimeTool, WaitTool};
-        builtin_tools.push(Arc::new(WaitTool::new()));
+        use crate::builtin::utility::DateTimeTool;
         builtin_tools.push(Arc::new(DateTimeTool::new()));
 
         let mut allowed_tools = HashSet::new();
@@ -249,9 +237,6 @@ impl CompositeDispatcher {
             session_id,
             image_tool_results: true,
             allowed_tools,
-            wait_interrupt_rx: None,
-            completion_feed: None,
-            interrupt_baseline: None,
         })
     }
 
@@ -457,26 +442,16 @@ impl AgentToolDispatcher for CompositeDispatcher {
             ExternalToolUpdate::default()
         };
 
-        // When the CompletionFeed is wired, the agent boundary drains completions
-        // directly from the feed. drain_completed() still runs for its side effect
-        // (flipping completion_notified so cleanup_old_jobs can evict).
-        //
-        // When NO feed is wired (direct AgentBuilder paths without AgentFactory),
-        // background_completions is the only delivery path — return them here so
-        // the agent boundary's legacy ext.background_completions processing works.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref mgr) = self.job_manager {
             let drained = mgr.drain_completed().await;
-            if self.completion_feed.is_none() {
-                update.background_completions.extend(drained);
-            }
+            update.background_completions.extend(drained);
         }
 
         update
     }
 
     fn capabilities(&self) -> DispatcherCapabilities {
-        let has_wait = self.builtin_tools.iter().any(|t| t.name() == "wait");
         let mut ops_lifecycle = false;
         #[cfg(not(target_arch = "wasm32"))]
         if self.job_manager.is_some() {
@@ -489,69 +464,25 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 .is_some_and(|ext| ext.capabilities().ops_lifecycle);
         }
         DispatcherCapabilities {
-            wait_interrupt: has_wait,
+            wait_interrupt: false,
             ops_lifecycle,
-            completion_feed: has_wait,
+            completion_feed: false,
         }
     }
 
     fn bind_wait_interrupt(
         self: Arc<Self>,
-        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+        _rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
     ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
-        let mut owned = Arc::try_unwrap(self)
-            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        // Swap the wait tool with an interrupt-aware version, including
-        // completion feed + baseline if available.
-        use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt_and_feed(
-            rx.clone(),
-            owned.completion_feed.clone(),
-            owned.interrupt_baseline.clone(),
-        ));
-        for tool in &mut owned.builtin_tools {
-            if tool.name() == "wait" {
-                *tool = new_wait;
-                break;
-            }
-        }
-        // Stash the receiver for carry-forward across dispatcher rebuilds
-        // (e.g., bind_ops_lifecycle creates a fresh CompositeDispatcher).
-        owned.wait_interrupt_rx = Some(rx);
-        Ok(BindOutcome::Bound(Arc::new(owned)))
+        Err(meerkat_core::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 
     fn bind_completion_feed(
         self: Arc<Self>,
-        feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
-        baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        _feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
+        _baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
-        let mut owned = Arc::try_unwrap(self)
-            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        // Swap the wait tool with a feed-aware version, preserving any
-        // previously-bound cooperative interrupt receiver.
-        use crate::builtin::utility::WaitTool;
-        let new_wait: Arc<dyn BuiltinTool> = if let Some(rx) = owned.wait_interrupt_rx.clone() {
-            Arc::new(WaitTool::with_interrupt_and_feed(
-                rx,
-                Some(Arc::clone(&feed)),
-                Some(Arc::clone(&baseline)),
-            ))
-        } else {
-            Arc::new(WaitTool::with_feed_only(
-                Arc::clone(&feed),
-                Arc::clone(&baseline),
-            ))
-        };
-        for tool in &mut owned.builtin_tools {
-            if tool.name() == "wait" {
-                *tool = new_wait;
-                break;
-            }
-        }
-        owned.completion_feed = Some(feed);
-        owned.interrupt_baseline = Some(baseline);
-        Ok(BindOutcome::Bound(Arc::new(owned)))
+        Err(meerkat_core::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 
     fn bind_ops_lifecycle(
@@ -582,22 +513,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
 
-            // Transplant the fully-configured WaitTool from the old dispatcher
-            // into the rebuild, rather than dismantling it into parts (interrupt_rx,
-            // feed, baseline) and reconstructing. The WaitTool already holds all
-            // three pieces from prior bind_wait_interrupt / bind_completion_feed.
-            let old_wait = owned
-                .builtin_tools
-                .iter()
-                .find(|t| t.name() == "wait")
-                .cloned();
-
-            // Carry forward comms interrupt receiver and feed/baseline for
-            // the struct fields (used by capabilities() and future rebuilds).
-            let interrupt_rx = owned.wait_interrupt_rx.take();
-            let feed = owned.completion_feed.take();
-            let baseline = owned.interrupt_baseline.take();
-
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
             let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
                 Arc::clone(&owned.task_store),
@@ -610,21 +525,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 owned.image_tool_results,
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
-
-            // Restore struct fields for future rebuilds and capabilities().
-            rebound.wait_interrupt_rx = interrupt_rx;
-            rebound.completion_feed = feed;
-            rebound.interrupt_baseline = baseline;
-
-            // Replace the bare WaitTool::new() with the transplanted one.
-            if let Some(configured_wait) = old_wait {
-                for tool in &mut rebound.builtin_tools {
-                    if tool.name() == "wait" {
-                        *tool = configured_wait;
-                        break;
-                    }
-                }
-            }
 
             #[cfg(feature = "skills")]
             if let Some(skill_tools) = owned.skill_tools.take() {
@@ -723,68 +623,9 @@ mod tests {
         assert!(usage.contains("List active mobs"));
     }
 
-    // set_wait_interrupt test removed — legacy API replaced by bind_wait_interrupt()
-
-    #[tokio::test]
-    async fn bind_wait_interrupt_swaps_in_interrupt_aware_wait_tool() {
-        use crate::builtin::utility::WaitInterrupt;
-        use meerkat_core::time_compat::Duration;
-
-        let store = Arc::new(MemoryTaskStore::new());
-        let dispatcher = Arc::new(
-            CompositeDispatcher::new(
-                store,
-                &BuiltinToolConfig::default(),
-                None,
-                None,
-                None,
-                None,
-                true,
-            )
-            .expect("composite dispatcher should build"),
-        );
-
-        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
-        let rebound = dispatcher
-            .bind_wait_interrupt(rx)
-            .expect("bind_wait_interrupt should succeed")
-            .into_dispatcher();
-
-        // Dispatch a wait call and interrupt it
-        let call_json =
-            serde_json::value::RawValue::from_string(r#"{"seconds": 30.0}"#.to_string()).unwrap();
-        let call = ToolCallView {
-            id: "test-id",
-            name: "wait",
-            args: &call_json,
-        };
-
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tx.send(Some(WaitInterrupt {
-                reason: "bind test interrupt".to_string(),
-            }));
-        });
-
-        let start = std::time::Instant::now();
-        let result = rebound
-            .dispatch(call)
-            .await
-            .expect("dispatch should succeed");
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "wait should be interrupted quickly, took {elapsed:?}"
-        );
-        let content: serde_json::Value =
-            serde_json::from_str(&result.result.text_content()).unwrap();
-        assert_eq!(content["status"], "interrupted");
-    }
-
     #[test]
     #[allow(clippy::panic)]
-    fn bind_wait_interrupt_shared_ownership_error() {
+    fn bind_wait_interrupt_is_unsupported_without_wait_tool() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = Arc::new(
             CompositeDispatcher::new(
@@ -803,17 +644,16 @@ mod tests {
         let (_tx, rx) =
             tokio::sync::watch::channel(None::<meerkat_core::wait_interrupt::WaitInterrupt>);
         match dispatcher.bind_wait_interrupt(rx) {
-            Err(meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
-            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
-            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+            Err(meerkat_core::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
+            Ok(_) => panic!("expected Unsupported error, got Ok"),
+            Err(e) => panic!("expected Unsupported, got {e:?}"),
         }
     }
 
-    #[tokio::test]
-    async fn bind_completion_feed_preserves_existing_wait_interrupt_receiver() {
-        use crate::builtin::utility::WaitInterrupt;
+    #[test]
+    #[allow(clippy::panic)]
+    fn bind_completion_feed_is_unsupported_without_wait_tool() {
         use meerkat_core::completion_feed::{CompletionBatch, CompletionFeed, CompletionSeq};
-        use meerkat_core::time_compat::Duration;
 
         #[derive(Debug)]
         struct EmptyFeed;
@@ -853,48 +693,14 @@ mod tests {
             .expect("composite dispatcher should build"),
         );
 
-        let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
-        let rebound = dispatcher
-            .bind_wait_interrupt(rx)
-            .expect("bind_wait_interrupt should succeed")
-            .into_dispatcher();
-        let rebound = rebound
-            .bind_completion_feed(
-                Arc::new(EmptyFeed),
-                Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            )
-            .expect("bind_completion_feed should succeed")
-            .into_dispatcher();
-
-        let call_json =
-            serde_json::value::RawValue::from_string(r#"{"seconds": 30.0}"#.to_string()).unwrap();
-        let call = ToolCallView {
-            id: "test-id",
-            name: "wait",
-            args: &call_json,
-        };
-
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tx.send(Some(WaitInterrupt {
-                reason: "post-feed bind interrupt".to_string(),
-            }));
-        });
-
-        let start = std::time::Instant::now();
-        let result = rebound
-            .dispatch(call)
-            .await
-            .expect("dispatch should succeed");
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "wait should still be interrupted quickly after feed binding, took {elapsed:?}"
-        );
-        let content: serde_json::Value =
-            serde_json::from_str(&result.result.text_content()).unwrap();
-        assert_eq!(content["status"], "interrupted");
+        match dispatcher.bind_completion_feed(
+            Arc::new(EmptyFeed),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ) {
+            Err(meerkat_core::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
+            Ok(_) => panic!("expected Unsupported error, got Ok"),
+            Err(e) => panic!("expected Unsupported, got {e:?}"),
+        }
     }
 
     #[tokio::test]
@@ -911,13 +717,12 @@ mod tests {
         )
         .expect("composite dispatcher should build");
 
-        // The "wait" tool returns ToolOutput::Json with a JSON object.
-        // A string JSON value should be returned as-is (not double-quoted).
-        let call_json =
-            serde_json::value::RawValue::from_string(r#"{"seconds": 0.1}"#.to_string()).unwrap();
+        // Builtin JSON outputs should be serialized into text content without
+        // losing object structure.
+        let call_json = serde_json::value::RawValue::from_string(r#"{}"#.to_string()).unwrap();
         let call = ToolCallView {
             id: "test-str",
-            name: "wait",
+            name: "datetime",
             args: &call_json,
         };
         let result = dispatcher
@@ -925,10 +730,9 @@ mod tests {
             .await
             .expect("dispatch should succeed");
         assert!(!result.result.is_error);
-        // wait returns {"waited_seconds": ..., "status": "complete"} which is an object
         let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
             .expect("content should be valid JSON");
-        assert_eq!(parsed["status"], "complete");
+        assert!(parsed["iso8601"].is_string());
     }
 
     #[tokio::test]

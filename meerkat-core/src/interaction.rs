@@ -136,6 +136,31 @@ pub struct ClassifiedInboxInteraction {
     pub lifecycle_peer: Option<String>,
 }
 
+/// Canonical peer/event ingress candidate handed to runtime admission.
+///
+/// This is the typed, machine-authored drain unit for runtime-backed peer
+/// ingress. It preserves ingress classification so downstream code does not
+/// re-derive semantics after drain.
+#[derive(Debug, Clone)]
+pub struct PeerInputCandidate {
+    /// The original interaction data.
+    pub interaction: InboxInteraction,
+    /// Pre-computed classification from ingress.
+    pub class: PeerInputClass,
+    /// For lifecycle events, the peer name that was added/retired.
+    pub lifecycle_peer: Option<String>,
+}
+
+impl From<ClassifiedInboxInteraction> for PeerInputCandidate {
+    fn from(value: ClassifiedInboxInteraction) -> Self {
+        Self {
+            interaction: value.interaction,
+            class: value.class,
+            lifecycle_peer: value.lifecycle_peer,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

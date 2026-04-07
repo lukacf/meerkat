@@ -31,8 +31,6 @@ pub struct Inbox {
     notify: Arc<Notify>,
     /// Classified entries channel (parallel to raw channel).
     classified_rx: Option<mpsc::Receiver<ClassifiedInboxEntry>>,
-    /// Notifier that fires only for actionable inputs.
-    actionable_notify: Option<Arc<Notify>>,
 }
 
 /// The sending end of the inbox, cloned to IO tasks.
@@ -45,8 +43,6 @@ pub struct InboxSender {
     classification_context: Option<Arc<IngressClassificationContext>>,
     /// Classified entries sender (parallel to raw channel).
     classified_tx: Option<mpsc::Sender<ClassifiedInboxEntry>>,
-    /// Notifier that fires only for actionable inputs.
-    actionable_notify: Option<Arc<Notify>>,
 }
 
 impl Inbox {
@@ -64,14 +60,12 @@ impl Inbox {
                 rx,
                 notify: notify.clone(),
                 classified_rx: None,
-                actionable_notify: None,
             },
             InboxSender {
                 tx,
                 notify,
                 classification_context: None,
                 classified_tx: None,
-                actionable_notify: None,
             },
         )
     }
@@ -89,20 +83,17 @@ impl Inbox {
         let (tx, rx) = mpsc::channel(DEFAULT_INBOX_CAPACITY);
         let (classified_tx, classified_rx) = mpsc::channel(DEFAULT_INBOX_CAPACITY);
         let notify = Arc::new(Notify::new());
-        let actionable_notify = Arc::new(Notify::new());
         (
             Inbox {
                 rx,
                 notify: notify.clone(),
                 classified_rx: Some(classified_rx),
-                actionable_notify: Some(actionable_notify.clone()),
             },
             InboxSender {
                 tx,
                 notify,
                 classification_context: Some(context),
                 classified_tx: Some(classified_tx),
-                actionable_notify: Some(actionable_notify),
             },
         )
     }
@@ -143,11 +134,6 @@ impl Inbox {
     /// Try to receive a single classified entry without blocking.
     pub(crate) fn try_recv_one_classified(&mut self) -> Option<ClassifiedInboxEntry> {
         self.classified_rx.as_mut()?.try_recv().ok()
-    }
-
-    /// Get the actionable-input notifier (fires only for actionable classes).
-    pub(crate) fn classified_actionable_notify(&self) -> Option<Arc<Notify>> {
-        self.actionable_notify.clone()
     }
 }
 
@@ -201,15 +187,10 @@ impl InboxSender {
             };
             // Enqueue only on classified channel (no raw double-enqueue).
             // drain_classified_inbox_interactions() is the sole consumer.
-            let is_actionable = entry.class.is_actionable();
             classified_tx.try_send(entry).map_err(|err| match err {
                 mpsc::error::TrySendError::Closed(_) => InboxError::Closed,
                 mpsc::error::TrySendError::Full(_) => InboxError::Full,
             })?;
-            // Fire actionable notify only for actionable classes
-            if is_actionable && let Some(ref actionable) = self.actionable_notify {
-                actionable.notify_waiters();
-            }
             // Always fire broad notify
             self.notify.notify_waiters();
             Ok(())
@@ -430,147 +411,6 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             }],
         }
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_actionable_notify_fires_for_message() {
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-        let notified = actionable.notified();
-
-        sender
-            .send_classified(InboxItem::External {
-                envelope: make_test_envelope(),
-            })
-            .unwrap();
-
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
-        assert!(result.is_ok(), "Actionable notify should fire for messages");
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_actionable_notify_fires_for_request() {
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-        let notified = actionable.notified();
-
-        let mut envelope = make_test_envelope();
-        envelope.kind = MessageKind::Request {
-            intent: "review".to_string(),
-            params: serde_json::json!({}),
-        };
-
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .unwrap();
-
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
-        assert!(result.is_ok(), "Actionable notify should fire for requests");
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_no_actionable_notify_for_response() {
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-
-        let mut envelope = make_test_envelope();
-        envelope.kind = MessageKind::Response {
-            in_reply_to: Uuid::new_v4(),
-            status: crate::types::Status::Completed,
-            result: serde_json::json!({}),
-            handling_mode: None,
-        };
-
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .unwrap();
-
-        let notified = actionable.notified();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
-        assert!(
-            result.is_err(),
-            "Actionable notify should NOT fire for responses"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_no_actionable_notify_for_ack() {
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-
-        let mut envelope = make_test_envelope();
-        envelope.kind = MessageKind::Ack {
-            in_reply_to: Uuid::new_v4(),
-        };
-
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .unwrap();
-
-        let notified = actionable.notified();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
-        assert!(
-            result.is_err(),
-            "Actionable notify should NOT fire for acks"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_no_actionable_notify_for_plain_event() {
-        let ctx = make_classification_context(TrustedPeers::new(), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-
-        sender
-            .send_classified(InboxItem::PlainEvent {
-                body: "event".to_string(),
-                source: meerkat_core::PlainEventSource::Tcp,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
-                interaction_id: None,
-                blocks: None,
-                render_metadata: None,
-            })
-            .unwrap();
-
-        let notified = actionable.notified();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
-        assert!(
-            result.is_err(),
-            "Actionable notify should NOT fire for plain events"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_no_actionable_notify_for_lifecycle() {
-        let sender_pubkey = PubKey::new([1u8; 32]);
-        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-
-        let mut envelope = make_test_envelope();
-        envelope.kind = MessageKind::Request {
-            intent: "mob.peer_added".to_string(),
-            params: serde_json::json!({"peer": "new-agent"}),
-        };
-
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .unwrap();
-
-        let notified = actionable.notified();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
-        assert!(
-            result.is_err(),
-            "Actionable notify should NOT fire for lifecycle events"
-        );
     }
 
     #[tokio::test]

@@ -1222,14 +1222,14 @@ mod tests {
 
     #[test]
     fn plain_event_and_direct_runtime_external_event_share_projection() -> Result<(), String> {
-        use crate::comms_bridge::classified_interaction_to_runtime_input;
+        use crate::comms_bridge::peer_input_candidate_to_runtime_input;
         use crate::identifiers::LogicalRuntimeId;
         use meerkat_core::interaction::{
-            ClassifiedInboxInteraction, InboxInteraction, InteractionContent, PeerInputClass,
+            InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass,
         };
 
-        let from_comms = classified_interaction_to_runtime_input(
-            &ClassifiedInboxInteraction {
+        let from_comms = peer_input_candidate_to_runtime_input(
+            &PeerInputCandidate {
                 class: PeerInputClass::PlainEvent,
                 lifecycle_peer: None,
                 interaction: InboxInteraction {

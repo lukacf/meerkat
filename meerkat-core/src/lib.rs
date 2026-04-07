@@ -137,7 +137,7 @@ pub use image_content::{
 };
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
-    PeerInputClass, ResponseStatus,
+    PeerInputCandidate, PeerInputClass, ResponseStatus,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,

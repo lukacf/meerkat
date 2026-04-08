@@ -6,7 +6,7 @@
 //! This target is a **runtime-backed surface** (same tier as CLI/RPC/REST):
 //! - Agent construction via `AgentFactory::build_agent()`
 //! - Session lifecycle via `PersistentSessionService`
-//! - Input routing via `RuntimeSessionAdapter` with `HandlingMode::Steer`
+//! - Input routing via canonical classified peer ingress
 //! - Typed `MessageKind` classification (no string prefixes)
 //!
 //! Sessions are persisted to disk. On restart the most recent session
@@ -19,7 +19,7 @@
 //!
 //! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,31 +27,26 @@ use std::time::Duration;
 use anyhow::{Context as _, bail};
 use futures::StreamExt;
 use meerkat::PersistentSessionService;
-use meerkat::{AgentFactory, FactoryAgentBuilder, PersistenceBundle};
+use meerkat::FactoryAgentBuilder;
 use meerkat_comms::MessageKind;
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
-use meerkat_core::lifecycle::RunId;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::agent::CommsRuntime as _;
+use meerkat_core::interaction::{InteractionContent, PeerInputCandidate};
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError,
 };
-use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_core::{AgentEvent, Config, Session};
-use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
+use meerkat_core::types::{ContentInput, SessionId};
+use meerkat_core::{AgentEvent, Config};
+use meerkat_mob_mcp::MobMcpState;
+use meerkat_rpc::session_executor::{PersistentSessionServiceExecutor, SessionStopCleanup};
 use meerkat_runtime::RuntimeSessionAdapter;
-use meerkat_runtime::input::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
-};
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
-use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
+use meerkat_surface_runtime::RuntimeSessionHost;
+use meerkat_store::{MemoryBlobStore, SessionFilter};
 
 use mdm_tux::{
     DirectControlPayload, KennelPayload, ProviderKind, RegResponse, auto_detect,
-    build_signed_envelope, direct_control_request, parse_direct_control_message, read_envelope,
-    register_with_backoff, verify_envelope, write_envelope,
+    build_signed_envelope, direct_control_request, read_envelope, register_with_backoff,
+    verify_envelope, write_envelope, DIRECT_CONTROL_INTENT,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -67,9 +62,10 @@ Execute user requests using your available tools. Respond conversationally.
 Your responses stream directly to the controller — do not use the 'send' comms tool to reply.";
 
 struct TargetRuntimeSurface {
+    host: Arc<RuntimeSessionHost>,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
-    jsonl_store: Arc<JsonlStore>,
+    jsonl_store: Arc<dyn meerkat::SessionStore>,
     mob_state: Arc<MobMcpState>,
 }
 
@@ -77,46 +73,25 @@ async fn build_target_runtime_surface(
     session_dir: &Path,
     comms_runtime: Arc<CommsRuntime>,
 ) -> anyhow::Result<TargetRuntimeSurface> {
-    let factory = AgentFactory::new(session_dir)
-        .shell(true)
-        .builtins(true)
-        .mob(true)
-        .with_comms_runtime(comms_runtime);
-    let builder = FactoryAgentBuilder::new(factory, Config::default());
-    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-
-    let jsonl_store = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
-    jsonl_store.init().await?;
-
-    let persistence = PersistenceBundle::new(
-        Arc::clone(&jsonl_store) as Arc<dyn SessionStore>,
-        None,
-        Arc::new(MemoryBlobStore::new()),
+    let host = Arc::new(
+        RuntimeSessionHost::builder(session_dir.to_path_buf())
+            .shell(true)
+            .builtins(true)
+            .mob(true)
+            .session_comms_name_prefix("target")
+            .comms_runtime(comms_runtime)
+            .config(Config::default())
+            .max_sessions(10)
+            .build()
+            .await?,
     );
-    let runtime_adapter = persistence.runtime_adapter();
-    let (session_store, runtime_store, blob_store) = persistence.into_parts();
-
-    let mut session_service =
-        PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
-    {
-        let adapter = runtime_adapter.clone();
-        session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-            let adapter = adapter.clone();
-            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-        }));
-    }
-    let service = Arc::new(session_service);
-    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-        service.clone(),
-        Some(runtime_adapter.clone()),
-    ));
-    *mob_tools_slot
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-        AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
-    ));
+    let service = host.service();
+    let runtime_adapter = host.runtime_adapter();
+    let jsonl_store = host.session_store();
+    let mob_state = host.mob_state();
 
     Ok(TargetRuntimeSurface {
+        host,
         service,
         runtime_adapter,
         jsonl_store,
@@ -254,26 +229,14 @@ async fn main() -> anyhow::Result<()> {
     // ── 3. Build runtime-backed session service ───────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-    let TargetRuntimeSurface {
-        service,
-        runtime_adapter,
-        jsonl_store,
-        mob_state,
-    } = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
+    let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
+    let service = Arc::clone(&surface.service);
 
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
 
     // ── 4. Create or auto-resume session ──────────────────────────────────────
-    let mut current_session_id = create_or_resume_session(
-        &service,
-        &runtime_adapter,
-        &jsonl_store,
-        &model,
-        &system_prompt,
-        &mob_state,
-        &provider,
-    )
-    .await?;
+    let mut current_session_id =
+        create_or_resume_session(&surface, &model, &system_prompt, &provider).await?;
 
     let mut event_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -399,12 +362,9 @@ async fn main() -> anyhow::Result<()> {
             &comms_runtime,
             disconnect_rx,
             disconnect_tx,
-            &service,
-            &runtime_adapter,
-            &jsonl_store,
+            &surface,
             &model,
             &system_prompt,
-            &mob_state,
             &provider,
             &mut session_binding_state,
             &mut current_session_id,
@@ -457,39 +417,65 @@ async fn run_inbox_loop(
     comms_runtime: &Arc<CommsRuntime>,
     mut disconnect_rx: tokio::sync::watch::Receiver<bool>,
     disconnect_tx: tokio::sync::watch::Sender<bool>,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    let mut pending_candidates = VecDeque::new();
     loop {
+        if let Some(candidate) = pending_candidates.pop_front() {
+            match parse_direct_control_candidate(&candidate) {
+                Ok(Some(payload)) => {
+                    tracing::debug!(?payload, "ignoring direct control payload at target surface");
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("[target] invalid direct control payload: {error}");
+                    continue;
+                }
+            }
+            match handle_target_message(
+                &candidate,
+                comms_runtime,
+                &disconnect_tx,
+                surface,
+                model,
+                system_prompt,
+                provider,
+                session_binding_state,
+                current_session_id,
+                event_forwarder,
+            )
+            .await
+            {
+                TargetLoopAction::Continue => {}
+                TargetLoopAction::ExitProcess => std::process::exit(0),
+            }
+            continue;
+        }
+
+        let inbox_notify = comms_runtime.inbox_notify();
+        let notified = inbox_notify.notified();
+        pending_candidates.extend(comms_runtime.drain_peer_input_candidates().await);
+        if !pending_candidates.is_empty() {
+            continue;
+        }
+        if comms_runtime.dismiss_received() {
+            eprintln!("[target] received DISMISS — shutting down");
+            std::process::exit(0);
+        }
+
         tokio::select! {
-            msg = comms_runtime.recv_message() => {
-                let Some(msg) = msg else { break };
-                match handle_target_message(
-                    &msg,
-                    comms_runtime,
-                    &disconnect_tx,
-                    service,
-                    runtime_adapter,
-                    jsonl_store,
-                    model,
-                    system_prompt,
-                    mob_state,
-                    provider,
-                    session_binding_state,
-                    current_session_id,
-                    event_forwarder,
-                )
-                .await {
-                    TargetLoopAction::Continue => {}
-                    TargetLoopAction::ExitProcess => std::process::exit(0),
+            _ = notified => {
+                pending_candidates.extend(comms_runtime.drain_peer_input_candidates().await);
+                if pending_candidates.is_empty() && comms_runtime.dismiss_received() {
+                    eprintln!("[target] received DISMISS — shutting down");
+                    std::process::exit(0);
                 }
             }
 
@@ -669,42 +655,32 @@ async fn apply_target_control_effects(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_target_message(
-    msg: &meerkat_comms::agent::types::CommsMessage,
+    candidate: &PeerInputCandidate,
     comms_runtime: &Arc<CommsRuntime>,
     disconnect_tx: &tokio::sync::watch::Sender<bool>,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> TargetLoopAction {
-    let sender = msg.from_peer.clone();
-    match &msg.content {
-        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-            if intent.as_str() == "dismiss" =>
-        {
+    let sender = candidate.interaction.from.clone();
+    match &candidate.interaction.content {
+        InteractionContent::Request { intent, .. } if intent == "dismiss" => {
             eprintln!("[target] received DISMISS — shutting down");
             return TargetLoopAction::ExitProcess;
         }
-        meerkat_comms::agent::types::CommsContent::Request { intent, params, .. }
-            if intent.as_str() == "command" =>
-        {
+        InteractionContent::Request { intent, params } if intent == "command" => {
             let cmd = params.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
             eprintln!("[target] command: {cmd}");
 
             let response = handle_command(
                 cmd,
-                service,
-                runtime_adapter,
-                jsonl_store,
+                surface,
                 model,
                 system_prompt,
-                mob_state,
                 provider,
                 session_binding_state,
                 current_session_id,
@@ -727,63 +703,42 @@ async fn handle_target_message(
             );
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reply_fut).await;
         }
-        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-            if intent.as_str() == "heartbeat" => {}
-        meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
-            eprintln!("[target] received message from '{sender}'");
-
-            let peer_input = Input::Peer(PeerInput {
-                header: InputHeader {
-                    id: meerkat_core::lifecycle::InputId::new(),
-                    timestamp: chrono::Utc::now(),
-                    source: InputOrigin::Peer {
-                        peer_id: sender.clone(),
-                        runtime_id: None,
-                    },
-                    durability: InputDurability::Ephemeral,
-                    visibility: InputVisibility::default(),
-                    idempotency_key: None,
-                    supersession_key: None,
-                    correlation_id: None,
-                },
-                convention: Some(PeerConvention::Message),
-                body: body.clone(),
-                blocks: None,
-                handling_mode: Some(HandlingMode::Steer),
-            });
-
-            match runtime_adapter
-                .accept_input(active_session_id(session_binding_state), peer_input)
-                .await
-            {
-                Ok(outcome) => {
-                    tracing::debug!(?outcome, "input accepted");
-                }
-                Err(e) => {
-                    eprintln!("[target] accept_input error: {e}");
-                    let req = StartTurnRequest {
-                        prompt: ContentInput::Text(body.clone()),
-                        system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: HandlingMode::Queue,
-                        event_tx: None,
-                        skill_references: None,
-                        flow_tool_overlay: None,
-                        additional_instructions: None,
-                        execution_kind: None,
-                    };
-                    if let Err(e) = service
-                        .start_turn(active_session_id(session_binding_state), req)
-                        .await
-                    {
-                        eprintln!("[target] fallback start_turn error: {e}");
-                    }
-                }
-            }
+        InteractionContent::Request { intent, .. } if intent == "heartbeat" => {}
+        InteractionContent::Request { intent, .. } if intent == DIRECT_CONTROL_INTENT => {
+            tracing::debug!("ignoring direct control payload after surface handling");
         }
-        _ => {}
+        InteractionContent::Message { .. }
+        | InteractionContent::Request { .. }
+        | InteractionContent::Response { .. } => match surface
+            .host
+            .inject_peer_input_candidate(
+                active_session_id(session_binding_state),
+                candidate,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                tracing::debug!(?outcome, "classified input accepted");
+            }
+            Err(error) => {
+                eprintln!("[target] inject_peer_input_candidate error: {error}");
+            }
+        },
     }
     TargetLoopAction::Continue
+}
+
+fn parse_direct_control_candidate(
+    candidate: &PeerInputCandidate,
+) -> anyhow::Result<Option<DirectControlPayload>> {
+    match &candidate.interaction.content {
+        InteractionContent::Request { intent, params } if intent == DIRECT_CONTROL_INTENT => {
+            let payload =
+                serde_json::from_value(params.clone()).context("decode direct control payload")?;
+            Ok(Some(payload))
+        }
+        _ => Ok(None),
+    }
 }
 
 async fn forward_stream_event(
@@ -854,12 +809,9 @@ fn spawn_heartbeat(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     cmd: &str,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
@@ -869,12 +821,10 @@ async fn handle_command(
 ) -> String {
     if cmd == "NEW_SESSION" {
         match switch_session(
-            service,
-            runtime_adapter,
+            surface,
             None,
             model,
             system_prompt,
-            mob_state,
             provider,
             session_binding_state,
             current_session_id,
@@ -888,7 +838,7 @@ async fn handle_command(
             Err(e) => format!("Failed to create session: {e}"),
         }
     } else if cmd == "LIST_SESSIONS" {
-        match jsonl_store.list(SessionFilter::default()).await {
+        match surface.jsonl_store.list(SessionFilter::default()).await {
             Ok(mut sessions) => {
                 sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 if sessions.is_empty() {
@@ -927,7 +877,7 @@ async fn handle_command(
             Ok(n) if n >= 1 => n - 1,
             _ => return format!("Invalid session number: {arg}"),
         };
-        match jsonl_store.list(SessionFilter::default()).await {
+        match surface.jsonl_store.list(SessionFilter::default()).await {
             Ok(mut sessions) => {
                 sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 if idx >= sessions.len() {
@@ -935,12 +885,10 @@ async fn handle_command(
                 }
                 let resume_id = sessions[idx].id.clone();
                 match switch_session(
-                    service,
-                    runtime_adapter,
+                    surface,
                     Some(resume_id),
                     model,
                     system_prompt,
-                    mob_state,
                     provider,
                     session_binding_state,
                     current_session_id,
@@ -979,32 +927,21 @@ fn format_duration(d: std::time::Duration) -> String {
 /// Create a new session or resume an existing one. Registers the session
 /// with the RuntimeSessionAdapter and subscribes to its events.
 async fn create_or_resume_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
 ) -> anyhow::Result<SessionId> {
     // Try to auto-resume the most recent session. On failure, warn and start fresh.
-    if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
+    if let Ok(mut sessions) = surface.jsonl_store.list(SessionFilter::default()).await {
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         if let Some(latest) = sessions.first() {
             eprintln!(
                 "[target] auto-resuming session {} ({} messages)",
                 latest.id, latest.message_count
             );
-            match setup_session(
-                service,
-                runtime_adapter,
-                Some(latest.id.clone()),
-                model,
-                system_prompt,
-                mob_state,
-                provider,
-            )
-            .await
+            match setup_session(surface, Some(latest.id.clone()), model, system_prompt, provider)
+                .await
             {
                 Ok(sid) => return Ok(sid),
                 Err(e) => {
@@ -1015,16 +952,7 @@ async fn create_or_resume_session(
     }
 
     eprintln!("[target] starting fresh session");
-    setup_session(
-        service,
-        runtime_adapter,
-        None,
-        model,
-        system_prompt,
-        mob_state,
-        provider,
-    )
-    .await
+    setup_session(surface, None, model, system_prompt, provider).await
 }
 
 /// Switch to a new or resumed session. Drops the old event forwarder,
@@ -1032,12 +960,10 @@ async fn create_or_resume_session(
 /// and spawns a new event forwarder.
 #[allow(clippy::too_many_arguments)]
 async fn switch_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    surface: &TargetRuntimeSurface,
     resume_id: Option<SessionId>,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
@@ -1057,16 +983,8 @@ async fn switch_session(
     let mut new_id: Option<SessionId> = None;
     for effect in effects {
         if let SessionBindingEffect::SetupSession { resume_id } = effect {
-            let setup_result = setup_session(
-                service,
-                runtime_adapter,
-                resume_id,
-                model,
-                system_prompt,
-                mob_state,
-                provider,
-            )
-            .await;
+            let setup_result =
+                setup_session(surface, resume_id, model, system_prompt, provider).await;
             match setup_result {
                 Ok(session_id) => new_id = Some(session_id),
                 Err(err) => {
@@ -1108,7 +1026,7 @@ async fn switch_session(
                     old.abort();
                 }
                 match spawn_event_forwarder(
-                    service,
+                    &surface.service,
                     &session_id,
                     Arc::clone(comms_runtime),
                     disconnect_tx.clone(),
@@ -1130,12 +1048,12 @@ async fn switch_session(
                         for cleanup in cleanup_effects {
                             match cleanup {
                                 SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                                    runtime_adapter.unregister_session(&session_id).await;
+                                    surface.runtime_adapter.unregister_session(&session_id).await;
                                 }
                                 SessionBindingEffect::DiscardLiveSession { session_id } => {
                                     if let Err(discard_err) = discard_live_session_with_mob_cleanup(
-                                        service,
-                                        mob_state,
+                                        &surface.service,
+                                        &surface.mob_state,
                                         &session_id,
                                     )
                                     .await
@@ -1155,11 +1073,16 @@ async fn switch_session(
                 }
             }
             SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                runtime_adapter.unregister_session(&session_id).await;
+                surface.runtime_adapter.unregister_session(&session_id).await;
             }
             SessionBindingEffect::DiscardLiveSession { session_id } => {
                 if let Err(e) =
-                    discard_live_session_with_mob_cleanup(service, mob_state, &session_id).await
+                    discard_live_session_with_mob_cleanup(
+                        &surface.service,
+                        &surface.mob_state,
+                        &session_id,
+                    )
+                    .await
                     && !matches!(e, SessionError::NotFound { .. })
                 {
                     eprintln!("[target] warning: discard old session {session_id}: {e}");
@@ -1178,11 +1101,15 @@ async fn switch_session(
     for effect in effects {
         match effect {
             SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                runtime_adapter.unregister_session(&session_id).await;
+                surface.runtime_adapter.unregister_session(&session_id).await;
             }
             SessionBindingEffect::DiscardLiveSession { session_id } => {
-                if let Err(e) =
-                    discard_live_session_with_mob_cleanup(service, mob_state, &session_id).await
+                if let Err(e) = discard_live_session_with_mob_cleanup(
+                    &surface.service,
+                    &surface.mob_state,
+                    &session_id,
+                )
+                .await
                     && !matches!(e, SessionError::NotFound { .. })
                 {
                     eprintln!("[target] warning: discard old session {session_id}: {e}");
@@ -1213,35 +1140,12 @@ async fn switch_session(
 
 /// Create or resume a session and register it with the runtime adapter.
 async fn setup_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    surface: &TargetRuntimeSurface,
     resume_id: Option<SessionId>,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
 ) -> anyhow::Result<SessionId> {
-    let resume_session = match &resume_id {
-        Some(id) => {
-            let loaded = service
-                .load_persisted(id)
-                .await
-                .map_err(|e| anyhow::anyhow!("load session {id}: {e}"))?;
-            Some(loaded.ok_or_else(|| anyhow::anyhow!("session {id} not found on disk"))?)
-        }
-        None => Some(Session::new()),
-    };
-    let prepared_session = resume_session
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("target setup requires a prepared session"))?;
-    let prepared_session_id = prepared_session.id().clone();
-
-    // Prepare canonical runtime bindings (registers + allocates epoch in one shot).
-    let bindings = runtime_adapter
-        .prepare_bindings(prepared_session_id.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
-
     // No external_tools needed — the factory composes comms tools automatically
     // from the CommsRuntime set via AgentFactory::with_comms_runtime().
     let build_opts = SessionBuildOptions {
@@ -1249,8 +1153,7 @@ async fn setup_session(
         override_builtins: meerkat_core::ToolCategoryOverride::Enable,
         override_shell: meerkat_core::ToolCategoryOverride::Enable,
         override_mob: meerkat_core::ToolCategoryOverride::Enable,
-        resume_session: Some(prepared_session),
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        keep_alive: true,
         ..Default::default()
     };
 
@@ -1268,181 +1171,34 @@ async fn setup_session(
         labels: None,
     };
 
-    let result = match service.create_session(req).await {
-        Ok(result) => result,
-        Err(error) => {
-            runtime_adapter
-                .unregister_session(&prepared_session_id)
-                .await;
-            return Err(anyhow::anyhow!("create session: {error}"));
-        }
-    };
-
-    let session_id = result.session_id;
+    let service = Arc::clone(&surface.service);
+    let mob_state = Arc::clone(&surface.mob_state);
+    let session_id = surface
+        .host
+        .create_or_resume_session(resume_id, req, move |session_id| {
+            let cleanup: SessionStopCleanup = Arc::new({
+                let service = Arc::clone(&service);
+                let mob_state = Arc::clone(&mob_state);
+                move |session_id| {
+                    let service = Arc::clone(&service);
+                    let mob_state = Arc::clone(&mob_state);
+                    Box::pin(async move {
+                        discard_live_session_with_mob_cleanup(&service, &mob_state, &session_id)
+                            .await
+                    })
+                }
+            });
+            Box::new(
+                PersistentSessionServiceExecutor::new(Arc::clone(&service), session_id)
+                    .with_stop_cleanup(cleanup),
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("create session: {error}"))?;
     eprintln!("[target] session ready: {session_id}");
-
-    // Create executor and register with runtime adapter for Steer support
-    let executor = Box::new(TargetCoreExecutor::new(
-        service.clone(),
-        mob_state.clone(),
-        session_id.clone(),
-    ));
-    runtime_adapter
-        .ensure_session_with_executor(session_id.clone(), executor)
-        .await;
-
-    // Configure peer ingress so the comms drain runs for this session.
-    // Without this, peer messages from delegate helpers sit in the inbox
-    // and the parent never processes them.
-    let comms_rt = service.comms_runtime(&session_id).await;
-    runtime_adapter
-        .update_peer_ingress_context(&session_id, true, comms_rt)
-        .await;
 
     Ok(session_id)
 }
-
-// ── CoreExecutor for runtime loop ────────────────────────────────────────────
-
-/// Bridges the RuntimeSessionAdapter's runtime loop to the PersistentSessionService.
-/// When the runtime loop dequeues an input (via DefaultPolicyTable routing),
-/// it calls `apply()` which translates the RunPrimitive into a `start_turn()`.
-struct TargetCoreExecutor {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    mob_state: Arc<MobMcpState>,
-    session_id: SessionId,
-}
-
-impl TargetCoreExecutor {
-    fn new(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        mob_state: Arc<MobMcpState>,
-        session_id: SessionId,
-    ) -> Self {
-        Self {
-            service,
-            mob_state,
-            session_id,
-        }
-    }
-}
-
-/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
-fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else if all_blocks.len() == 1 {
-                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
-                    ContentInput::Text(text.clone())
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
-#[async_trait::async_trait]
-impl CoreExecutor for TargetCoreExecutor {
-    async fn apply(
-        &mut self,
-        run_id: RunId,
-        primitive: RunPrimitive,
-    ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
-
-        let req = StartTurnRequest {
-            prompt,
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: HandlingMode::Queue,
-            event_tx: None,
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
-            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
-        };
-
-        let boundary = match &primitive {
-            RunPrimitive::StagedInput(staged) => staged.boundary,
-            _ => RunApplyBoundary::Immediate,
-        };
-        let input_ids = primitive.contributing_input_ids().to_vec();
-
-        self.service
-            .apply_runtime_turn(&self.session_id, run_id, req, boundary, input_ids)
-            .await
-            .map_err(|e| CoreExecutorError::ApplyFailed {
-                reason: e.to_string(),
-            })
-    }
-
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } => {
-                self.service.interrupt(&self.session_id).await.map_err(|e| {
-                    CoreExecutorError::ControlFailed {
-                        reason: e.to_string(),
-                    }
-                })
-            }
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = discard_live_session_with_mob_cleanup(
-                    &self.service,
-                    &self.mob_state,
-                    &self.session_id,
-                )
-                .await;
-                runtime_adapter_unregister_noop();
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
-                }
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-/// Placeholder for StopRuntimeExecutor — the target owns the adapter lifetime
-/// so explicit unregistration isn't needed during shutdown.
-fn runtime_adapter_unregister_noop() {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1485,23 +1241,10 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let target_id = comms_runtime.public_key().to_peer_id();
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-    let TargetRuntimeSurface {
-        service,
-        runtime_adapter,
-        jsonl_store,
-        mob_state,
-    } = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
+    let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
-    let mut current_session_id = create_or_resume_session(
-        &service,
-        &runtime_adapter,
-        &jsonl_store,
-        &model,
-        &system_prompt,
-        &mob_state,
-        &provider,
-    )
-    .await?;
+    let mut current_session_id =
+        create_or_resume_session(&surface, &model, &system_prompt, &provider).await?;
     let mut event_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     let (mut session_binding_state, _) = target_session_binding::transition(
         SessionBindingState::Unbound,
@@ -1660,12 +1403,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut write_half,
                                 adoption,
                                 true,
-                                &service,
-                                &runtime_adapter,
-                                &jsonl_store,
+                                &surface,
                                 &model,
                                 &system_prompt,
-                                &mob_state,
                                 &provider,
                                 &mut session_binding_state,
                                 &mut current_session_id,
@@ -1728,12 +1468,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut write_half,
                                 adoption,
                                 false,
-                                &service,
-                                &runtime_adapter,
-                                &jsonl_store,
+                                &surface,
                                 &model,
                                 &system_prompt,
-                                &mob_state,
                                 &provider,
                                 &mut session_binding_state,
                                 &mut current_session_id,
@@ -1804,12 +1541,9 @@ async fn run_adopted_loop(
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
@@ -1823,7 +1557,7 @@ async fn run_adopted_loop(
         old.abort();
     }
     if let Ok(handle) = spawn_event_forwarder(
-        service,
+        &surface.service,
         active_session_id(session_binding_state),
         Arc::clone(comms_runtime),
         disconnect_tx.clone(),
@@ -1843,12 +1577,9 @@ async fn run_adopted_loop(
         write_half,
         adoption,
         attach_required,
-        service,
-        runtime_adapter,
-        jsonl_store,
+        surface,
         model,
         system_prompt,
-        mob_state,
         provider,
         session_binding_state,
         current_session_id,
@@ -1875,12 +1606,9 @@ async fn run_adopted_loop_inner(
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
+    surface: &TargetRuntimeSurface,
     model: &str,
     system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
     provider: &str,
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
@@ -1940,39 +1668,14 @@ async fn run_adopted_loop_inner(
     }
 
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
+    let mut pending_candidates = VecDeque::new();
 
     loop {
-        let poll_kennel = matches!(
-            &machine_state.attachment,
-            TaState::Attaching { .. } | TaState::Attached { .. }
-        );
-
-        tokio::select! {
-            msg = comms_runtime.recv_message() => {
-                let Some(msg) = msg else {
-                    if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, effects) = target_kennel_control::transition(
-                        machine_state,
-                        TkcEvent::DirectLinkLost,
-                    )
-                    .map_err(|e| anyhow::anyhow!("direct-link-lost transition: {e}"))?;
-                    let _ = apply_target_control_effects(
-                        comms_runtime,
-                        &effects,
-                        &mut heartbeat,
-                        &disconnect_tx,
-                        attachment_hint,
-                        attachment_hint_path,
-                    )
-                    .await?;
-                    if let Some(fwd) = event_forwarder.take() {
-                        fwd.abort();
-                    }
-                    return Ok(s);
-                };
-                if let Some(payload) = parse_direct_control_message(&msg)? {
-                    if let DirectControlPayload::AttachAck { lease_id } = payload
-                        && matches!(machine_state.attachment, TaState::Attaching { .. })
+        if let Some(candidate) = pending_candidates.pop_front() {
+            if let Some(payload) = parse_direct_control_candidate(&candidate)? {
+                match payload {
+                    DirectControlPayload::AttachAck { lease_id }
+                        if matches!(machine_state.attachment, TaState::Attaching { .. }) =>
                     {
                         let (s, effects) = target_kennel_control::transition(
                             machine_state.clone(),
@@ -1991,14 +1694,54 @@ async fn run_adopted_loop_inner(
                         .await?;
                         continue;
                     }
+                    other => {
+                        tracing::debug!(?other, "ignoring direct control payload at target surface");
+                        continue;
+                    }
                 }
-                match handle_target_message(
-                    &msg, comms_runtime, &disconnect_tx, service, runtime_adapter,
-                    jsonl_store, model, system_prompt, mob_state, provider,
-                    session_binding_state, current_session_id, event_forwarder,
-                ).await {
-                    TargetLoopAction::Continue => {}
-                    TargetLoopAction::ExitProcess => std::process::exit(0),
+            }
+            match handle_target_message(
+                &candidate,
+                comms_runtime,
+                &disconnect_tx,
+                surface,
+                model,
+                system_prompt,
+                provider,
+                session_binding_state,
+                current_session_id,
+                event_forwarder,
+            )
+            .await
+            {
+                TargetLoopAction::Continue => {}
+                TargetLoopAction::ExitProcess => std::process::exit(0),
+            }
+            continue;
+        }
+
+        let inbox_notify = comms_runtime.inbox_notify();
+        let notified = inbox_notify.notified();
+        pending_candidates.extend(comms_runtime.drain_peer_input_candidates().await);
+        if !pending_candidates.is_empty() {
+            continue;
+        }
+        if comms_runtime.dismiss_received() {
+            eprintln!("[target] received DISMISS — shutting down");
+            std::process::exit(0);
+        }
+
+        let poll_kennel = matches!(
+            &machine_state.attachment,
+            TaState::Attaching { .. } | TaState::Attached { .. }
+        );
+
+        tokio::select! {
+            _ = notified => {
+                pending_candidates.extend(comms_runtime.drain_peer_input_candidates().await);
+                if pending_candidates.is_empty() && comms_runtime.dismiss_received() {
+                    eprintln!("[target] received DISMISS — shutting down");
+                    std::process::exit(0);
                 }
             }
             // Event forwarding is handled by the dedicated event_forwarder task.
@@ -2226,8 +1969,8 @@ mod tests {
     use anyhow::Context as _;
     use mdm_tux::ProviderKind;
     use meerkat::{
-        AgentFactory, FactoryAgentBuilder, LlmClient, PersistenceBundle, PersistentSessionService,
-        SessionAgentBuilder, SessionService, encode_llm_client_override_for_service,
+        AgentFactory, FactoryAgentBuilder, LlmClient, SessionAgentBuilder, SessionService,
+        encode_llm_client_override_for_service,
     };
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, TestClient};
@@ -2239,7 +1982,7 @@ mod tests {
     };
     use meerkat_core::types::{ContentInput, HandlingMode};
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
-    use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
+    use meerkat_surface_runtime::RuntimeSessionHost;
     use std::collections::{HashSet, VecDeque};
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -2292,50 +2035,26 @@ mod tests {
         comms_runtime: Arc<CommsRuntime>,
         llm_client: Arc<dyn LlmClient>,
     ) -> anyhow::Result<TargetRuntimeSurface> {
-        let factory = AgentFactory::new(session_dir)
-            .shell(true)
-            .builtins(true)
-            .mob(true)
-            .with_comms_runtime(comms_runtime);
-        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(llm_client);
-        let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-
-        let jsonl_store = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
-        jsonl_store.init().await?;
-
-        let bundle_store = JsonlStore::new(session_dir.to_path_buf());
-        bundle_store.init().await?;
-
-        let persistence = PersistenceBundle::new(
-            Arc::new(bundle_store) as Arc<dyn SessionStore>,
-            None,
-            Arc::new(MemoryBlobStore::new()),
+        let host = Arc::new(
+            RuntimeSessionHost::builder(session_dir.to_path_buf())
+                .shell(true)
+                .builtins(true)
+                .mob(true)
+                .session_comms_name_prefix("target")
+                .comms_runtime(comms_runtime)
+                .default_llm_client(llm_client)
+                .config(Config::default())
+                .max_sessions(10)
+                .build()
+                .await?,
         );
-        let runtime_adapter = persistence.runtime_adapter();
-        let (session_store, runtime_store, blob_store) = persistence.into_parts();
-
-        let mut session_service =
-            PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
-        {
-            let adapter = runtime_adapter.clone();
-            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-                let adapter = adapter.clone();
-                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-            }));
-        }
-        let service = Arc::new(session_service);
-        let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-            service.clone(),
-            Some(runtime_adapter.clone()),
-        ));
-        *mob_tools_slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
-        ));
+        let service = host.service();
+        let runtime_adapter = host.runtime_adapter();
+        let jsonl_store = host.session_store();
+        let mob_state = host.mob_state();
 
         Ok(TargetRuntimeSurface {
+            host,
             service,
             runtime_adapter,
             jsonl_store,
@@ -2449,7 +2168,9 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "datetime"));
         assert!(!tool_names.iter().any(|name| name == "wait"));
         assert!(tool_names.iter().any(|name| name == "shell"));
-        assert!(tool_names.iter().any(|name| name == "send"));
+        assert!(tool_names.iter().any(|name| name == "send_message"));
+        assert!(tool_names.iter().any(|name| name == "send_request"));
+        assert!(tool_names.iter().any(|name| name == "send_response"));
         assert!(tool_names.iter().any(|name| name == "peers"));
         assert!(tool_names.iter().any(|name| name == "delegate"));
         assert!(tool_names.iter().any(|name| name == "mob_list"));
@@ -2599,17 +2320,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let session_id = setup_session(
-            &surface.service,
-            &surface.runtime_adapter,
-            None,
-            "gpt-5.2",
-            "test background shell",
-            &surface.mob_state,
-            "openai",
-        )
-        .await
-        .unwrap();
+        let session_id = setup_session(&surface, None, "gpt-5.2", "test background shell", "openai")
+            .await
+            .unwrap();
 
         let runtime_registry = surface
             .runtime_adapter
@@ -2742,8 +2455,16 @@ mod tests {
         );
         // Comms
         assert!(
-            tool_names.iter().any(|n| n == "send"),
-            "missing comms 'send', got: {tool_names:?}"
+            tool_names.iter().any(|n| n == "send_message"),
+            "missing comms 'send_message', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "send_request"),
+            "missing comms 'send_request', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "send_response"),
+            "missing comms 'send_response', got: {tool_names:?}"
         );
         assert!(
             tool_names.iter().any(|n| n == "peers"),
@@ -2781,68 +2502,59 @@ mod tests {
         let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime))
             .await
             .unwrap();
-        let fresh_id = setup_session(
-            &surface.service,
-            &surface.runtime_adapter,
-            None,
-            "gpt-5.2",
-            "test",
-            &surface.mob_state,
-            "openai",
+        let fresh_id = setup_session(&surface, None, "gpt-5.2", "test", "openai")
+            .await
+            .unwrap();
+
+        // 2. Simulate a process restart before resuming.
+        discard_live_session_with_mob_cleanup(&surface.service, &surface.mob_state, &fresh_id)
+            .await
+            .unwrap();
+        surface.runtime_adapter.unregister_session(&fresh_id).await;
+        drop(surface);
+        drop(comms_runtime);
+
+        let restart_dir = temp.path().join("resume-restart");
+        let restart_comms_runtime =
+            create_target_comms_runtime("test-resume-restart", restart_dir.as_path())
+                .await
+                .unwrap();
+        restart_comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+            name: "tux".into(),
+            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+            addr: "tcp://127.0.0.1:9999".into(),
+            meta: meerkat_comms::PeerMeta::default(),
+        });
+
+        let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+        let restart_surface = build_target_runtime_surface_with_client(
+            &session_dir,
+            Arc::clone(&restart_comms_runtime),
+            capture.clone() as Arc<dyn LlmClient>,
         )
         .await
         .unwrap();
-
-        // 2. Resume that session through the builder with a capture client.
-        let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
-        let loaded = surface
-            .service
-            .load_persisted(&fresh_id)
+        let resumed_id = setup_session(&restart_surface, Some(fresh_id.clone()), "gpt-5.2", "test", "openai")
             .await
-            .unwrap()
             .unwrap();
+        assert_eq!(resumed_id, fresh_id);
 
-        let factory = AgentFactory::new(temp.path().join("sessions2"))
-            .shell(true)
-            .builtins(true)
-            .mob(true)
-            .with_comms_runtime(Arc::clone(&comms_runtime));
-        let builder = FactoryAgentBuilder::new(factory, Config::default());
-        *builder
-            .default_mob_tools
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            AgentMobToolSurfaceFactory::new(MobMcpState::new_in_memory()),
-        ));
-
-        let req = CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
-            prompt: ContentInput::Text("list tools".into()),
-            render_metadata: None,
-            system_prompt: Some("test".into()),
-            max_tokens: None,
-            event_tx: None,
-            skill_references: None,
-            initial_turn: InitialTurnPolicy::Defer,
-            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-            build: Some(SessionBuildOptions {
-                llm_client_override: Some(encode_llm_client_override_for_service(
-                    capture.clone() as Arc<dyn LlmClient>
-                )),
-                override_builtins: meerkat_core::ToolCategoryOverride::Enable,
-                override_shell: meerkat_core::ToolCategoryOverride::Enable,
-                override_mob: meerkat_core::ToolCategoryOverride::Enable,
-                resume_session: Some(loaded),
-                ..Default::default()
-            }),
-            labels: None,
-        };
-
-        let (event_tx, _) = mpsc::channel(8);
-        let mut agent = builder.build_agent(&req, event_tx).await.unwrap();
-        agent
-            .agent_mut()
-            .run(ContentInput::Text("list tools".into()))
+        restart_surface
+            .service
+            .start_turn(
+                &resumed_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("list tools".into()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: HandlingMode::Queue,
+                    event_tx: None,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    additional_instructions: None,
+                    execution_kind: None,
+                },
+            )
             .await
             .unwrap();
 
@@ -2860,8 +2572,20 @@ mod tests {
             "resumed session missing 'shell', got: {tool_names:?}"
         );
         assert!(
-            tool_names.iter().any(|n| n == "send"),
-            "resumed session missing comms 'send', got: {tool_names:?}"
+            tool_names.iter().any(|n| n == "send_message"),
+            "resumed session missing comms 'send_message', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "send_request"),
+            "resumed session missing comms 'send_request', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "send_response"),
+            "resumed session missing comms 'send_response', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "peers"),
+            "resumed session missing comms 'peers', got: {tool_names:?}"
         );
         assert!(
             tool_names.iter().any(|n| n == "delegate"),

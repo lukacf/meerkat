@@ -2714,6 +2714,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-surface-runtime",
  "meerkat-tools",
  "rmcp",
  "schemars",
@@ -2851,6 +2852,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-surface-runtime",
  "meerkat-tools",
  "reqwest",
  "serde",
@@ -2885,6 +2887,7 @@ dependencies = [
  "meerkat-models",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-surface-runtime",
  "serde",
  "serde_json",
  "tempfile",
@@ -3001,6 +3004,19 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "meerkat-surface-runtime"
+version = "0.5.1"
+dependencies = [
+ "meerkat",
+ "meerkat-core",
+ "meerkat-mob-mcp",
+ "meerkat-runtime",
+ "meerkat-store",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3760,6 +3776,7 @@ dependencies = [
  "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-store",
+ "meerkat-surface-runtime",
  "meerkat-tools",
  "nix 0.29.0",
  "parking_lot",

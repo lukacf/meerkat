@@ -23,6 +23,8 @@ meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "s
 meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
 meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
+meerkat-surface-runtime = { path = "../../meerkat-surface-runtime", default-features = false, features = ["comms", "mob"] }
+meerkat-rpc = { path = "../../meerkat-rpc", default-features = false, features = ["comms", "mob"] }
 meerkat-runtime = { path = "../../meerkat-runtime" }
 meerkat-store = { path = "../../meerkat-store", features = ["jsonl"] }
 futures       = "0.3"

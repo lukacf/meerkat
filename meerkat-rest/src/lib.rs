@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
     RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, SurfaceSessionRecoveryContext,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, noop_request_action, request_action,
+    SurfaceSessionRecoveryOverrides, noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -45,7 +45,7 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
@@ -60,6 +60,7 @@ use meerkat_core::{
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
+use meerkat_surface_runtime::{RuntimeSessionHost, RuntimeSessionHostError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -114,6 +115,7 @@ pub struct AppState {
     pub llm_client_override: Option<Arc<dyn LlmClient>>,
     pub config_store: Arc<dyn ConfigStore>,
     pub event_tx: broadcast::Sender<SessionEvent>,
+    pub runtime_host: Arc<RuntimeSessionHost>,
     /// Session service for managing agent lifecycle.
     pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub schedule_service: ScheduleService,
@@ -150,6 +152,7 @@ pub struct SessionEvent {
 struct RestRuntimeExecutorContext {
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
+    runtime_host: Arc<RuntimeSessionHost>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     realm_id: String,
     instance_id: Option<String>,
@@ -283,26 +286,21 @@ impl AppState {
 
         let skill_runtime = factory.build_skill_runtime(&config).await;
 
-        let builder =
-            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
-        // Capture the mob tools slot before the builder is consumed into the session service.
-        // We set the actual factory after mob_state is constructed (circular dep break).
+        let host = Arc::new(RuntimeSessionHost::from_builder(
+            FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store)),
+            100,
+            persistence,
+        ));
+        let session_service = host.service();
+        let runtime_adapter = host.runtime_adapter();
         #[cfg(feature = "mob")]
-        let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-        let runtime_adapter = persistence.runtime_adapter();
-        let (session_store, runtime_store, blob_store) = persistence.into_parts();
-        let mut session_service =
-            PersistentSessionService::new(builder, 100, session_store, runtime_store, blob_store);
-        {
-            let adapter = runtime_adapter.clone();
-            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-                let adapter = adapter.clone();
-                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-            }));
-        }
-        let session_service = Arc::new(session_service);
-        #[cfg(feature = "mob")]
-        let mob_session_service = session_service.clone();
+        host.set_mob_state(Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                session_service.clone(),
+                Some(runtime_adapter.clone()),
+            )
+            .with_persistent_storage_root(Some(realm_paths.root.clone())),
+        ));
 
         Ok(Self {
             store_path,
@@ -316,6 +314,7 @@ impl AppState {
             llm_client_override: None,
             config_store,
             event_tx,
+            runtime_host: Arc::clone(&host),
             session_service,
             schedule_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
@@ -330,18 +329,7 @@ impl AppState {
             runtime_adapter,
             schedule_host: Arc::new(schedule_host::ScheduleHostState::default()),
             #[cfg(feature = "mob")]
-            mob_state: {
-                let state = Arc::new(
-                    meerkat_mob_mcp::MobMcpState::new(mob_session_service)
-                        .with_persistent_storage_root(Some(realm_paths.root.clone())),
-                );
-                *mob_tools_slot
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-                    meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
-                ));
-                state
-            },
+            mob_state: host.mob_state(),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             request_executor: Arc::new(SurfaceRequestExecutor::new(
@@ -354,6 +342,7 @@ impl AppState {
         RestRuntimeExecutorContext {
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
+            runtime_host: self.runtime_host.clone(),
             session_service: self.session_service.clone(),
             realm_id: self.realm_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -432,6 +421,16 @@ fn validate_prompt_video_input(
     }
 
     Ok(())
+}
+
+fn runtime_host_session_error(error: RuntimeSessionHostError) -> SessionError {
+    match error {
+        RuntimeSessionHostError::Session(error) => error,
+        RuntimeSessionHostError::PersistedSessionNotFound(id) => SessionError::NotFound { id },
+        other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            other.to_string(),
+        )),
+    }
 }
 
 async fn apply_runtime_turn(
@@ -520,10 +519,7 @@ async fn apply_runtime_turn(
         )));
     }
 
-    let boundary = match primitive {
-        RunPrimitive::StagedInput(staged) => staged.boundary,
-        _ => RunApplyBoundary::Immediate,
-    };
+    let boundary = primitive.apply_boundary();
     let contributing_input_ids = primitive.contributing_input_ids().to_vec();
 
     let result = match context
@@ -539,58 +535,35 @@ async fn apply_runtime_turn(
     {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
-            let session = context
-                .session_service
-                .load_persisted(session_id)
-                .await?
-                .ok_or(SessionError::NotFound {
-                    id: session_id.clone(),
-                })?;
             let current_generation = context
                 .config_runtime
                 .get()
                 .await
                 .ok()
                 .map(|s| s.generation);
-            let bindings = context
-                .runtime_adapter
-                .prepare_bindings(session_id.clone())
-                .await
-                .map_err(|e| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to prepare runtime bindings for session {session_id}: {e}"
-                    )))
-                })?;
-            let recovered = build_recovered_session(
-                session,
-                &SurfaceSessionRecoveryOverrides {
-                    keep_alive: Some(keep_alive),
-                    ..Default::default()
-                },
-                SurfaceSessionRecoveryContext {
-                    llm_client_override: context
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    external_tools: None,
-                    runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                        bindings,
-                    )),
-                    realm_id: Some(context.realm_id.clone()),
-                    instance_id: context.instance_id.clone(),
-                    backend: Some(context.backend.clone()),
-                    config_generation: current_generation,
-                },
-            )
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    error.to_string(),
-                ))
-            })?;
             context
-                .session_service
-                .create_session(recovered.into_deferred_create_request())
-                .await?;
+                .runtime_host
+                .materialize_persisted_session(
+                    session_id,
+                    &SurfaceSessionRecoveryOverrides {
+                        keep_alive: Some(keep_alive),
+                        ..Default::default()
+                    },
+                    SurfaceSessionRecoveryContext {
+                        llm_client_override: context
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        external_tools: None,
+                        realm_id: Some(context.realm_id.clone()),
+                        instance_id: context.instance_id.clone(),
+                        backend: Some(context.backend.clone()),
+                        config_generation: current_generation,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(runtime_host_session_error)?;
             let output = context
                 .session_service
                 .apply_runtime_turn_outcome(
@@ -2353,18 +2326,6 @@ async fn create_session_inner(
     // and event forwarding before the service call returns).
     let pre_session = Session::new();
     let session_id = pre_session.id().clone();
-    let bindings = match state
-        .runtime_adapter
-        .prepare_bindings(session_id.clone())
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            let message = format!("failed to prepare runtime bindings: {e}");
-            return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
-        }
-    };
-
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forward_task = spawn_event_forwarder(
@@ -2443,7 +2404,7 @@ async fn create_session_inner(
         hooks_override: req.hooks_override.unwrap_or_default(),
         comms_name: req.comms_name.clone(),
         peer_meta: req.peer_meta.clone(),
-        resume_session: Some(pre_session),
+        resume_session: None,
         budget_limits: req.budget_limits,
         provider_params: req.provider_params.clone(),
         external_tools: mcp_external_tools,
@@ -2486,7 +2447,7 @@ async fn create_session_inner(
         call_timeout_override: Default::default(),
         blob_store_override: None,
         mob_tools: None,
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -2514,9 +2475,23 @@ async fn create_session_inner(
     }
 
     let adapter = state.runtime_adapter.clone();
+    let runtime_context = state.runtime_executor_context();
 
     // Create session with Defer, then route through runtime
-    let create_result = match state.session_service.create_session(svc_req).await {
+    let create_result = match state
+        .runtime_host
+        .materialize_session_with_result_and_executor(
+            pre_session,
+            svc_req,
+            move |runtime_session_id| {
+                Box::new(RestSessionRuntimeExecutor::new(
+                    runtime_context.clone(),
+                    runtime_session_id,
+                ))
+            },
+        )
+        .await
+    {
         Ok(result) => result,
         Err(err) => {
             #[cfg(feature = "mcp")]
@@ -2525,42 +2500,29 @@ async fn create_session_inner(
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             let api_err = match err {
-                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
-                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
-                SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
+                RuntimeSessionHostError::Session(SessionError::NotFound { .. })
+                | RuntimeSessionHostError::PersistedSessionNotFound(_) => {
+                    ApiError::NotFound(err.to_string())
+                }
+                RuntimeSessionHostError::Session(SessionError::Busy { .. }) => {
                     ApiError::BadRequest(err.to_string())
                 }
+                RuntimeSessionHostError::Session(SessionError::Agent(
+                    meerkat_core::error::AgentError::ConfigError(_),
+                )) => ApiError::BadRequest(err.to_string()),
                 _ => ApiError::Agent(err.to_string()),
             };
             return RequestOutcome::Unpublished(Err(api_err));
         }
     };
 
-    // Register executor for the new session.
-    // Session is already committed — failure here must use Published(Err) to
-    // preserve the session for resumption.
-    if let Err(_resp) = ensure_runtime_session_registered(state, &create_result.session_id).await {
-        drop(caller_event_tx);
-        drain_event_forwarder(&session_id, forward_task).await;
-        return RequestOutcome::Published(Err(ApiError::InternalWithData {
-            message: "failed to register runtime executor".to_string(),
-            code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
-            details: json!({
-                "session_id": session_id.to_string(),
-                "session_ref": format_session_ref(&state.realm_id, &session_id),
-                "session_created": true,
-                "resumable": true,
-            }),
-        }));
-    }
-
     // Update peer-ingress context so live sessions always get attached ingress
     // and idle keep_alive sessions retain a persistent host drain.
     #[cfg(feature = "comms")]
     {
-        let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        adapter
-            .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+        state
+            .runtime_host
+            .configure_peer_ingress(&session_id, keep_alive)
             .await;
     }
 
@@ -3162,19 +3124,6 @@ async fn continue_session_inner(
                 ))));
             }
         };
-        let bindings = match state
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let message = format!("failed to prepare runtime bindings: {e}");
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
-            }
-        };
         let mut build = SessionBuildOptions {
             provider: req.provider,
             output_schema: req.output_schema,
@@ -3184,7 +3133,7 @@ async fn continue_session_inner(
             hooks_override: req.hooks_override.clone().unwrap_or_default(),
             comms_name: req.comms_name.clone(),
             peer_meta: req.peer_meta.clone(),
-            resume_session: Some(session),
+            resume_session: None,
             budget_limits: None,
             provider_params: None,
             external_tools: None,
@@ -3223,7 +3172,7 @@ async fn continue_session_inner(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: None,
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let create_req = SvcCreateSessionRequest {
@@ -3251,7 +3200,21 @@ async fn continue_session_inner(
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
         }
-        let create_result = match state.session_service.create_session(create_req).await {
+        let runtime_context = state.runtime_executor_context();
+        let create_result = match state
+            .runtime_host
+            .materialize_session_with_result_and_executor(
+                session,
+                create_req,
+                move |runtime_session_id| {
+                    Box::new(RestSessionRuntimeExecutor::new(
+                        runtime_context.clone(),
+                        runtime_session_id,
+                    ))
+                },
+            )
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 drop(caller_event_tx);
@@ -3300,9 +3263,9 @@ async fn continue_session_inner(
 
         #[cfg(feature = "comms")]
         {
-            let comms_rt = state.session_service.comms_runtime(&session_id).await;
-            adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+            state
+                .runtime_host
+                .configure_peer_ingress(&session_id, keep_alive)
                 .await;
         }
         let input =

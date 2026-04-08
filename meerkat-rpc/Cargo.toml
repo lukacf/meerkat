@@ -31,6 +31,7 @@ meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
+meerkat-surface-runtime = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-runtime = { workspace = true, features = ["sqlite-store"] }
@@ -49,9 +50,9 @@ clap = { workspace = true }
 
 [features]
 default = ["comms", "mcp", "mob"]
-comms = ["meerkat/comms"]
+comms = ["meerkat/comms", "meerkat-surface-runtime/comms"]
 mcp = ["meerkat/mcp"]
-mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
+mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp", "meerkat-surface-runtime/mob"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

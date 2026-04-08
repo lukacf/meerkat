@@ -49,6 +49,7 @@ use crate::{
 
 #[derive(Clone)]
 struct McpScheduleContext {
+    runtime_host: Arc<meerkat_surface_runtime::RuntimeSessionHost>,
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
@@ -64,6 +65,7 @@ struct McpScheduleContext {
 impl McpScheduleContext {
     fn from_state(state: &MeerkatMcpState) -> Self {
         Self {
+            runtime_host: Arc::clone(&state.runtime_host),
             service: Arc::clone(&state.service),
             runtime_adapter: Arc::clone(&state.runtime_adapter),
             config_runtime: Arc::clone(&state.config_runtime),
@@ -80,6 +82,7 @@ impl McpScheduleContext {
     fn ingress_context(&self) -> runtime_ingress::McpRuntimeIngressContext {
         runtime_ingress::McpRuntimeIngressContext::new(
             runtime_ingress::McpRuntimeIngressResources {
+                runtime_host: Arc::clone(&self.runtime_host),
                 service: Arc::clone(&self.service),
                 runtime_adapter: Arc::clone(&self.runtime_adapter),
                 config_runtime: Arc::clone(&self.config_runtime),

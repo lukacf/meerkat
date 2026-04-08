@@ -6,13 +6,14 @@ use axum::http::{Request, StatusCode};
 use futures::stream;
 use http_body_util::BodyExt;
 use meerkat::{
-    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistentSessionService, SessionStore,
+    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistenceBundle, SessionStore,
 };
 use meerkat_client::types::LlmStream;
 use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
 use meerkat_runtime::SessionServiceRuntimeExt as _;
+use meerkat_surface_runtime::RuntimeSessionHost;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -84,20 +85,19 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     let llm = Arc::new(FirstTurnOnlyClient::new());
     builder.default_llm_client = Some(llm.clone());
-    let session_service = Arc::new(PersistentSessionService::new(
+    let runtime_host = Arc::new(RuntimeSessionHost::from_builder(
         builder,
         100,
-        store,
-        None,
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
+        PersistenceBundle::new(store, None, Arc::new(meerkat_store::MemoryBlobStore::new())),
     ));
+    let session_service = runtime_host.service();
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_arc),
         store_path.join("config_state.json"),
     ));
 
-    let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let runtime_adapter = runtime_host.runtime_adapter();
     let state = AppState {
         store_path: store_path.clone(),
         default_model: config.agent.model.clone().into(),
@@ -110,6 +110,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         llm_client_override: Some(llm.clone()),
         config_store: config_store_arc,
         event_tx,
+        runtime_host: Arc::clone(&runtime_host),
         session_service,
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
@@ -135,7 +136,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
             std::time::Duration::from_secs(5),
         )),
         #[cfg(feature = "mob")]
-        mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+        mob_state: runtime_host.mob_state(),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };

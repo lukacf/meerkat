@@ -7,19 +7,27 @@
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
+use meerkat::FactoryAgentBuilder;
+use meerkat::PersistentSessionService;
 use meerkat_core::EventEnvelope;
+use meerkat_core::SessionService;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::service::SessionError;
-use meerkat_core::types::SessionId;
+use meerkat_core::service::StartTurnRequest;
+use meerkat_core::types::{HandlingMode, SessionId};
 use tokio::sync::mpsc;
 
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
 #[cfg(feature = "mob")]
 use meerkat_mob::MobSessionService;
+
+pub type SessionStopCleanup =
+    Arc<dyn Fn(SessionId) -> BoxFuture<'static, Result<(), SessionError>> + Send + Sync + 'static>;
 
 /// Implements `CoreExecutor` by delegating to `SessionRuntime::start_turn()`.
 ///
@@ -30,6 +38,16 @@ pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
     notification_sink: NotificationSink,
+}
+
+/// Implements `CoreExecutor` directly against a `PersistentSessionService`.
+///
+/// This is the transport-neutral bridge used by non-RPC runtime-backed
+/// surfaces that already own their own event-forwarding path.
+pub struct PersistentSessionServiceExecutor {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+    stop_cleanup: Option<SessionStopCleanup>,
 }
 
 #[cfg(feature = "mob")]
@@ -66,6 +84,24 @@ impl SessionRuntimeExecutor {
             session_id,
             notification_sink,
         }
+    }
+}
+
+impl PersistentSessionServiceExecutor {
+    pub fn new(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            service,
+            session_id,
+            stop_cleanup: None,
+        }
+    }
+
+    pub fn with_stop_cleanup(mut self, cleanup: SessionStopCleanup) -> Self {
+        self.stop_cleanup = Some(cleanup);
+        self
     }
 }
 
@@ -160,6 +196,73 @@ impl CoreExecutor for SessionRuntimeExecutor {
     }
 }
 
+#[async_trait::async_trait]
+impl CoreExecutor for PersistentSessionServiceExecutor {
+    async fn apply(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let prompt = primitive.extract_content_input();
+        let req = StartTurnRequest {
+            prompt,
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: HandlingMode::Queue,
+            event_tx: None,
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.additional_instructions.clone()),
+            execution_kind: primitive.turn_metadata().and_then(|m| m.execution_kind),
+        };
+
+        self.service
+            .apply_runtime_turn(
+                &self.session_id,
+                run_id,
+                req,
+                primitive.apply_boundary(),
+                primitive.contributing_input_ids().to_vec(),
+            )
+            .await
+            .map_err(|error| CoreExecutorError::ApplyFailed {
+                reason: error.to_string(),
+            })
+    }
+
+    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } => self
+                .service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|error| CoreExecutorError::ControlFailed {
+                    reason: error.to_string(),
+                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let result = if let Some(cleanup) = &self.stop_cleanup {
+                    cleanup(self.session_id.clone()).await
+                } else {
+                    self.service.discard_live_session(&self.session_id).await
+                };
+                match result {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                    Err(error) => Err(CoreExecutorError::ControlFailed {
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutor for MobRpcRuntimeExecutor {
@@ -202,10 +305,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 &self.session_id,
                 run_id,
                 req,
-                match &primitive {
-                    RunPrimitive::StagedInput(staged) => staged.boundary,
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                },
+                primitive.apply_boundary(),
                 primitive.contributing_input_ids().to_vec(),
             )
             .await;

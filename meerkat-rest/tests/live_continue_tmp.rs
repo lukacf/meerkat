@@ -4,11 +4,12 @@ use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
 use meerkat::{
-    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistentSessionService, SessionStore,
+    AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistenceBundle, SessionStore,
 };
 use meerkat_client::TestClient;
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
+use meerkat_surface_runtime::RuntimeSessionHost;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -34,13 +35,12 @@ async fn integration_real_live_continue_hangs() {
         .project_root(project_root.clone());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let session_service = Arc::new(PersistentSessionService::new(
+    let runtime_host = Arc::new(RuntimeSessionHost::from_builder(
         builder,
         100,
-        store,
-        None,
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
+        PersistenceBundle::new(store, None, Arc::new(meerkat_store::MemoryBlobStore::new())),
     ));
+    let session_service = runtime_host.service();
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -60,6 +60,7 @@ async fn integration_real_live_continue_hangs() {
         llm_client_override: Some(Arc::new(TestClient::default())),
         config_store,
         event_tx,
+        runtime_host: Arc::clone(&runtime_host),
         session_service,
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
@@ -79,13 +80,13 @@ async fn integration_real_live_continue_hangs() {
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
-        runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        runtime_adapter: runtime_host.runtime_adapter(),
         schedule_host: Arc::default(),
         request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
             std::time::Duration::from_secs(5),
         )),
         #[cfg(feature = "mob")]
-        mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+        mob_state: runtime_host.mob_state(),
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };

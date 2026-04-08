@@ -224,6 +224,16 @@ impl RunPrimitive {
         }
     }
 
+    /// Return the canonical runtime apply boundary for this primitive.
+    pub fn apply_boundary(&self) -> RunApplyBoundary {
+        match self {
+            RunPrimitive::StagedInput(staged) => staged.boundary,
+            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => {
+                RunApplyBoundary::Immediate
+            }
+        }
+    }
+
     /// Whether this primitive is a context-only staged input that should be
     /// routed to `apply_runtime_context_appends` rather than a full turn.
     pub fn is_context_only_immediate(&self) -> bool {

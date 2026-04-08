@@ -53,6 +53,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
+use crate::runtime_session_host::RuntimeSessionHost;
 #[cfg(feature = "mcp")]
 use meerkat::{
     McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter,
@@ -276,19 +277,15 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
-        let builder = FactoryAgentBuilder::new(factory, config);
-        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-        let service = Arc::new(Self::build_persistent_service(
-            builder,
+        let host = RuntimeSessionHost::from_builder(
+            FactoryAgentBuilder::new(factory, config),
             max_sessions,
-            store,
-            runtime_store.clone(),
-            blob_store,
-            &runtime_adapter,
-        ));
+            persistence,
+        );
+        let service = host.service();
+        let runtime_adapter = host.runtime_adapter();
+        let builder_mob_tools_slot = host.builder_mob_tools_slot();
 
         Self {
             service,
@@ -309,7 +306,7 @@ impl SessionRuntime {
                 registry: SourceIdentityRegistry::default(),
             })),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
+            mob_state: StdRwLock::new(Some(host.mob_state())),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -331,20 +328,15 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
-        let builder =
-            FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
-        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-        let service = Arc::new(Self::build_persistent_service(
-            builder,
+        let host = RuntimeSessionHost::from_builder(
+            FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store),
             max_sessions,
-            store,
-            runtime_store.clone(),
-            blob_store,
-            &runtime_adapter,
-        ));
+            persistence,
+        );
+        let service = host.service();
+        let runtime_adapter = host.runtime_adapter();
+        let builder_mob_tools_slot = host.builder_mob_tools_slot();
 
         Self {
             service,
@@ -365,7 +357,7 @@ impl SessionRuntime {
                 registry: SourceIdentityRegistry::default(),
             })),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
+            mob_state: StdRwLock::new(Some(host.mob_state())),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -375,27 +367,6 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
         }
-    }
-
-    /// Build a `PersistentSessionService` with the runtime bindings provider
-    /// wired to the runtime adapter so lazy session rebuilds use the canonical
-    /// bindings instead of an orphaned fallback.
-    fn build_persistent_service(
-        builder: FactoryAgentBuilder,
-        max_sessions: usize,
-        store: Arc<dyn meerkat_store::SessionStore>,
-        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
-        blob_store: Arc<dyn meerkat_core::BlobStore>,
-        runtime_adapter: &Arc<meerkat_runtime::RuntimeSessionAdapter>,
-    ) -> PersistentSessionService<FactoryAgentBuilder> {
-        let mut service =
-            PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
-        let adapter = runtime_adapter.clone();
-        service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-            let adapter = adapter.clone();
-            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-        }));
-        service
     }
 
     /// Attach realm context defaults used for session metadata.

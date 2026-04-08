@@ -1,0 +1,33 @@
+[package]
+name = "meerkat-surface-runtime"
+description = "Shared runtime-backed session host for Meerkat surfaces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat = { workspace = true, features = ["jsonl-store", "session-store", "memory-store"] }
+meerkat-core = { workspace = true }
+meerkat-runtime = { workspace = true }
+meerkat-store = { workspace = true }
+meerkat-mob-mcp = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+comms = ["meerkat/comms"]
+mob = ["dep:meerkat-mob-mcp"]
+
+[package.metadata.cargo-machete]
+ignored = ["meerkat-mob-mcp", "thiserror"]  # optional / proc macro
+
+[lints]
+workspace = true

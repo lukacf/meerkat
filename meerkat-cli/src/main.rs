@@ -36,6 +36,7 @@ use meerkat_mob_pack::pack::{
 };
 use meerkat_mob_pack::targz::extract_targz_safe;
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
+use meerkat_surface_runtime::RuntimeSessionHost;
 use meerkat_tools::find_project_root;
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -2999,6 +3000,7 @@ fn compose_external_tool_dispatchers(
 }
 
 /// Build an `EphemeralSessionService` backed by the factory.
+#[cfg(test)]
 fn build_cli_service(
     factory: AgentFactory,
     config: Config,
@@ -3035,23 +3037,13 @@ async fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let (store, runtime_store, blob_store) = persistence.into_parts();
-    let builder = FactoryAgentBuilder::new(factory, config);
-    let service = Arc::new(meerkat::PersistentSessionService::new(
-        builder,
+    let service = RuntimeSessionHost::from_builder(
+        FactoryAgentBuilder::new(factory, config),
         64,
-        store,
-        runtime_store,
-        blob_store,
-    ));
+        persistence,
+    )
+    .service();
     Ok(Arc::new(MobCliSessionService::new(service)))
-}
-
-fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Error {
-    match e {
-        meerkat_core::service::SessionError::Agent(agent_err) => anyhow::Error::from(agent_err),
-        other => anyhow::anyhow!("Session service error: {other}"),
-    }
 }
 
 fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Result<SessionId> {
@@ -3312,8 +3304,14 @@ async fn run_agent(
         config.comms.address = Some(addr.clone());
     }
 
-    // Build the parent session service.
-    let service = build_cli_service(factory, config.clone());
+    // Build the parent session host on the realm-backed persistent service.
+    let runtime_host = Arc::new(RuntimeSessionHost::from_builder(
+        FactoryAgentBuilder::new(factory, config.clone()),
+        64,
+        persistence.clone(),
+    ));
+    let service = runtime_host.service();
+    let runtime_adapter = runtime_host.runtime_adapter();
 
     if keep_alive {
         eprintln!(
@@ -3321,9 +3319,6 @@ async fn run_agent(
             if verbose { " with verbose output" } else { "" }
         );
     }
-
-    // Wrap in Arc so we can share with the stdin reader task
-    let service = Arc::new(service);
 
     let mut run_mob_tools = if effective_mob {
         let mob_persistent = get_or_create_mob_persistent_service_from_bundle(
@@ -3360,13 +3355,6 @@ async fn run_agent(
     let output_pipeline =
         CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
-    // Create ephemeral runtime adapter and prepare epoch-local bindings.
-    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    let bindings = runtime_adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
-
     let mut build = SessionBuildOptions {
         provider: Some(provider.as_core()),
         output_schema,
@@ -3374,7 +3362,7 @@ async fn run_agent(
         hooks_override,
         comms_name: comms_name.clone(),
         peer_meta: comms_overrides.peer_meta.clone(),
-        resume_session: Some(session),
+        resume_session: None,
         budget_limits: Some(limits),
         provider_params,
         external_tools,
@@ -3401,7 +3389,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
         blob_store_override: None,
@@ -3455,38 +3443,53 @@ async fn run_agent(
     let mut stdin_reader_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     let turn_result = async {
+        let executor_event_tx = output_pipeline.event_sender();
         #[cfg(feature = "comms")]
-        let create_result = service
-            .create_session(create_req)
+        let create_result = runtime_host
+            .materialize_session_with_result_and_executor(session, create_req, {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                move |runtime_session_id| {
+                    Box::new(CliRuntimeExecutor {
+                        service: Arc::clone(&service)
+                            as Arc<dyn meerkat_core::service::SessionService>,
+                        persistent_service: Some(Arc::clone(&service)),
+                        session_id: runtime_session_id,
+                        runtime_adapter: Arc::clone(&runtime_adapter),
+                        event_tx: executor_event_tx,
+                    })
+                }
+            })
             .await
-            .map_err(session_err_to_anyhow)?;
+            .map_err(|error| anyhow::anyhow!("failed to materialize session: {error}"))?;
 
         #[cfg(not(feature = "comms"))]
         let create_result = {
             let _ = stdin_events;
-            service
-                .create_session(create_req)
+            runtime_host
+                .materialize_session_with_result_and_executor(session, create_req, {
+                    let service = Arc::clone(&service);
+                    let runtime_adapter = Arc::clone(&runtime_adapter);
+                    move |runtime_session_id| {
+                        Box::new(CliRuntimeExecutor {
+                            service: Arc::clone(&service)
+                                as Arc<dyn meerkat_core::service::SessionService>,
+                            persistent_service: Some(Arc::clone(&service)),
+                            session_id: runtime_session_id,
+                            runtime_adapter: Arc::clone(&runtime_adapter),
+                            event_tx: executor_event_tx,
+                        })
+                    }
+                })
                 .await
-                .map_err(session_err_to_anyhow)?
+                .map_err(|error| anyhow::anyhow!("failed to materialize session: {error}"))?
         };
-
-        // Register executor and route turn through runtime adapter.
         let session_id = create_result.session_id.clone();
-        let executor = Box::new(CliRuntimeExecutor {
-            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-            persistent_service: None,
-            session_id: session_id.clone(),
-            runtime_adapter: runtime_adapter.clone(),
-            event_tx: output_pipeline.event_sender(),
-        });
-        runtime_adapter
-            .register_session_with_executor(session_id.clone(), executor)
-            .await;
 
         #[cfg(feature = "comms")]
         if stdin_events && keep_alive {
             stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
-                runtime_adapter.clone(),
+                Arc::clone(&runtime_adapter),
                 session_id.clone(),
                 match line_format {
                     LineFormat::Text => stdin_events::StdinLineFormat::Text,
@@ -3516,9 +3519,8 @@ async fn run_agent(
         // routed through the runtime adapter and automatically trigger new turns.
         #[cfg(feature = "comms")]
         {
-            let comms_rt = service.comms_runtime(&session_id).await;
-            runtime_adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+            runtime_host
+                .configure_peer_ingress(&session_id, keep_alive)
                 .await;
         }
 
@@ -3831,14 +3833,13 @@ async fn resume_session_with_llm_override(
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
-    let (persistent_service, resume_adapter) =
-        meerkat::build_persistent_service_with_runtime_adapter(
-            factory,
-            config.clone(),
-            64,
-            persistence.clone(),
-        );
-    let service = Arc::new(persistent_service);
+    let runtime_host = Arc::new(RuntimeSessionHost::from_builder(
+        FactoryAgentBuilder::new(factory, config.clone()),
+        64,
+        persistence.clone(),
+    ));
+    let service = runtime_host.service();
+    let resume_adapter = runtime_host.runtime_adapter();
 
     log_stage("compose_external_tool_dispatchers");
     let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
@@ -3876,19 +3877,13 @@ async fn resume_session_with_llm_override(
         }],
     )?;
 
-    // Prepare epoch-local bindings for the resumed session.
-    let resume_bindings = resume_adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
-
     let mut build = SessionBuildOptions {
         provider: Some(provider_core),
         output_schema: None,
         structured_output_retries: 2,
         hooks_override,
         comms_name: comms_name.clone(),
-        resume_session: Some(session),
+        resume_session: None,
         budget_limits: budget_override,
         provider_params: merged_provider_params,
         external_tools,
@@ -3921,7 +3916,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         resume_override_mask: ResumeOverrideMask {
             provider_params: provider_params_override,
             ..Default::default()
@@ -3939,32 +3934,50 @@ async fn resume_session_with_llm_override(
     );
 
     let turn_result = async {
+        let executor_event_tx = output_pipeline.event_sender();
         // Route through SessionService::create_session() with the resumed session
         // staged in the build config. The service builds the agent (which picks up
         // the resume_session), runs the first turn, and returns RunResult.
         log_stage("service.create_session(start)");
-        let create_result = service
-            .create_session(CreateSessionRequest {
-                model,
-                prompt: prompt.to_string().into(),
-                render_metadata: None,
-                system_prompt,
-                max_tokens: Some(max_tokens),
-                event_tx: output_pipeline.event_sender(),
+        let create_result = runtime_host
+            .materialize_session_with_result_and_executor(
+                session,
+                CreateSessionRequest {
+                    model,
+                    prompt: prompt.to_string().into(),
+                    render_metadata: None,
+                    system_prompt,
+                    max_tokens: Some(max_tokens),
+                    event_tx: output_pipeline.event_sender(),
 
-                skill_references: if run_initial_turn_during_create {
-                    canonical_skill_refs.clone()
-                } else {
-                    None
+                    skill_references: if run_initial_turn_during_create {
+                        canonical_skill_refs.clone()
+                    } else {
+                        None
+                    },
+                    // Always defer — runtime adapter handles execution.
+                    initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(build),
+                    labels: None,
                 },
-                // Always defer — runtime adapter handles execution.
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(build),
-                labels: None,
-            })
+                {
+                    let service = Arc::clone(&service);
+                    let resume_adapter = Arc::clone(&resume_adapter);
+                    move |runtime_session_id| {
+                        Box::new(CliRuntimeExecutor {
+                            service: Arc::clone(&service)
+                                as Arc<dyn meerkat_core::service::SessionService>,
+                            persistent_service: Some(Arc::clone(&service)),
+                            session_id: runtime_session_id,
+                            runtime_adapter: Arc::clone(&resume_adapter),
+                            event_tx: executor_event_tx,
+                        })
+                    }
+                },
+            )
             .await
-            .map_err(session_err_to_anyhow)?;
+            .map_err(|error| anyhow::anyhow!("failed to materialize session: {error}"))?;
 
         let additional_instructions = if instructions.is_empty() {
             None
@@ -3974,17 +3987,6 @@ async fn resume_session_with_llm_override(
 
         // Route through runtime adapter (same pattern as run command)
         let session_id = create_result.session_id.clone();
-        let executor = Box::new(CliRuntimeExecutor {
-            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-            persistent_service: Some(service.clone()),
-            session_id: session_id.clone(),
-            runtime_adapter: resume_adapter.clone(),
-            event_tx: output_pipeline.event_sender(),
-        });
-        resume_adapter
-            .register_session_with_executor(session_id.clone(), executor)
-            .await;
-
         let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
             prompt.to_string(),
             Some(
@@ -4006,9 +4008,8 @@ async fn resume_session_with_llm_override(
         // routed through the runtime adapter and automatically trigger new turns.
         #[cfg(feature = "comms")]
         {
-            let comms_rt = service.comms_runtime(&session_id).await;
-            resume_adapter
-                .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
+            runtime_host
+                .configure_peer_ingress(&session_id, keep_alive)
                 .await;
         }
 
@@ -9945,7 +9946,9 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let tools = dispatcher.tools();
         let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
-        assert!(tool_names.contains(&"send"));
+        assert!(tool_names.contains(&"send_message"));
+        assert!(tool_names.contains(&"send_request"));
+        assert!(tool_names.contains(&"send_response"));
         assert!(tool_names.contains(&"peers"));
     }
 

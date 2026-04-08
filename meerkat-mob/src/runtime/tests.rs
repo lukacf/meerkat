@@ -16173,3 +16173,49 @@ async fn test_root_loop_body_failure_stops_after_first_failed_iteration() {
         "failed loop body should stop loop execution instead of advancing to extra iterations"
     );
 }
+
+#[tokio::test]
+async fn test_list_members_does_not_stall_during_concurrent_spawn() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    // Spawn members in the background
+    let handle_clone = handle.clone();
+    let spawn_task = tokio::spawn(async move {
+        for i in 0..3 {
+            let name = format!("worker-{i}");
+            handle_clone
+                .spawn(
+                    ProfileName::from("worker"),
+                    MeerkatId::from(name.as_str()),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
+        }
+    });
+
+    // Concurrently poll list_members — this must not deadlock
+    let list_task = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let members = handle.list_members().await;
+                if members.len() >= 3 {
+                    return members.len();
+                }
+                assert!(
+                    tokio::time::Instant::now() <= deadline,
+                    "list_members timed out: only {}/3 members visible",
+                    members.len()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    });
+
+    spawn_task.await.expect("spawn task should complete");
+    let count = list_task.await.expect("list task should complete");
+    assert!(count >= 3, "expected at least 3 members, got {count}");
+}

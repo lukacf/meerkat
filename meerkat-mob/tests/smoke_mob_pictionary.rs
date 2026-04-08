@@ -26,8 +26,8 @@
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
-    MobSessionService, MobStorage, Profile, ProfileName, ToolConfig,
+    MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
+    MobStorage, Profile, ProfileName, ToolConfig,
     definition::{RoleWiringRule, WiringRules},
 };
 use meerkat_session::PersistentSessionService;
@@ -267,23 +267,12 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
             .map_err(|e| format!("spawn {name}: {e}"))?;
     }
 
-    // Wait for all to become active
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let members = handle.list_members().await;
-        let active_count = members
-            .iter()
-            .filter(|m| matches!(m.status, MobMemberStatus::Active))
-            .count();
-        if active_count == 4 {
-            return Ok(());
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out: only {active_count}/4 active"
-        );
-        sleep(Duration::from_millis(500)).await;
-    }
+    // Wait for kickoff completion (initial autonomous turns)
+    handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(60)))
+        .await
+        .map_err(|e| format!("kickoff wait: {e}"))?;
+    Ok(())
 }
 
 /// Wait for the artist to receive a message containing the secret word.

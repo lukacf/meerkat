@@ -641,7 +641,13 @@ impl MobHandle {
         let entries: Vec<_> = entries.cloned().collect();
         let mut projected = Vec::with_capacity(entries.len());
         for entry in entries {
-            let snapshot = self.member_status(&entry.meerkat_id).await.ok();
+            // Skip peer connectivity resolution — list_members doesn't expose
+            // it and the live comms fanout can stall during spawn/wiring.
+            let snapshot = self
+                .canonical_member_snapshot_material(&entry.meerkat_id, false)
+                .await
+                .to_snapshot();
+            let snapshot = Some(snapshot);
             let (status, error, is_final, current_session_id, kickoff) = match snapshot {
                 Some(snapshot) => (
                     snapshot.status,
@@ -1072,7 +1078,7 @@ impl MobHandle {
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
         let old_session_id_before = self
-            .canonical_member_snapshot_material(&meerkat_id)
+            .canonical_member_snapshot_material(&meerkat_id, false)
             .await
             .current_session_id;
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1097,7 +1103,7 @@ impl MobHandle {
                     receipt.old_session_id = old_session_id_before;
                 }
                 let post_material = self
-                    .canonical_member_snapshot_material(&receipt.member_id)
+                    .canonical_member_snapshot_material(&receipt.member_id, false)
                     .await;
                 if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
                     receipt.new_session_id = post_material.current_session_id;
@@ -1113,7 +1119,7 @@ impl MobHandle {
             receipt.old_session_id = old_session_id_before;
         }
         let post_material = self
-            .canonical_member_snapshot_material(&receipt.member_id)
+            .canonical_member_snapshot_material(&receipt.member_id, false)
             .await;
         if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
             receipt.new_session_id = post_material.current_session_id;
@@ -1428,6 +1434,7 @@ impl MobHandle {
     async fn canonical_member_snapshot_material(
         &self,
         meerkat_id: &MeerkatId,
+        resolve_connectivity: bool,
     ) -> CanonicalMemberSnapshotMaterial {
         // Canonical helper-surface classification is derived only from roster
         // membership/state plus session-service activity, never side tables.
@@ -1511,12 +1518,16 @@ impl MobHandle {
                         }
                         Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
                     };
-                let peer_connectivity = match roster_entry.as_ref() {
-                    Some(entry) => {
-                        self.resolve_peer_connectivity(entry, &session_id, &roster_snapshot)
-                            .await
+                let peer_connectivity = if resolve_connectivity {
+                    match roster_entry.as_ref() {
+                        Some(entry) => {
+                            self.resolve_peer_connectivity(entry, &session_id, &roster_snapshot)
+                                .await
+                        }
+                        None => None,
                     }
-                    None => None,
+                } else {
+                    None
                 };
                 MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
                     member_present: true,
@@ -1625,7 +1636,9 @@ impl MobHandle {
         meerkat_id: &MeerkatId,
     ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
         loop {
-            let material = self.canonical_member_snapshot_material(meerkat_id).await;
+            let material = self
+                .canonical_member_snapshot_material(meerkat_id, false)
+                .await;
             if MobMemberTerminalClassifier::is_terminal(&material) {
                 return Ok(material);
             }
@@ -1638,7 +1651,9 @@ impl MobHandle {
         &self,
         meerkat_id: &MeerkatId,
     ) -> Result<MobMemberSnapshot, MobError> {
-        let material = self.canonical_member_snapshot_material(meerkat_id).await;
+        let material = self
+            .canonical_member_snapshot_material(meerkat_id, true)
+            .await;
         Ok(material.to_snapshot())
     }
 
@@ -1749,7 +1764,9 @@ impl MobHandle {
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
-        let helper_material = self.canonical_member_snapshot_material(&meerkat_id).await;
+        let helper_material = self
+            .canonical_member_snapshot_material(&meerkat_id, false)
+            .await;
         let _ = self.retire(meerkat_id.clone()).await;
 
         Ok(helper_material.to_helper_result())
@@ -1790,7 +1807,9 @@ impl MobHandle {
         };
 
         self.spawn_spec(spec).await?;
-        let helper_material = self.canonical_member_snapshot_material(&meerkat_id).await;
+        let helper_material = self
+            .canonical_member_snapshot_material(&meerkat_id, false)
+            .await;
         let _ = self.retire(meerkat_id.clone()).await;
 
         Ok(helper_material.to_helper_result())

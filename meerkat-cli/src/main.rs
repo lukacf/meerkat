@@ -61,6 +61,8 @@ const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
 
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// Safely truncate a string to approximately `max_bytes`, respecting UTF-8 char boundaries.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -342,14 +344,11 @@ fn print_cli_callback_pending(
     Ok(())
 }
 
-async fn finalize_cli_runtime_backed_turn<T, F>(
+async fn finalize_cli_runtime_backed_turn<T>(
     output_pipeline: CliOutputPipeline,
     turn_result: anyhow::Result<T>,
-    after_sender_drop: F,
-) -> anyhow::Result<T>
-where
-    F: std::future::Future<Output = anyhow::Result<()>>,
-{
+    after_sender_drop: BoxFuture<'_, anyhow::Result<()>>,
+) -> anyhow::Result<T> {
     let shutdown_result = output_pipeline.shutdown_after(after_sender_drop).await;
     match (turn_result, shutdown_result) {
         (Ok(result), Ok(())) => Ok(result),
@@ -3543,10 +3542,10 @@ async fn run_agent(
         eprintln!("\nShutting down...");
     }
 
-    let result = Box::pin(finalize_cli_runtime_backed_turn(
+    let result = finalize_cli_runtime_backed_turn(
         output_pipeline,
         turn_result,
-        async {
+        Box::pin(async {
             // Abort the comms drain so the CLI can exit cleanly.
             #[cfg(feature = "comms")]
             {
@@ -3570,8 +3569,8 @@ async fn run_agent(
                 mob_ctx.persist(scope).await?;
             }
             Ok(())
-        },
-    ))
+        }),
+    )
     .await?;
 
     // Output the result
@@ -4010,10 +4009,10 @@ async fn resume_session_with_llm_override(
     }
     .await;
 
-    let result = Box::pin(finalize_cli_runtime_backed_turn(
+    let result = finalize_cli_runtime_backed_turn(
         output_pipeline,
         turn_result,
-        async {
+        Box::pin(async {
             // The resume turn is complete — abort the comms drain so the CLI can
             // return. Same rationale as run_agent: one-shot commands must not block.
             #[cfg(feature = "comms")]
@@ -4034,8 +4033,8 @@ async fn resume_session_with_llm_override(
                 mob_ctx.persist(scope).await?;
             }
             Ok(())
-        },
-    ))
+        }),
+    )
     .await?;
 
     // Output the result
@@ -6233,15 +6232,15 @@ const WEB_INDEX_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
-async fn execute_mob_deploy(
-    scope: &RuntimeScope,
-    pack: &std::path::Path,
-    prompt: &str,
+fn execute_mob_deploy<'a>(
+    scope: &'a RuntimeScope,
+    pack: &'a std::path::Path,
+    prompt: &'a str,
     cli_trust_policy: Option<TrustPolicyArg>,
     surface: DeploySurfaceArg,
     cli_overrides: CliOverrides,
-) -> anyhow::Result<String> {
-    Box::pin(execute_mob_deploy_internal(
+) -> BoxFuture<'a, anyhow::Result<String>> {
+    execute_mob_deploy_internal(
         scope,
         pack,
         prompt,
@@ -6252,8 +6251,7 @@ async fn execute_mob_deploy(
             rpc_io: None,
             config_observer: None,
         },
-    ))
-    .await
+    )
 }
 
 type RpcDeployIo = (
@@ -6269,100 +6267,105 @@ struct DeployInvocation {
     config_observer: Option<DeployConfigObserver>,
 }
 
-async fn execute_mob_deploy_internal(
-    scope: &RuntimeScope,
-    pack: &std::path::Path,
-    prompt: &str,
+fn execute_mob_deploy_internal<'a>(
+    scope: &'a RuntimeScope,
+    pack: &'a std::path::Path,
+    prompt: &'a str,
     invocation: DeployInvocation,
-) -> anyhow::Result<String> {
-    let bytes = tokio::fs::read(pack)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
-    let files =
-        extract_targz_safe(&bytes).map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let archive = MobpackArchive::from_extracted_files(&files)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let digest = compute_archive_digest(&bytes)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let config_trust = read_config_trust_policy(scope)?;
-    let trust_policy = resolve_trust_policy(
-        invocation.cli_trust_policy,
-        |key| std::env::var(key).ok(),
-        config_trust,
-    )?;
-    let trusted_signers = load_trusted_signers(
-        &user_trust_store_path(scope),
-        &project_trust_store_path(scope),
-    )
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let warnings = verify_pack_trust(&files, digest, trust_policy, &trusted_signers)
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    validate_required_capabilities(&archive.manifest, &runtime_capabilities(invocation.surface))
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-    let effective_config = load_deploy_config_with_pack_defaults(
-        scope,
-        archive.config.get("config/defaults.toml"),
-        invocation.cli_overrides,
-    )?;
-    if let Some(observer) = invocation.config_observer.as_ref() {
-        observer(&effective_config);
-    }
-
-    let deployed_mob_id = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
-        let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
-            (
-                Box::new(BufReader::new(tokio::io::stdin())),
-                Box::new(tokio::io::stdout()),
-            )
-        });
-        run_rpc_surface(scope, effective_config, &archive, prompt, reader, writer).await?
-    } else {
-        let session_service =
-            build_deploy_mob_session_service(scope, effective_config.clone()).await?;
-        let mut builder = meerkat_mob::MobBuilder::from_mobpack(
-            archive.definition.clone(),
-            archive.skills.clone(),
-            meerkat_mob::MobStorage::in_memory(),
-        )
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-        .with_session_service(session_service.clone());
-        if let Some(adapter) = session_service.runtime_adapter() {
-            builder = builder.with_runtime_adapter(adapter);
-        }
-        let handle = builder
-            .create()
+) -> BoxFuture<'a, anyhow::Result<String>> {
+    Box::pin(async move {
+        let bytes = tokio::fs::read(pack)
             .await
+            .map_err(|err| anyhow::anyhow!("failed reading pack '{}': {err}", pack.display()))?;
+        let files = extract_targz_safe(&bytes)
             .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-
-        if let Some(orchestrator) = &archive.definition.orchestrator {
-            let roster = handle.roster().await;
-            if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
-                handle
-                    .member(&entry.meerkat_id)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-                    .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-            }
+        let archive = MobpackArchive::from_extracted_files(&files)
+            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        let digest = compute_archive_digest(&bytes)
+            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        let config_trust = read_config_trust_policy(scope)?;
+        let trust_policy = resolve_trust_policy(
+            invocation.cli_trust_policy,
+            |key| std::env::var(key).ok(),
+            config_trust,
+        )?;
+        let trusted_signers = load_trusted_signers(
+            &user_trust_store_path(scope),
+            &project_trust_store_path(scope),
+        )
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        let warnings = verify_pack_trust(&files, digest, trust_policy, &trusted_signers)
+            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        validate_required_capabilities(
+            &archive.manifest,
+            &runtime_capabilities(invocation.surface),
+        )
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        let effective_config = load_deploy_config_with_pack_defaults(
+            scope,
+            archive.config.get("config/defaults.toml"),
+            invocation.cli_overrides,
+        )?;
+        if let Some(observer) = invocation.config_observer.as_ref() {
+            observer(&effective_config);
         }
 
-        handle.mob_id().to_string()
-    };
+        let deployed_mob_id = if matches!(invocation.surface, DeploySurfaceArg::Rpc) {
+            let (reader, writer): RpcDeployIo = invocation.rpc_io.unwrap_or_else(|| {
+                (
+                    Box::new(BufReader::new(tokio::io::stdin())),
+                    Box::new(tokio::io::stdout()),
+                )
+            });
+            run_rpc_surface(scope, effective_config, &archive, prompt, reader, writer).await?
+        } else {
+            let session_service =
+                build_deploy_mob_session_service(scope, effective_config.clone()).await?;
+            let mut builder = meerkat_mob::MobBuilder::from_mobpack(
+                archive.definition.clone(),
+                archive.skills.clone(),
+                meerkat_mob::MobStorage::in_memory(),
+            )
+            .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+            .with_session_service(session_service.clone());
+            if let Some(adapter) = session_service.runtime_adapter() {
+                builder = builder.with_runtime_adapter(adapter);
+            }
+            let handle = builder
+                .create()
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
 
-    let mut rendered = format!(
-        "deployed\tmob={}\tsurface={}\tprompt_bytes={}",
-        deployed_mob_id,
-        match invocation.surface {
-            DeploySurfaceArg::Cli => "cli",
-            DeploySurfaceArg::Rpc => "rpc",
-        },
-        prompt.len()
-    );
-    for warning in warnings {
-        rendered.push_str(&format!("\nwarning\t{warning}"));
-    }
-    Ok(rendered)
+            if let Some(orchestrator) = &archive.definition.orchestrator {
+                let roster = handle.roster().await;
+                if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
+                    handle
+                        .member(&entry.meerkat_id)
+                        .await
+                        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                        .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
+                        .await
+                        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+                }
+            }
+
+            handle.mob_id().to_string()
+        };
+
+        let mut rendered = format!(
+            "deployed\tmob={}\tsurface={}\tprompt_bytes={}",
+            deployed_mob_id,
+            match invocation.surface {
+                DeploySurfaceArg::Cli => "cli",
+                DeploySurfaceArg::Rpc => "rpc",
+            },
+            prompt.len()
+        );
+        for warning in warnings {
+            rendered.push_str(&format!("\nwarning\t{warning}"));
+        }
+        Ok(rendered)
+    })
 }
 
 fn resolve_trust_policy<F>(
@@ -6944,10 +6947,10 @@ mod tests {
             finalize_cli_runtime_backed_turn(
                 pipeline,
                 Err::<(), _>(anyhow::anyhow!("turn abandoned: synthetic failure")),
-                async {
+                Box::pin(async {
                     runtime_adapter.unregister_session(&session_id).await;
                     Ok(())
-                },
+                }),
             ),
         )
         .await

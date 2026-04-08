@@ -334,7 +334,10 @@ impl AppState {
             schedule_host: Arc::new(schedule_host::ScheduleHostState::default()),
             #[cfg(feature = "mob")]
             mob_state: {
-                let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service));
+                let state = Arc::new(
+                    meerkat_mob_mcp::MobMcpState::new(mob_session_service)
+                        .with_persistent_storage_root(Some(realm_paths.root.clone())),
+                );
                 *mob_tools_slot
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(

@@ -38,6 +38,7 @@ smoke_scenario!(e2e_smoke_s51_rpc_mcp_shared_realm_parity, 51);
 smoke_scenario!(e2e_smoke_s52_cli_rpc_cli_continuity, 52);
 smoke_scenario!(e2e_smoke_s53_cli_rest_cli_continuity, 53);
 smoke_scenario!(e2e_smoke_s54_shared_realm_mob_visibility, 54);
+smoke_scenario!(e2e_smoke_s55_rpc_rest_callback_peer_storm_resume, 55);
 smoke_suite!(e2e_smoke_rpc_mob_callback_tools, "rpc-mob-callback-tools");
 smoke_suite!(
     e2e_smoke_rpc_transport_backpressure,

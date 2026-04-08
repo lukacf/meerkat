@@ -43,6 +43,7 @@ use meerkat_mob::{
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +55,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 #[derive(Clone)]
 struct ManagedMob {
     handle: MobHandle,
+    storage_path: Option<PathBuf>,
 }
 
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
@@ -95,9 +97,11 @@ pub struct MobMcpState {
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
+    persistent_storage_root: Option<PathBuf>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    restore_lock: Mutex<bool>,
 }
 
 impl MobMcpState {
@@ -116,9 +120,16 @@ impl MobMcpState {
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
+            persistent_storage_root: None,
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
+            restore_lock: Mutex::new(false),
         }
+    }
+
+    pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
+        self.persistent_storage_root = runtime_root.map(|root| Self::persistent_mob_root(&root));
+        self
     }
 
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
@@ -142,6 +153,180 @@ impl MobMcpState {
         self
     }
 
+    fn persistent_mob_root(runtime_root: &Path) -> PathBuf {
+        runtime_root.join("mobs")
+    }
+
+    fn escape_mob_id_for_path(mob_id: &MobId) -> String {
+        let mut escaped = String::with_capacity(mob_id.to_string().len() * 3);
+        for byte in mob_id.to_string().bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                escaped.push(char::from(byte));
+            } else {
+                escaped.push('%');
+                escaped.push_str(&format!("{byte:02X}"));
+            }
+        }
+        escaped
+    }
+
+    fn persistent_storage_path(root: &Path, mob_id: &MobId) -> PathBuf {
+        root.join(format!("{}.db", Self::escape_mob_id_for_path(mob_id)))
+    }
+
+    fn default_llm_client_snapshot(&self) -> Option<Arc<dyn LlmClient>> {
+        self.default_llm_client.clone().or_else(|| {
+            self.default_llm_client_provider
+                .as_ref()
+                .and_then(|provider| provider())
+        })
+    }
+
+    fn configure_builder(&self, mut builder: MobBuilder) -> MobBuilder {
+        builder = builder
+            .with_session_service(self.session_service.clone())
+            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
+            .with_default_external_tools_provider(self.external_tools_provider.clone());
+        if let Some(adapter) = &self.runtime_adapter {
+            builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        if let Some(client) = self.default_llm_client_snapshot() {
+            builder = builder.with_default_llm_client(client);
+        }
+        builder
+    }
+
+    async fn storage_for_new_mob(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<(MobStorage, Option<PathBuf>), MobError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.session_service.supports_persistent_sessions()
+            && let Some(root) = &self.persistent_storage_root
+        {
+            tokio::fs::create_dir_all(root).await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to create persistent mob root '{}': {error}",
+                    root.display()
+                ))
+            })?;
+            let path = Self::persistent_storage_path(root, mob_id);
+            let storage = MobStorage::persistent(&path)?;
+            return Ok((storage, Some(path)));
+        }
+
+        Ok((MobStorage::in_memory(), None))
+    }
+
+    async fn maybe_remove_storage_file(path: Option<&Path>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = path
+            && let Err(error) = tokio::fs::remove_file(path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), error = %error, "failed to remove mob storage file");
+        }
+    }
+
+    async fn restore_from_persistent_storage(&self) -> Result<(), MobError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(root) = &self.persistent_storage_root else {
+                return Ok(());
+            };
+            tokio::fs::create_dir_all(root).await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to create persistent mob root '{}': {error}",
+                    root.display()
+                ))
+            })?;
+
+            let mut dir = tokio::fs::read_dir(root).await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to read persistent mob root '{}': {error}",
+                    root.display()
+                ))
+            })?;
+
+            while let Some(entry) = dir.next_entry().await.map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to iterate persistent mob root '{}': {error}",
+                    root.display()
+                ))
+            })? {
+                let path = entry.path();
+                let file_type = entry.file_type().await.map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to inspect persistent mob entry '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+                if !file_type.is_file()
+                    || path.extension().and_then(|ext| ext.to_str()) != Some("db")
+                {
+                    continue;
+                }
+
+                let storage = MobStorage::persistent(&path)?;
+                if storage.events.replay_all().await?.is_empty() {
+                    Self::maybe_remove_storage_file(Some(path.as_path())).await;
+                    continue;
+                }
+
+                let handle = self
+                    .configure_builder(MobBuilder::for_resume(storage))
+                    .resume()
+                    .await?;
+                let mob_id = handle.definition().id.clone();
+                match self.mobs.write().await.entry(mob_id.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(ManagedMob {
+                            handle,
+                            storage_path: Some(path.clone()),
+                        });
+                    }
+                    Entry::Occupied(_) => {
+                        let _ = handle.destroy().await;
+                        return Err(MobError::Internal(format!(
+                            "duplicate persisted mob id during restore: {mob_id}"
+                        )));
+                    }
+                }
+            }
+
+            let _ = self.scavenge_orphaned_session_scoped_mobs_inner().await;
+            Ok(())
+        }
+    }
+
+    async fn ensure_restored(&self) -> Result<(), MobError> {
+        if self.persistent_storage_root.is_none() {
+            return Ok(());
+        }
+        let mut restored = self.restore_lock.lock().await;
+        if *restored {
+            return Ok(());
+        }
+        self.restore_from_persistent_storage().await?;
+        *restored = true;
+        Ok(())
+    }
+
+    async fn ensure_restored_best_effort(&self, action: &str) -> bool {
+        match self.ensure_restored().await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(action, error = %error, "mob state restore failed");
+                false
+            }
+        }
+    }
+
     /// Access the underlying session service.
     pub fn session_service(&self) -> Arc<dyn MobSessionService> {
         self.session_service.clone()
@@ -152,29 +337,21 @@ impl MobMcpState {
         definition: MobDefinition,
     ) -> Result<MobId, MobError> {
         let mob_id = definition.id.clone();
+        self.ensure_restored().await?;
         if self.mobs.read().await.contains_key(&mob_id) {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
-        let storage = MobStorage::in_memory();
-        let mut builder = MobBuilder::new(definition.clone(), storage)
-            .with_session_service(self.session_service.clone())
-            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
-            .with_default_external_tools_provider(self.external_tools_provider.clone());
-        if let Some(adapter) = &self.runtime_adapter {
-            builder = builder.with_runtime_adapter(adapter.clone());
-        }
-        let default_llm_client = self.default_llm_client.clone().or_else(|| {
-            self.default_llm_client_provider
-                .as_ref()
-                .and_then(|provider| provider())
-        });
-        if let Some(client) = default_llm_client {
-            builder = builder.with_default_llm_client(client.clone());
-        }
-        let handle = builder.create().await?;
+        let (storage, storage_path) = self.storage_for_new_mob(&mob_id).await?;
+        let handle = self
+            .configure_builder(MobBuilder::new(definition.clone(), storage))
+            .create()
+            .await?;
         match self.mobs.write().await.entry(mob_id.clone()) {
             Entry::Vacant(entry) => {
-                entry.insert(ManagedMob { handle });
+                entry.insert(ManagedMob {
+                    handle,
+                    storage_path,
+                });
             }
             Entry::Occupied(_) => {
                 // Race-safe duplicate guard: avoid leaking the just-created runtime.
@@ -185,6 +362,7 @@ impl MobMcpState {
                         "duplicate mob create cleanup failed"
                     );
                 }
+                Self::maybe_remove_storage_file(storage_path.as_deref()).await;
                 return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
             }
         }
@@ -193,13 +371,19 @@ impl MobMcpState {
 
     /// Register an existing mob handle in this dispatcher state.
     pub async fn mob_insert_handle(&self, mob_id: MobId, handle: MobHandle) {
-        self.mobs
-            .write()
-            .await
-            .insert(mob_id, ManagedMob { handle });
+        self.mobs.write().await.insert(
+            mob_id,
+            ManagedMob {
+                handle,
+                storage_path: None,
+            },
+        );
     }
 
     pub async fn mob_list(&self) -> Vec<(MobId, MobState)> {
+        if !self.ensure_restored_best_effort("mob_list").await {
+            return Vec::new();
+        }
         self.mobs
             .read()
             .await
@@ -246,6 +430,11 @@ impl MobMcpState {
     ///
     /// Used by session cleanup paths and canonical implicit-mob reconciliation.
     pub(crate) async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
+        self.ensure_restored().await?;
+        self.mob_destroy_unchecked_loaded(mob_id).await
+    }
+
+    async fn mob_destroy_unchecked_loaded(&self, mob_id: &MobId) -> Result<(), MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
             mobs.remove(mob_id)
@@ -253,7 +442,10 @@ impl MobMcpState {
         };
 
         match managed.handle.destroy().await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
+                Ok(())
+            }
             Err(error) => {
                 let mut mobs = self.mobs.write().await;
                 match mobs.entry(mob_id.clone()) {
@@ -314,6 +506,7 @@ impl MobMcpState {
         &self,
         session_id: &SessionId,
     ) -> Result<(), MobError> {
+        self.ensure_restored().await?;
         // Derive membership from authoritative live mob roster state rather than
         // maintaining a separate reverse index that can drift during retirement,
         // respawn, or policy-driven auto-spawn flows.
@@ -351,6 +544,9 @@ impl MobMcpState {
     }
 
     pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
+        if !self.ensure_restored_best_effort("owns_live_session").await {
+            return false;
+        }
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         for mob_id in mob_ids {
             if let Ok(handle) = self.handle_for(&mob_id).await {
@@ -635,6 +831,9 @@ impl MobMcpState {
     /// `is_implicit == true` and `owner_session_id` matching the given session ID.
     /// Does NOT match explicit mobs that merely share the same owner.
     pub async fn find_implicit_mob(&self, session_id: &str) -> Option<MobId> {
+        if !self.ensure_restored_best_effort("find_implicit_mob").await {
+            return None;
+        }
         let mobs = self.mobs.read().await;
         mobs.iter()
             .find(|(_, m)| {
@@ -648,6 +847,9 @@ impl MobMcpState {
     ///
     /// Checks the canonical `is_implicit` field on the mob definition.
     pub async fn is_implicit_mob(&self, mob_id: &MobId) -> bool {
+        if !self.ensure_restored_best_effort("is_implicit_mob").await {
+            return false;
+        }
         let mobs = self.mobs.read().await;
         mobs.get(mob_id)
             .map(|m| m.handle.definition().is_implicit)
@@ -656,6 +858,12 @@ impl MobMcpState {
 
     /// Find all mobs indexed to the given session (both implicit and explicit).
     pub async fn find_mobs_for_session(&self, session_id: &str) -> Vec<MobId> {
+        if !self
+            .ensure_restored_best_effort("find_mobs_for_session")
+            .await
+        {
+            return Vec::new();
+        }
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
@@ -669,6 +877,12 @@ impl MobMcpState {
     }
 
     async fn find_session_scoped_mobs(&self, session_id: &str) -> Vec<MobId> {
+        if !self
+            .ensure_restored_best_effort("find_session_scoped_mobs")
+            .await
+        {
+            return Vec::new();
+        }
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
@@ -766,6 +980,7 @@ impl MobMcpState {
     /// Called during session archive to clean up mobs whose cleanup truth is
     /// `DestroyOnOwnerArchive`. `owner_session_id` alone is not sufficient.
     pub async fn destroy_session_mobs(&self, session_id: &str) -> Result<(), MobError> {
+        self.ensure_restored().await?;
         let mob_ids = self.find_session_scoped_mobs(session_id).await;
         if mob_ids.is_empty() {
             return Ok(());
@@ -792,6 +1007,16 @@ impl MobMcpState {
     /// `DestroyOnOwnerArchive`, checks whether the indexed owning session still
     /// exists. If not, destroys the mob. Returns the list of scavenged mob IDs.
     pub async fn scavenge_orphaned_session_scoped_mobs(&self) -> Vec<MobId> {
+        if !self
+            .ensure_restored_best_effort("scavenge_orphaned_session_scoped_mobs")
+            .await
+        {
+            return Vec::new();
+        }
+        self.scavenge_orphaned_session_scoped_mobs_inner().await
+    }
+
+    async fn scavenge_orphaned_session_scoped_mobs_inner(&self) -> Vec<MobId> {
         // Collect session-scoped cleanup candidates under a read lock.
         let candidates: Vec<(MobId, String)> = {
             let mobs = self.mobs.read().await;
@@ -824,7 +1049,7 @@ impl MobMcpState {
                 Err(_) => false, // Unknown error — don't scavenge
             };
             if is_orphan {
-                if let Err(error) = self.mob_destroy_unchecked(&mob_id).await {
+                if let Err(error) = self.mob_destroy_unchecked_loaded(&mob_id).await {
                     tracing::warn!(
                         mob_id = %mob_id,
                         session_id = %session_id,
@@ -851,6 +1076,7 @@ impl MobMcpState {
     ///
     /// Returns `MobError::Internal` if the mob is not found.
     pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+        self.ensure_restored().await?;
         self.mobs
             .read()
             .await
@@ -2309,6 +2535,10 @@ mod tests {
                 notifier.notify_waiters();
             }
             Ok(())
+        }
+
+        async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+            Ok(self.sessions.read().await.contains_key(id))
         }
 
         async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -3770,7 +4000,10 @@ mod tests {
             meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 skills: Vec::new(),
-                tools: meerkat_mob::profile::ToolConfig::default(),
+                tools: meerkat_mob::profile::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::profile::ToolConfig::default()
+                },
                 peer_description: "worker".to_string(),
                 external_addressable: false,
                 backend: None,
@@ -3798,6 +4031,84 @@ mod tests {
             session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
         }
+    }
+
+    #[tokio::test]
+    async fn test_persistent_root_restores_explicit_mob_member_status() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(
+            MobMcpState::new(svc.clone())
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+
+        let mob_id = state
+            .mob_create_definition(explicit_definition("restored-explicit"))
+            .await
+            .expect("create explicit mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                MeerkatId::from("worker-1"),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+
+        let restored = Arc::new(
+            MobMcpState::new(svc.clone())
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        let status = restored
+            .mob_member_status(&mob_id, &MeerkatId::from("worker-1"))
+            .await
+            .expect("restore member status");
+        assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        assert!(
+            status.current_session_id.is_some(),
+            "restored member should still have a live session binding"
+        );
+
+        let mobs = restored.mob_list().await;
+        assert_eq!(mobs.len(), 1);
+        assert_eq!(mobs[0].0, mob_id);
+    }
+
+    #[tokio::test]
+    async fn test_mob_destroy_removes_persistent_store_file() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(
+            MobMcpState::new(svc.clone())
+                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+
+        let mob_id = state
+            .mob_create_definition(explicit_definition("destroyed-explicit"))
+            .await
+            .expect("create explicit mob");
+        let storage_root = MobMcpState::persistent_mob_root(root.path());
+        let storage_path = MobMcpState::persistent_storage_path(&storage_root, &mob_id);
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_ok(),
+            "persistent mob db should exist after create"
+        );
+
+        state.mob_destroy(&mob_id).await.expect("destroy mob");
+        assert!(
+            tokio::fs::metadata(&storage_path).await.is_err(),
+            "destroy should remove persistent mob db"
+        );
+
+        let restored = Arc::new(
+            MobMcpState::new(svc).with_persistent_storage_root(Some(root.path().to_path_buf())),
+        );
+        assert!(
+            restored.mob_list().await.is_empty(),
+            "destroyed persistent mobs must not reappear after restart"
+        );
     }
 
     #[tokio::test]

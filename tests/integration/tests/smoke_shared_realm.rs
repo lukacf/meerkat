@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -9,7 +10,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, Instant, sleep, timeout};
 
 fn workspace_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -56,8 +57,16 @@ fn anthropic_api_key() -> Option<String> {
     first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
 }
 
+fn openai_api_key() -> Option<String> {
+    first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"])
+}
+
 fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+}
+
+fn openai_smoke_model() -> String {
+    first_env(&["SMOKE_MODEL_OPENAI", "OPENAI_SMOKE_MODEL"]).unwrap_or_else(|| "gpt-5.4".into())
 }
 
 fn skip_if_missing_binary(path: &Option<PathBuf>, name: &str) -> bool {
@@ -115,6 +124,10 @@ async fn run_binary(
     if let Some(key) = api_key {
         cmd.env("ANTHROPIC_API_KEY", key)
             .env("RKAT_ANTHROPIC_API_KEY", key);
+    }
+    if let Some(key) = openai_api_key() {
+        cmd.env("OPENAI_API_KEY", &key)
+            .env("RKAT_OPENAI_API_KEY", key);
     }
     Ok(timeout(Duration::from_secs(180), cmd.output()).await??)
 }
@@ -234,6 +247,10 @@ async fn spawn_stdio_process(
         cmd.env("ANTHROPIC_API_KEY", key)
             .env("RKAT_ANTHROPIC_API_KEY", key);
     }
+    if let Some(key) = openai_api_key() {
+        cmd.env("OPENAI_API_KEY", &key)
+            .env("RKAT_OPENAI_API_KEY", key);
+    }
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
@@ -326,6 +343,168 @@ async fn shutdown_stdio_process(mut process: RpcProcess) -> Result<(), Box<dyn s
         return Err(format!("stdio process exited unsuccessfully: {status}").into());
     }
     Ok(())
+}
+
+async fn rpc_read_json_line(
+    process: &mut RpcProcess,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    loop {
+        let mut line = String::new();
+        let bytes_read = timeout(
+            Duration::from_secs(timeout_secs),
+            process.stdout.read_line(&mut line),
+        )
+        .await??;
+        if bytes_read == 0 {
+            let mut stderr = String::new();
+            let _ = process.stderr.read_to_string(&mut stderr).await;
+            return Err(format!(
+                "stdio process reached EOF before JSON line\nstderr:\n{}",
+                stderr.trim()
+            )
+            .into());
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(trimmed) {
+            Ok(value) => return Ok(value),
+            Err(_) => continue,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RpcEventPump {
+    next_id: u64,
+    responses: BTreeMap<u64, Value>,
+    callbacks: BTreeMap<String, Value>,
+}
+
+impl RpcEventPump {
+    fn allocate_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    async fn send_request(
+        &mut self,
+        process: &mut RpcProcess,
+        method: &str,
+        params: Value,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let id = self.allocate_id();
+        rpc_send_line(
+            process,
+            &serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }))?,
+        )
+        .await?;
+        Ok(id)
+    }
+
+    async fn call(
+        &mut self,
+        process: &mut RpcProcess,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let id = self.send_request(process, method, params).await?;
+        self.wait_for_response(process, id, timeout_secs).await
+    }
+
+    async fn wait_for_response(
+        &mut self,
+        process: &mut RpcProcess,
+        id: u64,
+        timeout_secs: u64,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if let Some(response) = self.responses.remove(&id) {
+                if !response["error"].is_null() {
+                    return Err(format!("rpc request {id} failed: {response}").into());
+                }
+                return Ok(response["result"].clone());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("timed out waiting for rpc response id={id}").into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_secs = remaining.as_secs().max(1);
+            let value = rpc_read_json_line(process, remaining_secs).await?;
+            self.ingest_event(value)?;
+        }
+    }
+
+    async fn wait_for_callback(
+        &mut self,
+        process: &mut RpcProcess,
+        label: &str,
+        timeout_secs: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if self.callbacks.contains_key(label) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("timed out waiting for callback label '{label}'").into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_secs = remaining.as_secs().max(1);
+            let value = rpc_read_json_line(process, remaining_secs).await?;
+            self.ingest_event(value)?;
+        }
+    }
+
+    async fn respond_callback(
+        &mut self,
+        process: &mut RpcProcess,
+        label: &str,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let callback = self
+            .callbacks
+            .remove(label)
+            .ok_or_else(|| format!("missing pending callback for label '{label}'"))?;
+        let callback_id = callback["id"].clone();
+        rpc_send_line(
+            process,
+            &serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": callback_id,
+                "result": {
+                    "content": content,
+                    "is_error": false
+                }
+            }))?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn ingest_event(&mut self, value: Value) -> Result<(), Box<dyn std::error::Error>> {
+        if value.get("method").and_then(Value::as_str) == Some("tool/execute") {
+            let label = value["params"]["arguments"]["label"]
+                .as_str()
+                .ok_or_else(|| format!("tool/execute missing label argument: {value}"))?
+                .to_string();
+            self.callbacks.insert(label, value);
+            return Ok(());
+        }
+        if let Some(id) = value.get("id").and_then(Value::as_u64) {
+            self.responses.insert(id, value);
+        }
+        Ok(())
+    }
 }
 
 fn allocate_port() -> u16 {
@@ -466,6 +645,26 @@ fn http_json_body(response: &str) -> Result<Value, Box<dyn std::error::Error>> {
     })
 }
 
+fn token_count(payload: &Value, token: &str) -> usize {
+    payload.to_string().matches(token).count()
+}
+
+fn has_token(payload: &Value, token: &str) -> bool {
+    token_count(payload, token) > 0
+}
+
+fn history_comms_message_token_count(history: &Value, token: &str) -> usize {
+    history["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["role"].as_str() == Some("user"))
+        .filter_map(|message| message["content"].as_str())
+        .filter(|content| content.contains("[COMMS MESSAGE"))
+        .map(|content| content.matches(token).count())
+        .sum()
+}
+
 fn parse_mcp_tool_payload(response: &Value) -> Result<Value, Box<dyn std::error::Error>> {
     let text = response["result"]["content"][0]["text"]
         .as_str()
@@ -559,6 +758,92 @@ async fn write_cli_mobpack_fixture(
     );
     tokio::fs::write(mob_dir.join("definition.json"), definition).await?;
     Ok(mob_dir)
+}
+
+async fn wait_for_rpc_history_token(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    session_id: &str,
+    token: &str,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let history = pump
+            .call(
+                process,
+                "session/history",
+                json!({
+                    "session_id": session_id,
+                    "offset": 0,
+                    "limit": 200
+                }),
+                30,
+            )
+            .await?;
+        if has_token(&history, token) {
+            return Ok(history);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for token '{token}' in session history for {session_id}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn rest_session_history(
+    port: u16,
+    session_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = http_request(
+        port,
+        format!(
+            "GET /sessions/{session_id}/history?offset=0&limit=200 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return Err(format!("REST history failed: {response}").into());
+    }
+    http_json_body(&response)
+}
+
+async fn rest_session_info(
+    port: u16,
+    session_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = http_request(
+        port,
+        format!(
+            "GET /sessions/{session_id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return Err(format!("REST session info failed: {response}").into());
+    }
+    http_json_body(&response)
+}
+
+async fn rest_mob_member_status(
+    port: u16,
+    mob_id: &str,
+    meerkat_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = http_request(
+        port,
+        format!(
+            "GET /mob/{mob_id}/members/{meerkat_id}/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return Err(format!("REST mob member status failed: {response}").into());
+    }
+    http_json_body(&response)
 }
 
 // ===========================================================================
@@ -1564,5 +1849,536 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         );
     }
 
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 55: RPC callback-pending peer ingress, restart, and REST rebuild
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    let rkat_rest = binary_path("rkat-rest");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc")
+        || skip_if_missing_binary(&rkat_rest, "rkat-rest")
+    {
+        return Ok(());
+    }
+    let Some(anthropic_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let Some(openai_key) = openai_api_key() else {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+    let rkat_rest = rkat_rest.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-55-shared";
+    let mob_id = "scenario-55-chaos";
+    let parent_peer = format!("{mob_id}/parent/parent");
+    let nonce = format!("{}", std::process::id());
+    let token_a_steer = format!("A_STEER_{nonce}");
+    let token_b_queue = format!("B_QUEUE_{nonce}");
+
+    eprintln!("[scenario 55] starting RPC server");
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&anthropic_key),
+    )
+    .await?;
+    let mut pump = RpcEventPump::default();
+
+    let initialize = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+    assert!(
+        initialize["methods"]
+            .as_array()
+            .is_some_and(|methods| methods
+                .iter()
+                .any(|entry| entry.as_str() == Some("mob/spawn"))),
+        "rpc initialize should advertise mob methods: {initialize}"
+    );
+    eprintln!("[scenario 55] rpc initialized");
+
+    let _registered = pump
+        .call(
+            &mut rpc,
+            "tools/register",
+            json!({
+                "tools": [{
+                    "name": "hold_gate",
+                    "description": "Call this tool exactly when instructed. It blocks until the harness replies.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"}
+                        },
+                        "required": ["label"]
+                    }
+                }]
+            }),
+            20,
+        )
+        .await?;
+    eprintln!("[scenario 55] callback tool registered");
+
+    let created = pump
+        .call(
+            &mut rpc,
+            "mob/create",
+            json!({
+                "definition": {
+                    "id": mob_id,
+                    "profiles": {
+                        "parent": {
+                            "model": openai_smoke_model(),
+                            "external_addressable": true,
+                            "tools": { "comms": true }
+                        },
+                        "helper-a": {
+                            "model": openai_smoke_model(),
+                            "runtime_mode": "autonomous_host",
+                            "external_addressable": true,
+                            "tools": { "comms": true }
+                        },
+                        "helper-b": {
+                            "model": smoke_model(),
+                            "runtime_mode": "autonomous_host",
+                            "external_addressable": true,
+                            "tools": { "comms": true }
+                        }
+                    },
+                    "wiring": {
+                        "auto_wire_orchestrator": false,
+                        "role_wiring": [
+                            {"a": "parent", "b": "helper-a"},
+                            {"a": "parent", "b": "helper-b"}
+                        ]
+                    }
+                }
+            }),
+            30,
+        )
+        .await?;
+    assert_eq!(created["mob_id"].as_str(), Some(mob_id));
+    eprintln!("[scenario 55] mob created");
+
+    let parent_spawn = pump
+        .call(
+            &mut rpc,
+            "mob/spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "parent",
+                "meerkat_id": "parent"
+            }),
+            30,
+        )
+        .await?;
+    let parent_session_id = parent_spawn["session_id"]
+        .as_str()
+        .ok_or("parent spawn missing session_id")?
+        .to_string();
+    eprintln!("[scenario 55] parent spawned session_id={parent_session_id}");
+
+    let parent_turn_id = pump
+        .send_request(
+            &mut rpc,
+            "turn/start",
+            json!({
+                "session_id": &parent_session_id,
+                "prompt": format!(
+                    "You must call the hold_gate tool immediately with label 'parent' before replying. \
+                     After the tool returns, reply with exactly one line in this format: \
+                     SEEN: <tokens>. Include only exact uppercase peer-message tokens you have already received while this turn was active, in arrival order, and include no explanation. \
+                     If none arrived, reply exactly SEEN:"
+                )
+            }),
+        )
+        .await?;
+    pump.wait_for_callback(&mut rpc, "parent", 60).await?;
+    eprintln!("[scenario 55] parent entered callback-pending");
+
+    let helper_a_prompt =
+        "Call the hold_gate tool immediately with label 'helper-a'. After the tool returns, reply with exactly HELPER_A_FINISHED.".to_string();
+    let helper_a_spawn = pump
+        .call(
+            &mut rpc,
+            "mob/spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "helper-a",
+                "meerkat_id": "helper-a",
+                "runtime_mode": "autonomous_host",
+                "initial_message": helper_a_prompt,
+            }),
+            30,
+        )
+        .await?;
+    assert!(
+        helper_a_spawn["session_id"].as_str().is_some(),
+        "helper-a spawn missing session_id: {helper_a_spawn}"
+    );
+    let helper_a_session_id = helper_a_spawn["session_id"]
+        .as_str()
+        .ok_or("helper-a spawn missing session_id")?
+        .to_string();
+    eprintln!("[scenario 55] helper-a spawned");
+
+    let helper_b_spawn = pump
+        .call(
+            &mut rpc,
+            "mob/spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "helper-b",
+                "meerkat_id": "helper-b",
+                "runtime_mode": "turn_driven",
+                "initial_turn": "deferred",
+            }),
+            30,
+        )
+        .await?;
+    assert!(
+        helper_b_spawn["session_id"].as_str().is_some(),
+        "helper-b spawn missing session_id: {helper_b_spawn}"
+    );
+    let helper_b_session_id = helper_b_spawn["session_id"]
+        .as_str()
+        .ok_or("helper-b spawn missing session_id")?
+        .to_string();
+    eprintln!("[scenario 55] helper-b spawned");
+
+    pump.wait_for_callback(&mut rpc, "helper-a", 90).await?;
+    eprintln!("[scenario 55] helper-a entered callback-pending");
+
+    let steer_send = pump
+        .call(
+            &mut rpc,
+            "comms/send",
+            json!({
+                "session_id": &helper_a_session_id,
+                "kind": "peer_message",
+                "to": &parent_peer,
+                "body": &token_a_steer,
+                "handling_mode": "steer"
+            }),
+            30,
+        )
+        .await?;
+    assert_eq!(steer_send["kind"].as_str(), Some("peer_message_sent"));
+
+    let queue_send = pump
+        .call(
+            &mut rpc,
+            "comms/send",
+            json!({
+                "session_id": &helper_b_session_id,
+                "kind": "peer_message",
+                "to": &parent_peer,
+                "body": &token_b_queue,
+                "handling_mode": "queue"
+            }),
+            30,
+        )
+        .await?;
+    assert_eq!(queue_send["kind"].as_str(), Some("peer_message_sent"));
+
+    pump.respond_callback(&mut rpc, "helper-a", "HELPER_A_GATE_RELEASED")
+        .await?;
+    eprintln!("[scenario 55] helper-a callback released while parent remained pending");
+
+    pump.respond_callback(&mut rpc, "parent", "PARENT_GATE_RELEASED")
+        .await?;
+    eprintln!("[scenario 55] parent callback released");
+    let _parent_turn = pump
+        .wait_for_response(&mut rpc, parent_turn_id, 180)
+        .await?;
+    eprintln!("[scenario 55] parent turn completed");
+
+    let post_parent_history =
+        wait_for_rpc_history_token(&mut pump, &mut rpc, &parent_session_id, &token_a_steer, 30)
+            .await?;
+    eprintln!(
+        "[scenario 55] post-parent history observed steer token (queue visible: {})",
+        has_token(&post_parent_history, &token_b_queue)
+    );
+
+    let helper_a_started = pump
+        .call(
+            &mut rpc,
+            "mob/wait_kickoff",
+            json!({
+                "mob_id": mob_id,
+                "member_ids": ["helper-a"],
+                "timeout_ms": 60_000
+            }),
+            90,
+        )
+        .await?;
+    let helper_a_snapshot = helper_a_started["members"][0].clone();
+    assert_eq!(helper_a_snapshot["meerkat_id"].as_str(), Some("helper-a"));
+    assert_eq!(helper_a_snapshot["status"].as_str(), Some("active"));
+    if let Some(phase) = helper_a_snapshot["kickoff"]["phase"].as_str() {
+        assert_eq!(phase, "started");
+    }
+    eprintln!("[scenario 55] helper-a kickoff started");
+
+    let final_rpc_history =
+        wait_for_rpc_history_token(&mut pump, &mut rpc, &parent_session_id, &token_b_queue, 60)
+            .await?;
+    if history_comms_message_token_count(&final_rpc_history, &token_a_steer) != 1 {
+        let matching = final_rpc_history["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|message| message["role"].as_str() == Some("user"))
+            .filter_map(|message| message["content"].as_str())
+            .filter(|content| content.contains(&token_a_steer))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[scenario 55] duplicate steer token history entries: {}",
+            serde_json::to_string_pretty(&matching).unwrap_or_else(|_| "<encode failed>".into())
+        );
+    }
+    assert_eq!(
+        history_comms_message_token_count(&final_rpc_history, &token_a_steer),
+        1
+    );
+    assert_eq!(
+        history_comms_message_token_count(&final_rpc_history, &token_b_queue),
+        1
+    );
+    eprintln!("[scenario 55] rpc history assertions passed");
+
+    let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+    let mob_db_path = realm_paths.root.join("mobs").join(format!("{mob_id}.db"));
+    assert!(
+        tokio::fs::metadata(&mob_db_path).await.is_ok(),
+        "expected durable mob DB at {} before restart",
+        mob_db_path.display()
+    );
+
+    shutdown_stdio_process(rpc).await?;
+    eprintln!("[scenario 55] rpc shutdown complete");
+
+    let port = allocate_port();
+    tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
+    let rest_config = format!(
+        "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n\n[rest]\nhost = \"127.0.0.1\"\nport = {port}\n",
+        smoke_model()
+    );
+    tokio::fs::write(&realm_paths.config_path, rest_config).await?;
+
+    let mut rest = Command::new(&rkat_rest);
+    rest.current_dir(&project_dir)
+        .env("HOME", &project_dir)
+        .env("XDG_DATA_HOME", project_dir.join("data"))
+        .env("ANTHROPIC_API_KEY", &anthropic_key)
+        .env("RKAT_ANTHROPIC_API_KEY", &anthropic_key)
+        .env("OPENAI_API_KEY", &openai_key)
+        .env("RKAT_OPENAI_API_KEY", &openai_key)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args([
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--instance",
+            "scenario-55-rest",
+        ]);
+    let rest_child = wait_for_rest_server(rest.spawn()?, port).await?;
+    eprintln!("[scenario 55] rest started on port {port}");
+
+    let rest_history = rest_session_history(port, &parent_session_id).await?;
+    assert_eq!(
+        history_comms_message_token_count(&rest_history, &token_a_steer),
+        1
+    );
+    assert_eq!(
+        history_comms_message_token_count(&rest_history, &token_b_queue),
+        1
+    );
+
+    let rest_helper_a_session = rest_session_info(port, &helper_a_session_id).await?;
+    assert_eq!(
+        rest_helper_a_session["session_id"].as_str(),
+        Some(helper_a_session_id.as_str())
+    );
+    let rest_helper_a_status = rest_mob_member_status(port, mob_id, "helper-a").await?;
+    assert_eq!(rest_helper_a_status["status"].as_str(), Some("active"));
+    assert_eq!(
+        rest_helper_a_status["kickoff"]["phase"].as_str(),
+        Some("started")
+    );
+    let rest_helper_b_status = rest_mob_member_status(port, mob_id, "helper-b").await?;
+    assert_ne!(rest_helper_b_status["status"].as_str(), Some("broken"));
+
+    shutdown_child(rest_child).await?;
+    eprintln!("[scenario 55] completed");
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 56: RPC explicit mob persists and REST rebuilds member status
+// ===========================================================================
+
+#[tokio::test]
+async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    let rkat_rest = binary_path("rkat-rest");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc")
+        || skip_if_missing_binary(&rkat_rest, "rkat-rest")
+    {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+    let rkat_rest = rkat_rest.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-56-shared";
+    let mob_id = "scenario-56-explicit";
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        None,
+    )
+    .await?;
+    let mut pump = RpcEventPump::default();
+
+    let initialize = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+    assert!(
+        initialize["methods"]
+            .as_array()
+            .is_some_and(|methods| methods
+                .iter()
+                .any(|entry| entry.as_str() == Some("mob/spawn"))),
+        "rpc initialize should advertise mob methods: {initialize}"
+    );
+
+    let created = pump
+        .call(
+            &mut rpc,
+            "mob/create",
+            json!({
+                "definition": {
+                    "id": mob_id,
+                    "profiles": {
+                        "worker": {
+                            "model": smoke_model(),
+                            "runtime_mode": "turn_driven",
+                            "external_addressable": true,
+                            "tools": { "comms": true }
+                        }
+                    }
+                }
+            }),
+            30,
+        )
+        .await?;
+    assert_eq!(created["mob_id"].as_str(), Some(mob_id));
+
+    let spawned = pump
+        .call(
+            &mut rpc,
+            "mob/spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "worker-1",
+                "runtime_mode": "turn_driven",
+                "initial_turn": "deferred"
+            }),
+            30,
+        )
+        .await?;
+    assert!(
+        spawned["session_id"].as_str().is_some(),
+        "worker spawn missing session_id: {spawned}"
+    );
+
+    let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+    let mob_db_path = realm_paths.root.join("mobs").join(format!("{mob_id}.db"));
+    assert!(
+        tokio::fs::metadata(&mob_db_path).await.is_ok(),
+        "expected durable mob DB at {} before restart",
+        mob_db_path.display()
+    );
+
+    shutdown_stdio_process(rpc).await?;
+
+    let port = allocate_port();
+    tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
+    let rest_config = format!(
+        "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n\n[rest]\nhost = \"127.0.0.1\"\nport = {port}\n",
+        smoke_model()
+    );
+    tokio::fs::write(&realm_paths.config_path, rest_config).await?;
+
+    let mut rest = Command::new(&rkat_rest);
+    rest.current_dir(&project_dir)
+        .env("HOME", &project_dir)
+        .env("XDG_DATA_HOME", project_dir.join("data"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args([
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--instance",
+            "scenario-56-rest",
+        ]);
+    let rest_child = wait_for_rest_server(rest.spawn()?, port).await?;
+
+    let rest_worker_status = rest_mob_member_status(port, mob_id, "worker-1").await?;
+    assert_eq!(rest_worker_status["status"].as_str(), Some("active"));
+    assert_ne!(rest_worker_status["current_session_id"].as_str(), Some(""));
+
+    shutdown_child(rest_child).await?;
     Ok(())
 }

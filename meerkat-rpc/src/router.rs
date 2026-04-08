@@ -1,6 +1,7 @@
 //! Method router - dispatches JSON-RPC requests to the correct handler.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -311,6 +312,11 @@ impl MethodRouter {
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
         #[cfg(feature = "mob")]
+        let persistent_mob_root = config_store
+            .metadata()
+            .and_then(|metadata| metadata.resolved_paths)
+            .map(|paths| PathBuf::from(paths.root));
+        #[cfg(feature = "mob")]
         let mob_state = Arc::new({
             let llm_provider: Arc<
                 dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync,
@@ -336,6 +342,7 @@ impl MethodRouter {
                 runtime.session_service(),
                 Some(runtime_adapter.clone()),
             )
+            .with_persistent_storage_root(persistent_mob_root)
             .with_default_llm_client_provider(Some(llm_provider))
             .with_external_tools_provider(Some(tools_provider))
         });

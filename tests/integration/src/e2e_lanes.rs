@@ -1407,6 +1407,28 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        55 => Some(&Spec {
+            id: Some(55),
+            lane: Lane::Smoke,
+            title: "RPC+REST callback peer storm resume",
+            timeout_secs: 1800,
+            required_env: &[
+                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
+            ],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "e2e_scenario_55_rpc_rest_callback_peer_storm_resume",
+                features: &[],
+                all_features: false,
+            },
+        }),
         _ => None,
     }
 }

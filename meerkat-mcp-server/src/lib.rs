@@ -568,7 +568,13 @@ impl MeerkatMcpState {
             skill_runtime,
             #[cfg(feature = "mob")]
             mob_state: {
-                let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+                let state = Arc::new(
+                    meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                        service.clone(),
+                        Some(runtime_adapter.clone()),
+                    )
+                    .with_persistent_storage_root(Some(realm_paths.root.clone())),
+                );
                 *mob_tools_slot
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(

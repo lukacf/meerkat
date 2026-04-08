@@ -139,10 +139,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: integration-fast
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -181,10 +187,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-system
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

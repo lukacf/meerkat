@@ -1575,7 +1575,10 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             cwd: ".",
             env: &[],
             cargo_bin_env: &[],
-            pre_commands: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+                &["cargo", "build", "-p", "meerkat-rest", "--bin", "rkat-rest"],
+            ],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "system_shared_realm",
@@ -1594,7 +1597,10 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             cwd: ".",
             env: &[],
             cargo_bin_env: &[],
-            pre_commands: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+            ],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "system_shared_realm",
@@ -1613,7 +1619,10 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             cwd: ".",
             env: &[],
             cargo_bin_env: &[],
-            pre_commands: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
+                &["cargo", "build", "-p", "meerkat-rest", "--bin", "rkat-rest"],
+            ],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "system_shared_realm",

@@ -574,6 +574,23 @@ Surface availability:
 
 Semantic memory (`memory_search`) and compaction integrate through the same session/runtime pipeline.
 
+## Repo test lanes
+
+For repository development and regression triage, use the standardized Cargo
+lanes rather than ad hoc per-surface commands:
+
+- `./scripts/repo-cargo unit`
+- `./scripts/repo-cargo int`
+- `./scripts/repo-cargo e2e-fast`
+- `./scripts/repo-cargo e2e-system`
+- `./scripts/repo-cargo e2e-live`
+- `./scripts/repo-cargo e2e-smoke`
+
+Authoritative end-to-end lane ownership lives in
+`tests/integration/src/e2e_lanes.rs`. Python, TypeScript, and browser live
+scenarios may still shell out internally, but the supported top-level runner is
+the Rust-owned lane harness.
+
 ## Reference
 
 For complete method signatures and multi-surface examples, load:

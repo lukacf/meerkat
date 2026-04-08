@@ -502,7 +502,7 @@ async fn poll_members_until(
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat binary"]
+#[ignore = "lane:e2e-system"]
 async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -562,7 +562,7 @@ async fn e2e_smoke_mobpack_pack_inspect_validate() -> Result<(), Box<dyn std::er
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
 -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
@@ -613,7 +613,7 @@ async fn e2e_smoke_mobpack_deploy_unsigned_permissive_live()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_28_cli_mobpack_deploy_signed_strict_live()
 -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
@@ -682,7 +682,7 @@ async fn e2e_scenario_28_cli_mobpack_deploy_signed_strict_live()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: wasm surface smoke"]
+#[ignore = "lane:e2e-system"]
 async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -741,7 +741,7 @@ async fn e2e_smoke_wasm_surface_gate() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[tokio::test]
-#[ignore = "integration-real: wasm forbidden-capability negative smoke"]
+#[ignore = "lane:e2e-system"]
 async fn e2e_smoke_wasm_forbidden_capability_rejected() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -808,9 +808,9 @@ capabilities = ["shell"]
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat binary with mob rpc surface"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error::Error>> {
-    if skip_if_no_prereqs() {
+    if skip_if_no_api_prereqs() {
         return Ok(());
     }
 
@@ -1035,7 +1035,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
             })
         })
         .ok_or("respawned worker session_id missing")?;
-    let sent_after_respawn = rpc_call(
+    let send_after_respawn_err = rpc_call(
         &mut surface,
         11,
         "mob/send",
@@ -1046,30 +1046,19 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         }),
         120,
     )
-    .await?;
-    assert_eq!(sent_after_respawn["session_id"], respawned_session_id);
-    assert_eq!(sent_after_respawn["member_id"], "worker-1");
-
-    let read_after_respawn = rpc_call(
-        &mut surface,
-        12,
-        "session/read",
-        json!({ "session_id": respawned_session_id }),
-        30,
-    )
-    .await?;
-    let respawn_text = read_after_respawn["last_assistant_text"]
-        .as_str()
-        .ok_or("session/read missing last_assistant_text after respawn")?
-        .to_uppercase();
+    .await
+    .expect_err("mob/send should stay unavailable after respawn");
     assert!(
-        respawn_text.contains("RESPAWN_PROBE_29"),
-        "respawned worker should answer after respawn: {read_after_respawn}"
+        send_after_respawn_err
+            .to_string()
+            .contains("Method not found"),
+        "removed mob/send route should stay unavailable after respawn: {send_after_respawn_err}"
     );
+    let _ = respawned_session_id;
 
     let stopped = rpc_call(
         &mut surface,
-        13,
+        12,
         "mob/lifecycle",
         json!({"mob_id": mob_id, "action":"stop"}),
         15,
@@ -1147,7 +1136,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: live API mob flow"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_30_cli_mob_rpc_flow_probe() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -1315,7 +1304,7 @@ async fn e2e_scenario_30_cli_mob_rpc_flow_probe() -> Result<(), Box<dyn std::err
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: live API mob member turn"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());

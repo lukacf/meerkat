@@ -1,16 +1,17 @@
 # Live Smoke Matrix
 
-This directory owns the manual, live end-to-end smoke matrix for Meerkat.
+This directory owns the live smoke assets and browser fixtures for Meerkat.
 
-These scenarios are intentionally:
+The authoritative numbered live/smoke matrix now lives in Rust metadata under
+`tests/integration/src/e2e_lanes.rs`, and the supported top-level runners are
+Cargo lane commands instead of a standalone Python dispatcher.
+
+These scenarios remain intentionally:
 
 - live-provider backed
 - out of CI
 - cross-surface
 - numbered and tracked as a single matrix
-
-The canonical scenario registry lives in [`scenarios.toml`](./scenarios.toml).
-Run scenarios through [`scripts/live_smoke/run`](/Users/luka/src/meerkat/scripts/live_smoke/run).
 
 ## Prereqs
 
@@ -25,38 +26,48 @@ Typical full-matrix prereqs:
 
 ## Common Commands
 
-List the matrix:
+List the live lane tests:
 
 ```bash
-scripts/live_smoke/run --list
+cargo test -p meerkat-integration-tests --test e2e_live_lane -- --ignored --list
 ```
 
-Run all non-browser scenarios:
+Run the targeted live-provider lane:
 
 ```bash
-scripts/live_smoke/run
+cargo e2e-live
 ```
 
-Run all scenarios including browser/WASM:
+Run the compound live smoke lane:
 
 ```bash
-scripts/live_smoke/run --browser
+cargo e2e-smoke
 ```
 
-Run one surface:
+Inside the repo, prefer the wrapped form so target-dir isolation and cache
+settings match CI:
 
 ```bash
-scripts/live_smoke/run --surface rpc
+./scripts/repo-cargo e2e-live
+./scripts/repo-cargo e2e-smoke
 ```
 
-Run a range:
+Run one scenario by cargo test filter:
 
 ```bash
-scripts/live_smoke/run --from 31 --to 36
+cargo nextest run -p meerkat-integration-tests --test e2e_live_lane e2e_live_s15_rpc_full_lifecycle_and_recall --run-ignored ignored-only --test-threads=1
 ```
 
-Re-run only the last failures:
+Run one smoke suite:
 
 ```bash
-scripts/live_smoke/run --resume-failed
+cargo nextest run -p meerkat-integration-tests --test e2e_smoke_lane e2e_smoke_mob_flow_runtime_suite --run-ignored ignored-only --test-threads=1
 ```
+
+Browser fixtures under `tests/live_smoke/browser` are still used by the WASM
+smoke scenarios; Cargo now invokes them through the Rust-owned lane harness.
+
+The Rust harness also bootstraps Python, TypeScript, and browser prerequisites
+for the numbered matrix scenarios. Treat direct `pytest`, `node --test`, or
+`npm run smoke` invocations as surface-level debugging tools rather than the
+canonical top-level test entrypoints.

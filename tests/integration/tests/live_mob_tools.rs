@@ -1,7 +1,7 @@
 #![cfg(all(feature = "integration-real-tests", not(target_arch = "wasm32")))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
-//! E2E smoke tests for the agent mob tool surface (#191).
+//! Live integration tests for the agent mob tool surface (#191).
 //!
 //! These tests exercise the actual tool dispatch path through RPC with real
 //! LLM calls. Every assertion uses authoritative state (MobMcpState, session
@@ -9,7 +9,7 @@
 //!
 //! Run with:
 //!   ANTHROPIC_API_KEY=... cargo nextest run -p meerkat-integration-tests \
-//!     --test e2e_agent_mob_tools --run-ignored ignored-only --test-threads=1
+//!     --test live_mob_tools --run-ignored ignored-only --test-threads=1
 
 use meerkat::{AgentFactory, Config};
 use meerkat_core::service::MobToolsFactory;
@@ -133,8 +133,12 @@ async fn make_smoke_rpc_stack(
         paths.runtime_root.join("config_state.json"),
     )));
 
-    // Create mob state from the runtime's session service.
-    let mob_state = Arc::new(MobMcpState::new(runtime.session_service()));
+    // Create mob state from the runtime's session service, preserving the
+    // runtime adapter so delegate-spawned AutonomousHost helpers can boot.
+    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
+        runtime.session_service(),
+        Some(runtime.runtime_adapter()),
+    ));
 
     // Wire mob tools factory into the builder inside the session service.
     // This uses the builder_mob_tools_slot (Arc<RwLock>) to write through
@@ -217,6 +221,33 @@ async fn rpc_archive(router: &MethodRouter, session_id: &SessionId) {
     assert_eq!(result["archived"], true);
 }
 
+async fn session_history_json(
+    router: &MethodRouter,
+    session_id: &SessionId,
+    limit: usize,
+) -> Value {
+    let read_resp = router
+        .dispatch(rpc_request(
+            "session/history",
+            json!({
+                "session_id": session_id.to_string(),
+                "limit": limit,
+            }),
+        ))
+        .await
+        .unwrap();
+    rpc_result(&read_resp)
+}
+
+async fn session_history_text(
+    router: &MethodRouter,
+    session_id: &SessionId,
+    limit: usize,
+) -> String {
+    serde_json::to_string(&session_history_json(router, session_id, limit).await)
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Guard macro for skipping tests without API keys
 // ---------------------------------------------------------------------------
@@ -236,7 +267,7 @@ macro_rules! skip_if_no_key {
 
 /// 1. Force real tool calls to prove delegate and mob_list are dispatchable.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_agent_tools_surface_present() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -244,6 +275,7 @@ async fn e2e_agent_tools_surface_present() {
     let temp = TempDir::new().unwrap();
     let paths = SmokePaths::new(temp.path());
     let (router, mob_state, _notif_rx) = make_smoke_rpc_stack(&paths).await;
+    let router = Arc::new(router);
 
     let session_id = rpc_create_session(
         &router,
@@ -272,7 +304,7 @@ async fn e2e_agent_tools_surface_present() {
 
 /// 2. Delegate creates implicit mob, archive cleans it up.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_delegate_creates_implicit_mob() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -323,7 +355,7 @@ async fn e2e_delegate_creates_implicit_mob() {
 
 /// 3. Second delegate reuses the same implicit mob.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -387,7 +419,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
 
 /// 5. Full explicit mob lifecycle: create → spawn → check → retire → destroy.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -521,7 +553,7 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
 
 /// 6. Session B cannot see or mutate session A's mobs.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_agent_cannot_see_other_sessions_mobs() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -605,7 +637,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
 
 /// 7. Archive cleans up both implicit and explicit session-owned mobs.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -676,7 +708,7 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
 
 /// 10. Error contracts: implicit mob destroy rejected, bad member, spoofed owner.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_tool_error_contracts() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -766,7 +798,7 @@ async fn e2e_tool_error_contracts() {
 /// We exercise it directly since RPC turn/start hot-swaps the LLM client
 /// without rebuilding the agent (build_mob_tools only runs at create time).
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_resume_model_override_recreates_implicit_mob() {
     let model_a = smoke_model();
     skip_if_no_key!(model_a);
@@ -890,7 +922,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
 /// must receive the helper's message in its session history — roster wired_to
 /// is not proof of delivery.
 #[tokio::test]
-#[ignore = "e2e_: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_delegate_bidirectional_comms() {
     let model = smoke_model();
     skip_if_no_key!(model);
@@ -898,24 +930,24 @@ async fn e2e_delegate_bidirectional_comms() {
     let temp = TempDir::new().unwrap();
     let paths = SmokePaths::new(temp.path());
     let (router, mob_state, _notif_rx) = make_smoke_rpc_stack(&paths).await;
+    let router = Arc::new(router);
 
     let nonce = format!("COMMS_PING_{}", uuid::Uuid::new_v4().simple());
 
-    // Create session with keep_alive + comms_name.
-    // keep_alive is required for the comms drain to run (background inbox consumption).
-    // Without it, the parent never processes incoming messages.
     let resp = router
         .dispatch(rpc_request(
             "session/create",
             json!({
                 "model": model,
                 "prompt": format!(
-                    "Call the delegate tool exactly once with task: \
-                     'Use the send tool to send a message with body \"{nonce}\" \
-                     to your parent peer. Then reply with the word SENT.' \
+                    "Call the delegate tool exactly once with task \
+                     'Call the send tool exactly once with kind peer_message, \
+                     to e2e-comms-parent, and body exactly {nonce}. \
+                     After the send succeeds, reply with SENT.' \
                      and member_id 'comms-helper'. \
                      After delegate returns, reply with DELEGATED."
                 ),
+                "initial_turn": "deferred",
                 "enable_mob": true,
                 "enable_builtins": true,
                 "keep_alive": true,
@@ -926,9 +958,22 @@ async fn e2e_delegate_bidirectional_comms() {
         .await
         .unwrap();
     let result = rpc_result(&resp);
-    // keep_alive: session/create returns immediately (turn spawned in background)
     let session_id = SessionId::parse(result["session_id"].as_str().expect("session_id"))
         .expect("parse session_id");
+
+    let router_for_turn = Arc::clone(&router);
+    let session_id_for_turn = session_id.clone();
+    let mut turn_task = tokio::spawn(async move {
+        router_for_turn
+            .dispatch(rpc_request(
+                "turn/start",
+                json!({
+                    "session_id": session_id_for_turn.to_string(),
+                    "prompt": "Execute the pending instructions now. Do not add any extra work.",
+                }),
+            ))
+            .await
+    });
 
     // Wait for the implicit mob to be created (delegate was called).
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -938,7 +983,18 @@ async fn e2e_delegate_bidirectional_comms() {
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for implicit mob creation via delegate"
+            "timed out waiting for implicit mob creation via delegate; turn_task={}; history={}",
+            if turn_task.is_finished() {
+                match tokio::time::timeout(Duration::from_secs(1), &mut turn_task).await {
+                    Ok(Ok(Some(resp))) => format!("finished:{resp:?}"),
+                    Ok(Ok(None)) => "finished:none".to_string(),
+                    Ok(Err(join_err)) => format!("join_error:{join_err}"),
+                    Err(_) => "finished:timed_out_join".to_string(),
+                }
+            } else {
+                "running".to_string()
+            },
+            session_history_text(router.as_ref(), &session_id, 50).await
         );
         sleep(Duration::from_millis(500)).await;
     };
@@ -953,7 +1009,24 @@ async fn e2e_delegate_bidirectional_comms() {
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for comms-helper to appear in roster"
+            "timed out waiting for comms-helper to appear in roster; turn_task={}; roster={:?}; history={}",
+            if turn_task.is_finished() {
+                match tokio::time::timeout(Duration::from_secs(1), &mut turn_task).await {
+                    Ok(Ok(Some(resp))) => format!("finished:{resp:?}"),
+                    Ok(Ok(None)) => "finished:none".to_string(),
+                    Ok(Err(join_err)) => format!("join_error:{join_err}"),
+                    Err(_) => "finished:timed_out_join".to_string(),
+                }
+            } else {
+                "running".to_string()
+            },
+            handle
+                .roster()
+                .await
+                .list()
+                .map(|entry| entry.meerkat_id.to_string())
+                .collect::<Vec<_>>(),
+            session_history_text(router.as_ref(), &session_id, 100).await
         );
         sleep(Duration::from_millis(500)).await;
     }
@@ -983,22 +1056,9 @@ async fn e2e_delegate_bidirectional_comms() {
     // helper's message.
     let deadline = Instant::now() + Duration::from_secs(30);
     let found = loop {
-        let read_resp = router
-            .dispatch(rpc_request(
-                "session/history",
-                json!({
-                    "session_id": session_id.to_string(),
-                    "limit": 100,
-                }),
-            ))
-            .await
-            .unwrap();
-        if read_resp.error.is_none() {
-            let history = rpc_result(&read_resp);
-            let history_text = serde_json::to_string(&history).unwrap_or_default();
-            if history_text.contains(&nonce) {
-                break true;
-            }
+        let history_text = session_history_text(router.as_ref(), &session_id, 100).await;
+        if history_text.contains(&nonce) {
+            break true;
         }
         if Instant::now() >= deadline {
             break false;
@@ -1010,7 +1070,8 @@ async fn e2e_delegate_bidirectional_comms() {
         found,
         "parent session history should contain the nonce '{nonce}' sent by the helper. \
          This proves bidirectional comms: helper→parent message was delivered and \
-         injected into the parent's conversation context."
+         injected into the parent's conversation context. history={}",
+        session_history_text(router.as_ref(), &session_id, 100).await
     );
 
     // Clean up: interrupt the keep-alive session
@@ -1020,4 +1081,6 @@ async fn e2e_delegate_bidirectional_comms() {
             json!({ "session_id": session_id.to_string() }),
         ))
         .await;
+
+    turn_task.abort();
 }

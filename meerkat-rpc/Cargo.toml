@@ -16,6 +16,14 @@ categories.workspace = true
 name = "rkat-rpc"
 path = "src/main.rs"
 
+[[test]]
+name = "live_smoke_rpc"
+path = "tests/live_smoke_rpc.rs"
+
+[[test]]
+name = "live_rpc_regression"
+path = "tests/live_rpc_regression.rs"
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-models = { workspace = true }

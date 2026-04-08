@@ -27,11 +27,24 @@ uuid = { workspace = true, features = ["v4"] }
 [features]
 integration-real-tests = []
 
+[[test]]
+name = "live_mob_tools"
+path = "tests/live_mob_tools.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "smoke_shared_realm"
+path = "tests/smoke_shared_realm.rs"
+
+[[test]]
+name = "system_shared_realm"
+path = "tests/system_shared_realm.rs"
+
 [package.metadata.cargo-machete]
 ignored = [
     "tempfile",  # dev-dependency used in tests
-    "meerkat-mob-mcp",  # used in integration tests (e2e_agent_mob_tools)
-    "meerkat-rpc",  # used in integration tests (e2e_agent_mob_tools)
+    "meerkat-mob-mcp",  # used in integration tests (live_mob_tools)
+    "meerkat-rpc",  # used in integration tests (live_mob_tools)
     "meerkat-runtime",  # transitive, needed for RuntimeSessionAdapter in tests
     "meerkat-session",  # transitive, needed for PersistentSessionService in tests
     "serde",  # used in integration tests

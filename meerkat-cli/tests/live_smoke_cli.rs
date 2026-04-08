@@ -107,7 +107,7 @@ async fn write_smoke_config(
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_26_cli_run_resume_persistence() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -226,7 +226,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_27_cli_shell_and_structured_output() -> Result<(), Box<dyn std::error::Error>>
 {
     if skip_if_no_api_prereqs() {
@@ -350,7 +350,7 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat binary"]
+#[ignore = "lane:e2e-system"]
 async fn e2e_scenario_28_cli_capabilities_and_config() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -558,7 +558,7 @@ async fn inner_e2e_cli_capabilities_and_config() -> Result<(), Box<dyn std::erro
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -657,7 +657,7 @@ async fn inner_e2e_cli_structured_output() -> Result<(), Box<dyn std::error::Err
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: live API + shell — background job notification (REQ-001)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_001_background_job_active_turn_completion() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_api_prereqs() {
         return Ok(());
@@ -758,7 +758,7 @@ async fn inner_e2e_001_bg_active_turn() -> Result<(), Box<dyn std::error::Error>
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "e2e: live API + shell + keep-alive — background job idle wake (REQ-002)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_002_background_job_idle_keepalive_completion() -> Result<(), Box<dyn std::error::Error>>
 {
     if skip_if_no_api_prereqs() {

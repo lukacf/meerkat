@@ -7,7 +7,7 @@
 //! respawn, and comms collaboration through the public mob/runtime surfaces.
 //!
 //! Run with:
-//!   cargo test -p meerkat-mob --test e2e_smoke --features integration-real-tests -- --ignored --test-threads=1
+//!   cargo test -p meerkat-mob --test smoke_mob_resume --features integration-real-tests -- --ignored --test-threads=1
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder, SessionHistoryQuery, SessionStore};
 use meerkat_core::types::HandlingMode;
@@ -249,7 +249,7 @@ async fn send_and_wait(
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
     let model = smoke_model();
     if !has_key_for_smoke_model(&model) {

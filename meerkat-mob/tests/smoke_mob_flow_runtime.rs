@@ -7,7 +7,7 @@
 //! and focus on frame-root flows with loops, sibling parallelism, and fanout.
 //!
 //! Run with:
-//!   cargo test -p meerkat-mob --test e2e_flow_runtime \
+//!   cargo test -p meerkat-mob --test smoke_mob_flow_runtime \
 //!     --features integration-real-tests -- --ignored --test-threads=1 --nocapture
 
 use indexmap::IndexMap;
@@ -2608,7 +2608,7 @@ async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime fanout + loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_fanout_parallel_review_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_fanout_parallel_review_loop_smoke",
@@ -2697,7 +2697,7 @@ async fn e2e_flow_runtime_fanout_parallel_review_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime dual-loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_dual_sibling_loops_join_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_dual_sibling_loops_join_smoke",
@@ -2772,7 +2772,7 @@ async fn e2e_flow_runtime_dual_sibling_loops_join_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime branch + loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_branch_then_review_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_branch_then_review_loop_smoke",
@@ -2799,7 +2799,7 @@ async fn e2e_flow_runtime_branch_then_review_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime parallel loop-body smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_parallel_body_siblings_join_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_parallel_body_siblings_join_smoke",
@@ -2832,7 +2832,7 @@ async fn e2e_flow_runtime_parallel_body_siblings_join_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime nested loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_nested_outer_inner_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_nested_outer_inner_loop_smoke",
@@ -2858,7 +2858,7 @@ async fn e2e_flow_runtime_nested_outer_inner_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime fanin smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_fanin_after_parallel_loops_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_fanin_after_parallel_loops_smoke",
@@ -2893,7 +2893,7 @@ async fn e2e_flow_runtime_fanin_after_parallel_loops_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime conditional skip smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_conditional_skip_inside_body_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_conditional_skip_inside_body_loop_smoke",
@@ -2917,7 +2917,7 @@ async fn e2e_flow_runtime_conditional_skip_inside_body_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime three-way branch smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_three_way_branch_loop_audit_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_three_way_branch_loop_audit_smoke",
@@ -2948,7 +2948,7 @@ async fn e2e_flow_runtime_three_way_branch_loop_audit_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime sequential loop-chain smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_sequential_loop_chain_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_sequential_loop_chain_smoke",
@@ -2974,7 +2974,7 @@ async fn e2e_flow_runtime_sequential_loop_chain_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime three-sibling-loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_three_sibling_loops_join_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_three_sibling_loops_join_smoke",
@@ -3001,7 +3001,7 @@ async fn e2e_flow_runtime_three_sibling_loops_join_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime outer-branch-inner-loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_outer_branch_inner_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_outer_branch_inner_loop_smoke",
@@ -3031,7 +3031,7 @@ async fn e2e_flow_runtime_outer_branch_inner_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime maximal matrix smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_maximal_matrix_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_maximal_matrix_smoke",
@@ -3077,7 +3077,7 @@ async fn e2e_flow_runtime_maximal_matrix_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime persisted branch-review smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_persisted_branch_parallel_review_loop_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_persisted_branch_parallel_review_loop_smoke",
@@ -3113,7 +3113,7 @@ async fn e2e_flow_runtime_persisted_branch_parallel_review_loop_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime persisted dual-loop fanin smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_persisted_dual_loops_fanin_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_persisted_dual_loops_fanin_smoke",
@@ -3147,7 +3147,7 @@ async fn e2e_flow_runtime_persisted_dual_loops_fanin_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime persisted sequential-chain smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_persisted_sequential_loop_chain_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_persisted_sequential_loop_chain_smoke",
@@ -3182,7 +3182,7 @@ async fn e2e_flow_runtime_persisted_sequential_loop_chain_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime persisted three-loop smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_persisted_three_sibling_loops_join_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_persisted_three_sibling_loops_join_smoke",
@@ -3209,7 +3209,7 @@ async fn e2e_flow_runtime_persisted_three_sibling_loops_join_smoke() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API (flow runtime persisted branch-dual-loop audit smoke)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_persisted_branch_dual_loops_audit_smoke() {
     let Some(run) = run_smoke_flow_or_skip(
         "e2e_flow_runtime_persisted_branch_dual_loops_audit_smoke",

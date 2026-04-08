@@ -334,7 +334,7 @@ async fn assert_default_sqlite_realm(
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat-rpc/rkat-rest binaries"]
+#[ignore = "lane:e2e-system"]
 async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;
@@ -482,7 +482,7 @@ async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat-rpc/rkat binaries"]
+#[ignore = "lane:e2e-system"]
 async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;
@@ -581,7 +581,7 @@ async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat-rest/rkat binaries"]
+#[ignore = "lane:e2e-system"]
 async fn cli_rest_cli_default_sqlite_shared_realm_roundtrip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = sqlite_shared_realm_test_lock().lock().await;

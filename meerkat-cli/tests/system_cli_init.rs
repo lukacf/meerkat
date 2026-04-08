@@ -38,7 +38,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat binary"]
+#[ignore = "lane:e2e-system"]
 async fn integration_real_rkat_init_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 

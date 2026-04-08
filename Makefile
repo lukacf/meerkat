@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -42,15 +42,33 @@ test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
 	$(CARGO) nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
 
-# Integration-real tests (ignored by default)
-test-int-real:
-	@echo "$(YELLOW)Running integration-real tests (ignored by default)...$(NC)"
-	$(CARGO) nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
+# Deterministic end-to-end lane (canonical integration harness)
+e2e-fast:
+	@echo "$(GREEN)Running e2e-fast lane...$(NC)"
+	$(CARGO) e2e-fast
 
-# End-to-end tests (ignored by default)
+# Real local resources only (binaries, sockets, filesystems; no live providers)
+e2e-system:
+	@echo "$(GREEN)Running e2e-system lane...$(NC)"
+	$(CARGO) e2e-system
+
+# Targeted live-provider boundary checks
+e2e-live:
+	@echo "$(YELLOW)Running e2e-live lane (ignored by default)...$(NC)"
+	$(CARGO) e2e-live
+
+# Compound live-provider smoke scenarios
+e2e-smoke:
+	@echo "$(YELLOW)Running e2e-smoke lane (ignored by default)...$(NC)"
+	$(CARGO) e2e-smoke
+
+# Temporary compatibility shims during lane migration.
+test-int-real: e2e-system
+
 test-e2e:
-	@echo "$(YELLOW)Running e2e tests (ignored by default)...$(NC)"
-	$(CARGO) nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
+	@echo "$(YELLOW)Running legacy e2e shim (e2e-live + e2e-smoke)...$(NC)"
+	@$(MAKE) e2e-live
+	@$(MAKE) e2e-smoke
 
 # Full test suite (for CI)
 # Includes all tests with all features
@@ -150,13 +168,13 @@ audit-alt:
 	@echo "$(GREEN)Running cargo-audit...$(NC)"
 	$(CARGO) audit
 
-# Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+# Full CI pipeline - runs the required deterministic lanes plus build policy checks
+ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-all test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -395,8 +413,12 @@ help:
 	@echo "  $(GREEN)test$(NC)          - Run fast tests (unit + integration-fast)"
 	@echo "  $(GREEN)test-unit$(NC)     - Run unit tests only"
 	@echo "  $(GREEN)test-int$(NC)      - Run integration-fast tests only"
-	@echo "  $(GREEN)test-int-real$(NC) - Run integration-real tests (ignored)"
-	@echo "  $(GREEN)test-e2e$(NC)      - Run e2e tests (ignored)"
+	@echo "  $(GREEN)e2e-fast$(NC)      - Run deterministic end-to-end lane"
+	@echo "  $(GREEN)e2e-system$(NC)    - Run real-binary / real-local-resource lane"
+	@echo "  $(GREEN)e2e-live$(NC)      - Run targeted live-provider lane (ignored)"
+	@echo "  $(GREEN)e2e-smoke$(NC)     - Run kitchen-sink live smoke lane (ignored)"
+	@echo "  $(GREEN)test-int-real$(NC) - Legacy alias for e2e-system"
+	@echo "  $(GREEN)test-e2e$(NC)      - Legacy alias for e2e-live + e2e-smoke"
 	@echo "  $(GREEN)test-all$(NC)      - Run full test suite (CI)"
 	@echo "  $(GREEN)test-surface-modularity$(NC) - Minimal surface build + binary smoke checks"
 	@echo "  $(GREEN)lint$(NC)          - Run clippy linter"

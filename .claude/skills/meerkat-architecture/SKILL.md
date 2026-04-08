@@ -389,6 +389,20 @@ Use this as the first regression checklist when touching post-`v0.5.0` architect
 18. **Operator authority is injected, not ambient** — mob support being enabled must not surface operator tools without runtime context.
 19. **Runtime owns detached wake** — background-op completion wakeups must flow through `DetachedWakeState` + `ContinuationInput`, not surface code.
 
+## Test Harness Ownership
+
+Repository-wide test lanes are part of the architecture, not just project
+convention:
+
+- `unit` and `int` are the deterministic inner loops
+- `e2e-fast` and `e2e-system` are the required deterministic/system lanes
+- `e2e-live` and `e2e-smoke` are the live-provider lanes
+
+The authoritative end-to-end lane catalog lives in
+`tests/integration/src/e2e_lanes.rs`. If a change affects how a scenario is
+classified, filtered, or bootstrapped, update the lane harness first rather
+than reintroducing script-owned truth.
+
 ## Key Files
 
 - `meerkat-core/src/agent.rs` — agent loop state machine

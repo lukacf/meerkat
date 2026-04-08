@@ -979,15 +979,9 @@ mod tests {
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "SubmitTypedPeerInputDelivered")
+                .any(|transition| transition.name == "EnqueueActionableMessage")
         );
-        assert!(
-            schema
-                .state
-                .terminal_phases
-                .iter()
-                .any(|phase| phase == "Delivered")
-        );
+        assert!(schema.state.terminal_phases.is_empty());
         assert_eq!(schema.validate(), Ok(()));
     }
 

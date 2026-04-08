@@ -27,7 +27,7 @@ mod llm_normalization {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_anthropic_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]) else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -94,7 +94,7 @@ mod llm_normalization {
 
     #[cfg(feature = "openai")]
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_openai_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]) else {
             eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -132,7 +132,7 @@ mod llm_normalization {
 
     #[cfg(feature = "gemini")]
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_gemini_normalizes_to_llm_event() {
         let Some(api_key) = first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
         else {
@@ -902,7 +902,7 @@ mod mcp_protocol {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: requires built mcp-test-server binary"]
+    #[ignore = "lane:e2e-system"]
     async fn integration_real_mcp_tool_call_roundtrip() {
         // Test with real MCP test server if available
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
@@ -1116,7 +1116,7 @@ mod external_source_lifecycle {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    #[ignore = "integration-real: spawns stdio child process and TCP listener"]
+    #[ignore = "lane:e2e-system"]
     async fn e2e_external_source_lifecycle_stdio_and_http_like_transports() {
         let stdio_script = r#"
 read line

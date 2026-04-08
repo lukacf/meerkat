@@ -15,11 +15,11 @@ repos:
         types: [rust]
         pass_filenames: false
 
-  # Manual: changed-crate validation when you want a local preflight.
+  # Manual: changed-crate deterministic validation when you want a local preflight.
   - repo: local
     hooks:
       - id: cargo-check-changed
-        name: clippy + unit tests (changed crates)
+        name: clippy + deterministic tests (changed crates)
         entry: scripts/test-changed-crates.sh
         language: script
         types: [rust]
@@ -83,11 +83,11 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
-  # On push: unit tests workspace-wide
+  # On push: deterministic repo gate
   - repo: local
     hooks:
       - id: cargo-test
-        name: workspace unit gate
+        name: workspace deterministic gate
         entry: scripts/pre-push-unit.sh
         language: system
         types: [rust]

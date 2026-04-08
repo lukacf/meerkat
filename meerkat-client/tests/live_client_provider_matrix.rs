@@ -1,6 +1,6 @@
 #![cfg(feature = "integration-real-tests")]
 
-//! E2E tests for LLM clients.
+//! Live integration tests for LLM clients.
 //!
 //! Verifies stream normalization and error handling for all providers.
 
@@ -120,7 +120,7 @@ fn gemini_api_key() -> Option<String> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = anthropic_api_key() else {
         eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -153,7 +153,7 @@ async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = anthropic_api_key() else {
         eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -414,7 +414,7 @@ async fn test_anthropic_stream_end_without_done_yields_success()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = openai_api_key() else {
         eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -447,7 +447,7 @@ async fn e2e_openai_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = openai_api_key() else {
         eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -493,7 +493,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = gemini_api_key() else {
         eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
@@ -526,7 +526,7 @@ async fn e2e_gemini_stream() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = gemini_api_key() else {
         eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
@@ -707,7 +707,7 @@ async fn collect_stream_text(
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = anthropic_api_key() else {
         eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -736,7 +736,7 @@ async fn e2e_anthropic_structured_output() -> Result<(), Box<dyn std::error::Err
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = openai_api_key() else {
         eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -765,7 +765,7 @@ async fn e2e_openai_structured_output() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = gemini_api_key() else {
         eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
@@ -794,7 +794,7 @@ async fn e2e_gemini_structured_output() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_openai_structured_output_strict_nested_schema()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = openai_api_key() else {
@@ -831,7 +831,7 @@ async fn e2e_openai_structured_output_strict_nested_schema()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_anthropic_structured_output_strict_nested_schema()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = anthropic_api_key() else {
@@ -868,7 +868,7 @@ async fn e2e_anthropic_structured_output_strict_nested_schema()
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_gemini_structured_output_rich_schema_keywords()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(api_key) = gemini_api_key() else {

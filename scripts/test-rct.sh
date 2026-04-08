@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run the fast test suite for Meerkat (unit + integration-fast).
-# Slow suites (integration-real, e2e) are ignored by default.
+# Run the fast deterministic suite for Meerkat (unit + integration-fast).
+# The e2e lanes live behind dedicated cargo aliases.
 
 set -e
 
@@ -22,5 +22,6 @@ echo "=== Fast Tests Complete ==="
 
 echo ""
 echo "Optional slow suites:"
-echo "  $CARGO test --workspace integration_real -- --ignored --test-threads=1"
-echo "  $CARGO test --workspace e2e_ -- --ignored --test-threads=1"
+echo "  $CARGO e2e-system"
+echo "  $CARGO e2e-live"
+echo "  $CARGO e2e-smoke"

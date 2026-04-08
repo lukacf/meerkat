@@ -66,7 +66,7 @@ Config resolution follows a strict precedence: `Config::default()` → file load
 
 ### Testing is a design constraint, not an afterthought
 
-The three-tier test suite (unit/fast-integration in seconds, integration-real with spawned processes, e2e with live APIs) exists because the architecture makes it possible. Core has no I/O, so unit tests need no mocks. Every trait has a test implementation. The test tiers are named, aliased (`cargo rct`, `cargo unit`, `cargo int`), and enforced by pre-commit hooks.
+The named test lanes exist because the architecture makes them possible. Core has no I/O, so unit tests need no mocks. Every trait has a test implementation. The repo separates `unit`, `integration-fast`, deterministic `e2e-fast`, real-local-resource `e2e-system`, targeted live-provider `e2e-live`, and compound live-provider `e2e-smoke` coverage, with Cargo aliases and hooks aligned to those lanes.
 
 ---
 

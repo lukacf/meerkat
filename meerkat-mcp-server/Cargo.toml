@@ -16,6 +16,10 @@ categories.workspace = true
 name = "rkat-mcp"
 path = "src/main.rs"
 
+[[test]]
+name = "live_mcp_matrix"
+path = "tests/live_mcp_matrix.rs"
+
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-mcp = { workspace = true }

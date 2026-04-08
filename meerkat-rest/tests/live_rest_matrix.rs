@@ -292,7 +292,7 @@ async fn read_http_response_head(socket: &mut TcpStream) -> Vec<u8> {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_21_rest_runtime_accept_input_roundtrip() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 21: missing ANTHROPIC_API_KEY");
@@ -374,7 +374,7 @@ async fn e2e_scenario_21_rest_runtime_accept_input_roundtrip() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: runtime control plane"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
@@ -561,7 +561,7 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_23_rest_sse_events_follow_continue_turn() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 23: missing ANTHROPIC_API_KEY");
@@ -674,7 +674,7 @@ async fn e2e_scenario_23_rest_sse_events_follow_continue_turn() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: diagnostics endpoints"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_24_rest_config_capabilities_health_and_skills() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 24: missing ANTHROPIC_API_KEY");
@@ -720,7 +720,7 @@ async fn e2e_scenario_24_rest_config_capabilities_health_and_skills() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_25_rest_reload_and_resume_on_same_realm_root() {
     let Some(client) = live_client() else {
         eprintln!("Skipping scenario 25: missing ANTHROPIC_API_KEY");

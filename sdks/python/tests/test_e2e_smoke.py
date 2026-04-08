@@ -50,8 +50,8 @@ def persistent_realm_kwargs(tmp_path: Path) -> dict[str, str]:
 
 
 def include_scenario(scenario_id: int) -> bool:
-    selected = os.environ.get("LIVE_SMOKE_SCENARIO")
-    return selected in (None, "", str(scenario_id))
+    del scenario_id
+    return True
 
 
 async def collect_stream_text(stream) -> tuple[str, object]:

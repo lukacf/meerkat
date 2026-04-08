@@ -70,6 +70,21 @@ integration-real-tests = []
 [package.metadata.cargo-machete]
 ignored = ["async-stream"]  # proc macro (stream!)
 
+[[test]]
+name = "smoke_mob_resume"
+path = "tests/smoke_mob_resume.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "smoke_mob_flow_runtime"
+path = "tests/smoke_mob_flow_runtime.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "smoke_mob_pictionary"
+path = "tests/smoke_mob_pictionary.rs"
+required-features = ["integration-real-tests"]
+
 [[example]]
 name = "017-mob-coding-swarm"
 path = "../examples/017-mob-coding-swarm-rs/main.rs"

@@ -68,8 +68,8 @@ function openaiModel() {
 }
 
 function includeScenario(id) {
-  const selected = process.env.LIVE_SMOKE_SCENARIO;
-  return !selected || selected === String(id);
+  void id;
+  return true;
 }
 
 async function waitFor(fetch, predicate, { timeoutMs = 60000, intervalMs = 200 } = {}) {

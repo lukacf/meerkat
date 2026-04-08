@@ -1,4 +1,4 @@
-//! E2E smoke tests for the RPC server (scenarios 15-17).
+//! Live integration and smoke tests for the RPC server.
 //!
 //! Reuses the same duplex-stream pattern from `integration_server.rs`.
 //! All scenarios require a live Anthropic API key and are `#[ignore]`.
@@ -129,7 +129,7 @@ async fn read_response_with_notifications(
 /// session/read -> session/list (verify present) -> session/archive ->
 /// session/list (verify gone).
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_15_full_rpc_conversation_flow() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -325,7 +325,7 @@ async fn e2e_scenario_15_full_rpc_conversation_flow() {
 /// Supplemental: degraded/unhealthy diagnostics are projected consistently
 /// across RPC/REST wire payloads plus MCP/CLI JSON envelopes.
 #[tokio::test]
-#[ignore = "integration-real: diagnostics projection contract"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
     let run = meerkat_core::RunResult {
         text: "ok".to_string(),
@@ -408,7 +408,7 @@ async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
 /// Exercises: initialization, tool calling, multi-turn, structured output,
 /// session CRUD, capabilities, config — all through a single RPC connection.
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_16_kitchen_sink() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -807,7 +807,7 @@ async fn e2e_scenario_16_kitchen_sink() {
 /// turn/start follow-up -> collect more events. Verify notification structure
 /// and context maintained across turns.
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_17_multi_turn_event_streaming() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -975,7 +975,7 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
 ///   tools/register → SessionRuntime → MethodRouter → MobMcpState → MobBuilder
 ///   → MobActor → compose_external_tools_for_profile → agent session.
 #[tokio::test]
-#[ignore = "e2e: live API + mob callback tools"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_21_mob_callback_tools() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -1047,7 +1047,6 @@ async fn e2e_scenario_21_mob_callback_tools() {
                     "profiles": {
                         "worker": {
                             "model": model,
-                            "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'alpha'. Always use tools when available.",
                             "tools": { "comms": true }
                         }
                     }
@@ -1172,7 +1171,7 @@ async fn e2e_scenario_21_mob_callback_tools() {
 /// `BlockingWriter` fix ensures writes block instead of returning WouldBlock.
 /// With the old `tokio::io::stdout()` approach, this would crash.
 #[tokio::test]
-#[ignore = "e2e: live API + transport backpressure"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_22_transport_backpressure() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -1327,7 +1326,7 @@ async fn e2e_scenario_22_transport_backpressure() {
 /// A separate explicit `turn/start` drives the LLM call after tools are
 /// registered. `runtime_mode: "turn_driven"` ensures no background loop starts.
 #[tokio::test]
-#[ignore = "e2e: live API + post-spawn dynamic tool pickup"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_23_late_register_on_existing_member() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -1373,7 +1372,6 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                         "worker": {
                             "model": model,
                             "runtime_mode": "turn_driven",
-                            "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'beta'. Always use tools when available.",
                             "tools": { "comms": true }
                         }
                     }

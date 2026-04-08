@@ -1,6 +1,6 @@
 //! E2E regression tests for the RPC server (scenarios 19-21).
 //!
-//! Reuses the same duplex-stream pattern from `e2e_smoke.rs`.
+//! Reuses the same duplex-stream pattern from `live_smoke_rpc.rs`.
 //! All scenarios require a live Anthropic API key and are `#[ignore]`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -132,7 +132,7 @@ async fn read_response_with_notifications(
 /// session/read (message_count >= 4) ->
 /// session/archive -> clean up
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_19_inject_context_recall() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,
@@ -295,7 +295,7 @@ async fn e2e_scenario_19_inject_context_recall() {
 /// assert at least 1 stream_event -> assert turn has text ->
 /// session/stream_close -> assert success -> clean up
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_20_streaming_events() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,
@@ -482,7 +482,7 @@ async fn e2e_scenario_20_streaming_events() {
 /// turn/start(nonexistent UUID) -> assert error ->
 /// session/archive -> clean up
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_18_config_capabilities_errors() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(k) => k,

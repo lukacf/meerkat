@@ -21,7 +21,7 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: resume flow can exceed fast-suite timing budget"]
+#[ignore = "lane:e2e-system"]
 async fn integration_real_rest_resume_metadata() {
     if skip_if_no_prereqs() {
         return;

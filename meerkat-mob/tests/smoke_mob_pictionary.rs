@@ -19,7 +19,7 @@
 //! ## Run
 //! ```bash
 //! ANTHROPIC_API_KEY=... GEMINI_API_KEY=... OPENAI_API_KEY=... \
-//!   cargo test -p meerkat-mob --test e2e_pictionary \
+//!   cargo test -p meerkat-mob --test smoke_mob_pictionary \
 //!     --features integration-real-tests -- --ignored --test-threads=1 --nocapture
 //! ```
 
@@ -460,7 +460,7 @@ async fn print_conversation(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "e2e: live API (Gemini image gen + Claude/Gemini/GPT multimodal + mob comms)"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_pictionary_multimodal_comms_stress() {
     // Init tracing so RUST_LOG output is visible.
     let _ = tracing_subscriber::fmt()
@@ -592,7 +592,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                     to: meerkat_core::comms::PeerName::new(&peer_name).unwrap(),
                     body: format!("Pictionary {label} — guess what I drew!"),
                     blocks: Some(image_blocks.clone()),
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    handling_mode: HandlingMode::Steer,
                 })
                 .await
                 .unwrap_or_else(|e| panic!("artist→{peer_name} peer send: {e}"));

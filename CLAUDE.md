@@ -26,18 +26,30 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 # Run all tests including doc-tests (SLOW due to doc-test compilation)
 ./scripts/repo-cargo test --workspace
 
-# Run integration-real tests (ignored by default; spawns processes / requires binaries)
-./scripts/repo-cargo nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
+# Run deterministic end-to-end lane
+./scripts/repo-cargo e2e-fast
 
-# Run E2E tests (ignored by default; live APIs / full-system resources)
-./scripts/repo-cargo nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
+# Run real local-resource end-to-end lane
+./scripts/repo-cargo e2e-system
+
+# Run targeted live-provider lane (ignored by default)
+./scripts/repo-cargo e2e-live
+
+# Run kitchen-sink live smoke lane (ignored by default)
+./scripts/repo-cargo e2e-smoke
 
 # Cargo aliases (defined in .cargo/config.toml)
 ./scripts/cargo-rct       # Fast tests (unit + integration-fast)
 ./scripts/repo-cargo unit # Unit tests only
 ./scripts/repo-cargo int  # Integration-fast tests only
-./scripts/repo-cargo int-real  # Integration-real tests (ignored)
-./scripts/repo-cargo e2e  # E2E tests (ignored)
+./scripts/repo-cargo e2e-fast    # Deterministic e2e lane
+./scripts/repo-cargo e2e-system  # Real binary / local resource lane
+./scripts/repo-cargo e2e-live    # Targeted live-provider lane
+./scripts/repo-cargo e2e-smoke   # Compound live-provider smoke lane
+
+# Legacy compatibility shims (during migration)
+./scripts/repo-cargo int-real  # Alias for e2e-system
+./scripts/repo-cargo e2e       # Alias for e2e-live + e2e-smoke
 
 # Run the CLI
 ./scripts/repo-cargo run -p meerkat-cli -- run "prompt"
@@ -233,7 +245,7 @@ make audit       # Security audit via cargo-deny
 ### GitHub Workflows
 
 **CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch:
-- 8 parallel jobs: `fmt-lint` (format, clippy, feature matrix, cargo-machete) → `test` (nextest, all features) → `test-minimal` → `test-feature-matrix-lib` → `test-feature-matrix-surface-checks` → `test-surface-smoke` (per-binary) → `audit` (cargo-deny) → `gate` (status aggregation)
+- required deterministic jobs: `fmt-lint`, `machine-authority`, `test-unit`, `integration-fast`, `e2e-fast`, `e2e-system`, `test-minimal`, `test-feature-matrix-lib`, `test-feature-matrix-surface-checks`, `wasm-check`, `audit`, then `gate` aggregates status
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 
@@ -278,7 +290,7 @@ Installed via `make install-hooks`. Two stages:
 - Trailing whitespace, YAML/TOML validation, merge conflict check, large file check
 - `cargo fmt --all -- --check`
 - `scripts/pre-push-clippy.sh` (clippy on changed crates only with `--all-targets`; falls back to full workspace when root `Cargo.toml`/`Cargo.lock` changes)
-- `scripts/pre-push-unit.sh` (`cargo unit` with per-tree cache, serialized runs, and one retry if `nextest` discovery hangs)
+- `scripts/pre-push-unit.sh` (deterministic local gate: `cargo unit` plus `cargo e2e-fast`, with per-tree cache, serialized runs, and one retry if `nextest` discovery hangs)
 
 **Manual local preflight**:
 - `pre-commit run --hook-stage manual cargo-check-changed`
@@ -402,7 +414,7 @@ See `docs/reference/design-philosophy.mdx` for the full treatment with code exam
 - **Errors separate mechanism from policy** — typed three-tier errors (`ToolError` → `AgentError` → `SessionError`) with stable `error_code()` for wire formats; the loop retries, callers decide to resume or abort
 - **Wire types ≠ domain types** — `meerkat-contracts` owns wire format and feeds SDK codegen; domain types in `meerkat-core` are richer and version-locked
 - **Configuration is layered and declarative** — `Config::default()` → file → env (keys only) → per-request `SessionBuildOptions`; no cascading merges, no global mutable state
-- **Testing is a design constraint** — core has no I/O so unit tests need no mocks; three named tiers (`cargo rct`, `cargo int-real`, `cargo e2e`)
+- **Testing is a design constraint** — core has no I/O so unit tests need no mocks; the repo standardizes on named lanes: `cargo unit`, `cargo int`, `cargo e2e-fast`, `cargo e2e-system`, `cargo e2e-live`, and `cargo e2e-smoke`
 
 ### Rust Implementation Principles
 

@@ -79,6 +79,36 @@ rkat run --model claude-sonnet-4-5 --enable-builtins --enable-shell \
 
 The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. All three examples use the same binary; provider is inferred from the model name.
 
+## Testing
+
+Meerkat’s repo-wide test lanes are intentionally named by execution model:
+
+- `cargo unit` for unit tests
+- `cargo int` for integration-fast tests
+- `cargo e2e-fast` for deterministic end-to-end coverage
+- `cargo e2e-system` for real binaries / real local resources, but no live providers
+- `cargo e2e-live` for targeted live-provider integration checks
+- `cargo e2e-smoke` for compound live-provider smoke scenarios
+
+The authoritative end-to-end harness lives in `tests/integration/src/e2e_lanes.rs`.
+Even when a scenario internally shells out to Python, Node, or browser tooling,
+the supported top-level entrypoint is still one of the Cargo lane commands
+above, or a filtered `cargo nextest run -p meerkat-integration-tests --test ...`
+invocation.
+
+Inside the repo, prefer the wrapped form:
+
+```bash
+./scripts/repo-cargo unit
+./scripts/repo-cargo int
+./scripts/repo-cargo e2e-fast
+./scripts/repo-cargo e2e-system
+./scripts/repo-cargo e2e-live
+./scripts/repo-cargo e2e-smoke
+```
+
+Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider lanes stay opt-in.
+
 ## Capabilities
 
 **Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is inferred from the model name -- switch models with a flag, not a code change.

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use meerkat::{Config, SessionId};
-use meerkat_store::{JsonlStore, SessionStore};
+use meerkat::{Config, SessionId, open_realm_persistence_in};
+use meerkat_store::RealmOrigin;
 use tempfile::TempDir;
 
 fn rkat_binary_path() -> Option<PathBuf> {
@@ -57,7 +57,7 @@ fn skip_if_no_prereqs() -> bool {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns rkat binary"]
+#[ignore = "lane:e2e-system"]
 async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     if skip_if_no_prereqs() {
         return Ok(());
@@ -92,8 +92,10 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
 async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = std::env::var("TEST_PROJECT_DIR")?;
     let data_dir = std::env::var("TEST_DATA_DIR")?;
+    let home_dir = std::env::var("HOME")?;
     let project_dir = std::path::PathBuf::from(project_dir);
     let data_dir = std::path::PathBuf::from(data_dir);
+    let home_dir = std::path::PathBuf::from(home_dir);
 
     // Change to project dir so .rkat is found
     std::env::set_current_dir(&project_dir)?;
@@ -136,26 +138,38 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .ok_or("session_id missing in response")?
         .to_string();
 
-    let output_find = Command::new("find")
-        .arg(&std::env::var("HOME")?)
-        .arg("-name")
-        .arg("*.jsonl")
+    let session_ref = parsed["session_ref"]
+        .as_str()
+        .ok_or("session_ref missing in response")?;
+    let realm_id = session_ref
+        .split_once(':')
+        .map(|(realm_id, _)| realm_id)
+        .ok_or("session_ref missing realm prefix")?;
+    let realm_show = Command::new(&rkat)
+        .current_dir(&project_dir)
+        .env("HOME", &home_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .args(["realms", "show", realm_id])
         .output()
         .await?;
-    let find_stdout = String::from_utf8_lossy(&output_find.stdout);
+    if !realm_show.status.success() {
+        return Err(format!(
+            "rkat realm show failed: {}",
+            String::from_utf8_lossy(&realm_show.stderr)
+        )
+        .into());
+    }
+    let realm_show_stdout = String::from_utf8_lossy(&realm_show.stdout);
+    let realms_root = realm_show_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("state_root: "))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("state_root missing in realm show output: {realm_show_stdout}"))?;
+    let (_manifest, persistence) =
+        open_realm_persistence_in(&realms_root, realm_id, None, Some(RealmOrigin::Workspace))
+            .await?;
+    let store = persistence.session_store();
 
-    // Heuristic: pick the directory of the first found session file
-    let store_dir = if let Some(first_file) = find_stdout.lines().next() {
-        std::path::Path::new(first_file)
-            .parent()
-            .ok_or("no parent dir")?
-            .to_path_buf()
-    } else {
-        data_dir.join("meerkat").join("sessions")
-    };
-
-    let store = JsonlStore::new(store_dir);
-    store.init().await?;
     let session = store
         .load(&SessionId::parse(&session_id)?)
         .await?

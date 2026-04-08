@@ -17,8 +17,8 @@ name = "rkat-rest"
 path = "src/main.rs"
 
 [[test]]
-name = "e2e_resume"
-path = "tests/e2e_resume.rs"
+name = "system_rest_resume"
+path = "tests/system_rest_resume.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
@@ -27,13 +27,13 @@ path = "tests/live_continue_tmp.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e_regression"
-path = "tests/e2e_regression.rs"
+name = "live_rest_regression"
+path = "tests/live_rest_regression.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "live_smoke_matrix"
-path = "tests/live_smoke_matrix.rs"
+name = "live_rest_matrix"
+path = "tests/live_rest_matrix.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]

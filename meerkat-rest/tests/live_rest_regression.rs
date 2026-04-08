@@ -120,7 +120,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
 /// 5. DELETE /sessions/{id} — archive the session
 /// 6. GET /sessions/{id} — confirm 404
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_25_rest_full_lifecycle() {
     let api_key = match anthropic_api_key() {
         Some(k) => k,

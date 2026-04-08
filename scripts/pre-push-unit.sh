@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-push unit test gate:
+# Pre-push deterministic test gate:
 # - skips reruns for the same committed tree
 # - serializes runs so repeated pushes don't fight each other
 # - retries nextest once if discovery hangs
@@ -8,13 +8,13 @@ set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 
-CACHE_VERSION="v2"
+CACHE_VERSION="v3"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-120}"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_UNIT_LOCK_WAIT_SECS:-180}"
 GIT_DIR_PATH="$(git rev-parse --git-dir)"
 HOOK_CACHE_ROOT="${GIT_DIR_PATH}/meerkat-hook-cache"
-HOOK_CACHE_DIR="${HOOK_CACHE_ROOT}/unit"
-LOCK_DIR="${HOOK_CACHE_ROOT}/unit.lock"
+HOOK_CACHE_DIR="${HOOK_CACHE_ROOT}/deterministic"
+LOCK_DIR="${HOOK_CACHE_ROOT}/deterministic.lock"
 PID_FILE="${LOCK_DIR}/pid"
 
 mkdir -p "$HOOK_CACHE_DIR"
@@ -104,16 +104,13 @@ run_with_timeout() {
   wait "$cmd_pid"
 }
 
-retry_nextest() {
-  local nextest_cmd=(
-    "$CARGO" nextest run --workspace --lib
-    --show-progress none
-    --status-level none
-    --final-status-level fail
-  )
+retry_lane() {
+  local label="$1"
+  shift
+  local lane_cmd=("$@")
 
-  echo "Running workspace unit tests with nextest..."
-  if run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${nextest_cmd[@]}"; then
+  echo "Running ${label}..."
+  if run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${lane_cmd[@]}"; then
     return 0
   fi
 
@@ -122,9 +119,9 @@ retry_nextest() {
     return "$status"
   fi
 
-  echo "nextest timed out; retrying once with a clean process tree..." >&2
+  echo "${label} timed out; retrying once with a clean process tree..." >&2
   sleep 1
-  run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${nextest_cmd[@]}"
+  run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${lane_cmd[@]}"
 }
 
 tree="$(tree_key)"
@@ -132,7 +129,7 @@ stamp_key="${CACHE_VERSION}-${tree}"
 stamp_path="${HOOK_CACHE_DIR}/${stamp_key}.ok"
 
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
-  echo "cargo unit already validated for tree ${tree}; skipping."
+  echo "deterministic pre-push gate already validated for tree ${tree}; skipping."
   exit 0
 fi
 
@@ -140,9 +137,14 @@ acquire_lock
 trap release_lock EXIT
 
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
-  echo "cargo unit already validated for tree ${tree}; skipping."
+  echo "deterministic pre-push gate already validated for tree ${tree}; skipping."
   exit 0
 fi
 
-retry_nextest
-printf 'tree=%s\nrunner=nextest\n' "$tree" > "$stamp_path"
+retry_lane \
+  "workspace unit lane" \
+  "$CARGO" unit
+retry_lane \
+  "e2e-fast lane" \
+  "$CARGO" e2e-fast
+printf 'tree=%s\nrunners=unit,e2e-fast\n' "$tree" > "$stamp_path"

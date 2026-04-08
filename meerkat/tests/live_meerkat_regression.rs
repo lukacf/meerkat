@@ -10,7 +10,7 @@
 //! tests skip gracefully with an informational message.
 //!
 //! Run with:
-//!   cargo test -p meerkat --test e2e_regression -- --ignored --test-threads=1
+//!   cargo test -p meerkat --test live_meerkat_regression -- --ignored --test-threads=1
 
 use meerkat::*;
 use meerkat_core::service::InitialTurnPolicy;
@@ -58,7 +58,7 @@ mod scenario_22_session_service_lifecycle {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_scenario_22_session_service_lifecycle() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
@@ -194,7 +194,7 @@ mod scenario_23_structured_output {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_scenario_23_structured_output() {
         let mut ran_any = false;
 
@@ -359,7 +359,7 @@ mod scenario_24_event_capture {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_scenario_24_event_capture() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 24: missing ANTHROPIC_API_KEY");

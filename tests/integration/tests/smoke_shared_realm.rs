@@ -566,7 +566,7 @@ async fn write_cli_mobpack_fixture(
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm rpc/rest live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_49_rpc_rest_shared_realm_roundtrip() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat_rpc = binary_path("rkat-rpc");
@@ -759,7 +759,7 @@ async fn e2e_scenario_49_rpc_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm rest/cli live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_50_rest_cli_shared_realm_roundtrip() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat = binary_path("rkat");
@@ -867,7 +867,7 @@ async fn e2e_scenario_50_rest_cli_shared_realm_roundtrip() -> Result<(), Box<dyn
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm rpc/mcp live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_51_rpc_mcp_shared_realm_roundtrip() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat_rpc = binary_path("rkat-rpc");
@@ -1055,7 +1055,7 @@ async fn e2e_scenario_51_rpc_mcp_shared_realm_roundtrip() -> Result<(), Box<dyn 
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm cli/rpc live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_52_cli_rpc_shared_realm_roundtrip() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat = binary_path("rkat");
@@ -1178,7 +1178,7 @@ async fn e2e_scenario_52_cli_rpc_shared_realm_roundtrip() -> Result<(), Box<dyn 
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm cli/rest live API"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn std::error::Error>>
 {
     let rkat = binary_path("rkat");
@@ -1306,7 +1306,7 @@ async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "integration-real: shared realm cli mob rpc surface"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
 -> Result<(), Box<dyn std::error::Error>> {
     let rkat = binary_path("rkat");

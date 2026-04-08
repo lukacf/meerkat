@@ -16,7 +16,7 @@ use tokio::time::{Duration, timeout};
 use tower::ServiceExt;
 
 #[tokio::test]
-#[ignore = "integration-real: temporary regression reproducer (can hang)"]
+#[ignore = "lane:e2e-live"]
 async fn integration_real_live_continue_hangs() {
     let temp_dir = TempDir::new().unwrap();
     let project_root = temp_dir.path().join("project");

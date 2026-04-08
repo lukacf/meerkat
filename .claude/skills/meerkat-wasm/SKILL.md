@@ -91,6 +91,11 @@ const runtime = await MeerkatRuntime.init(wasm, {
 });
 ```
 
+For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane
+harness in `tests/integration/src/e2e_lanes.rs`. Prefer
+`./scripts/repo-cargo e2e-live` or `./scripts/repo-cargo e2e-smoke` over manual
+`npm run smoke` unless you are debugging the browser surface directly.
+
 **Version validation:** `runtime_version()` export returns `CARGO_PKG_VERSION`. `MeerkatRuntime.init()` checks it against the expected version to catch stale cached WASM.
 
 ## Building

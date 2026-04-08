@@ -8,7 +8,12 @@
 //! These tests require API keys and make real API calls; when keys are missing
 //! they log a skip message and return early.
 //!
-//! Run with: cargo e2e (or cargo test --package meerkat --test e2e)
+//! Run directly with:
+//!   cargo test --package meerkat --features integration-real-tests,jsonl-store,mcp \
+//!     --test live_meerkat_user_flows -- --ignored
+//!
+//! The canonical repo-wide entrypoints now live under `cargo e2e-live` and
+//! `cargo e2e-smoke` through the integration harness.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -342,7 +347,7 @@ mod simple_chat {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_simple_chat_anthropic() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -396,7 +401,7 @@ mod simple_chat {
 
     #[cfg(feature = "openai")]
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_simple_chat_openai() {
         let Some(api_key) = openai_api_key() else {
             eprintln!("Skipping: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)");
@@ -430,7 +435,7 @@ mod simple_chat {
 
     #[cfg(feature = "gemini")]
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_simple_chat_gemini() {
         let Some(api_key) = gemini_api_key() else {
             eprintln!("Skipping: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)");
@@ -515,7 +520,7 @@ mod tool_invocation {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_tool_invocation_with_mcp() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -600,7 +605,7 @@ mod multi_turn {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_multi_turn_context_maintained() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -686,7 +691,7 @@ mod session_resume {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_session_resume_from_checkpoint() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -772,7 +777,7 @@ mod budget_exhaustion {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_budget_exhaustion_graceful_stop() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -834,7 +839,7 @@ mod budget_exhaustion {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_tool_call_budget_limit() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -912,7 +917,7 @@ mod parallel_tools {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_parallel_tool_execution() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -1082,7 +1087,7 @@ mod parallel_tools {
     /// E2E test for parallel tool execution with timing verification
     /// Verifies that multiple tools execute concurrently, not serially
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_parallel_tools_with_timing_verification() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -1162,7 +1167,7 @@ mod parallel_tools {
     /// E2E test for multi-turn conversation with parallel tools
     /// Turn 1: Multiple tools → Turn 2: Follow-up question
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_parallel_tools_multiturn() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
@@ -1227,7 +1232,7 @@ mod parallel_tools {
     /// E2E test for partial tool failure in parallel execution
     /// One tool fails, others should still complete and LLM should handle gracefully
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-live"]
     async fn e2e_parallel_tools_partial_failure() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");

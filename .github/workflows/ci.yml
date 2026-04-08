@@ -110,8 +110,8 @@ jobs:
       - name: Machine verification
         run: cargo xtask machine-verify --all
 
-  test:
-    name: Test suite (all features)
+  test-unit:
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -126,8 +126,71 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Full test suite (all features)
-        run: cargo nextest run --workspace --all-features
+      - name: Unit test lane
+        run: cargo unit
+
+  integration-fast:
+    name: Integration-fast lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: integration-fast
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Integration-fast lane
+        run: cargo int
+
+  e2e-fast:
+    name: E2E fast lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-fast
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-fast lane
+        run: cargo e2e-fast
+
+  e2e-system:
+    name: E2E system lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-system
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e-system lane
+        run: cargo e2e-system
 
   test-minimal:
     name: Minimal feature builds
@@ -211,52 +274,6 @@ jobs:
           cargo check -p rkat --no-default-features --features session-store,mcp
           cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
-  test-surface-smoke:
-    name: Surface smoke (${{ matrix.bin }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - pkg: rkat
-            bin: rkat
-            features: "--no-default-features --features session-store"
-            test: true
-          - pkg: meerkat-rpc
-            bin: rkat-rpc
-            features: "--no-default-features"
-            test: false
-          - pkg: meerkat-rest
-            bin: rkat-rest
-            features: "--no-default-features"
-            test: false
-          - pkg: meerkat-mcp-server
-            bin: rkat-mcp
-            features: "--no-default-features"
-            test: false
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: smoke-${{ matrix.bin }}
-
-      - name: Install nextest
-        if: matrix.test
-        uses: taiki-e/install-action@nextest
-
-      - name: Build and smoke test
-        run: cargo run -p ${{ matrix.pkg }} ${{ matrix.features }} --bin ${{ matrix.bin }} -- --help >/dev/null
-
-      - name: Run tests
-        if: matrix.test
-        run: cargo nextest run -p ${{ matrix.pkg }} --no-default-features --features session-store,mcp --no-capture
-
   wasm-check:
     name: WASM compilation check
     runs-on: ubuntu-latest
@@ -298,7 +315,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, machine-authority, test, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, test-surface-smoke, wasm-check, audit]
+    needs: [fmt-lint, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -307,22 +324,26 @@ jobs:
           for job in \
             fmt-lint \
             machine-authority \
-            test \
+            test-unit \
+            integration-fast \
+            e2e-fast \
+            e2e-system \
             test-minimal \
             test-feature-matrix-lib \
             test-feature-matrix-surface-checks \
-            test-surface-smoke \
             wasm-check \
             audit
           do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
               machine-authority) result="${{ needs.machine-authority.result }}" ;;
-              test) result="${{ needs.test.result }}" ;;
+              test-unit) result="${{ needs.test-unit.result }}" ;;
+              integration-fast) result="${{ needs.integration-fast.result }}" ;;
+              e2e-fast) result="${{ needs.e2e-fast.result }}" ;;
+              e2e-system) result="${{ needs.e2e-system.result }}" ;;
               test-minimal) result="${{ needs.test-minimal.result }}" ;;
               test-feature-matrix-lib) result="${{ needs.test-feature-matrix-lib.result }}" ;;
               test-feature-matrix-surface-checks) result="${{ needs.test-feature-matrix-surface-checks.result }}" ;;
-              test-surface-smoke) result="${{ needs.test-surface-smoke.result }}" ;;
               wasm-check) result="${{ needs.wasm-check.result }}" ;;
               audit) result="${{ needs.audit.result }}" ;;
             esac

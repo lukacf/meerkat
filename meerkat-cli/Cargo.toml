@@ -17,23 +17,23 @@ name = "rkat"
 path = "src/main.rs"
 
 [[test]]
-name = "e2e_rkat_init"
-path = "tests/e2e_rkat_init.rs"
+name = "system_cli_init"
+path = "tests/system_cli_init.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e_resume"
-path = "tests/e2e_resume.rs"
+name = "system_cli_resume"
+path = "tests/system_cli_resume.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e_smoke"
-path = "tests/e2e_smoke.rs"
+name = "live_smoke_cli"
+path = "tests/live_smoke_cli.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e_mobpack_smoke"
-path = "tests/e2e_mobpack_smoke.rs"
+name = "cli_mobpack_live_smoke"
+path = "tests/cli_mobpack_live_smoke.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]

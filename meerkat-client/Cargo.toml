@@ -47,13 +47,13 @@ gemini = []
 integration-real-tests = []
 
 [[test]]
-name = "e2e_system_proxy"
-path = "tests/e2e_system_proxy.rs"
+name = "system_client_proxy"
+path = "tests/system_client_proxy.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e"
-path = "tests/e2e.rs"
+name = "live_client_provider_matrix"
+path = "tests/live_client_provider_matrix.rs"
 required-features = ["integration-real-tests"]
 
 [package.metadata.cargo-machete]

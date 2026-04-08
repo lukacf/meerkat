@@ -10,7 +10,7 @@
 //! tests skip gracefully with an informational message.
 //!
 //! Run with:
-//!   cargo test -p meerkat --test e2e_smoke -- --ignored --test-threads=1
+//!   cargo test -p meerkat --test smoke_meerkat_sdk -- --ignored --test-threads=1
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -279,7 +279,7 @@ mod scenario_01_multi_provider {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_multi_provider_round_robin() {
         let mut ran_any = false;
 
@@ -409,7 +409,7 @@ mod scenario_02_tool_driven_shell {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_tool_driven_shell() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 2: missing ANTHROPIC_API_KEY");
@@ -471,7 +471,7 @@ mod scenario_03_structured_output {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_structured_output_with_tools() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 3: missing ANTHROPIC_API_KEY");
@@ -588,7 +588,7 @@ mod scenario_05_multi_turn {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_multi_turn_context_recall() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 5: missing ANTHROPIC_API_KEY");
@@ -674,7 +674,7 @@ mod scenario_06_hooks {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_hooks_pipeline() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 6: missing ANTHROPIC_API_KEY");
@@ -856,7 +856,7 @@ mod scenario_07_session_resume {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_session_persist_and_resume() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 7: missing ANTHROPIC_API_KEY");
@@ -1076,7 +1076,7 @@ mod scenario_08_comms {
     }
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_comms_exchange() {
         let Some(api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 8: missing ANTHROPIC_API_KEY");
@@ -1139,7 +1139,7 @@ mod scenario_09_session_service {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_session_service_lifecycle() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 9: missing ANTHROPIC_API_KEY");
@@ -1277,7 +1277,7 @@ mod scenario_10_memory {
     use meerkat_session::DefaultCompactor;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_memory_compaction_and_search() {
         let Some(api_key_val) = anthropic_api_key() else {
             eprintln!("Skipping scenario 10: missing ANTHROPIC_API_KEY");
@@ -1403,7 +1403,7 @@ mod scenario_19_multi_turn_context {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_multi_turn_deep_context() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 19: missing ANTHROPIC_API_KEY");
@@ -1499,7 +1499,7 @@ mod scenario_21_sdk_builder {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "integration-real: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_sdk_builder_profile() {
         // This test does NOT require an API key — it tests the build toolchain.
         // However, it requires Python 3 and the build.py script to exist.
@@ -1723,7 +1723,7 @@ mod scenario_22_runtime_host_comms {
     }
 
     #[tokio::test]
-    #[ignore = "e2e: live API"]
+    #[ignore = "lane:e2e-smoke"]
     async fn e2e_runtime_keep_alive_comms_stress() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
@@ -1812,11 +1812,11 @@ mod scenario_22_runtime_host_comms {
             turn_count.load(Ordering::Relaxed)
         );
 
-        // Update peer ingress for A — this is the runtime-backed path under test.
+        // Spawn comms drain for A — THE path under test
         runtime_adapter
             .update_peer_ingress_context(&sid_a, true, Some(comms_a))
             .await;
-        eprintln!("[scenario 22] Peer ingress updated for A");
+        eprintln!("[scenario 22] Comms drain spawned for A");
 
         // --- Inject message into A's inbox programmatically ---
         // Use CommsCommand::Input to inject directly into Agent A's comms inbox.

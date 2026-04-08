@@ -447,7 +447,7 @@ async fn read_http_response(socket: &mut TcpStream) -> io::Result<(u16, Vec<u8>)
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_31_mcp_stdio_run_resume_lifecycle() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 31: missing ANTHROPIC_API_KEY");
@@ -534,7 +534,7 @@ async fn e2e_scenario_31_mcp_stdio_run_resume_lifecycle() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: diagnostics endpoints"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_32_mcp_stdio_config_capabilities_and_skills() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 32: missing ANTHROPIC_API_KEY");
@@ -596,7 +596,7 @@ async fn e2e_scenario_32_mcp_stdio_config_capabilities_and_skills() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_33_mcp_stdio_event_stream_read_roundtrip() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 33: missing ANTHROPIC_API_KEY");
@@ -693,7 +693,7 @@ async fn e2e_scenario_33_mcp_stdio_event_stream_read_roundtrip() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_34_mcp_streamable_http_run_resume_lifecycle() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 34: missing ANTHROPIC_API_KEY");
@@ -764,7 +764,7 @@ async fn e2e_scenario_34_mcp_streamable_http_run_resume_lifecycle() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: diagnostics endpoints"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_35_mcp_streamable_http_config_capabilities_and_skills() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 35: missing ANTHROPIC_API_KEY");
@@ -842,7 +842,7 @@ async fn e2e_scenario_35_mcp_streamable_http_config_capabilities_and_skills() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: live API"]
+#[ignore = "lane:e2e-live"]
 async fn e2e_scenario_36_mcp_streamable_http_event_stream_and_archive_roundtrip() {
     let Some(_client) = live_client() else {
         eprintln!("Skipping scenario 36: missing ANTHROPIC_API_KEY");

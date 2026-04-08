@@ -14,11 +14,15 @@ unit = "nextest run --workspace --lib --show-progress none --status-level none -
 # Integration-fast tests only (ignored tests are not run)
 int = "nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail"
 
-# Integration tests that spawn real processes / need binaries (ignored by default)
-int-real = "nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1"
+# Canonical e2e lanes
+e2e-fast = "nextest run -p meerkat-integration-tests --test e2e_fast_lane --no-fail-fast --show-progress none --status-level none --final-status-level fail"
+e2e-system = "nextest run -p meerkat-integration-tests --test e2e_system_lane --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-live = "nextest run -p meerkat-integration-tests --test e2e_live_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-smoke = "nextest run -p meerkat-integration-tests --test e2e_smoke_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
 
-# End-to-end tests (live APIs / full-system resources, ignored by default)
-e2e = "nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1"
+# Temporary compatibility shims during lane migration.
+int-real = "!./scripts/repo-cargo e2e-system"
+e2e = "!./scripts/repo-cargo e2e-live && ./scripts/repo-cargo e2e-smoke"
 
 # Feature matrix helpers (shell aliases to make targets)
 test-minimal = "!make test-minimal"

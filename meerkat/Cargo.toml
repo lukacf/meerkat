@@ -179,14 +179,14 @@ path = "../examples/025-full-stack-agent-rs/main.rs"
 required-features = ["jsonl-store"]
 
 [[test]]
-name = "e2e"
-path = "tests/e2e.rs"
-required-features = ["integration-real-tests", "jsonl-store"]
+name = "live_meerkat_user_flows"
+path = "tests/live_meerkat_user_flows.rs"
+required-features = ["integration-real-tests", "jsonl-store", "mcp"]
 
 [[test]]
-name = "e2e_comms"
-path = "tests/e2e_comms.rs"
-required-features = ["integration-real-tests", "jsonl-store"]
+name = "live_meerkat_comms"
+path = "tests/live_meerkat_comms.rs"
+required-features = ["integration-real-tests", "jsonl-store", "comms"]
 
 [[test]]
 name = "e2e_shell"
@@ -194,11 +194,11 @@ path = "tests/e2e_shell.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]
-name = "e2e_smoke"
-path = "tests/e2e_smoke.rs"
+name = "smoke_meerkat_sdk"
+path = "tests/smoke_meerkat_sdk.rs"
 required-features = ["integration-real-tests", "jsonl-store"]
 
 [[test]]
-name = "e2e_regression"
-path = "tests/e2e_regression.rs"
+name = "live_meerkat_regression"
+path = "tests/live_meerkat_regression.rs"
 required-features = ["integration-real-tests"]

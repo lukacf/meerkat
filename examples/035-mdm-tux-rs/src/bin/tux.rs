@@ -26,7 +26,7 @@ use anyhow::Context as _;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
-use meerkat::{AgentBuildConfig, AgentEvent, AgentFactory, DynAgent, LlmClient};
+use meerkat::{AgentBuildConfig, AgentEvent, AgentFactory, DynAgent, LlmClient, ToolGatewayBuilder};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
 use meerkat_comms::agent::types::CommsContent;
@@ -49,8 +49,9 @@ use mdm_tux::machines::tux_runtime_registry as runtime_registry;
 use mdm_tux::{
     ClaimGrant, CommsNode, DirectControlPayload, KennelPayload, LeaseRef, LeaseTerminationReason,
     ListScope, ProviderKind, TargetListEntry, auto_detect, build_signed_envelope,
-    direct_control_request, load_or_generate_keypair, parse_direct_control_message, read_envelope,
-    run_registration_server, verify_envelope, write_envelope,
+    direct_control_request, load_or_generate_keypair, parse_direct_control_message,
+    read_envelope, run_registration_server, schedule_tools::open_schedule_tool_dispatcher,
+    verify_envelope, write_envelope,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -816,7 +817,12 @@ async fn build_hive_with_llm_override(
     llm_client_override: Option<Arc<dyn LlmClient>>,
 ) -> anyhow::Result<HiveAgentState> {
     let factory = AgentFactory::new(session_dir).mob(true);
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::new(router, trusted));
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(
+        ToolGatewayBuilder::new()
+            .add_dispatcher(Arc::new(CommsToolDispatcher::new(router, trusted)))
+            .add_dispatcher(open_schedule_tool_dispatcher(session_dir)?)
+            .build()?,
+    );
     let store = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
     store.init().await?;
     let hive_store: Arc<dyn AgentSessionStore> = Arc::new(StoreAdapter::new(store));
@@ -3349,11 +3355,15 @@ mod tests {
             .unwrap();
 
         let tool_names = capture.tool_names();
-        assert!(tool_names.iter().any(|name| name == "send"));
+        assert!(tool_names.iter().any(|name| name == "send_message"));
+        assert!(tool_names.iter().any(|name| name == "send_request"));
+        assert!(tool_names.iter().any(|name| name == "send_response"));
         assert!(tool_names.iter().any(|name| name == "peers"));
         assert!(tool_names.iter().any(|name| name == "delegate"));
         assert!(tool_names.iter().any(|name| name == "mob_list"));
         assert!(tool_names.iter().any(|name| name == "mob_check_member"));
+        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_create"));
+        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_list"));
         assert!(!tool_names.iter().any(|name| name == "shell"));
     }
 }

@@ -36,7 +36,7 @@ use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError,
 };
 use meerkat_core::types::{ContentInput, SessionId};
-use meerkat_core::{AgentEvent, Config};
+use meerkat_core::{AgentEvent, AgentToolDispatcher, Config};
 use meerkat_mob_mcp::MobMcpState;
 use meerkat_runtime::RuntimeSessionAdapter;
 use meerkat_surface_runtime::RuntimeSessionHost;
@@ -45,7 +45,8 @@ use meerkat_store::{MemoryBlobStore, SessionFilter};
 use mdm_tux::{
     DirectControlPayload, KennelPayload, ProviderKind, RegResponse, auto_detect,
     build_signed_envelope, direct_control_request, read_envelope, register_with_backoff,
-    verify_envelope, write_envelope, DIRECT_CONTROL_INTENT,
+    schedule_tools::open_schedule_tool_dispatcher, verify_envelope, write_envelope,
+    DIRECT_CONTROL_INTENT,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -65,6 +66,7 @@ struct TargetRuntimeSurface {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
     comms_runtime: Arc<CommsRuntime>,
+    schedule_tools: Arc<dyn AgentToolDispatcher>,
     jsonl_store: Arc<dyn meerkat::SessionStore>,
     mob_state: Arc<MobMcpState>,
 }
@@ -86,6 +88,7 @@ async fn build_target_runtime_surface(
     );
     let service = host.service();
     let runtime_adapter = host.runtime_adapter();
+    let schedule_tools = open_schedule_tool_dispatcher(session_dir)?;
     let jsonl_store = host.session_store();
     let mob_state = host.mob_state();
 
@@ -94,6 +97,7 @@ async fn build_target_runtime_surface(
         service,
         runtime_adapter,
         comms_runtime,
+        schedule_tools,
         jsonl_store,
         mob_state,
     })
@@ -1216,6 +1220,7 @@ async fn setup_session(
     // from the CommsRuntime set via AgentFactory::with_comms_runtime().
     let build_opts = SessionBuildOptions {
         provider: Some(meerkat_core::Provider::from_name(provider)),
+        external_tools: Some(Arc::clone(&surface.schedule_tools)),
         override_builtins: meerkat_core::ToolCategoryOverride::Enable,
         override_shell: meerkat_core::ToolCategoryOverride::Enable,
         override_mob: meerkat_core::ToolCategoryOverride::Enable,
@@ -2016,7 +2021,7 @@ mod tests {
         discard_live_session_with_mob_cleanup, parse_provider_override, setup_session,
     };
     use anyhow::Context as _;
-    use mdm_tux::ProviderKind;
+    use mdm_tux::{ProviderKind, schedule_tools::open_schedule_tool_dispatcher};
     use meerkat::{
         AgentFactory, FactoryAgentBuilder, LlmClient, SessionAgentBuilder, SessionService,
         encode_llm_client_override_for_service,
@@ -2098,6 +2103,7 @@ mod tests {
         );
         let service = host.service();
         let runtime_adapter = host.runtime_adapter();
+        let schedule_tools = open_schedule_tool_dispatcher(session_dir)?;
         let jsonl_store = host.session_store();
         let mob_state = host.mob_state();
 
@@ -2106,6 +2112,7 @@ mod tests {
             service,
             runtime_adapter,
             comms_runtime,
+            schedule_tools,
             jsonl_store,
             mob_state,
         })
@@ -2182,6 +2189,7 @@ mod tests {
         ));
 
         let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+        let schedule_tools = open_schedule_tool_dispatcher(temp.path()).unwrap();
 
         let req = CreateSessionRequest {
             model: "gpt-5.2".to_string(),
@@ -2197,6 +2205,7 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture.clone() as Arc<dyn LlmClient>
                 )),
+                external_tools: Some(schedule_tools),
                 override_builtins: meerkat_core::ToolCategoryOverride::Enable,
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
@@ -2224,6 +2233,8 @@ mod tests {
         assert!(tool_names.iter().any(|name| name == "delegate"));
         assert!(tool_names.iter().any(|name| name == "mob_list"));
         assert!(tool_names.iter().any(|name| name == "mob_check_member"));
+        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_create"));
+        assert!(tool_names.iter().any(|name| name == "meerkat_schedule_list"));
     }
 
     #[tokio::test]
@@ -2457,6 +2468,7 @@ mod tests {
         ));
 
         let capture2: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+        let schedule_tools = open_schedule_tool_dispatcher(temp.path()).unwrap();
         let req2 = CreateSessionRequest {
             model: "gpt-5.2".to_string(),
             prompt: ContentInput::Text("list tools".into()),
@@ -2471,6 +2483,7 @@ mod tests {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture2.clone() as Arc<dyn LlmClient>
                 )),
+                external_tools: Some(schedule_tools),
                 override_builtins: meerkat_core::ToolCategoryOverride::Enable,
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
@@ -2527,6 +2540,14 @@ mod tests {
         assert!(
             tool_names.iter().any(|n| n == "mob_list"),
             "missing 'mob_list', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "meerkat_schedule_create"),
+            "missing schedule 'meerkat_schedule_create', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "meerkat_schedule_list"),
+            "missing schedule 'meerkat_schedule_list', got: {tool_names:?}"
         );
     }
 
@@ -2639,6 +2660,14 @@ mod tests {
         assert!(
             tool_names.iter().any(|n| n == "delegate"),
             "resumed session missing mob 'delegate', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "meerkat_schedule_create"),
+            "resumed session missing schedule 'meerkat_schedule_create', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "meerkat_schedule_list"),
+            "resumed session missing schedule 'meerkat_schedule_list', got: {tool_names:?}"
         );
     }
 }

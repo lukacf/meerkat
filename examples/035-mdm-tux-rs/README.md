@@ -67,9 +67,9 @@ If `--model` is given, the provider is inferred from the prefix (`claude-*` → 
 
 ---
 
-## Delegation
+## Delegation And Scheduling
 
-Both the target agent and the hive agent now expose Meerkat's built-in delegation and mob management tools:
+Both the target agent and the hive agent now expose Meerkat's built-in delegation, mob management, and schedule tools:
 
 - `delegate`
 - `mob_create`
@@ -79,6 +79,14 @@ Both the target agent and the hive agent now expose Meerkat's built-in delegatio
 - `mob_check_member`
 - `mob_list_members`
 - `mob_list`
+- `meerkat_schedule_create`
+- `meerkat_schedule_get`
+- `meerkat_schedule_list`
+- `meerkat_schedule_update`
+- `meerkat_schedule_pause`
+- `meerkat_schedule_resume`
+- `meerkat_schedule_delete`
+- `meerkat_schedule_occurrences`
 
 This example uses the built-in option-1 surface only. Delegated helpers are inspected through the mob tools themselves, not projected into the TUX timeline as first-class targets.
 

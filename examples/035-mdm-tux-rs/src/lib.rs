@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub mod kennel;
 pub mod machines;
+pub mod schedule_tools;
 pub use kennel::*;
 
 // ── Provider auto-detection ───────────────────────────────────────────────────

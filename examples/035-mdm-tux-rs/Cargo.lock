@@ -2531,6 +2531,7 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-rpc",
  "meerkat-runtime",
+ "meerkat-schedule",
  "meerkat-store",
  "meerkat-surface-runtime",
  "parking_lot",

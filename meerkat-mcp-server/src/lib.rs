@@ -532,7 +532,7 @@ impl MeerkatMcpState {
         // in SessionBuildOptions control what tools are actually enabled.
         let mut factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
-            .runtime_root(realm_paths.root)
+            .runtime_root(realm_paths.root.clone())
             .project_root(project_root)
             .builtins(true)
             .shell(true);
@@ -556,6 +556,23 @@ impl MeerkatMcpState {
             runtime_store,
             blob_store,
         ));
+        #[cfg(feature = "mob")]
+        let mob_state = {
+            let persistent_mob_root = realm_paths.root.clone();
+            let state = Arc::new(
+                meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                    service.clone(),
+                    Some(runtime_adapter.clone()),
+                )
+                .with_persistent_storage_root(Some(persistent_mob_root)),
+            );
+            *mob_tools_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+                meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+            ));
+            state
+        };
 
         let state = Self {
             service,
@@ -567,21 +584,7 @@ impl MeerkatMcpState {
             config_runtime,
             skill_runtime,
             #[cfg(feature = "mob")]
-            mob_state: {
-                let state = Arc::new(
-                    meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
-                        service.clone(),
-                        Some(runtime_adapter.clone()),
-                    )
-                    .with_persistent_storage_root(Some(realm_paths.root.clone())),
-                );
-                *mob_tools_slot
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-                    meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
-                ));
-                state
-            },
+            mob_state,
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),

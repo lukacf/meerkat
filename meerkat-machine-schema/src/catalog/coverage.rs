@@ -14,12 +14,12 @@ use super::{
     flow_run::flow_run_machine,
     input_lifecycle::input_lifecycle_machine,
     loop_iteration::loop_iteration_machine,
-    mob_helper_result_anchor::mob_helper_result_anchor_machine,
     mob_lifecycle::mob_lifecycle_machine,
-    mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine,
+    mob_member_bootstrap::mob_member_bootstrap_machine,
+    mob_member_lifecycle::mob_member_lifecycle_machine,
     mob_orchestrator::mob_orchestrator_machine,
-    mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine,
-    mob_wiring_anchor::mob_wiring_anchor_machine,
+    mob_runtime_bridge::mob_runtime_bridge_machine,
+    mob_wiring::mob_wiring_machine,
     occurrence_lifecycle::occurrence_lifecycle_machine,
     ops_lifecycle::ops_lifecycle_machine,
     peer_comms::peer_comms_machine,
@@ -487,7 +487,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &mob_member_lifecycle_anchor_machine(),
+            &mob_member_lifecycle_machine(),
             &[
                 anchor(
                     "mob_runtime_actor",
@@ -516,12 +516,12 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "member-lifecycle-observation-lineage",
-                    "member lifecycle anchor tracks observation lineage counters and sets without owning canonical lifecycle truth",
+                    "member lifecycle owner tracks peer exposure and terminalization routes without overloading bootstrap failure semantics",
                 ),
             ],
         ),
         machine_manifest_from_schema(
-            &mob_runtime_bridge_anchor_machine(),
+            &mob_runtime_bridge_machine(),
             &[
                 anchor(
                     "mob_runtime_actor",
@@ -542,117 +542,117 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[
                 scenario(
                     "runtime-run-submission-observed",
-                    "runtime run submissions are mirrored into runtime-bridge observation state",
+                    "runtime run submissions update canonical runtime-bridge state",
                 ),
                 scenario(
                     "runtime-run-terminal-observed",
-                    "runtime run completion/failure/cancellation is mirrored into runtime-bridge observation state",
+                    "runtime run completion/failure/cancellation update canonical runtime-bridge state",
                 ),
                 scenario(
                     "runtime-stop-request-observed",
-                    "runtime stop requests are mirrored into runtime-bridge observation state",
+                    "runtime stop requests update canonical runtime-bridge state",
                 ),
             ],
         ),
         machine_manifest_from_schema(
-            &mob_wiring_anchor_machine(),
+            &mob_wiring_machine(),
             &[
                 anchor(
                     "mob_runtime_actor",
                     "meerkat-mob/src/runtime/actor.rs",
-                    "peer wiring and admission routes mirrored into wiring observation state",
+                    "peer wiring and admission routes drive canonical wiring state",
                 ),
                 anchor(
                     "mob_roster_authority",
                     "meerkat-mob/src/runtime/roster_authority.rs",
-                    "roster/peer graph mutation precursor for wiring boundary observations",
+                    "roster/peer graph mutation precursor for canonical wiring state",
                 ),
                 anchor(
                     "mob_edge_locks",
                     "meerkat-mob/src/runtime/edge_locks.rs",
-                    "wire/unwire lock discipline precursor tied to observed wiring boundaries",
+                    "wire/unwire lock discipline precursor tied to canonical wiring ownership",
                 ),
             ],
             &[
                 scenario(
                     "operation-peer-trust-observed",
-                    "operation peer-trust events are mirrored into wiring observation state",
+                    "operation peer-trust events update canonical wiring state",
                 ),
                 scenario(
                     "peer-input-admission-observed",
-                    "peer input candidate admission is mirrored into wiring observation state",
+                    "peer input candidate admission updates canonical wiring state",
                 ),
                 scenario(
                     "runtime-work-admission-observed",
-                    "runtime work admission is mirrored into wiring observation state",
+                    "runtime work admission updates canonical wiring state",
                 ),
             ],
         ),
         machine_manifest_from_schema(
-            &mob_helper_result_anchor_machine(),
+            &mob_member_bootstrap_machine(),
             &[
                 anchor(
                     "mob_runtime_handle",
                     "meerkat-mob/src/runtime/handle.rs",
-                    "helper-facing surfaces that return run/member result classes",
+                    "member/member-list surfaces that project durable kickoff state",
                 ),
                 anchor(
                     "mob_runtime_actor",
                     "meerkat-mob/src/runtime/actor.rs",
-                    "runtime command handling path that mirrors terminal classes for helper surfaces",
+                    "runtime command handling path that realizes kickoff bootstrap transitions",
                 ),
                 anchor(
-                    "mob_terminalization",
-                    "meerkat-mob/src/runtime/terminalization.rs",
-                    "run terminalization precursor for helper-result class observations",
+                    "mob_bootstrap_authority",
+                    "meerkat-mob/src/runtime/mob_member_bootstrap_authority.rs",
+                    "bootstrap authority that owns kickoff transition legality",
                 ),
             ],
             &[
                 scenario(
-                    "helper-completed-class-observed",
-                    "completed run classes are mirrored into helper-result observation state",
+                    "kickoff-started",
+                    "successful kickoff completion transitions bootstrap state to started",
                 ),
                 scenario(
-                    "helper-failed-class-observed",
-                    "failed and cancelled run classes are mirrored into helper-result observation state",
+                    "kickoff-failed-or-cancelled",
+                    "failed and cancelled kickoff outcomes transition bootstrap state and emit typed lifecycle notices",
                 ),
                 scenario(
-                    "helper-force-cancel-observed",
-                    "force-cancel helper classification signals are mirrored into helper-result observation state",
+                    "kickoff-callback-pending",
+                    "callback-pending kickoff remains non-terminal and distinct from member lifecycle corruption",
                 ),
             ],
         ),
         machine_manifest_from_schema(
-            &mob_member_lifecycle_anchor_machine(),
+            &mob_member_lifecycle_machine(),
             &[
                 anchor(
-                    "mob_member_lifecycle_anchor_schema",
-                    "meerkat-machine-schema/src/catalog/mob_member_lifecycle_anchor.rs",
-                    "formal observation anchor for member lifecycle boundary routes",
+                    "mob_member_lifecycle_schema",
+                    "meerkat-machine-schema/src/catalog/mob_member_lifecycle.rs",
+                    "formal canonical owner for member lifecycle boundary routes",
                 ),
                 anchor(
                     "mob_ops_adapter",
                     "meerkat-mob/src/runtime/ops_adapter.rs",
-                    "member operation lifecycle observation and peer-ready reporting precursor",
+                    "member operation lifecycle and peer-ready reporting precursor",
                 ),
                 anchor(
                     "mob_handle",
                     "meerkat-mob/src/runtime/handle.rs",
-                    "helper/member-facing lifecycle observation precursor",
+                    "helper/member-facing lifecycle projection precursor",
                 ),
             ],
             &[scenario(
                 "member-peer-exposure-terminalization",
-                "member lifecycle anchor observes peer exposure and terminalization routes",
+                "member lifecycle owner tracks peer exposure and terminalization routes",
             )],
         ),
         machine_manifest_from_schema(
-            &mob_runtime_bridge_anchor_machine(),
+            &mob_runtime_bridge_machine(),
             &[
                 anchor(
-                    "mob_runtime_bridge_anchor_schema",
-                    "meerkat-machine-schema/src/catalog/mob_runtime_bridge_anchor.rs",
-                    "formal observation anchor for runtime bridge routes",
+                    "mob_runtime_bridge_schema",
+                    "meerkat-machine-schema/src/catalog/mob_runtime_bridge.rs",
+                    "formal canonical owner for runtime bridge routes",
                 ),
                 anchor(
                     "mob_actor",
@@ -667,16 +667,16 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
             &[scenario(
                 "runtime-run-bridge-observation",
-                "runtime bridge anchor observes submitted, terminal, and stop-request run routes",
+                "runtime bridge owner tracks submitted, terminal, and stop-request run routes",
             )],
         ),
         machine_manifest_from_schema(
-            &mob_wiring_anchor_machine(),
+            &mob_wiring_machine(),
             &[
                 anchor(
-                    "mob_wiring_anchor_schema",
-                    "meerkat-machine-schema/src/catalog/mob_wiring_anchor.rs",
-                    "formal observation anchor for mob wiring routes",
+                    "mob_wiring_schema",
+                    "meerkat-machine-schema/src/catalog/mob_wiring.rs",
+                    "formal canonical owner for mob wiring routes",
                 ),
                 anchor(
                     "mob_actor",
@@ -691,31 +691,31 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
             &[scenario(
                 "peer-input-runtime-work-observation",
-                "wiring anchor observes peer-input admission, runtime-work admission, and trusted operation peers",
+                "wiring owner tracks peer-input admission, runtime-work admission, and trusted operation peers",
             )],
         ),
         machine_manifest_from_schema(
-            &mob_helper_result_anchor_machine(),
+            &mob_member_bootstrap_machine(),
             &[
                 anchor(
-                    "mob_helper_result_anchor_schema",
-                    "meerkat-machine-schema/src/catalog/mob_helper_result_anchor.rs",
-                    "formal observation anchor for helper-facing terminal result classes",
+                    "mob_member_bootstrap_schema",
+                    "meerkat-machine-schema/src/catalog/mob_member_bootstrap.rs",
+                    "formal canonical owner for member bootstrap state",
                 ),
                 anchor(
                     "mob_handle",
                     "meerkat-mob/src/runtime/handle.rs",
-                    "helper result classification precursor",
+                    "kickoff state projection precursor",
                 ),
                 anchor(
                     "mob_actor",
                     "meerkat-mob/src/runtime/actor.rs",
-                    "runtime terminal outcome observation precursor",
+                    "bootstrap state realization precursor",
                 ),
             ],
             &[scenario(
-                "helper-result-observation",
-                "helper result anchor observes completed, failed, cancelled, and force-cancelled helper outcomes",
+                "member-bootstrap-state",
+                "member bootstrap owner tracks started, callback-pending, failed, and cancelled kickoff outcomes",
             )],
         ),
         machine_manifest_from_schema(

@@ -1,5 +1,10 @@
 use super::*;
 use crate::MobRuntimeMode;
+use crate::roster::MobMemberKickoffSnapshot;
+use crate::runtime::mob_member_lifecycle_authority::{
+    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
+    MobMemberLifecycleAuthority, MobMemberLifecycleInput, MobMemberTerminalClass,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -15,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -82,29 +87,6 @@ pub struct MobPeerConnectivitySnapshot {
     pub reachable_peer_count: usize,
     pub unknown_peer_count: usize,
     pub unreachable_peers: Vec<MobUnreachablePeer>,
-}
-
-/// Resolution state for a member's initial autonomous kickoff turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum MobMemberKickoffPhase {
-    Pending,
-    Starting,
-    CallbackPending,
-    Started,
-    Failed,
-    Cancelled,
-}
-
-/// Durable snapshot of a member's kickoff state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct MobMemberKickoffSnapshot {
-    pub phase: MobMemberKickoffPhase,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub updated_at: SystemTime,
 }
 
 /// One currently wired peer that is known to be unreachable.
@@ -266,31 +248,6 @@ impl From<MeerkatId> for PeerTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CanonicalMemberStatus {
-    Unknown,
-    Active,
-    Retiring,
-    Broken,
-    Completed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CanonicalSessionObservation {
-    Active,
-    Inactive,
-    Missing,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MobMemberTerminalClass {
-    Running,
-    TerminalFailure,
-    TerminalUnknown,
-    TerminalCompleted,
-}
-
 struct MobMemberTerminalClassifier;
 
 impl MobMemberTerminalClassifier {
@@ -328,50 +285,6 @@ impl MobMemberTerminalClassifier {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CanonicalMemberSnapshotMaterial {
-    member_present: bool,
-    status: CanonicalMemberStatus,
-    session_observation: CanonicalSessionObservation,
-    error: Option<String>,
-    output_preview: Option<String>,
-    tokens_used: u64,
-    current_session_id: Option<SessionId>,
-    peer_connectivity: Option<MobPeerConnectivitySnapshot>,
-    kickoff: Option<MobMemberKickoffSnapshot>,
-}
-
-impl CanonicalMemberSnapshotMaterial {
-    fn to_snapshot(&self) -> MobMemberSnapshot {
-        let status = match self.status {
-            CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
-            CanonicalMemberStatus::Active => MobMemberStatus::Active,
-            CanonicalMemberStatus::Retiring => MobMemberStatus::Retiring,
-            CanonicalMemberStatus::Broken => MobMemberStatus::Broken,
-            CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
-        };
-        let is_final = MobMemberTerminalClassifier::is_terminal(self);
-        MobMemberSnapshot {
-            status,
-            output_preview: self.output_preview.clone(),
-            error: self.error.clone(),
-            tokens_used: self.tokens_used,
-            is_final,
-            current_session_id: self.current_session_id.clone(),
-            peer_connectivity: self.peer_connectivity.clone(),
-            kickoff: self.kickoff.clone(),
-        }
-    }
-
-    fn to_helper_result(&self) -> HelperResult {
-        HelperResult {
-            output: self.output_preview.clone(),
-            tokens_used: self.tokens_used,
-            session_id: self.current_session_id.clone(),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MobHandle
 // ---------------------------------------------------------------------------
@@ -394,7 +307,6 @@ pub struct MobHandle {
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
-    pub(super) kickoff_state: Arc<RwLock<HashMap<MeerkatId, MobMemberKickoffSnapshot>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -587,10 +499,6 @@ impl MobHandle {
             session_id: diag.session_id,
             reason: diag.reason,
         }
-    }
-
-    async fn kickoff_state_for(&self, meerkat_id: &MeerkatId) -> Option<MobMemberKickoffSnapshot> {
-        self.kickoff_state.read().await.get(meerkat_id).cloned()
     }
 
     /// Poll mob events from the underlying store.
@@ -1543,61 +1451,49 @@ impl MobHandle {
                 .get(meerkat_id)
                 .cloned()
         };
-        let kickoff = self.kickoff_state_for(meerkat_id).await;
-
         if let Some(diag) = restore_failure {
-            let member_present = roster_state.is_some();
-            return CanonicalMemberSnapshotMaterial {
-                member_present,
-                status: if member_present {
-                    CanonicalMemberStatus::Broken
-                } else {
-                    CanonicalMemberStatus::Unknown
-                },
+            return MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+                member_present: roster_state.is_some(),
+                roster_state,
                 session_observation: CanonicalSessionObservation::Missing,
-                error: Some(diag.reason),
+                restore_failure: Some(diag.reason),
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: Some(diag.session_id),
                 peer_connectivity: None,
-                kickoff,
-            };
+                kickoff: roster_entry
+                    .as_ref()
+                    .and_then(|entry| entry.kickoff.clone()),
+            });
         }
 
         match (roster_state, current_session_id) {
-            (None, _) => CanonicalMemberSnapshotMaterial {
+            (None, _) => MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
                 member_present: false,
-                status: CanonicalMemberStatus::Unknown,
+                roster_state: None,
                 session_observation: CanonicalSessionObservation::Missing,
-                error: None,
+                restore_failure: None,
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
                 peer_connectivity: None,
-                kickoff,
-            },
-            (Some(crate::roster::MemberState::Retiring), None) => CanonicalMemberSnapshotMaterial {
-                member_present: true,
-                status: CanonicalMemberStatus::Retiring,
-                session_observation: CanonicalSessionObservation::Missing,
-                error: None,
-                output_preview: None,
-                tokens_used: 0,
-                current_session_id: None,
-                peer_connectivity: None,
-                kickoff,
-            },
-            (Some(crate::roster::MemberState::Active), None) => CanonicalMemberSnapshotMaterial {
-                member_present: true,
-                status: CanonicalMemberStatus::Completed,
-                session_observation: CanonicalSessionObservation::Missing,
-                error: None,
-                output_preview: None,
-                tokens_used: 0,
-                current_session_id: None,
-                peer_connectivity: None,
-                kickoff,
-            },
+                kickoff: None,
+            }),
+            (Some(roster_state), None) => {
+                MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+                    member_present: true,
+                    roster_state: Some(roster_state),
+                    session_observation: CanonicalSessionObservation::Missing,
+                    restore_failure: None,
+                    output_preview: None,
+                    tokens_used: 0,
+                    current_session_id: None,
+                    peer_connectivity: None,
+                    kickoff: roster_entry
+                        .as_ref()
+                        .and_then(|entry| entry.kickoff.clone()),
+                })
+            }
             (Some(roster_state), Some(session_id)) => {
                 let (output_preview, tokens_used, observation) =
                     match self.session_service.read(&session_id).await {
@@ -1615,25 +1511,6 @@ impl MobHandle {
                         }
                         Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
                     };
-                let status = match observation {
-                    CanonicalSessionObservation::Active => match roster_state {
-                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
-                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
-                    },
-                    CanonicalSessionObservation::Inactive => match roster_state {
-                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
-                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
-                    },
-                    CanonicalSessionObservation::Missing => match roster_state {
-                        crate::roster::MemberState::Active => CanonicalMemberStatus::Completed,
-                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
-                    },
-                    // Transport/read faults are not terminal truth.
-                    CanonicalSessionObservation::Unknown => match roster_state {
-                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
-                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
-                    },
-                };
                 let peer_connectivity = match roster_entry.as_ref() {
                     Some(entry) => {
                         self.resolve_peer_connectivity(entry, &session_id, &roster_snapshot)
@@ -1641,17 +1518,17 @@ impl MobHandle {
                     }
                     None => None,
                 };
-                CanonicalMemberSnapshotMaterial {
+                MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
                     member_present: true,
-                    status,
+                    roster_state: Some(roster_state),
                     session_observation: observation,
-                    error: None,
+                    restore_failure: None,
                     output_preview,
                     tokens_used,
                     current_session_id: Some(session_id),
                     peer_connectivity,
-                    kickoff,
-                }
+                    kickoff: roster_entry.and_then(|entry| entry.kickoff),
+                })
             }
         }
     }

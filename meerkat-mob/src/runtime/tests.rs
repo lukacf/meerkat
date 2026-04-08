@@ -1484,6 +1484,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MobReset => "MobReset",
             MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
             MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
+            MobEventKind::MeerkatKickoffUpdated { .. } => "MeerkatKickoffUpdated",
             MobEventKind::PeersWired { .. } => "PeersWired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
@@ -3716,10 +3717,15 @@ async fn test_lifecycle_updates_mcp_server_states() {
 #[tokio::test]
 async fn test_stop_persists_all_state_and_rejects_mutations() {
     let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn");
+    handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("kickoff should settle before counting persisted events");
     let event_count_before = handle.events().replay_all().await.expect("replay").len();
 
     handle.stop().await.expect("stop");
@@ -4370,6 +4376,16 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
         !snapshots.is_empty(),
         "barrier should return snapshots for spawned members"
     );
+    let kickoff = snapshots[0]
+        .1
+        .kickoff
+        .clone()
+        .expect("successful autonomous kickoff should be recorded");
+    assert_eq!(
+        kickoff.phase,
+        crate::roster::MobMemberKickoffPhase::Started,
+        "successful initial autonomous turn should mark kickoff as started"
+    );
 }
 
 #[tokio::test]
@@ -4484,10 +4500,7 @@ async fn test_wait_for_kickoff_complete_exposes_failed_kickoff_without_marking_m
         crate::runtime::handle::MobMemberStatus::Active
     );
     let kickoff = snapshot.kickoff.clone().expect("kickoff snapshot");
-    assert_eq!(
-        kickoff.phase,
-        crate::runtime::handle::MobMemberKickoffPhase::Failed
-    );
+    assert_eq!(kickoff.phase, crate::roster::MobMemberKickoffPhase::Failed);
     assert!(
         kickoff
             .error
@@ -4498,6 +4511,56 @@ async fn test_wait_for_kickoff_complete_exposes_failed_kickoff_without_marking_m
     assert!(
         snapshot.error.is_none(),
         "kickoff failure should not overload canonical member corruption error state"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_restores_persisted_kickoff_failure_state() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    service.set_keep_alive_turn_failure("provider overloaded");
+
+    let member = MeerkatId::from("lead-kickoff-resume");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .wait_for_members_kickoff_complete(
+            std::slice::from_ref(&member),
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("kickoff barrier succeeds");
+    handle.stop().await.expect("stop mob before resume");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume mob");
+
+    let snapshot = resumed.member_status(&member).await.expect("member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    let kickoff = snapshot.kickoff.expect("kickoff snapshot");
+    assert_eq!(kickoff.phase, crate::roster::MobMemberKickoffPhase::Failed);
+    assert!(
+        kickoff
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("provider overloaded")),
+        "resumed kickoff state should preserve persisted failure reason: {kickoff:?}"
     );
 }
 
@@ -4529,7 +4592,7 @@ async fn test_callback_pending_kickoff_does_not_block_follow_up_messages() {
     );
     assert_eq!(
         snapshot.kickoff.as_ref().expect("kickoff snapshot").phase,
-        crate::runtime::handle::MobMemberKickoffPhase::CallbackPending
+        crate::roster::MobMemberKickoffPhase::CallbackPending
     );
 
     let baseline_injects = service.inject_call_count();
@@ -4555,7 +4618,7 @@ async fn test_callback_pending_kickoff_does_not_block_follow_up_messages() {
             .as_ref()
             .expect("kickoff snapshot")
             .phase,
-        crate::runtime::handle::MobMemberKickoffPhase::CallbackPending
+        crate::roster::MobMemberKickoffPhase::CallbackPending
     );
 }
 
@@ -4601,7 +4664,7 @@ async fn test_failed_kickoff_emits_lifecycle_notice_to_wired_peer() {
             .as_ref()
             .expect("kickoff snapshot")
             .phase,
-        crate::runtime::handle::MobMemberKickoffPhase::Failed
+        crate::roster::MobMemberKickoffPhase::Failed
     );
 
     let helper_intents = service.sent_intents(&helper_sid).await;

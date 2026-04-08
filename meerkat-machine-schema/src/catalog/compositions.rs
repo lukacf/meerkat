@@ -6500,24 +6500,24 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 actor: "mob_orchestrator_actor".into(),
             },
             MachineInstance {
-                instance_id: "mob_member_lifecycle_anchor".into(),
-                machine_name: "MobMemberLifecycleAnchorMachine".into(),
-                actor: "mob_member_lifecycle_anchor_actor".into(),
+                instance_id: "mob_member_lifecycle".into(),
+                machine_name: "MobMemberLifecycleMachine".into(),
+                actor: "mob_member_lifecycle_actor".into(),
             },
             MachineInstance {
-                instance_id: "mob_runtime_bridge_anchor".into(),
-                machine_name: "MobRuntimeBridgeAnchorMachine".into(),
-                actor: "mob_runtime_bridge_anchor_actor".into(),
+                instance_id: "mob_runtime_bridge".into(),
+                machine_name: "MobRuntimeBridgeMachine".into(),
+                actor: "mob_runtime_bridge_actor".into(),
             },
             MachineInstance {
-                instance_id: "mob_wiring_anchor".into(),
-                machine_name: "MobWiringAnchorMachine".into(),
-                actor: "mob_wiring_anchor_actor".into(),
+                instance_id: "mob_wiring".into(),
+                machine_name: "MobWiringMachine".into(),
+                actor: "mob_wiring_actor".into(),
             },
             MachineInstance {
-                instance_id: "mob_helper_result_anchor".into(),
-                machine_name: "MobHelperResultAnchorMachine".into(),
-                actor: "mob_helper_result_anchor_actor".into(),
+                instance_id: "mob_member_bootstrap".into(),
+                machine_name: "MobMemberBootstrapMachine".into(),
+                actor: "mob_member_bootstrap_actor".into(),
             },
             MachineInstance {
                 instance_id: "flow_run".into(),
@@ -6553,10 +6553,10 @@ pub fn mob_bundle_composition() -> CompositionSchema {
         actors: vec![
             machine_actor("mob_lifecycle_actor"),
             machine_actor("mob_orchestrator_actor"),
-            machine_actor("mob_member_lifecycle_anchor_actor"),
-            machine_actor("mob_runtime_bridge_anchor_actor"),
-            machine_actor("mob_wiring_anchor_actor"),
-            machine_actor("mob_helper_result_anchor_actor"),
+            machine_actor("mob_member_lifecycle_actor"),
+            machine_actor("mob_runtime_bridge_actor"),
+            machine_actor("mob_wiring_actor"),
+            machine_actor("mob_member_bootstrap_actor"),
             machine_actor("flow_engine"),
             machine_actor("ops_plane"),
             machine_actor("peer_plane"),
@@ -6715,7 +6715,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "peer_comms".into(),
                 effect_variant: "SubmitPeerInputCandidate".into(),
                 to: RouteTarget {
-                    machine: "mob_wiring_anchor".into(),
+                    machine: "mob_wiring".into(),
                     input_variant: "PeerInputAdmitted".into(),
                 },
                 bindings: vec![
@@ -6753,7 +6753,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "runtime_control".into(),
                 effect_variant: "SubmitAdmittedIngressEffect".into(),
                 to: RouteTarget {
-                    machine: "mob_wiring_anchor".into(),
+                    machine: "mob_wiring".into(),
                     input_variant: "RuntimeWorkAdmitted".into(),
                 },
                 bindings: vec![
@@ -6795,7 +6795,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "runtime_control".into(),
                 effect_variant: "SubmitRunPrimitive".into(),
                 to: RouteTarget {
-                    machine: "mob_runtime_bridge_anchor".into(),
+                    machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeRunSubmitted".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -6861,7 +6861,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunCompleted".into(),
                 to: RouteTarget {
-                    machine: "mob_runtime_bridge_anchor".into(),
+                    machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeRunCompleted".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -6874,12 +6874,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
-                name: "mob_execution_completion_anchors_helper_result".into(),
+                name: "mob_execution_completion_updates_bootstrap".into(),
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunCompleted".into(),
                 to: RouteTarget {
-                    machine: "mob_helper_result_anchor".into(),
-                    input_variant: "AnchorCompleted".into(),
+                    machine: "mob_member_bootstrap".into(),
+                    input_variant: "KickoffStarted".into(),
                 },
                 bindings: vec![RouteFieldBinding {
                     to_field: "run_id".into(),
@@ -6911,7 +6911,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunFailed".into(),
                 to: RouteTarget {
-                    machine: "mob_runtime_bridge_anchor".into(),
+                    machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeRunFailed".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -6924,12 +6924,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
-                name: "mob_execution_failure_anchors_helper_result".into(),
+                name: "mob_execution_failure_updates_bootstrap".into(),
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunFailed".into(),
                 to: RouteTarget {
-                    machine: "mob_helper_result_anchor".into(),
-                    input_variant: "AnchorFailed".into(),
+                    machine: "mob_member_bootstrap".into(),
+                    input_variant: "KickoffFailed".into(),
                 },
                 bindings: vec![RouteFieldBinding {
                     to_field: "run_id".into(),
@@ -6961,7 +6961,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunCancelled".into(),
                 to: RouteTarget {
-                    machine: "mob_runtime_bridge_anchor".into(),
+                    machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeRunCancelled".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -6974,12 +6974,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
-                name: "mob_execution_cancel_anchors_helper_result".into(),
+                name: "mob_execution_cancel_updates_bootstrap".into(),
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunCancelled".into(),
                 to: RouteTarget {
-                    machine: "mob_helper_result_anchor".into(),
-                    input_variant: "AnchorCancelled".into(),
+                    machine: "mob_member_bootstrap".into(),
+                    input_variant: "KickoffCancelled".into(),
                 },
                 bindings: vec![RouteFieldBinding {
                     to_field: "run_id".into(),
@@ -7011,19 +7011,19 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "mob_orchestrator".into(),
                 effect_variant: "MemberForceCancelled".into(),
                 to: RouteTarget {
-                    machine: "mob_runtime_bridge_anchor".into(),
+                    machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeStopRequested".into(),
                 },
                 bindings: vec![],
                 delivery: RouteDelivery::Immediate,
             },
             Route {
-                name: "mob_member_force_cancel_anchors_helper_result".into(),
+                name: "mob_member_force_cancel_updates_bootstrap".into(),
                 from_machine: "mob_orchestrator".into(),
                 effect_variant: "MemberForceCancelled".into(),
                 to: RouteTarget {
-                    machine: "mob_helper_result_anchor".into(),
-                    input_variant: "AnchorForceCancelled".into(),
+                    machine: "mob_member_bootstrap".into(),
+                    input_variant: "KickoffForceCancelled".into(),
                 },
                 bindings: vec![],
                 delivery: RouteDelivery::Immediate,
@@ -7066,7 +7066,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "ops_lifecycle".into(),
                 effect_variant: "ExposeOperationPeer".into(),
                 to: RouteTarget {
-                    machine: "mob_member_lifecycle_anchor".into(),
+                    machine: "mob_member_lifecycle".into(),
                     input_variant: "MemberPeerExposed".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -7083,7 +7083,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "ops_lifecycle".into(),
                 effect_variant: "ExposeOperationPeer".into(),
                 to: RouteTarget {
-                    machine: "mob_wiring_anchor".into(),
+                    machine: "mob_wiring".into(),
                     input_variant: "OperationPeerTrusted".into(),
                 },
                 bindings: vec![RouteFieldBinding {
@@ -7100,7 +7100,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "ops_lifecycle".into(),
                 effect_variant: "NotifyOpWatcher".into(),
                 to: RouteTarget {
-                    machine: "mob_member_lifecycle_anchor".into(),
+                    machine: "mob_member_lifecycle".into(),
                     input_variant: "MemberTerminalized".into(),
                 },
                 bindings: vec![
@@ -7246,39 +7246,39 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
             },
             CompositionInvariant {
-                name: "mob_runtime_admission_is_observed_by_wiring_anchor".into(),
+                name: "mob_runtime_admission_updates_wiring".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_runtime_admission_tracks_wiring".into(),
-                    to_machine: "mob_wiring_anchor".into(),
+                    to_machine: "mob_wiring".into(),
                     input_variant: "RuntimeWorkAdmitted".into(),
                     from_machine: "runtime_control".into(),
                     effect_variant: "SubmitAdmittedIngressEffect".into(),
                 },
                 statement:
-                    "mob runtime admission effects are mirrored into the wiring observation anchor".into(),
-                references_machines: vec!["runtime_control".into(), "mob_wiring_anchor".into()],
-                references_actors: vec!["control_plane".into(), "mob_wiring_anchor_actor".into()],
+                    "mob runtime admission effects are recorded in the wiring owner".into(),
+                references_machines: vec!["runtime_control".into(), "mob_wiring".into()],
+                references_actors: vec!["control_plane".into(), "mob_wiring_actor".into()],
             },
             CompositionInvariant {
-                name: "mob_runtime_start_is_observed_by_bridge_anchor".into(),
+                name: "mob_runtime_start_updates_bridge".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_runtime_start_tracks_bridge".into(),
-                    to_machine: "mob_runtime_bridge_anchor".into(),
+                    to_machine: "mob_runtime_bridge".into(),
                     input_variant: "RuntimeRunSubmitted".into(),
                     from_machine: "runtime_control".into(),
                     effect_variant: "SubmitRunPrimitive".into(),
                 },
                 statement:
-                    "mob run handoff into turn execution is mirrored into the runtime-bridge observation anchor".into(),
+                    "mob run handoff into turn execution is recorded in the runtime bridge owner".into(),
                 references_machines: vec![
                     "runtime_control".into(),
                     "turn_execution".into(),
-                    "mob_runtime_bridge_anchor".into(),
+                    "mob_runtime_bridge".into(),
                 ],
                 references_actors: vec![
                     "control_plane".into(),
                     "turn_executor".into(),
-                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_runtime_bridge_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -7317,25 +7317,25 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     required_targets: vec![
                         RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunFailed".into() },
                         RouteTarget { machine: "runtime_control".into(), input_variant: "RunFailed".into() },
-                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunFailed".into() },
-                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorFailed".into() },
+                        RouteTarget { machine: "mob_runtime_bridge".into(), input_variant: "RuntimeRunFailed".into() },
+                        RouteTarget { machine: "mob_member_bootstrap".into(), input_variant: "KickoffFailed".into() },
                     ],
                 },
                 statement:
-                    "mob turn-execution failure is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                    "mob turn-execution failure is handled by ingress/runtime control and recorded in runtime-bridge and member-bootstrap owner and runtime-bridge owner".into(),
                 references_machines: vec![
                     "turn_execution".into(),
                     "runtime_ingress".into(),
                     "runtime_control".into(),
-                    "mob_runtime_bridge_anchor".into(),
-                    "mob_helper_result_anchor".into(),
+                    "mob_runtime_bridge".into(),
+                    "mob_member_bootstrap".into(),
                 ],
                 references_actors: vec![
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
-                    "mob_runtime_bridge_anchor_actor".into(),
-                    "mob_helper_result_anchor_actor".into(),
+                    "mob_runtime_bridge_actor".into(),
+                    "mob_member_bootstrap_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -7346,25 +7346,25 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     required_targets: vec![
                         RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCancelled".into() },
                         RouteTarget { machine: "runtime_control".into(), input_variant: "RunCancelled".into() },
-                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCancelled".into() },
-                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCancelled".into() },
+                        RouteTarget { machine: "mob_runtime_bridge".into(), input_variant: "RuntimeRunCancelled".into() },
+                        RouteTarget { machine: "mob_member_bootstrap".into(), input_variant: "KickoffCancelled".into() },
                     ],
                 },
                 statement:
-                    "mob turn-execution cancellation is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                    "mob turn-execution cancellation is handled by ingress/runtime control and recorded in runtime-bridge and member-bootstrap owner and runtime-bridge owner".into(),
                 references_machines: vec![
                     "turn_execution".into(),
                     "runtime_ingress".into(),
                     "runtime_control".into(),
-                    "mob_runtime_bridge_anchor".into(),
-                    "mob_helper_result_anchor".into(),
+                    "mob_runtime_bridge".into(),
+                    "mob_member_bootstrap".into(),
                 ],
                 references_actors: vec![
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
-                    "mob_runtime_bridge_anchor_actor".into(),
-                    "mob_helper_result_anchor_actor".into(),
+                    "mob_runtime_bridge_actor".into(),
+                    "mob_member_bootstrap_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -7375,25 +7375,25 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     required_targets: vec![
                         RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCompleted".into() },
                         RouteTarget { machine: "runtime_control".into(), input_variant: "RunCompleted".into() },
-                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCompleted".into() },
-                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCompleted".into() },
+                        RouteTarget { machine: "mob_runtime_bridge".into(), input_variant: "RuntimeRunCompleted".into() },
+                        RouteTarget { machine: "mob_member_bootstrap".into(), input_variant: "KickoffStarted".into() },
                     ],
                 },
                 statement:
-                    "mob turn-execution completion is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                    "mob turn-execution completion is handled by ingress/runtime control and recorded in runtime-bridge and member-bootstrap owner and runtime-bridge owner".into(),
                 references_machines: vec![
                     "turn_execution".into(),
                     "runtime_ingress".into(),
                     "runtime_control".into(),
-                    "mob_runtime_bridge_anchor".into(),
-                    "mob_helper_result_anchor".into(),
+                    "mob_runtime_bridge".into(),
+                    "mob_member_bootstrap".into(),
                 ],
                 references_actors: vec![
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
-                    "mob_runtime_bridge_anchor_actor".into(),
-                    "mob_helper_result_anchor_actor".into(),
+                    "mob_runtime_bridge_actor".into(),
+                    "mob_member_bootstrap_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -7426,35 +7426,35 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 name: "mob_member_lifecycle_terminal_events_are_observed".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_ops_terminal_tracks_member_lifecycle".into(),
-                    to_machine: "mob_member_lifecycle_anchor".into(),
+                    to_machine: "mob_member_lifecycle".into(),
                     input_variant: "MemberTerminalized".into(),
                     from_machine: "ops_lifecycle".into(),
                     effect_variant: "NotifyOpWatcher".into(),
                 },
                 statement:
-                    "mob member lifecycle terminal events are mirrored from ops lifecycle into the member-lifecycle observation anchor".into(),
+                    "mob member lifecycle terminal events are mirrored from ops lifecycle into the member lifecycle owner".into(),
                 references_machines: vec![
                     "ops_lifecycle".into(),
-                    "mob_member_lifecycle_anchor".into(),
+                    "mob_member_lifecycle".into(),
                 ],
                 references_actors: vec![
                     "ops_plane".into(),
-                    "mob_member_lifecycle_anchor_actor".into(),
+                    "mob_member_lifecycle_actor".into(),
                 ],
             },
             CompositionInvariant {
-                name: "mob_wiring_anchor_tracks_peer_candidates".into(),
+                name: "mob_wiring_tracks_peer_candidates".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_peer_candidate_tracks_wiring".into(),
-                    to_machine: "mob_wiring_anchor".into(),
+                    to_machine: "mob_wiring".into(),
                     input_variant: "PeerInputAdmitted".into(),
                     from_machine: "peer_comms".into(),
                     effect_variant: "SubmitPeerInputCandidate".into(),
                 },
                 statement:
-                    "mob peer candidate admission is mirrored into the wiring observation anchor through an explicit route".into(),
-                references_machines: vec!["peer_comms".into(), "mob_wiring_anchor".into()],
-                references_actors: vec!["peer_plane".into(), "mob_wiring_anchor_actor".into()],
+                    "mob peer candidate admission is recorded in the wiring owner through an explicit route".into(),
+                references_machines: vec!["peer_comms".into(), "mob_wiring".into()],
+                references_actors: vec!["peer_plane".into(), "mob_wiring_actor".into()],
             },
         ],
         witnesses: vec![
@@ -7634,7 +7634,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_execution_completion_updates_ingress".into(),
                     "mob_execution_completion_notifies_control".into(),
                     "mob_execution_completion_tracks_bridge".into(),
-                    "mob_execution_completion_anchors_helper_result".into(),
+                    "mob_execution_completion_updates_bootstrap".into(),
                     "mob_flow_terminalization_completes_orchestrator".into(),
                     "mob_flow_deactivation_finishes_lifecycle_run".into(),
                 ],
@@ -8111,7 +8111,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_execution_failure_updates_ingress".into(),
                     "mob_execution_failure_notifies_control".into(),
                     "mob_execution_failure_tracks_bridge".into(),
-                    "mob_execution_failure_anchors_helper_result".into(),
+                    "mob_execution_failure_updates_bootstrap".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -8316,7 +8316,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_execution_cancel_updates_ingress".into(),
                     "mob_execution_cancel_notifies_control".into(),
                     "mob_execution_cancel_tracks_bridge".into(),
-                    "mob_execution_cancel_anchors_helper_result".into(),
+                    "mob_execution_cancel_updates_bootstrap".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -8523,7 +8523,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_supervisor_activation_starts_lifecycle".into(),
                     "mob_member_force_cancelled_stops_runtime".into(),
                     "mob_member_force_cancel_tracks_bridge".into(),
-                    "mob_member_force_cancel_anchors_helper_result".into(),
+                    "mob_member_force_cancel_updates_bootstrap".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![

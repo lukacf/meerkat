@@ -31,7 +31,6 @@ struct RuntimeWiring {
     task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
-    kickoff_state: Arc<RwLock<HashMap<MeerkatId, super::handle::MobMemberKickoffSnapshot>>>,
     mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
@@ -393,13 +392,11 @@ impl MobBuilder {
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
-        let kickoff_state = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             state: state.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
-            kickoff_state: kickoff_state.clone(),
             mcp_servers: mcp_servers.clone(),
             command_tx: command_tx.clone(),
             command_rx,
@@ -415,7 +412,6 @@ impl MobBuilder {
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: session_service.clone(),
             restore_diagnostics,
-            kickoff_state,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -858,13 +854,11 @@ impl MobBuilder {
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
-        let kickoff_state = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster,
             task_board,
             state,
             restore_diagnostics,
-            kickoff_state,
             mcp_servers,
             command_tx,
             command_rx,
@@ -900,7 +894,6 @@ impl MobBuilder {
             task_board,
             state,
             restore_diagnostics,
-            kickoff_state,
             mcp_servers,
             command_tx,
             command_rx,
@@ -918,7 +911,6 @@ impl MobBuilder {
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: handle_session_service.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
-            kickoff_state: kickoff_state.clone(),
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
             session_service,
@@ -1025,7 +1017,6 @@ impl MobBuilder {
             session_service: handle_session_service,
             runtime_adapter,
             restore_diagnostics,
-            kickoff_state,
             task_board_service,
             spawn_policy,
             lifecycle_authority,

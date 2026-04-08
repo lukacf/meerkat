@@ -5,12 +5,12 @@ pub mod flow_frame;
 pub mod flow_run;
 pub mod input_lifecycle;
 pub mod loop_iteration;
-pub mod mob_helper_result_anchor;
 pub mod mob_lifecycle;
-pub mod mob_member_lifecycle_anchor;
+pub mod mob_member_bootstrap;
+pub mod mob_member_lifecycle;
 pub mod mob_orchestrator;
-pub mod mob_runtime_bridge_anchor;
-pub mod mob_wiring_anchor;
+pub mod mob_runtime_bridge;
+pub mod mob_wiring;
 pub mod occurrence_lifecycle;
 pub mod ops_lifecycle;
 pub mod peer_comms;
@@ -35,10 +35,10 @@ pub fn all_kernels() -> Vec<GeneratedMachineKernel> {
         external_tool_surface::kernel(),
         turn_execution::kernel(),
         mob_lifecycle::kernel(),
-        mob_member_lifecycle_anchor::kernel(),
-        mob_runtime_bridge_anchor::kernel(),
-        mob_wiring_anchor::kernel(),
-        mob_helper_result_anchor::kernel(),
+        mob_member_lifecycle::kernel(),
+        mob_runtime_bridge::kernel(),
+        mob_wiring::kernel(),
+        mob_member_bootstrap::kernel(),
         flow_run::kernel(),
         mob_orchestrator::kernel(),
         comms_drain_lifecycle::kernel(),

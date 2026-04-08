@@ -1,7 +1,7 @@
 ---- MODULE model ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Generated semantic machine model for MobRuntimeBridgeAnchorMachine.
+\* Generated semantic machine model for MobRuntimeBridgeMachine.
 
 CONSTANTS RunIdValues
 
@@ -22,7 +22,7 @@ VARIABLES phase, model_step_count, observed_submitted_runs, observed_completed_r
 vars == << phase, model_step_count, observed_submitted_runs, observed_completed_runs, observed_failed_runs, observed_cancelled_runs, stop_request_count >>
 
 Init ==
-    /\ phase = "Tracking"
+    /\ phase = "Stable"
     /\ model_step_count = 0
     /\ observed_submitted_runs = {}
     /\ observed_completed_runs = {}
@@ -31,40 +31,40 @@ Init ==
     /\ stop_request_count = 0
 
 RuntimeRunSubmitted(run_id) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_submitted_runs' = (observed_submitted_runs \cup {run_id})
     /\ UNCHANGED << observed_completed_runs, observed_failed_runs, observed_cancelled_runs, stop_request_count >>
 
 
 RuntimeRunCompleted(run_id) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_completed_runs' = (observed_completed_runs \cup {run_id})
     /\ UNCHANGED << observed_submitted_runs, observed_failed_runs, observed_cancelled_runs, stop_request_count >>
 
 
 RuntimeRunFailed(run_id) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_failed_runs' = (observed_failed_runs \cup {run_id})
     /\ UNCHANGED << observed_submitted_runs, observed_completed_runs, observed_cancelled_runs, stop_request_count >>
 
 
 RuntimeRunCancelled(run_id) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_cancelled_runs' = (observed_cancelled_runs \cup {run_id})
     /\ UNCHANGED << observed_submitted_runs, observed_completed_runs, observed_failed_runs, stop_request_count >>
 
 
 RuntimeStopRequested ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ stop_request_count' = (stop_request_count) + 1
     /\ UNCHANGED << observed_submitted_runs, observed_completed_runs, observed_failed_runs, observed_cancelled_runs >>

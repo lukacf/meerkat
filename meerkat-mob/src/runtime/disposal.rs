@@ -227,6 +227,7 @@ mod tests {
                 wired_to: BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
+                kickoff: None,
             },
             retiring_comms: None,
             retiring_key: None,

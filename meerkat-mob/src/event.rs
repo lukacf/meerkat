@@ -5,6 +5,7 @@
 
 use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
 use meerkat_core::comms::TrustedPeerSpec;
@@ -181,6 +182,13 @@ pub enum MobEventKind {
         role: ProfileName,
         /// Backend-neutral member identity that was retired.
         member_ref: MemberRef,
+    },
+    /// Kickoff state for an existing meerkat changed.
+    MeerkatKickoffUpdated {
+        /// Meerkat whose kickoff state changed.
+        meerkat_id: MeerkatId,
+        /// Current kickoff snapshot.
+        kickoff: MobMemberKickoffSnapshot,
     },
     /// Bidirectional trust was established between two meerkats.
     PeersWired {
@@ -434,6 +442,18 @@ mod tests {
             meerkat_id: MeerkatId::from("agent-1"),
             role: ProfileName::from("worker"),
             member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
+        });
+    }
+
+    #[test]
+    fn test_meerkat_kickoff_updated_roundtrip() {
+        roundtrip(&MobEventKind::MeerkatKickoffUpdated {
+            meerkat_id: MeerkatId::from("agent-1"),
+            kickoff: crate::roster::MobMemberKickoffSnapshot {
+                phase: crate::roster::MobMemberKickoffPhase::Failed,
+                error: Some("provider overloaded".to_string()),
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
+            },
         });
     }
 

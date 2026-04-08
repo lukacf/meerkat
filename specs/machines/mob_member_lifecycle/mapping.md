@@ -1,11 +1,11 @@
-# MobMemberLifecycleAnchorMachine Mapping Note
+# MobMemberLifecycleMachine Mapping Note
 
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage
 This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Machine
-- `MobMemberLifecycleAnchorMachine`
+- `MobMemberLifecycleMachine`
 
 ### Code Anchors
 - `mob_runtime_actor`: `meerkat-mob/src/runtime/actor.rs` — mob actor observes child operation peer exposure and terminalization routes
@@ -15,7 +15,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Scenarios
 - `member-peer-exposure-observed` — operation peer-ready exposure is mirrored into member lifecycle observation state
 - `member-terminalization-observed` — operation terminalization is mirrored into member lifecycle observation state
-- `member-lifecycle-observation-lineage` — member lifecycle anchor tracks observation lineage counters and sets without owning canonical lifecycle truth
+- `member-lifecycle-observation-lineage` — member lifecycle owner tracks peer exposure and terminalization routes without overloading bootstrap failure semantics
 
 ### Transitions
 - `MemberPeerExposed`
@@ -26,7 +26,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `member-peer-exposure-observed`
 
 ### Effects
-- `MemberLifecycleSnapshotUpdated`
+- `MemberLifecycleStateUpdated`
   - anchors: `mob_runtime_actor`, `mob_ops_adapter`, `mob_provisioner`
   - scenarios: `member-peer-exposure-observed`
 

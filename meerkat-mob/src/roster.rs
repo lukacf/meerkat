@@ -18,6 +18,7 @@ use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::SystemTime;
 
 /// Lifecycle state for a roster member.
 ///
@@ -28,6 +29,29 @@ pub enum MemberState {
     #[default]
     Active,
     Retiring,
+}
+
+/// Resolution state for a member's initial autonomous kickoff turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MobMemberKickoffPhase {
+    Pending,
+    Starting,
+    CallbackPending,
+    Started,
+    Failed,
+    Cancelled,
+}
+
+/// Durable projected snapshot of a member's kickoff state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MobMemberKickoffSnapshot {
+    pub phase: MobMemberKickoffPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub updated_at: SystemTime,
 }
 
 /// A single meerkat entry in the roster.
@@ -56,6 +80,9 @@ pub struct RosterEntry {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Projected kickoff state for autonomous initial turn resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kickoff: Option<MobMemberKickoffSnapshot>,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -139,6 +166,12 @@ impl Roster {
             MobEventKind::PeersUnwired { a, b } => {
                 self.unwire(a, b);
             }
+            MobEventKind::MeerkatKickoffUpdated {
+                meerkat_id,
+                kickoff,
+            } => {
+                self.set_kickoff(meerkat_id, Some(kickoff.clone()));
+            }
             MobEventKind::MobReset => {
                 self.entries.clear();
             }
@@ -162,6 +195,7 @@ impl Roster {
                     wired_to: BTreeSet::new(),
                     external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
+                    kickoff: None,
                 },
             )
             .is_none()
@@ -328,6 +362,19 @@ impl Roster {
     pub fn set_peer_id(&mut self, meerkat_id: &MeerkatId, peer_id: Option<String>) -> bool {
         if let Some(entry) = self.entries.get_mut(meerkat_id) {
             entry.peer_id = peer_id;
+            return true;
+        }
+        false
+    }
+
+    /// Update the projected kickoff state for an existing meerkat.
+    pub fn set_kickoff(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        kickoff: Option<MobMemberKickoffSnapshot>,
+    ) -> bool {
+        if let Some(entry) = self.entries.get_mut(meerkat_id) {
+            entry.kickoff = kickoff;
             return true;
         }
         false
@@ -828,6 +875,7 @@ mod tests {
             },
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
+            kickoff: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
@@ -997,6 +1045,7 @@ mod tests {
             wired_to: BTreeSet::new(),
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
+            kickoff: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();

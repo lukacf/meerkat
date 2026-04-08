@@ -6,26 +6,25 @@ use crate::{
     TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
-/// Observation anchor for member-lifecycle-related async routes in `mob_bundle`.
+/// Canonical owner for member lifecycle truth in `mob_bundle`.
 ///
-/// This machine is intentionally narrow. Today the live mob runtime still keeps
-/// canonical member lifecycle truth in handwritten mob code; this anchor only
-/// records which lifecycle-relevant operation events the composition has
-/// observed so those routes are not entirely informal. It is purely
-/// observational and must not be interpreted as the canonical member lifecycle
-/// owner—it stands in only until the formal owner schema is completed.
-pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
+/// This machine tracks peer exposure and member terminalization routes that
+/// determine whether a member remains active, is retiring, or has fully
+/// terminalized. Bootstrap failures are modeled separately in
+/// `MobMemberBootstrapMachine` and must not collapse member lifecycle into
+/// corruption.
+pub fn mob_member_lifecycle_machine() -> MachineSchema {
     MachineSchema {
-        machine: "MobMemberLifecycleAnchorMachine".into(),
+        machine: "MobMemberLifecycleMachine".into(),
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "generated::mob_member_lifecycle_anchor".into(),
+            module: "generated::mob_member_lifecycle".into(),
         },
         state: StateSchema {
             phase: EnumSchema {
-                name: "MobMemberLifecycleAnchorState".into(),
-                variants: vec![variant("Tracking")],
+                name: "MobMemberLifecycleState".into(),
+                variants: vec![variant("Stable")],
             },
             fields: vec![
                 field(
@@ -40,7 +39,7 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
                 field("terminalization_count", TypeRef::U32),
             ],
             init: InitSchema {
-                phase: "Tracking".into(),
+                phase: "Stable".into(),
                 fields: vec![
                     init("observed_peer_exposed_operations", Expr::EmptySet),
                     init("observed_terminalized_operations", Expr::EmptySet),
@@ -51,7 +50,7 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
             terminal_phases: vec![],
         },
         inputs: EnumSchema {
-            name: "MobMemberLifecycleAnchorInput".into(),
+            name: "MobMemberLifecycleInput".into(),
             variants: vec![
                 VariantSchema {
                     name: "MemberPeerExposed".into(),
@@ -70,8 +69,8 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
             ],
         },
         effects: EnumSchema {
-            name: "MobMemberLifecycleAnchorEffect".into(),
-            variants: vec![variant("MemberLifecycleSnapshotUpdated")],
+            name: "MobMemberLifecycleEffect".into(),
+            variants: vec![variant("MemberLifecycleStateUpdated")],
         },
         helpers: vec![],
         derived: vec![],
@@ -79,7 +78,7 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
         transitions: vec![
             TransitionSchema {
                 name: "MemberPeerExposed".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "MemberPeerExposed".into(),
                     bindings: vec!["operation_id".into()],
@@ -95,15 +94,15 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
                         amount: 1,
                     },
                 ],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "MemberLifecycleSnapshotUpdated".into(),
+                    variant: "MemberLifecycleStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
                 name: "MemberTerminalized".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "MemberTerminalized".into(),
                     bindings: vec!["operation_id".into(), "terminal_outcome".into()],
@@ -119,16 +118,16 @@ pub fn mob_member_lifecycle_anchor_machine() -> MachineSchema {
                         amount: 1,
                     },
                 ],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "MemberLifecycleSnapshotUpdated".into(),
+                    variant: "MemberLifecycleStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
         ],
         ci_step_limit: None,
         effect_dispositions: vec![disposition(
-            "MemberLifecycleSnapshotUpdated",
+            "MemberLifecycleStateUpdated",
             EffectDisposition::Local,
         )],
     }

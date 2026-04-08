@@ -1,7 +1,7 @@
 ---- MODULE model ----
 EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Generated semantic machine model for MobMemberLifecycleAnchorMachine.
+\* Generated semantic machine model for MobMemberLifecycleMachine.
 
 CONSTANTS OperationIdValues, OperationTerminalOutcomeValues
 
@@ -22,7 +22,7 @@ VARIABLES phase, model_step_count, observed_peer_exposed_operations, observed_te
 vars == << phase, model_step_count, observed_peer_exposed_operations, observed_terminalized_operations, peer_exposure_count, terminalization_count >>
 
 Init ==
-    /\ phase = "Tracking"
+    /\ phase = "Stable"
     /\ model_step_count = 0
     /\ observed_peer_exposed_operations = {}
     /\ observed_terminalized_operations = {}
@@ -30,8 +30,8 @@ Init ==
     /\ terminalization_count = 0
 
 MemberPeerExposed(operation_id) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_peer_exposed_operations' = (observed_peer_exposed_operations \cup {operation_id})
     /\ peer_exposure_count' = (peer_exposure_count) + 1
@@ -39,8 +39,8 @@ MemberPeerExposed(operation_id) ==
 
 
 MemberTerminalized(operation_id, terminal_outcome) ==
-    /\ phase = "Tracking"
-    /\ phase' = "Tracking"
+    /\ phase = "Stable"
+    /\ phase' = "Stable"
     /\ model_step_count' = model_step_count + 1
     /\ observed_terminalized_operations' = (observed_terminalized_operations \cup {operation_id})
     /\ terminalization_count' = (terminalization_count) + 1

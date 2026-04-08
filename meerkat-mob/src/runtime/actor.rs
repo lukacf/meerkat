@@ -4,8 +4,16 @@ use super::disposal::{
 use super::mob_lifecycle_authority::{
     MobLifecycleAuthority, MobLifecycleInput, MobLifecycleMutator,
 };
+use super::mob_member_bootstrap_authority::{
+    MobMemberBootstrapAuthority, MobMemberBootstrapEffect, MobMemberBootstrapInput,
+};
 use super::mob_orchestrator_authority::{
     MobOrchestratorAuthority, MobOrchestratorInput, MobOrchestratorMutator,
+};
+use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
+use super::mob_wiring_authority::{
+    ExternalUnwirePlan, ExternalWireInput, ExternalWirePlan, LocalUnwirePlan, LocalWirePlan,
+    MobWiringAuthority,
 };
 use super::provision_guard::PendingProvision;
 use super::transaction::LifecycleRollback;
@@ -209,8 +217,6 @@ pub(super) struct MobActor {
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
-    pub(super) kickoff_state:
-        Arc<RwLock<HashMap<MeerkatId, super::handle::MobMemberKickoffSnapshot>>>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
@@ -256,39 +262,84 @@ impl MobActor {
             flow_streams: self.flow_streams.clone(),
             session_service: self.session_service.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
-            kickoff_state: self.kickoff_state.clone(),
         }
     }
 
-    async fn set_kickoff_state(
+    async fn persist_kickoff_state(
         &self,
         meerkat_id: &MeerkatId,
-        phase: super::handle::MobMemberKickoffPhase,
+        phase: crate::roster::MobMemberKickoffPhase,
         error: Option<String>,
-    ) {
-        self.kickoff_state.write().await.insert(
-            meerkat_id.clone(),
-            super::handle::MobMemberKickoffSnapshot {
-                phase,
-                error,
-                updated_at: std::time::SystemTime::now(),
-            },
-        );
+    ) -> Result<(), MobError> {
+        let kickoff = crate::roster::MobMemberKickoffSnapshot {
+            phase,
+            error,
+            updated_at: std::time::SystemTime::now(),
+        };
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MeerkatKickoffUpdated {
+                    meerkat_id: meerkat_id.clone(),
+                    kickoff: kickoff.clone(),
+                },
+            })
+            .await
+            .map_err(MobError::from)?;
+        self.roster
+            .write()
+            .await
+            .set_kickoff(meerkat_id, Some(kickoff));
+        Ok(())
     }
 
     async fn kickoff_phase_for(
         &self,
         meerkat_id: &MeerkatId,
-    ) -> Option<super::handle::MobMemberKickoffPhase> {
-        self.kickoff_state
+    ) -> Option<crate::roster::MobMemberKickoffPhase> {
+        self.roster
             .read()
             .await
             .get(meerkat_id)
-            .map(|snapshot| snapshot.phase)
+            .and_then(|entry| entry.kickoff.as_ref().map(|snapshot| snapshot.phase))
     }
 
     async fn clear_kickoff_state(&self, meerkat_id: &MeerkatId) {
-        self.kickoff_state.write().await.remove(meerkat_id);
+        self.roster.write().await.set_kickoff(meerkat_id, None);
+    }
+
+    async fn apply_kickoff_input(
+        &self,
+        meerkat_id: &MeerkatId,
+        input: MobMemberBootstrapInput,
+    ) -> Result<bool, MobError> {
+        let current_phase = self.kickoff_phase_for(meerkat_id).await;
+        let mut authority = MobMemberBootstrapAuthority::new(current_phase);
+        let transition = match authority.apply(input) {
+            Ok(transition) => transition,
+            Err(_) => return Ok(false),
+        };
+
+        for effect in transition.effects {
+            match effect {
+                MobMemberBootstrapEffect::PersistKickoff { phase, error } => {
+                    self.persist_kickoff_state(meerkat_id, phase, error).await?;
+                }
+                MobMemberBootstrapEffect::EmitLifecycleNotice { intent } => {
+                    if let Err(error) = self.notify_kickoff_event(meerkat_id, intent).await {
+                        tracing::warn!(
+                            meerkat_id = %meerkat_id,
+                            error = %error,
+                            intent,
+                            "failed to emit kickoff lifecycle notice"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     fn expect_state(&self, expected: &[MobState], to: MobState) -> Result<(), MobError> {
@@ -843,71 +894,36 @@ impl MobActor {
         &self,
         meerkat_id: &MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
-    ) {
-        use super::handle::MobMemberKickoffPhase;
-        use meerkat_runtime::completion::CompletionOutcome;
-
-        match outcome {
-            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult => {
-                self.set_kickoff_state(meerkat_id, MobMemberKickoffPhase::Started, None)
-                    .await;
-            }
-            CompletionOutcome::CallbackPending { tool_name, args } => {
-                self.set_kickoff_state(meerkat_id, MobMemberKickoffPhase::CallbackPending, None)
-                    .await;
-                tracing::debug!(
-                    meerkat_id = %meerkat_id,
-                    tool_name = %tool_name,
-                    args = ?args,
-                    "autonomous kickoff reached callback-pending boundary"
-                );
-            }
-            CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
-                self.set_kickoff_state(
-                    meerkat_id,
-                    MobMemberKickoffPhase::Failed,
-                    Some(reason.clone()),
-                )
-                .await;
-                if let Err(error) = self
-                    .notify_kickoff_event(meerkat_id, "mob.kickoff_failed")
-                    .await
-                {
-                    tracing::warn!(
-                        meerkat_id = %meerkat_id,
-                        error = %error,
-                        "failed to emit kickoff failure lifecycle notice"
-                    );
-                }
-            }
+    ) -> Result<(), MobError> {
+        if let meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } =
+            &outcome
+        {
+            tracing::debug!(
+                meerkat_id = %meerkat_id,
+                tool_name = %tool_name,
+                args = ?args,
+                "autonomous kickoff reached callback-pending boundary"
+            );
         }
+
+        let _ = self
+            .apply_kickoff_input(
+                meerkat_id,
+                MobMemberBootstrapInput::ResolveOutcome { outcome },
+            )
+            .await?;
+        Ok(())
     }
 
     async fn maybe_mark_kickoff_cancelled(&self, meerkat_id: &MeerkatId) {
-        use super::handle::MobMemberKickoffPhase;
-
-        let phase = self.kickoff_phase_for(meerkat_id).await;
-        if !matches!(
-            phase,
-            Some(
-                MobMemberKickoffPhase::Pending
-                    | MobMemberKickoffPhase::Starting
-                    | MobMemberKickoffPhase::CallbackPending
-            )
-        ) {
-            return;
-        }
-
-        self.set_kickoff_state(meerkat_id, MobMemberKickoffPhase::Cancelled, None)
-            .await;
         if let Err(error) = self
-            .notify_kickoff_event(meerkat_id, "mob.kickoff_cancelled")
+            .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::CancelRequested)
             .await
         {
             tracing::warn!(
                 meerkat_id = %meerkat_id,
                 error = %error,
-                "failed to emit kickoff cancellation lifecycle notice"
+                "failed to apply kickoff cancellation transition"
             );
         }
     }
@@ -1326,7 +1342,13 @@ impl MobActor {
                     outcome,
                     ack_tx,
                 } => {
-                    self.resolve_kickoff_outcome(&meerkat_id, outcome).await;
+                    if let Err(error) = self.resolve_kickoff_outcome(&meerkat_id, outcome).await {
+                        tracing::warn!(
+                            meerkat_id = %meerkat_id,
+                            error = %error,
+                            "failed to persist kickoff outcome"
+                        );
+                    }
                     let _ = ack_tx.send(());
                 }
                 MobCommand::RunFlow {
@@ -2696,12 +2718,9 @@ impl MobActor {
         }
         self.restore_diagnostics.write().await.remove(meerkat_id);
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            self.set_kickoff_state(
-                meerkat_id,
-                super::handle::MobMemberKickoffPhase::Pending,
-                None,
-            )
-            .await;
+            let _ = self
+                .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::MarkPending)
+                .await?;
         }
         tracing::debug!(
             meerkat_id = %meerkat_id,
@@ -2732,12 +2751,9 @@ impl MobActor {
         }
 
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            self.set_kickoff_state(
-                meerkat_id,
-                super::handle::MobMemberKickoffPhase::Starting,
-                None,
-            )
-            .await;
+            let _ = self
+                .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::MarkStarting)
+                .await?;
             if let Err(start_error) = self
                 .start_autonomous_member(meerkat_id, &member_ref, prompt)
                 .await
@@ -3473,7 +3489,6 @@ impl MobActor {
             .write()
             .await
             .remove(&ctx.meerkat_id);
-        self.kickoff_state.write().await.remove(&ctx.meerkat_id);
     }
 
     /// P1-T06: wire() establishes local or external trust.
@@ -3539,23 +3554,18 @@ impl MobActor {
         };
 
         let local_comms_name = self.comms_name_for(&entry);
-        if local == &external_name || spec.name == local_comms_name {
-            return Err(MobError::WiringError(format!(
-                "wire requires distinct peers (got '{local_comms_name}')"
-            )));
-        }
-
-        if collides_with_local_member {
-            return Err(MobError::WiringError(format!(
-                "external peer '{}' collides with a local roster member; use PeerTarget::Local instead",
-                spec.name
-            )));
-        }
-        if entry.state != crate::roster::MemberState::Active {
-            return Err(MobError::WiringError(format!(
-                "wire requires active member '{local}', found state {:?}",
-                &entry.state
-            )));
+        let plan = MobWiringAuthority::plan_external_wire(ExternalWireInput {
+            local,
+            local_state: entry.state,
+            external_name: &external_name,
+            local_comms_name: &local_comms_name,
+            already_wired,
+            collides_with_local_member,
+            stored_spec: stored_spec.as_ref(),
+            new_spec: spec,
+        })?;
+        if matches!(plan, ExternalWirePlan::NoOp) {
+            return Ok(());
         }
 
         let comms = self
@@ -3567,8 +3577,12 @@ impl MobActor {
 
         let mut rollback = LifecycleRollback::new("wire_external");
         comms.add_trusted_peer(spec.clone()).await?;
-        match (already_wired, stored_spec.clone()) {
-            (true, Some(previous)) if previous != *spec => {
+        let previous_spec = match plan {
+            ExternalWirePlan::NoOp => None,
+            ExternalWirePlan::EstablishOrUpdate { previous_spec } => previous_spec,
+        };
+        match previous_spec {
+            Some(previous) if already_wired && previous != *spec => {
                 let previous_for_rollback = previous.clone();
                 rollback.defer(
                     format!("restore external trust '{local}' -> '{}'", previous.name),
@@ -3588,7 +3602,7 @@ impl MobActor {
                     comms.remove_trusted_peer(&previous.peer_id).await?;
                 }
             }
-            (true, None) | (false, _) => {
+            _ => {
                 rollback.defer(
                     format!("remove external trust '{local}' -> '{}'", spec.name),
                     {
@@ -3601,11 +3615,6 @@ impl MobActor {
                     },
                 );
             }
-            _ => {}
-        }
-
-        if already_wired && stored_spec.as_ref() == Some(spec) {
-            return Ok(());
         }
 
         if let Err(append_error) = self
@@ -3738,13 +3747,16 @@ impl MobActor {
             .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
             .await?;
 
-        if !a_has_b_edge && !b_has_a_edge {
-            let _ = comms_a.remove_trusted_peer(&key_b).await?;
-            let _ = comms_b.remove_trusted_peer(&key_a).await?;
-            self.edge_locks.remove(a.as_str(), b.as_str()).await;
-            self.debug_assert_roster_edge_symmetric(a, b, "handle_unwire/noop")
-                .await;
-            return Ok(());
+        match MobWiringAuthority::plan_local_unwire(a, b, a_has_b_edge, b_has_a_edge)? {
+            LocalUnwirePlan::NoOp => {
+                let _ = comms_a.remove_trusted_peer(&key_b).await?;
+                let _ = comms_b.remove_trusted_peer(&key_a).await?;
+                self.edge_locks.remove(a.as_str(), b.as_str()).await;
+                self.debug_assert_roster_edge_symmetric(a, b, "handle_unwire/noop")
+                    .await;
+                return Ok(());
+            }
+            LocalUnwirePlan::Remove => {}
         }
 
         let mut rollback = LifecycleRollback::new("unwire");
@@ -3838,12 +3850,6 @@ impl MobActor {
         peer_name: &MeerkatId,
         spec_hint: Option<TrustedPeerSpec>,
     ) -> Result<(), MobError> {
-        if local == peer_name {
-            return Err(MobError::WiringError(format!(
-                "unwire requires distinct peers (got '{local}')"
-            )));
-        }
-
         let _edge_guard = self
             .edge_locks
             .acquire(local.as_str(), peer_name.as_str())
@@ -3866,30 +3872,16 @@ impl MobActor {
             )
         };
 
-        if collides_with_local_member {
-            return Err(MobError::WiringError(format!(
-                "peer '{peer_name}' is a local roster member; use local unwire semantics instead",
-            )));
-        }
-
-        if !already_wired && stored_spec.is_none() && spec_hint.is_none() {
-            return Ok(());
-        }
-
-        let spec = match (spec_hint, stored_spec.clone()) {
-            (Some(hint), Some(stored)) if hint != stored => {
-                return Err(MobError::WiringError(format!(
-                    "external peer spec mismatch for '{local}' -> '{peer_name}'",
-                )));
-            }
-            (Some(hint), Some(_)) => hint,
-            (Some(hint), None) => hint,
-            (None, Some(stored)) => stored,
-            (None, None) => {
-                return Err(MobError::WiringError(format!(
-                    "external unwire requires stored peer spec for '{local}' -> '{peer_name}'",
-                )));
-            }
+        let spec = match MobWiringAuthority::plan_external_unwire(
+            local,
+            peer_name,
+            already_wired,
+            stored_spec.as_ref(),
+            collides_with_local_member,
+            spec_hint.as_ref(),
+        )? {
+            ExternalUnwirePlan::NoOp => return Ok(()),
+            ExternalUnwirePlan::Remove { spec } => spec,
         };
 
         let comms = self
@@ -5017,6 +5009,7 @@ impl MobActor {
                 wired_to: std::collections::BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
+                kickoff: None,
             }),
             retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
@@ -5085,12 +5078,6 @@ impl MobActor {
         self.ensure_member_not_broken(a).await?;
         self.ensure_member_not_broken(b).await?;
 
-        if a == b {
-            return Err(MobError::WiringError(format!(
-                "wire requires distinct members (got '{a}')"
-            )));
-        }
-
         let _edge_guard = self.edge_locks.acquire(a.as_str(), b.as_str()).await;
 
         let (entry_a, entry_b, a_has_b_edge, b_has_a_edge) = {
@@ -5107,27 +5094,24 @@ impl MobActor {
             let b_has_a_edge = eb.wired_to.contains(a);
             (ea, eb, a_has_b_edge, b_has_a_edge)
         };
-        if entry_a.state != crate::roster::MemberState::Active {
-            return Err(MobError::WiringError(format!(
-                "wire requires active member '{a}', found state {:?}",
-                &entry_a.state
-            )));
-        }
-        if entry_b.state != crate::roster::MemberState::Active {
-            return Err(MobError::WiringError(format!(
-                "wire requires active member '{b}', found state {:?}",
-                &entry_b.state
-            )));
-        }
-
-        if a_has_b_edge && b_has_a_edge {
-            // Roster projection already says "wired". Reconcile trust edges so
-            // stale/missing comms trust cannot hide behind a roster-only fast path.
-            self.reconcile_wire_trust_edges(a, &entry_a, b, &entry_b)
-                .await?;
-            self.debug_assert_roster_edge_symmetric(a, b, "do_wire/reconcile")
-                .await;
-            return Ok(());
+        match MobWiringAuthority::plan_local_wire(
+            a,
+            entry_a.state,
+            a_has_b_edge,
+            b,
+            entry_b.state,
+            b_has_a_edge,
+        )? {
+            LocalWirePlan::ReconcileExisting => {
+                // Roster projection already says "wired". Reconcile trust edges so
+                // stale/missing comms trust cannot hide behind a roster-only fast path.
+                self.reconcile_wire_trust_edges(a, &entry_a, b, &entry_b)
+                    .await?;
+                self.debug_assert_roster_edge_symmetric(a, b, "do_wire/reconcile")
+                    .await;
+                return Ok(());
+            }
+            LocalWirePlan::EstablishNew => {}
         }
         if a_has_b_edge != b_has_a_edge {
             tracing::warn!(
@@ -5435,12 +5419,18 @@ impl MobActor {
             (entry, wired_peers)
         };
         let sender_comms = self.provisioner_comms(&entry.member_ref).await;
+        let effects = MobRuntimeBridgeAuthority::plan_lifecycle_notice(
+            sender_comms.is_some(),
+            &wired_peers,
+            intent,
+        );
 
         let Some(sender_comms) = sender_comms else {
             return Ok(());
         };
 
-        for peer_id in wired_peers {
+        for effect in effects {
+            let MobRuntimeBridgeEffect::DeliverLifecycleNotice { peer_id, intent } = effect;
             self.notify_peer_event(intent, &peer_id, meerkat_id, &entry, &sender_comms)
                 .await?;
         }

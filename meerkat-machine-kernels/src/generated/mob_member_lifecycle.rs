@@ -5,7 +5,7 @@ use crate::runtime::{
 };
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
-    meerkat_machine_schema::mob_runtime_bridge_anchor_machine()
+    meerkat_machine_schema::mob_member_lifecycle_machine()
 }
 
 pub fn kernel() -> GeneratedMachineKernel {

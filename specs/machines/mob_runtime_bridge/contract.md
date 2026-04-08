@@ -1,12 +1,12 @@
-# MobRuntimeBridgeAnchorMachine
+# MobRuntimeBridgeMachine
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-mob` / `generated::mob_runtime_bridge_anchor`
+- Rust owner: `meerkat-mob` / `generated::mob_runtime_bridge`
 
 ## State
-- Phase enum: `Tracking`
+- Phase enum: `Stable`
 - `observed_submitted_runs`: `Set<RunId>`
 - `observed_completed_runs`: `Set<RunId>`
 - `observed_failed_runs`: `Set<RunId>`
@@ -21,40 +21,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeStopRequested`
 
 ## Effects
-- `RuntimeBridgeSnapshotUpdated`
+- `RuntimeBridgeStateUpdated`
 
 ## Invariants
 
 ## Transitions
 ### `RuntimeRunSubmitted`
-- From: `Tracking`
+- From: `Stable`
 - On: `RuntimeRunSubmitted`(run_id)
-- Emits: `RuntimeBridgeSnapshotUpdated`
-- To: `Tracking`
+- Emits: `RuntimeBridgeStateUpdated`
+- To: `Stable`
 
 ### `RuntimeRunCompleted`
-- From: `Tracking`
+- From: `Stable`
 - On: `RuntimeRunCompleted`(run_id)
-- Emits: `RuntimeBridgeSnapshotUpdated`
-- To: `Tracking`
+- Emits: `RuntimeBridgeStateUpdated`
+- To: `Stable`
 
 ### `RuntimeRunFailed`
-- From: `Tracking`
+- From: `Stable`
 - On: `RuntimeRunFailed`(run_id)
-- Emits: `RuntimeBridgeSnapshotUpdated`
-- To: `Tracking`
+- Emits: `RuntimeBridgeStateUpdated`
+- To: `Stable`
 
 ### `RuntimeRunCancelled`
-- From: `Tracking`
+- From: `Stable`
 - On: `RuntimeRunCancelled`(run_id)
-- Emits: `RuntimeBridgeSnapshotUpdated`
-- To: `Tracking`
+- Emits: `RuntimeBridgeStateUpdated`
+- To: `Stable`
 
 ### `RuntimeStopRequested`
-- From: `Tracking`
+- From: `Stable`
 - On: `RuntimeStopRequested`()
-- Emits: `RuntimeBridgeSnapshotUpdated`
-- To: `Tracking`
+- Emits: `RuntimeBridgeStateUpdated`
+- To: `Stable`
 
 ## Coverage
 ### Code Anchors
@@ -63,6 +63,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-mob/src/runtime/ops_adapter.rs` — ops/runtime linkage precursor for run-level bridge observations
 
 ### Scenarios
-- `runtime-run-submission-observed` — runtime run submissions are mirrored into runtime-bridge observation state
-- `runtime-run-terminal-observed` — runtime run completion/failure/cancellation is mirrored into runtime-bridge observation state
-- `runtime-stop-request-observed` — runtime stop requests are mirrored into runtime-bridge observation state
+- `runtime-run-submission-observed` — runtime run submissions update canonical runtime-bridge state
+- `runtime-run-terminal-observed` — runtime run completion/failure/cancellation update canonical runtime-bridge state
+- `runtime-stop-request-observed` — runtime stop requests update canonical runtime-bridge state

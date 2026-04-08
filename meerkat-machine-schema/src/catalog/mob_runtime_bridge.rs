@@ -6,25 +6,23 @@ use crate::{
     TransitionSchema, TypeRef, Update, VariantSchema,
 };
 
-/// Observation anchor for runtime-bridge-related routes in `mob_bundle`.
+/// Canonical owner for runtime-bridge-related routes in `mob_bundle`.
 ///
-/// This machine does not own canonical bridge/session/queued-turn truth yet.
-/// It only records which run-lifecycle and stop-request events the composition
-/// has observed at the mob/runtime bridge boundary. The live bridge owner is
-/// still elsewhere, so this anchor exists purely for visibility and should not
-/// be mistaken for the ultimate owner of those routes.
-pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
+/// This machine tracks run submission, terminalization, and stop-request
+/// boundaries at the mob/runtime bridge. Parent-session association and
+/// lifecycle notice emission in live code must remain aligned with this owner.
+pub fn mob_runtime_bridge_machine() -> MachineSchema {
     MachineSchema {
-        machine: "MobRuntimeBridgeAnchorMachine".into(),
+        machine: "MobRuntimeBridgeMachine".into(),
         version: 1,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "generated::mob_runtime_bridge_anchor".into(),
+            module: "generated::mob_runtime_bridge".into(),
         },
         state: StateSchema {
             phase: EnumSchema {
-                name: "MobRuntimeBridgeAnchorState".into(),
-                variants: vec![variant("Tracking")],
+                name: "MobRuntimeBridgeState".into(),
+                variants: vec![variant("Stable")],
             },
             fields: vec![
                 field(
@@ -46,7 +44,7 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                 field("stop_request_count", TypeRef::U32),
             ],
             init: InitSchema {
-                phase: "Tracking".into(),
+                phase: "Stable".into(),
                 fields: vec![
                     init("observed_submitted_runs", Expr::EmptySet),
                     init("observed_completed_runs", Expr::EmptySet),
@@ -58,7 +56,7 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
             terminal_phases: vec![],
         },
         inputs: EnumSchema {
-            name: "MobRuntimeBridgeAnchorInput".into(),
+            name: "MobRuntimeBridgeInput".into(),
             variants: vec![
                 VariantSchema {
                     name: "RuntimeRunSubmitted".into(),
@@ -80,8 +78,8 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
             ],
         },
         effects: EnumSchema {
-            name: "MobRuntimeBridgeAnchorEffect".into(),
-            variants: vec![variant("RuntimeBridgeSnapshotUpdated")],
+            name: "MobRuntimeBridgeEffect".into(),
+            variants: vec![variant("RuntimeBridgeStateUpdated")],
         },
         helpers: vec![],
         derived: vec![],
@@ -89,7 +87,7 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
         transitions: vec![
             TransitionSchema {
                 name: "RuntimeRunSubmitted".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "RuntimeRunSubmitted".into(),
                     bindings: vec!["run_id".into()],
@@ -99,15 +97,15 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                     field: "observed_submitted_runs".into(),
                     value: Expr::Binding("run_id".into()),
                 }],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "RuntimeBridgeSnapshotUpdated".into(),
+                    variant: "RuntimeBridgeStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
                 name: "RuntimeRunCompleted".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "RuntimeRunCompleted".into(),
                     bindings: vec!["run_id".into()],
@@ -117,15 +115,15 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                     field: "observed_completed_runs".into(),
                     value: Expr::Binding("run_id".into()),
                 }],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "RuntimeBridgeSnapshotUpdated".into(),
+                    variant: "RuntimeBridgeStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
                 name: "RuntimeRunFailed".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "RuntimeRunFailed".into(),
                     bindings: vec!["run_id".into()],
@@ -135,15 +133,15 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                     field: "observed_failed_runs".into(),
                     value: Expr::Binding("run_id".into()),
                 }],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "RuntimeBridgeSnapshotUpdated".into(),
+                    variant: "RuntimeBridgeStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
                 name: "RuntimeRunCancelled".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "RuntimeRunCancelled".into(),
                     bindings: vec!["run_id".into()],
@@ -153,15 +151,15 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                     field: "observed_cancelled_runs".into(),
                     value: Expr::Binding("run_id".into()),
                 }],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "RuntimeBridgeSnapshotUpdated".into(),
+                    variant: "RuntimeBridgeStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
             TransitionSchema {
                 name: "RuntimeStopRequested".into(),
-                from: vec!["Tracking".into()],
+                from: vec!["Stable".into()],
                 on: InputMatch {
                     variant: "RuntimeStopRequested".into(),
                     bindings: vec![],
@@ -171,16 +169,16 @@ pub fn mob_runtime_bridge_anchor_machine() -> MachineSchema {
                     field: "stop_request_count".into(),
                     amount: 1,
                 }],
-                to: "Tracking".into(),
+                to: "Stable".into(),
                 emit: vec![EffectEmit {
-                    variant: "RuntimeBridgeSnapshotUpdated".into(),
+                    variant: "RuntimeBridgeStateUpdated".into(),
                     fields: IndexMap::new(),
                 }],
             },
         ],
         ci_step_limit: None,
         effect_dispositions: vec![disposition(
-            "RuntimeBridgeSnapshotUpdated",
+            "RuntimeBridgeStateUpdated",
             EffectDisposition::Local,
         )],
     }

@@ -1,5 +1,5 @@
 use crate::ids::{MeerkatId, ProfileName};
-use crate::roster::{Roster, RosterAddEntry, RosterEntry};
+use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
 
@@ -26,6 +26,11 @@ pub(crate) trait RosterMutator: sealed::Sealed {
     );
     fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
     fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId);
+    fn set_kickoff(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        kickoff: Option<MobMemberKickoffSnapshot>,
+    ) -> bool;
 }
 
 /// Canonical authority for the roster projection.
@@ -154,5 +159,13 @@ impl RosterMutator for RosterAuthority {
 
     fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
         self.roster.unwire_external(local, peer_name);
+    }
+
+    fn set_kickoff(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        kickoff: Option<MobMemberKickoffSnapshot>,
+    ) -> bool {
+        self.roster.set_kickoff(meerkat_id, kickoff)
     }
 }

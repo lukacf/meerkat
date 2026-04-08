@@ -1,12 +1,12 @@
-# MobMemberLifecycleAnchorMachine
+# MobMemberLifecycleMachine
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-mob` / `generated::mob_member_lifecycle_anchor`
+- Rust owner: `meerkat-mob` / `generated::mob_member_lifecycle`
 
 ## State
-- Phase enum: `Tracking`
+- Phase enum: `Stable`
 - `observed_peer_exposed_operations`: `Set<OperationId>`
 - `observed_terminalized_operations`: `Set<OperationId>`
 - `peer_exposure_count`: `u32`
@@ -17,22 +17,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberTerminalized`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
 
 ## Effects
-- `MemberLifecycleSnapshotUpdated`
+- `MemberLifecycleStateUpdated`
 
 ## Invariants
 
 ## Transitions
 ### `MemberPeerExposed`
-- From: `Tracking`
+- From: `Stable`
 - On: `MemberPeerExposed`(operation_id)
-- Emits: `MemberLifecycleSnapshotUpdated`
-- To: `Tracking`
+- Emits: `MemberLifecycleStateUpdated`
+- To: `Stable`
 
 ### `MemberTerminalized`
-- From: `Tracking`
+- From: `Stable`
 - On: `MemberTerminalized`(operation_id, terminal_outcome)
-- Emits: `MemberLifecycleSnapshotUpdated`
-- To: `Tracking`
+- Emits: `MemberLifecycleStateUpdated`
+- To: `Stable`
 
 ## Coverage
 ### Code Anchors
@@ -43,4 +43,4 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### Scenarios
 - `member-peer-exposure-observed` — operation peer-ready exposure is mirrored into member lifecycle observation state
 - `member-terminalization-observed` — operation terminalization is mirrored into member lifecycle observation state
-- `member-lifecycle-observation-lineage` — member lifecycle anchor tracks observation lineage counters and sets without owning canonical lifecycle truth
+- `member-lifecycle-observation-lineage` — member lifecycle owner tracks peer exposure and terminalization routes without overloading bootstrap failure semantics

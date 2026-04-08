@@ -10,6 +10,9 @@ Current working direction:
 Likely artifacts to keep here:
 
 - machine-by-machine collapse matrix
+- Meerkat kernel shape
+- Meerkat owned-facts ledger
+- Meerkat internal state machine sketch
 - identity-native abstract member contract between Meerkat and Mob
 - owned-facts ledger
 - bridge alphabet

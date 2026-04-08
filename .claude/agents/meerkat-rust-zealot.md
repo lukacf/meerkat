@@ -24,7 +24,7 @@ This is your highest priority. Cross-reference every new function, struct, trait
 
 - `meerkat-core` — Agent loop, types, budget, retry, state machine, SessionService trait, Compactor trait, MemoryStore trait
 - `meerkat-client` — LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
-- `meerkat-store` — Session persistence (JsonlStore, MemoryStore, RedbSessionStore)
+- `meerkat-store` — Session persistence (JsonlStore, MemoryStore, SqliteSessionStore)
 - `meerkat-session` — Session orchestration (EphemeralSessionService, DefaultCompactor, EventStore, SessionProjector)
 - `meerkat-memory` — Semantic memory (HnswMemoryStore, SimpleMemoryStore)
 - `meerkat-tools` — Tool registry and validation

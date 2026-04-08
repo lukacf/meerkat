@@ -1,3 +1,4 @@
+#![cfg(feature = "sqlite")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use chrono::{Duration, Utc};
@@ -8,8 +9,6 @@ use meerkat_schedule::{
     OverlapPolicy, Schedule, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
     TargetBinding, TriggerSpec,
 };
-use meerkat_store::RedbScheduleStore;
-#[cfg(feature = "sqlite")]
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -91,16 +90,6 @@ async fn assert_append_receipt_updates_occurrence_projection(
     Ok(())
 }
 
-#[tokio::test]
-async fn redb_append_receipt_updates_occurrence_projection()
--> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbScheduleStore::open(dir.path().join("schedule.redb"))?)
-        as Arc<dyn ScheduleStore>;
-    assert_append_receipt_updates_occurrence_projection(store).await
-}
-
-#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_append_receipt_updates_occurrence_projection()
 -> Result<(), Box<dyn std::error::Error>> {

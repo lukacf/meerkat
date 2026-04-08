@@ -46,7 +46,7 @@ async fn test_regression_session_index_reconciles_missing_entries()
     assert_eq!(sessions.len(), 1, "session should be listed after save");
 
     // Delete the index file to simulate corruption/partial write
-    let index_path = dir.path().join("session_index.redb");
+    let index_path = dir.path().join("session_index.sqlite3");
     if index_path.exists() {
         tokio::fs::remove_file(&index_path).await?;
     }
@@ -102,7 +102,7 @@ async fn test_regression_session_index_removes_stale_updated_at()
     );
 
     // Delete index and re-reconcile (simulating crash recovery)
-    let index_path = dir.path().join("session_index.redb");
+    let index_path = dir.path().join("session_index.sqlite3");
     if index_path.exists() {
         tokio::fs::remove_file(&index_path).await?;
     }

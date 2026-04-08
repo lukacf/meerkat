@@ -31,7 +31,6 @@ inventory = { workspace = true }
 
 # Optional dependencies (gated by features, not available on wasm32)
 meerkat-store = { workspace = true, optional = true }
-redb = { workspace = true, optional = true }
 meerkat-runtime = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -44,7 +43,7 @@ meerkat-store = { workspace = true, features = ["memory"] }
 
 [features]
 default = []
-session-store = ["dep:redb", "dep:meerkat-store", "dep:meerkat-runtime"]
+session-store = ["dep:meerkat-store", "dep:meerkat-runtime"]
 session-compaction = []
 
 [lints]

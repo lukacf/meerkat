@@ -39,7 +39,7 @@ Global flags (available on all commands):
 --realm <id>              # explicit realm ID
 --isolated                # start in isolated mode (new generated realm)
 --instance <id>           # optional instance ID inside a realm
---realm-backend <sqlite|redb|jsonl>
+--realm-backend <sqlite|jsonl>
 --state-root <path>       # override state root directory
 --context-root <path>     # convention context root for skills/hooks/AGENTS/MCP config
 --user-config-root <path> # optional user-global convention root
@@ -166,7 +166,6 @@ Config envelope shape (`GET/PUT/PATCH /config`):
     "manifest_path": "...",
     "config_path": "...",
     "sessions_sqlite_path": "...",
-    "sessions_redb_path": "...",
     "sessions_jsonl_dir": "..."
   }
 }

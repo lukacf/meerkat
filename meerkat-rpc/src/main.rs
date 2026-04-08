@@ -39,7 +39,6 @@ struct Cli {
 enum RealmBackendArg {
     Jsonl,
     Sqlite,
-    Redb,
 }
 
 impl From<RealmBackendArg> for RealmBackend {
@@ -47,7 +46,6 @@ impl From<RealmBackendArg> for RealmBackend {
         match value {
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
-            RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
 }
@@ -101,7 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 root: realm_paths.root.display().to_string(),
                 manifest_path: realm_paths.manifest_path.display().to_string(),
                 config_path: realm_paths.config_path.display().to_string(),
-                sessions_redb_path: realm_paths.sessions_redb_path.display().to_string(),
                 sessions_sqlite_path: Some(realm_paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: realm_paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -126,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| match manifest.backend {
             RealmBackend::Jsonl => realm_paths.sessions_jsonl_dir.clone(),
-            RealmBackend::Sqlite | RealmBackend::Redb => realm_paths.root.clone(),
+            RealmBackend::Sqlite => realm_paths.root.clone(),
         });
     let project_root = cli
         .context_root

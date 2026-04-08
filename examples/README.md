@@ -81,7 +81,7 @@ branch.
 | 012 | [skills-loading-rs](012-skills-loading-rs/) | Rust | Inject domain-specific knowledge from files, git, HTTP |
 | 013 | [context-compaction-rs](013-context-compaction-rs/) | Rust | Automatic context summarization for infinite conversations |
 | 014 | [semantic-memory-rs](014-semantic-memory-rs/) | Rust | Persistent, searchable memory across sessions |
-| 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Session persistence patterns and store implementations, including JSONL, in-memory, and redb-backed stores |
+| 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Session persistence patterns and store implementations, including JSONL, in-memory, and SQLite-backed stores |
 
 ### Multi-Agent — Comms & Mobs
 
@@ -195,7 +195,7 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 │                                                                 │
 │  Providers: Anthropic  │  OpenAI  │  Gemini                     │
 │                                                                 │
-│  Storage:   SQLite realms (default)  │  JsonlStore  │  MemoryStore  │  redb-backed stores │
+│  Storage:   SQLite realms (default)  │  JsonlStore  │  MemoryStore  │  SQLite-backed stores │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

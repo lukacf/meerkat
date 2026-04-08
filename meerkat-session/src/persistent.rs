@@ -3257,7 +3257,7 @@ mod tests {
                 peer_meta: None,
                 realm_id: Some("realm-test".to_string()),
                 instance_id: Some("instance-test".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
             })
             .expect("session metadata should serialize");
@@ -3416,7 +3416,7 @@ mod tests {
                 peer_meta: None,
                 realm_id: Some("realm-test".to_string()),
                 instance_id: Some("instance-test".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
             })
             .expect("session metadata should serialize");
@@ -3497,7 +3497,7 @@ mod tests {
                 peer_meta: None,
                 realm_id: Some("realm-test".to_string()),
                 instance_id: Some("instance-test".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
             })
             .expect("session metadata should serialize");

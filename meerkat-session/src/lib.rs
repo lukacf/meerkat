@@ -1,12 +1,11 @@
 //! meerkat-session — Session service orchestration for Meerkat.
 //!
 //! This crate provides `EphemeralSessionService` (always available) and,
-//! behind feature gates, `PersistentSessionService`, `DefaultCompactor`,
-//! and `RedbEventStore`.
+//! behind feature gates, `PersistentSessionService` and `DefaultCompactor`.
 //!
 //! # Features
 //!
-//! - `session-store`: Enables `PersistentSessionService` and `RedbEventStore`.
+//! - `session-store`: Enables `PersistentSessionService`.
 //! - `session-compaction`: Enables `DefaultCompactor` and `CompactionConfig`.
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
@@ -29,9 +28,6 @@ pub mod persistent;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod projector;
-
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub mod redb_events;
 
 pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot};
 
@@ -72,7 +68,7 @@ inventory::submit! {
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::SessionStore,
-        description: "PersistentSessionService, RedbEventStore, SessionProjector",
+        description: "PersistentSessionService, SessionProjector",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("session-store"),
         prerequisites: &[],

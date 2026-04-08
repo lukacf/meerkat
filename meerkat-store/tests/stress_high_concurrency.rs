@@ -3,7 +3,7 @@
 use meerkat_core::{SessionId, SessionMeta};
 use meerkat_store::SessionFilter;
 use meerkat_store::SessionStore;
-use meerkat_store::index::RedbSessionIndex;
+use meerkat_store::index::SqliteSessionIndex;
 use meerkat_store::jsonl::JsonlStore;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -44,11 +44,11 @@ async fn prepare_store(session_count: usize) -> PreparedStore {
     let store = Arc::new(JsonlStore::new(store_dir.clone()));
     store.init().await.expect("init store dir");
 
-    let index_path = store_dir.join("session_index.redb");
+    let index_path = store_dir.join("session_index.sqlite3");
     let metas = make_metas(session_count);
 
     tokio::task::spawn_blocking(move || {
-        let index = RedbSessionIndex::open(index_path)?;
+        let index = SqliteSessionIndex::open(index_path)?;
         index.insert_many(metas)?;
         Ok::<_, meerkat_store::StoreError>(())
     })

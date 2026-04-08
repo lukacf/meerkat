@@ -183,13 +183,13 @@ Returns a JSON array of result objects:
   <Tab title="HnswMemoryStore (production)">
     Uses:
     - **hnsw_rs** (v0.3) for approximate nearest-neighbor search with cosine distance.
-    - **redb** for persistent metadata and text storage.
+    - **SQLite** for persistent metadata and text storage.
 
-    Storage layout: `.rkat/memory/memory.redb`
+    Storage layout: `.rkat/memory/memory.sqlite3`
 
     Key characteristics:
     - **Embedding**: Bag-of-words TF with hash-based dimensionality reduction (4096-dimensional vectors, L2-normalized). Each word is hashed to a bucket and its presence increments that dimension.
-    - **Persistence**: Data survives process restart. On `open()`, all existing entries are re-indexed into the HNSW graph from redb.
+    - **Persistence**: Data survives process restart. On `open()`, all existing entries are re-indexed into the HNSW graph from SQLite.
     - **Score conversion**: HNSW cosine distance (0 = identical, 2 = opposite) is converted to a 0..1 similarity score: `score = 1.0 - (distance / 2.0)`.
     - **Thread safety**: Insertions are serialized via a `Mutex` to couple point ID allocation with successful writes. Searches use a `RwLock` for concurrent reads.
     - **Constants**: `MAX_NB_CONNECTION = 16`, `MAX_LAYER = 16`, `EF_CONSTRUCTION = 200`, `DEFAULT_MAX_ELEMENTS = 100_000`.

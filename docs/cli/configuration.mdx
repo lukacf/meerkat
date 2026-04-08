@@ -10,7 +10,7 @@ All CLI commands accept realm scope flags:
 
 - `--realm <id>`
 - `--instance <id>`
-- `--realm-backend <sqlite|redb|jsonl>` (creation hint only)
+- `--realm-backend <sqlite|jsonl>` (creation hint only)
 
 These flags decide which realm config/session state is used.
 
@@ -62,7 +62,6 @@ Important files:
 - `realm_manifest.json` (backend pinning)
 - `config.toml` (realm config)
 - `sessions.sqlite3` (when backend is sqlite)
-- `sessions.redb` (when backend is redb)
 - `sessions_jsonl/` (when backend is jsonl)
 - `mob_registry.json` (CLI mob registry)
 - `mob_registry.lock` (CLI mob registry lock)

@@ -26,13 +26,12 @@ Use that migration guide for:
 
 - Same `realm_id` => shared sessions/config/backend.
 - Different `realm_id` => strict isolation.
-- Backend (`sqlite`, `redb`, or `jsonl`) is pinned per realm in `realm_manifest.json`.
+- Backend (`sqlite` or `jsonl`) is pinned per realm in `realm_manifest.json`.
 
 Default persistent backend:
 
 - New persistent realms default to `sqlite` when sqlite support is compiled.
 - `sqlite` is the normal same-realm multi-process backend.
-- `redb` remains explicit for single-owner embedded session workflows.
 - `jsonl` remains explicit for inspectable file-backed persistence.
 
 Default realm behavior:
@@ -85,7 +84,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
 - Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
-- Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The redb-backed mob store has been removed.
+- Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The previous exclusive-handle mob store has been removed.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage sub-agents through implicit session-owned mobs.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
@@ -230,7 +229,7 @@ Operational notes:
 Terminology:
 
 - **Mob runtime contract**: where `mob_*` tools and `rkat mob` lifecycle are exposed.
-- **Backend selection**: realm-level storage backend (`sqlite`/`redb`/`jsonl`) pinned in `realm_manifest.json`.
+- **Backend selection**: realm-level storage backend (`sqlite`/`jsonl`) pinned in `realm_manifest.json`.
 
 Do not conflate the two: mob tool availability is a surface behavior, backend is a realm storage choice.
 
@@ -268,7 +267,7 @@ ScheduleService         — CRUD + occurrence planning
 ScheduleDriver          — tick loop, claims due occurrences, dispatches delivery
 ScheduleLifecycleAuthority   — authority-backed schedule state transitions
 OccurrenceLifecycleAuthority — authority-backed occurrence state transitions
-ScheduleStore           — persistence (Memory, SQLite, Redb)
+ScheduleStore           — persistence (Memory, SQLite)
 ```
 
 **Delivery**: The driver claims due occurrences, probes target availability, dispatches delivery (creates session + runs prompt), and monitors completion. The schedule host surface (`meerkat/src/surface/schedule_host.rs`) bridges delivery to `RuntimeSessionAdapter`.

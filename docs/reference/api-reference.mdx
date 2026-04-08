@@ -71,7 +71,7 @@ Mob runtime APIs live primarily in:
 | Type | Purpose |
 |------|---------|
 | `MobDefinition` | Declarative mob structure (profiles, wiring, topology, limits, flows) |
-| `MobStorage` | Event/run/spec storage bundle (in-memory or redb) |
+| `MobStorage` | Event/run/spec storage bundle (in-memory or SQLite) |
 | `MobBuilder` | Construct or resume mob runtime |
 | `MobHandle` | Runtime handle for lifecycle, membership, wiring, turns, flows, tasks |
 | `MobSessionService` | Session-service bridge trait required by mob runtime |
@@ -303,7 +303,7 @@ All implement `AgentLlmClient` and normalize streaming responses to `LlmEvent` (
 | Store | Feature flag | Purpose | Detailed docs |
 |-------|-------------|---------|---------------|
 | `JsonlStore` | `jsonl-store` | File-based JSONL persistence | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
-| `RedbSessionStore` | `session-store` | Embedded database (redb) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
+| `SqliteSessionStore` | `session-store` | Embedded database (sqlite) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
 | `MemoryStore` | `memory-store` | In-memory (testing) | [Rust SDK: session stores](/rust/tools-and-stores#session-stores) |
 | Custom (`dyn SessionStore`) | — | User-provided via `AgentFactory::session_store()` | [Rust SDK: custom stores](/rust/tools-and-stores#session-stores) |
 

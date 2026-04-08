@@ -1,3 +1,4 @@
+#![cfg(feature = "sqlite")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use chrono::{Duration, Utc};
@@ -7,8 +8,6 @@ use meerkat_schedule::{
     OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleStore,
     ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
 };
-use meerkat_store::RedbScheduleStore;
-#[cfg(feature = "sqlite")]
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -108,16 +107,6 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     Ok(())
 }
 
-#[tokio::test]
-async fn redb_atomic_schedule_mutation_supersedes_old_pending()
--> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbScheduleStore::open(dir.path().join("schedule.redb"))?)
-        as Arc<dyn ScheduleStore>;
-    assert_atomic_schedule_mutation_supersedes_old_pending(store).await
-}
-
-#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_atomic_schedule_mutation_supersedes_old_pending()
 -> Result<(), Box<dyn std::error::Error>> {

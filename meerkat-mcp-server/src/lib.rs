@@ -337,7 +337,6 @@ fn tagged_realm_config_store(
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
-                sessions_redb_path: paths.sessions_redb_path.display().to_string(),
                 sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -373,7 +372,7 @@ fn realm_store_path(
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
     match backend {
         meerkat_store::RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        meerkat_store::RealmBackend::Sqlite | meerkat_store::RealmBackend::Redb => paths.root,
+        meerkat_store::RealmBackend::Sqlite => paths.root,
     }
 }
 
@@ -601,7 +600,7 @@ impl MeerkatMcpState {
         Ok(state)
     }
 
-    /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
+    /// Test constructor that accepts an injected store (avoids opening a durable store at platform data dir).
     #[cfg(test)]
     pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
         let bootstrap = RuntimeBootstrap::default();
@@ -729,7 +728,6 @@ fn parse_backend_hint(raw: &str) -> Option<meerkat_store::RealmBackend> {
     match raw {
         "jsonl" => Some(meerkat_store::RealmBackend::Jsonl),
         "sqlite" => Some(meerkat_store::RealmBackend::Sqlite),
-        "redb" => Some(meerkat_store::RealmBackend::Redb),
         _ => None,
     }
 }
@@ -3108,12 +3106,11 @@ mod tests {
             metadata: Some(meerkat_core::ConfigStoreMetadata {
                 realm_id: Some("team".to_string()),
                 instance_id: Some("mcp-1".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
                     root: "/tmp/root".to_string(),
                     manifest_path: "/tmp/root/realm_manifest.json".to_string(),
                     config_path: "/tmp/root/config.toml".to_string(),
-                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
                     sessions_sqlite_path: Some("/tmp/root/sessions.sqlite3".to_string()),
                     sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
                 }),
@@ -3132,12 +3129,11 @@ mod tests {
             metadata: Some(meerkat_core::ConfigStoreMetadata {
                 realm_id: Some("team".to_string()),
                 instance_id: Some("mcp-1".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
                     root: "/tmp/root".to_string(),
                     manifest_path: "/tmp/root/realm_manifest.json".to_string(),
                     config_path: "/tmp/root/config.toml".to_string(),
-                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
                     sessions_sqlite_path: Some("/tmp/root/sessions.sqlite3".to_string()),
                     sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
                 }),

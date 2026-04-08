@@ -4,8 +4,6 @@
 //! with the boundary side effects before returning success."
 
 pub mod memory;
-#[cfg(feature = "redb-store")]
-pub mod redb;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
 
@@ -77,7 +75,7 @@ fn authoritative_receipt(
 ///
 /// Implementations:
 /// - `InMemoryRuntimeStore` — in-memory, no durability (ephemeral/testing)
-/// - `RedbRuntimeStore` — shared redb database, single-transaction atomicity (Phase 4)
+/// - `SqliteRuntimeStore` — SQLite-backed durable runtime state
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
@@ -193,7 +191,5 @@ pub trait RuntimeStore: Send + Sync {
 }
 
 pub use memory::InMemoryRuntimeStore;
-#[cfg(feature = "redb-store")]
-pub use redb::RedbRuntimeStore;
 #[cfg(feature = "sqlite-store")]
 pub use sqlite::SqliteRuntimeStore;

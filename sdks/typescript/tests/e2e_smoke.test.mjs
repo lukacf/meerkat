@@ -221,7 +221,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const clientA = await connectClient({
         realmId,
         stateRoot,
-        realmBackend: "redb",
+        realmBackend: "sqlite",
       });
       const session = await clientA.createSession(
         "Remember that the passphrase is comet-trail.",
@@ -236,7 +236,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const clientB = await connectClient({
         realmId,
         stateRoot,
-        realmBackend: "redb",
+        realmBackend: "sqlite",
       });
       const details = await clientB.readSession(sessionId);
       assert.equal(details.session_id, sessionId);

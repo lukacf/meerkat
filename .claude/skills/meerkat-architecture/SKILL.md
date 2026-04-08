@@ -57,7 +57,7 @@ When reviewing a proposal, ask first:
 | `meerkat-core` | Agent loop, core types, retry/state machines, session-store contract, ALL trait contracts | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `MobToolsFactory` |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas | — |
 | `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` |
-| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory, Redb) | Implements `SessionStore` |
+| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, builtins, shell, utility helpers, session-scoped task store (`SqliteTaskStore`) | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client and protocol transport integration | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
@@ -216,7 +216,7 @@ CreateSessionRequest → SessionService::create_session() → RunResult
 
 Two implementations:
 - `EphemeralSessionService<B>` — in-memory substrate (WASM, testing, embedded Queue-only use)
-- `PersistentSessionService<B>` — durable substrate for runtime-backed product surfaces (CLI, RPC, REST, MCP; typically backed by sqlite or redb through `PersistenceBundle`)
+- `PersistentSessionService<B>` — durable substrate for runtime-backed product surfaces (CLI, RPC, REST, MCP; typically backed by sqlite or jsonl through `PersistenceBundle`)
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
 
@@ -235,10 +235,10 @@ Persistent realm opening is backend-owned in the `meerkat` facade through `Persi
 
 - Surfaces open a realm bundle, not a raw session store plus ad hoc runtime companion.
 - The bundle carries the paired `SessionStore`, optional `RuntimeStore`, matching `RuntimeSessionAdapter`, and when enabled the blob/task companions for that realm.
-- SQLite is now the default persistent realm backend when compiled; redb remains explicit for session realms, but mob persistence itself is SQLite/WAL-backed.
+- SQLite is now the default persistent realm backend when compiled; jsonl remains the file-backed alternative, and mob persistence itself is SQLite/WAL-backed.
 - `meerkat-tools::builtin::SqliteTaskStore` persists session-scoped tasks in the shared SQLite realm when `session-store` is enabled.
 - `meerkat-mob::MobStorage::persistent()` uses `SqliteMobStores` (WAL, per-operation connections), and `MobStorage::custom()` is the extension seam for user-provided mob stores.
-- Do not reintroduce long-lived exclusive handles to mob persistence paths; the redb-backed mob store was removed specifically because lingering handles kept file locks across in-process restarts.
+- Do not reintroduce long-lived exclusive handles to mob persistence paths; the previous exclusive-handle mob store was removed specifically because lingering handles kept file locks across in-process restarts.
 
 ## Mob Orchestration
 

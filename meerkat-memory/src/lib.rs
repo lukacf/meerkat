@@ -3,7 +3,7 @@
 //! Provides `HnswMemoryStore` for indexing discarded conversation history
 //! during compaction, enabling semantic search across past sessions.
 //!
-//! Uses `hnsw_rs` for approximate nearest-neighbor search and `redb` for
+//! Uses `hnsw_rs` for approximate nearest-neighbor search and SQLite for
 //! metadata persistence.
 
 pub mod hnsw;
@@ -31,7 +31,7 @@ inventory::submit! {
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::MemoryStore,
-        description: "HNSW semantic search + redb persistence (indexes compaction discards)",
+        description: "HNSW semantic search + SQLite persistence (indexes compaction discards)",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("memory-store"),
         prerequisites: &[],

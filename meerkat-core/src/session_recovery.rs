@@ -563,7 +563,7 @@ mod tests {
             SurfaceSessionRecoveryContext {
                 realm_id: Some("realm-from-context".to_string()),
                 instance_id: Some("instance-from-context".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 config_generation: Some(99),
                 ..Default::default()
             },
@@ -578,7 +578,7 @@ mod tests {
             recovered.build.instance_id.as_deref(),
             Some("instance-from-context")
         );
-        assert_eq!(recovered.build.backend.as_deref(), Some("redb"));
+        assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
         assert_eq!(recovered.build.config_generation, Some(99));
     }
 

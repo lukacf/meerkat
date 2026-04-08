@@ -25,7 +25,7 @@ pub struct SessionFilter {
 
 /// Errors from session store operations.
 ///
-/// Backend-specific details (rusqlite, redb, etc.) are erased to strings
+/// Backend-specific details (rusqlite, filesystem, etc.) are erased to strings
 /// so that the trait contract carries no I/O dependencies.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionStoreError {

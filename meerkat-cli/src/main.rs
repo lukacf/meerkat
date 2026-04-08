@@ -603,7 +603,6 @@ enum RealmBackendArg {
     #[cfg(feature = "jsonl-store")]
     Jsonl,
     Sqlite,
-    Redb,
 }
 
 impl From<RealmBackendArg> for RealmBackend {
@@ -612,7 +611,6 @@ impl From<RealmBackendArg> for RealmBackend {
             #[cfg(feature = "jsonl-store")]
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
-            RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
 }
@@ -2421,11 +2419,8 @@ async fn create_persistence_bundle(
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     match manifest.backend {
-        #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        RealmBackend::Sqlite | RealmBackend::Redb => paths.root,
-        #[cfg(not(feature = "jsonl-store"))]
-        _ => paths.root,
+        RealmBackend::Sqlite => paths.root,
     }
 }
 
@@ -3247,6 +3242,8 @@ async fn run_agent(
 ) -> anyhow::Result<()> {
     let keep_alive = resolve_keep_alive(keep_alive)?;
     let effective_mob = enable_mob || config.tools.mob_enabled;
+    #[cfg(not(feature = "comms"))]
+    let _ = line_format;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let run_initial_turn_during_create = flow_tool_overlay.is_none();
@@ -6547,7 +6544,6 @@ where
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
-                sessions_redb_path: paths.sessions_redb_path.display().to_string(),
                 sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -6820,7 +6816,7 @@ mod tests {
                 realm_id: realm_id.to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
@@ -9956,7 +9952,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .expect("create root");
         let manifest = serde_json::json!({
             "realm_id": realm_id,
-            "backend": "redb",
+            "backend": "sqlite",
             "created_at": "1"
         });
         tokio::fs::write(
@@ -9982,7 +9978,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10018,7 +10014,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10065,7 +10061,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             let (_manifest, store) = meerkat_store::open_realm_session_store_in(
                 &state_root,
                 realm_id,
-                Some(RealmBackend::Redb),
+                Some(RealmBackend::Sqlite),
                 Some(RealmOrigin::Explicit),
             )
             .await
@@ -10094,7 +10090,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                 realm_id: "test-realm".to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: Some(root),
             user_config_root: None,

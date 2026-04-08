@@ -6,7 +6,7 @@ backends and the full session lifecycle.
 ## Concepts
 - `JsonlStore` — file-based JSONL storage (simple, human-readable)
 - `MemoryStore` — in-memory (for tests and ephemeral use)
-- `RedbSessionStore` — embedded B+tree database (production)
+- `SqliteSessionStore` — embedded SQLite database (production)
 - `SessionFilter` — query sessions by date, limit, offset
 - Session save/load roundtrip
 
@@ -16,8 +16,8 @@ Agent ←→ StoreAdapter ←→ SessionStore trait
                               ↓
                     ┌─────────┼─────────┐
                     │         │         │
-                 JsonlStore  Memory  RedbStore
-                 (files)    (RAM)   (redb DB)
+                 JsonlStore  Memory  SQLite
+                 (files)    (RAM)   (sqlite DB)
 ```
 
 ## Run

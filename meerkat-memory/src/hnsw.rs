@@ -1,6 +1,6 @@
 //! HnswMemoryStore — HNSW-backed semantic memory store.
 //!
-//! Uses `hnsw_rs` for approximate nearest-neighbor search and `redb` for
+//! Uses `hnsw_rs` for approximate nearest-neighbor search and SQLite for
 //! metadata persistence. Embeddings use a simple bag-of-words TF approach
 //! with cosine distance — upgrade to a proper embedding model for production.
 //!
@@ -9,17 +9,24 @@
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use meerkat_core::memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
-use redb::{Database, ReadableTable, TableDefinition};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// Redb table: point ID (u64) → metadata JSON bytes.
-const METADATA_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("memory_metadata");
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
-/// Redb table: point ID (u64) → original text bytes.
-const TEXT_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("memory_text");
+const CREATE_MEMORY_SCHEMA_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS memory_metadata (
+    point_id INTEGER PRIMARY KEY,
+    metadata_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_text (
+    point_id INTEGER PRIMARY KEY,
+    content BLOB NOT NULL
+)";
 
 /// Vocabulary dimension for bag-of-words vectors.
 const VOCAB_DIM: usize = 4096;
@@ -33,13 +40,29 @@ const EF_CONSTRUCTION: usize = 200;
 /// Default max elements hint.
 const DEFAULT_MAX_ELEMENTS: usize = 100_000;
 
-/// HNSW-backed memory store with redb metadata persistence.
+fn open_connection(path: &Path) -> Result<Connection, MemoryStoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(MemoryStoreError::Io)?;
+    }
+    let conn = Connection::open(path).map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    conn.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
+        .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+    Ok(conn)
+}
+
+/// HNSW-backed memory store with SQLite metadata persistence.
 pub struct HnswMemoryStore {
     // SAFETY NOTE: we use `'static` because `hnsw_rs` 0.3 copies inserted vectors
     // into owned internal storage. If a future `hnsw_rs` release changes this to
     // borrow caller memory, this type must be revisited before upgrading.
     index: Arc<std::sync::RwLock<Hnsw<'static, f32, DistCosine>>>,
-    db: Arc<Database>,
+    db_path: PathBuf,
     next_id: AtomicUsize,
     insert_lock: Mutex<()>,
     path: PathBuf,
@@ -51,53 +74,24 @@ impl HnswMemoryStore {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir).map_err(MemoryStoreError::Io)?;
 
-        let db_path = dir.join("memory.redb");
-        let db = Arc::new(
-            Database::create(&db_path).map_err(|e| MemoryStoreError::Index(e.to_string()))?,
-        );
+        let db_path = dir.join("memory.sqlite3");
+        let conn = open_connection(&db_path)?;
 
-        // Ensure tables exist
-        let write_txn = db
-            .begin_write()
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-        {
-            let _ = write_txn
-                .open_table(METADATA_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let _ = write_txn
-                .open_table(TEXT_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-
-        // Determine next_id from existing entries
         let next_id = {
-            let read_txn = db
-                .begin_read()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let table = read_txn
-                .open_table(METADATA_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let mut max_id = 0usize;
-            let iter = table
-                .iter()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            for entry in iter {
-                let (key, _) = entry.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-                let id = usize::try_from(key.value())
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
-                if id >= max_id {
-                    max_id = id
-                        .checked_add(1)
-                        .ok_or_else(|| MemoryStoreError::Index("point ID overflow".to_string()))?;
-                }
+            let max_id: Option<i64> = conn
+                .query_row("SELECT MAX(point_id) FROM memory_metadata", [], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?
+                .flatten();
+            match max_id {
+                Some(value) => usize::try_from(value + 1)
+                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?,
+                None => 0,
             }
-            max_id
         };
 
-        // Build HNSW index — reload from redb if entries exist
         let hnsw = Hnsw::<'static, f32, DistCosine>::new(
             MAX_NB_CONNECTION,
             DEFAULT_MAX_ELEMENTS,
@@ -106,32 +100,26 @@ impl HnswMemoryStore {
             DistCosine {},
         );
 
-        // Re-index existing entries
-        if next_id > 0 {
-            let read_txn = db
-                .begin_read()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let text_table = read_txn
-                .open_table(TEXT_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-
-            for point_id in 0..next_id {
-                let point_id_u64 = u64::try_from(point_id)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
-                if let Some(text_guard) = text_table
-                    .get(point_id_u64)
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
-                {
-                    let text = String::from_utf8_lossy(text_guard.value());
-                    let embedding = text_to_embedding(&text);
-                    hnsw.insert((&embedding, point_id));
-                }
-            }
+        let mut stmt = conn
+            .prepare("SELECT point_id, content FROM memory_text ORDER BY point_id ASC")
+            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+        for row in rows {
+            let (point_id, text) = row.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            let point_id = usize::try_from(point_id)
+                .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
+            let text = String::from_utf8_lossy(&text);
+            let embedding = text_to_embedding(&text);
+            hnsw.insert((&embedding, point_id));
         }
 
         Ok(Self {
             index: Arc::new(std::sync::RwLock::new(hnsw)),
-            db,
+            db_path,
             next_id: AtomicUsize::new(next_id),
             insert_lock: Mutex::new(()),
             path: dir.to_path_buf(),
@@ -150,38 +138,32 @@ impl MemoryStore for HnswMemoryStore {
         let meta_json = serde_json::to_vec(&metadata)
             .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
         let content = content.to_owned();
-        let db = Arc::clone(&self.db);
+        let db_path = self.db_path.clone();
         let index = Arc::clone(&self.index);
 
         // Keep point ID allocation coupled to a successful write.
         let _guard = self.insert_lock.lock().await;
         let point_id = self.next_id.load(Ordering::Acquire);
-        let point_id_u64 = u64::try_from(point_id)
+        let point_id_i64 = i64::try_from(point_id)
             .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
 
         tokio::task::spawn_blocking(move || {
             let embedding = text_to_embedding(&content);
-
-            let write_txn = db
-                .begin_write()
+            let mut conn = open_connection(&db_path)?;
+            let tx = conn
+                .transaction()
                 .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            {
-                let mut meta_table = write_txn
-                    .open_table(METADATA_TABLE)
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-                let mut text_table = write_txn
-                    .open_table(TEXT_TABLE)
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-
-                meta_table
-                    .insert(point_id_u64, meta_json.as_slice())
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-                text_table
-                    .insert(point_id_u64, content.as_bytes())
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            }
-            write_txn
-                .commit()
+            tx.execute(
+                "INSERT INTO memory_metadata (point_id, metadata_json) VALUES (?1, ?2)",
+                params![point_id_i64, meta_json],
+            )
+            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
+                params![point_id_i64, content.as_bytes()],
+            )
+            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            tx.commit()
                 .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
 
             let index = index
@@ -210,7 +192,7 @@ impl MemoryStore for HnswMemoryStore {
             return Ok(Vec::new());
         }
         let query = query.to_owned();
-        let db = Arc::clone(&self.db);
+        let db_path = self.db_path.clone();
         let index = Arc::clone(&self.index);
 
         tokio::task::spawn_blocking(move || {
@@ -223,34 +205,35 @@ impl MemoryStore for HnswMemoryStore {
                 index.search(&embedding, limit, ef_search)
             };
 
-            let read_txn = db
-                .begin_read()
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let meta_table = read_txn
-                .open_table(METADATA_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            let text_table = read_txn
-                .open_table(TEXT_TABLE)
-                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-
+            let conn = open_connection(&db_path)?;
             let mut results = Vec::with_capacity(neighbors.len());
             for neighbor in &neighbors {
-                let point_id = u64::try_from(neighbor.d_id)
+                let point_id = i64::try_from(neighbor.d_id)
                     .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
 
-                let content = match text_table
-                    .get(point_id)
+                let content = match conn
+                    .query_row(
+                        "SELECT content FROM memory_text WHERE point_id = ?1",
+                        params![point_id],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
                     .map_err(|e| MemoryStoreError::Index(e.to_string()))?
                 {
-                    Some(guard) => String::from_utf8_lossy(guard.value()).into_owned(),
+                    Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                     None => continue,
                 };
 
-                let metadata = match meta_table
-                    .get(point_id)
+                let metadata = match conn
+                    .query_row(
+                        "SELECT metadata_json FROM memory_metadata WHERE point_id = ?1",
+                        params![point_id],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
                     .map_err(|e| MemoryStoreError::Index(e.to_string()))?
                 {
-                    Some(guard) => serde_json::from_slice(guard.value())
+                    Some(bytes) => serde_json::from_slice(&bytes)
                         .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
                     None => continue,
                 };
@@ -284,7 +267,6 @@ impl MemoryStore for HnswMemoryStore {
 fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
     let mut vec = [0.0f32; VOCAB_DIM];
     for word in text.split_whitespace() {
-        // Simple hash: sum of byte values mod VOCAB_DIM
         let hash = word.bytes().fold(0usize, |acc, b| {
             acc.wrapping_mul(31)
                 .wrapping_add(b.to_ascii_lowercase() as usize)
@@ -292,7 +274,6 @@ fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
         vec[hash] += 1.0;
     }
 
-    // L2 normalize
     let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         for x in &mut vec {
@@ -342,7 +323,6 @@ mod tests {
 
         let results = store.search("REST API authentication", 10).await.unwrap();
         assert!(!results.is_empty());
-        // The most relevant result should mention REST API or authentication
         assert!(
             results[0].content.contains("REST") || results[0].content.contains("authentication"),
             "Top result should be relevant: {}",
@@ -380,7 +360,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let memory_dir = dir.path().join("memory");
 
-        // Index some data
         {
             let store = HnswMemoryStore::open(&memory_dir).unwrap();
             store
@@ -389,7 +368,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Reopen and search
         {
             let store = HnswMemoryStore::open(&memory_dir).unwrap();
             let results = store.search("Rust programming", 5).await.unwrap();
@@ -413,11 +391,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!results.is_empty());
-        // Score should be close to 1.0 for exact match
         assert!(
             results[0].score > 0.9,
             "Exact match should have high score, got: {}",
             results[0].score
         );
+        assert!(results[0].score <= 1.0);
+        assert!(results[0].score >= 0.0);
     }
 }

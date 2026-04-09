@@ -671,9 +671,9 @@ pub async fn open_realm_session_store_in(
     #[cfg(not(any(feature = "jsonl", feature = "sqlite")))]
     {
         let _ = (realms_root, realm_id, backend_hint, origin_hint);
-        return Err(StoreError::Internal(
+        Err(StoreError::Internal(
             "realm support requires at least one persistent backend".to_string(),
-        ));
+        ))
     }
 
     #[cfg(any(feature = "jsonl", feature = "sqlite"))]

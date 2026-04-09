@@ -1,6 +1,6 @@
 # Meerkat Internal State Machine Sketch
 
-Status: first-cut working sketch
+Status: supporting state sketch (target decisions frozen in `meerkat-machine-freeze.md`)
 
 ## Purpose
 
@@ -483,14 +483,18 @@ conservative subset of these invariants against the live joined snapshot:
 - pending tool-surface task/lineage sequence coherence
 - tool-surface removal-timing membership coherence
 
-## What Still Needs Formalization
+## Resolved Target Formalization Decisions
 
-- whether `binding.epoch_id` rotates on in-place reset
-- the exact shape of `ResetInputRegion`, `ResetOpsRegion`, and `RecoverTurn`
-- whether trust membership in `peer.trusted_peers` is recovered or reattached
-- whether tool-surface rebuild on reset is fully preserved or partially
-  reinitialized
-- how completion-waiter resolution is represented explicitly inside the machine
+The top-level target freeze now answers the main formalization questions:
+
+- `ResetRuntime` rotates `binding.epoch_id`
+- completion-waiter resolution is explicit machine state, not implicit support
+  carrier behavior
+- trust membership is machine-owned recoverable state
+- tool-surface rebuild belongs to the Meerkat machine, not to a second
+  out-of-band recovery protocol
+- `ResetInputRegion`, `ResetOpsRegion`, and `RecoverTurn` are formalized to
+  match the target lifecycle commitments in `meerkat-machine-freeze.md`
 
 ## Relationship To Existing Docs
 

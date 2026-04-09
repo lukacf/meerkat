@@ -1,9 +1,14 @@
 # Meerkat Cutover Checklist
 
-Status: active working checklist
+Status: frozen exact-current-state checklist
 
 This is the Meerkat-only execution checklist for moving from observational
 `MeerkatMachine` scaffolding to Meerkat semantic freeze.
+
+This checklist is now closed for the exact current `MeerkatMachine` freeze.
+It remains useful as the audit trail that produced the implementation baseline.
+The target-state machine is now frozen separately in
+`meerkat-machine-freeze.md`.
 
 It is derived from:
 
@@ -14,6 +19,16 @@ It is derived from:
 
 It is intentionally concrete. Each item exists because it currently blocks one
 or more stop/go checks in `cutover-gate.md`.
+
+## Nomenclature
+
+Top-level machine milestones use:
+
+- `M1` = full `MeerkatMachine`
+- `M2` = `MobMachine`
+
+This checklist is **not** that top-level milestone list. To avoid collision,
+the internal Meerkat freeze steps below use `K1`-`K10`.
 
 ## Reading rule
 
@@ -33,10 +48,10 @@ What is already relatively converged:
   `wait_all`
 - plain and attached steer-lane lifecycle behavior
 - `interrupt_current_run` on plain and attached runtimes
-- runtime-adapter `InterruptYielding` delivery vs session-layer cooperative
-  interrupt behavior
-- exact-current-state `M1` freeze note in `meerkat-m1-freeze.md`
-- exact-current-state `M2` freeze note in `meerkat-m2-freeze.md`
+- runtime-adapter `InterruptYielding` delivery, with no separate current
+  session-layer interrupt lowering
+- exact-current-state interrupt freeze note in `meerkat-interrupt-freeze.md`
+- exact-current-state detached-wake freeze note in `meerkat-detached-wake-freeze.md`
 - widened post-rebase validation is green again, including workspace-wide lib,
   test, test-check, and all-target compile lanes, so merge fallout is no
   longer a standalone freeze blocker
@@ -51,28 +66,32 @@ What is already relatively converged:
 - settled teardown behavior for `current_run_id`, queue/steer visibility, and
   completion-waiter teardown across most lifecycle families
 
-What still blocks semantic freeze:
+What no longer blocks semantic freeze:
 
-- turn/ops/barrier coupling on the live path
-- peer-ingress lifecycle and recovery depth
-- tool-surface lifecycle and recovery depth
-- drain/keep-alive cutover semantics
-- stable Meerkat input/effect alphabet
-- lowering from real functions into Meerkat machine inputs/effects
+- turn/ops/barrier coupling now has an exact-current freeze note
+- peer-ingress lifecycle is frozen as a live queue/authority seam, including
+  the explicit absence of durable queue replay
+- tool-surface lifecycle is frozen as the live router-authority snapshot seam
+- drain / keep-alive lifecycle is frozen as the live adapter-owned seam
+- the Meerkat input/effect alphabet exists
+- the Meerkat lowering map exists
+- remaining ownership decisions are explicit
 
-Current `M1` read:
+Current `K1` read:
 
-- `M1` is frozen for the exact current Meerkat boundary
-- the exact-current-state asset is `meerkat-m1-freeze.md`
+- `K1` is frozen for the exact current Meerkat boundary
+- the exact-current-state asset is `meerkat-interrupt-freeze.md`
 - the asset is review-ready and carries its own verification lane and reopen
   conditions
+- there is no distinct current `meerkat-session` interrupt seam inside this
+  frozen boundary
 - `cancel_after_boundary` is explicitly classified there as an authority-local
   or target-state verb until a real lowering exists
 
-Current `M2` read:
+Current `K2` read:
 
-- `M2` is frozen for the exact current Meerkat boundary
-- the exact-current-state asset is `meerkat-m2-freeze.md`
+- `K2` is frozen for the exact current Meerkat boundary
+- the exact-current-state asset is `meerkat-detached-wake-freeze.md`
 - feed-backed detached wake is the canonical live path for registered runtimes
 - legacy `DetachedWakeState` behavior is explicitly frozen as compatibility
   fallback behavior
@@ -81,36 +100,26 @@ Current `M2` read:
 
 | ID | Item | Status | Why it blocks freeze | Exit criteria |
 | --- | --- | --- | --- | --- |
-| M1 | Freeze interrupt and cancel semantics | Done | Exact current interrupt/cancel semantics are now frozen, and `cancel_after_boundary` is explicitly classified as not yet lowered into the live Meerkat boundary | `meerkat-m1-freeze.md` exists; plain and attached runtime proofs exist for `interrupt_current_run`; runtime-adapter `InterruptYielding` delivery is captured; session-layer cooperative interrupt path is captured; `cancel_after_boundary` is explicitly classified out of exact-current cutover scope until a lowering exists |
-| M2 | Freeze detached-wake and continuation interaction | Done | Exact current detached-wake and continuation behavior is now frozen, including canonical feed-backed behavior and the legacy compatibility fallback | `meerkat-m2-freeze.md` exists; feed-backed idle/post-drain continuation injection has direct machine proofs; non-quiescent defer behavior is captured; completion-kind filtering is captured; legacy `DetachedWakeState` behavior is explicitly classified as compatibility fallback |
-| M3 | Freeze turn / ops / barrier coupling | Pending | Barrier satisfaction and turn/ops coupling are still under-modeled at the joined runtime level | Live proofs connect operation registry truth, barrier satisfaction, and turn terminalization without relying on non-atomic snapshot folklore |
-| M4 | Freeze peer-ingress lifecycle and recovery | Pending | Peer state is visible, but full lifecycle, recovery, and post-admission ownership are not yet frozen enough for cutover | Trust mutation, classification, typed peer submission, dropped/delivered states, and recovery all have explicit machine-backed proofs |
-| M5 | Freeze external tool-surface lifecycle and recovery | Pending | Tool-surface state is visible and partially validated, but staged/recovery/cutover semantics are not yet complete enough for freeze | Staged add/remove/reload, draining removal, snapshot publication, and recovery/reconciliation all have explicit machine-backed proofs |
-| M6 | Freeze drain and keep-alive lifecycle | Pending | Drain state is visible, but not yet tied tightly enough to lifecycle cutover semantics | Spawn, stop, exit, abort, respawn, and suppression semantics are all represented as current owner truth |
-| M7 | Write and freeze the Meerkat input/effect alphabet | Pending | The gate still fails on “shell actions map to machine actions/effects” | A single Meerkat input/effect document exists, and every important shell/runtime action in scope maps to a named machine input or effect |
-| M8 | Write the Meerkat lowering map | Pending | No cutover without real lowering from code into machine authority | Real functions, adapter entry points, and runtime loop edges are mapped to machine inputs/effects and compatibility shims are explicit |
-| M9 | Freeze remaining open ownership questions | Pending | A few Meerkat ledger questions still leave room for semantic motion | Completion-waiter subregion vs carrier, raw peer lineage retention, tool projection scope, and hidden epoch policy are explicitly decided or explicitly deferred out of cutover scope |
-| M10 | Final Meerkat freeze review | Pending | We need an explicit “go/no-go” point before TLA+ and switch prep | Several consecutive slices with no owner-boundary movement, no semantic backtracks, stable alphabet, explicit remaining gaps, and a documented exact-vs-target-state classification |
+| K1 | Freeze interrupt and cancel semantics | Done | Exact current interrupt/cancel semantics are now frozen, and `cancel_after_boundary` is explicitly classified as not yet lowered into the live Meerkat boundary | `meerkat-interrupt-freeze.md` exists; plain and attached runtime proofs exist for `interrupt_current_run`; runtime-adapter `InterruptYielding` delivery is captured; no distinct current session-layer interrupt lowering is discovered; `cancel_after_boundary` is explicitly classified out of exact-current cutover scope until a lowering exists |
+| K2 | Freeze detached-wake and continuation interaction | Done | Exact current detached-wake and continuation behavior is now frozen, including canonical feed-backed behavior and the legacy compatibility fallback | `meerkat-detached-wake-freeze.md` exists; feed-backed idle/post-drain continuation injection has direct machine proofs; non-quiescent defer behavior is captured; completion-kind filtering is captured; legacy `DetachedWakeState` behavior is explicitly classified as compatibility fallback |
+| K3 | Freeze turn / ops / barrier coupling | Done | Barrier satisfaction and turn/ops coupling are now frozen as exact-current live semantics | `meerkat-turn-ops-barrier-freeze.md` exists; authority proofs, live runner lowering, and joined validator proofs exist |
+| K4 | Freeze peer-ingress lifecycle and recovery | Done | Peer-ingress lifecycle is now frozen as the exact current live queue/authority seam, including the explicit absence of durable queue replay | `meerkat-peer-ingress-freeze.md` exists; trust/classification/runtime-snapshot proofs exist; exact-current recovery classification is explicit |
+| K5 | Freeze external tool-surface lifecycle and recovery | Done | Tool-surface lifecycle is now frozen as the exact current live router-authority snapshot seam | `meerkat-tool-surface-freeze.md` exists; staged/apply/finalize/router proofs and joined Meerkat proof exist |
+| K6 | Freeze drain and keep-alive lifecycle | Done | Drain lifecycle is now frozen as the exact current live adapter-owned seam | `meerkat-drain-freeze.md` exists; adapter, joined Meerkat, and seam-classification proofs exist |
+| K7 | Write and freeze the Meerkat input/effect alphabet | Done | The exact current Meerkat alphabet now exists | `meerkat-input-effect-alphabet.md` exists and explicitly classifies live inputs/effects vs excluded target-state verbs |
+| K8 | Write the Meerkat lowering map | Done | The exact current lowerings from real code into machine inputs/effects are now explicit | `meerkat-lowering-map.md` exists and maps the live code paths |
+| K9 | Freeze remaining open ownership questions | Done | The remaining ownership questions are now explicitly decided for the exact current boundary | `meerkat-ownership-decisions.md` exists |
+| K10 | Final Meerkat freeze review | Done | The exact current Meerkat freeze set now exists as one coherent review-ready asset | `meerkat-machine-exact-current-freeze.md` exists; focused and widened verification lanes are documented; exact-vs-target-state classification is explicit |
 
-## Immediate execution order
+## Next active step
 
-1. `M3` Freeze turn / ops / barrier coupling
-2. `M4` Freeze peer-ingress lifecycle and recovery
-3. `M5` Freeze external tool-surface lifecycle and recovery
-4. `M6` Freeze drain and keep-alive lifecycle
-5. `M7` Write and freeze the Meerkat input/effect alphabet
-6. `M8` Write the Meerkat lowering map
-7. `M9` Freeze remaining open ownership questions
-8. `M10` Final Meerkat freeze review
+The next active step is no longer Meerkat freeze closure.
 
-## Notes on pace
+The next active step is:
 
-The checklist is intentionally more aggressive than the earlier convergence
-phase.
-
-That does **not** mean skipping backtracks. It means:
-
-- choosing higher-leverage freeze blockers first
-- preferring slices that remove uncertainty from the gate
-- rejecting pretty-but-false stories faster
-- moving toward machine-owned actions/effects, not only read-side observation
+1. use `meerkat-machine-exact-current-freeze.md` as the implementation baseline
+2. use `meerkat-machine-freeze.md` as the target-state machine asset
+3. use `meerkat-machine-proof-obligations.md` as the proof handoff package
+4. extend the existing target-state TLC scaffold in `tla/`, which now passes
+   bounded base and stress TLC runs, into the full proof model
+5. review implementation-vs-target deltas before any write-side switch planning

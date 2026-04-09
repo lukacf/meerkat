@@ -9,11 +9,29 @@ Current working direction:
 
 Likely artifacts to keep here:
 
+- top-level machine milestone notes (`M1 = MeerkatMachine`, `M2 = MobMachine`)
 - machine-by-machine collapse matrix
 - cutover gate and semantic-freeze checklist
 - Meerkat cutover checklist
-- Meerkat M1 freeze note
-- Meerkat M2 freeze note
+- Meerkat interrupt freeze note
+- Meerkat detached-wake freeze note
+- Meerkat turn / ops / barrier freeze note
+- Meerkat peer-ingress freeze note
+- Meerkat tool-surface freeze note
+- Meerkat drain / keep-alive freeze note
+- Meerkat input/effect alphabet
+- Meerkat lowering map
+- Meerkat ownership decisions
+- top-level exact-current MeerkatMachine freeze note
+- top-level target-state MeerkatMachine freeze note
+- Meerkat proof-obligations handoff for TLA+
+- Meerkat transition catalog for target-state proof work
+- Meerkat state schema and canonical initial state
+- Meerkat derived predicates for target-state proof work
+- Meerkat coverage matrix for target alphabet and regions
+- Meerkat glossary for frozen target terminology
+- Meerkat fairness assumptions for target-state liveness work
+- experimental target-state TLA+ scaffold and bounded TLC configs
 - implementation progress log
 - Meerkat kernel shape
 - Meerkat owned-facts ledger

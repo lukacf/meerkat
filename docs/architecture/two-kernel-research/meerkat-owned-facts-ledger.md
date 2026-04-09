@@ -1,6 +1,6 @@
 # Meerkat Owned-Facts Ledger
 
-Status: working draft
+Status: supporting design draft (target decisions frozen in `meerkat-machine-freeze.md`)
 
 ## Purpose
 
@@ -127,15 +127,16 @@ one internal owner per region:
 Each region may still expose helpers, reducers, or adapters, but those helpers
 must not become competing semantic owners.
 
-## Open Questions
+## Resolved Target Decisions
 
-- Should completion-waiter state become an explicit machine-owned subregion, or
-  remain a supporting carrier refined entirely from input terminalization?
-- Should `Peer Ingress` keep raw envelope lineage after successful typed-input
-  submission, or is post-admission reconstruction sufficient?
-- When should `CommsRuntime::upsert_trusted_peer(...)` be retired or
-  hard-deprecated now that canonical runtime trust mutation has named
-  `register_*` / `unregister_*` seams?
-- How much of the tool-surface router projection should be modeled directly in
-  the future Meerkat kernel spec versus treated as a derived cache?
-- Does in-place runtime `reset()` preserve or rotate `binding.epoch_id`?
+The target machine freeze now resolves the previously open ownership questions:
+
+- completion-waiter state becomes an explicit machine-owned subregion
+- peer-ingress backlog and lineage remain machine-owned until successful typed
+  admission or explicit rejection
+- raw helper seams like `CommsRuntime::upsert_trusted_peer(...)` are not part
+  of target semantic authority
+- router projection remains derived; machine-owned tool truth stays in the
+  tool-surface region
+- `ResetRuntime` rotates `binding.epoch_id`; `RecoverRuntime` and
+  `RecycleRuntime` do not

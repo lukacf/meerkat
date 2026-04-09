@@ -1,8 +1,8 @@
-# Meerkat M1 Freeze
+# Meerkat Interrupt Freeze
 
 Status: frozen exact-current-state asset
 
-This note closes `M1` from `meerkat-cutover-checklist.md`.
+This note closes `K1` from `meerkat-cutover-checklist.md`.
 
 It captures the exact current live Meerkat semantics for interrupt and cancel
 behavior at the runtime/session boundary, and it explicitly classifies what is
@@ -14,7 +14,6 @@ This freeze covers:
 
 - `RuntimeSessionAdapter::interrupt_current_run`
 - runtime-adapter delivery of `RunControlCommand::InterruptYielding`
-- session-layer cooperative interrupt via `interrupt_yielding`
 
 This freeze does **not** claim that every authority verb already has a live
 lowering.
@@ -23,7 +22,7 @@ There is no longer a live or compatibility local wait-tool builder/binder seam
 at this boundary. During the rebase audit, the briefly resurrected
 wait-interrupt builder/binder API was removed again because it had no real
 consumer on the current Meerkat path, so the frozen boundary is back to the
-runtime/session seams only.
+runtime/session-adapter seams only.
 
 ## Exact current semantics
 
@@ -57,16 +56,20 @@ Exact current live behavior:
 
 This is a deferred cooperative interrupt request at the runtime-adapter layer.
 
-### 3. Session-layer cooperative interrupt
+### 3. No distinct session-layer interrupt seam is currently discovered
 
 Exact current live behavior:
 
-- `interrupt_yielding` reaches the cooperative wait/yield channel
-- a cooperative wait can wake promptly and return normally with an interrupted
-  result
-- this does **not** call the agent hard-cancel path
+- the current codebase has no distinct `meerkat-session` interrupt verb,
+  control command, or contract test named `interrupt_yielding`
+- the live top-level seam is the runtime-adapter delivery of
+  `RunControlCommand::InterruptYielding` into the attached executor control
+  channel
+- any deeper cooperative-yield behavior is therefore below the exact-current
+  top-level Meerkat boundary, not a second frozen session-layer seam
 
-This is distinct from `CancelCurrentRun`.
+That means `K1` freezes the runtime-adapter interrupt seam exactly as it exists
+today, without pretending there is a second current session-layer action.
 
 ## Exact-vs-target-state classification
 
@@ -94,7 +97,7 @@ So the exact current-state classification is:
 - it must not be treated as a frozen live cutover action until a real lowering
   exists and is captured by the Meerkat lowering map
 
-That means `M1` is complete for the exact current live boundary, and
+That means `K1` is complete for the exact current live boundary, and
 `cancel_after_boundary` moves out of “interrupt ambiguity” and into
 “future lowering or explicit post-freeze target-state landing”.
 
@@ -106,36 +109,31 @@ Runtime-layer proofs:
 - `interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes`
 - `running_peer_message_interrupt_yielding_drains_before_next_apply`
 
-Session-layer proof:
-
-- `test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
-
 ## Reviewer Verification Lane
 
 The narrow verification lane for this freeze asset is:
 
 - `cargo test -p meerkat-runtime --lib session_adapter`
-- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
-- `rg -n "CancelAfterBoundary|cancel_after_boundary|interrupt_current_run|InterruptYielding|interrupt_yielding|CancelCurrentRun" meerkat-runtime meerkat-session meerkat-core meerkat/src docs/architecture/two-kernel-research`
+- `rg -n "CancelAfterBoundary|cancel_after_boundary|interrupt_current_run|InterruptYielding|CancelCurrentRun" meerkat-runtime meerkat-session meerkat-core meerkat/src docs/architecture/two-kernel-research`
 
 What a passing review means:
 
 - the plain and attached `interrupt_current_run` proofs still hold
 - the runtime-adapter `InterruptYielding` proof still holds
-- the session-layer cooperative interrupt proof still holds
+- no distinct session-layer interrupt seam has been reintroduced
 - the repo trace still does not reveal a newly discovered live lowering for
   `cancel_after_boundary`
 
 ## Reopen Conditions
 
-`M1` should be reopened only if one of the following becomes true:
+`K1` should be reopened only if one of the following becomes true:
 
 - a real runtime/session lowering for `cancel_after_boundary` is added
 - `interrupt_current_run` stops being deferred on attached runtimes
 - `InterruptYielding` starts hard-canceling the current run
-- session-layer `interrupt_yielding` begins calling the hard-cancel path
+- a distinct top-level session-layer interrupt action is introduced
 
-The following do **not** reopen `M1` by themselves:
+The following do **not** reopen `K1` by themselves:
 
 - new exact-current lifecycle proofs around steer, detach, destroy, or retire
 - detached-wake changes that do not alter the interrupt/cancel boundary
@@ -156,17 +154,18 @@ exclude `cancel_after_boundary` until a real lowering exists.
 
 ## Freeze decision
 
-`M1` is considered frozen for the exact current Meerkat cutover boundary.
+`K1` is considered frozen for the exact current Meerkat cutover boundary.
 
 What is frozen:
 
 - hard cancel request delivery semantics
-- cooperative interrupt delivery semantics
+- cooperative interrupt delivery semantics at the runtime-adapter seam
 - the distinction between the two
+- the explicit absence of a second current session-layer interrupt lowering
 
 What is explicitly not frozen as live behavior:
 
 - `cancel_after_boundary` lowering
 
-That remaining gap is no longer an `M1` blocker. It is a lowering-scope issue
+That remaining gap is no longer a `K1` blocker. It is a lowering-scope issue
 for later Meerkat cutover work.

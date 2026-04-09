@@ -1,8 +1,8 @@
-# Meerkat M2 Freeze
+# Meerkat Detached-Wake Freeze
 
 Status: frozen exact-current-state asset
 
-This note closes `M2` from `meerkat-cutover-checklist.md`.
+This note closes `K2` from `meerkat-cutover-checklist.md`.
 
 It captures the exact current live Meerkat semantics for detached wake and
 continuation injection at the runtime loop boundary, and it explicitly
@@ -141,7 +141,7 @@ Continuation-shape proof:
 
 ## Freeze decision
 
-`M2` is considered frozen for the exact current Meerkat cutover boundary.
+`K2` is considered frozen for the exact current Meerkat cutover boundary.
 
 What is frozen:
 
@@ -151,5 +151,5 @@ What is frozen:
 - continuation shape
 - legacy compatibility fallback behavior
 
-That means `M2` no longer blocks Meerkat freeze. The next blocker is `M3`:
+That means `K2` no longer blocks Meerkat freeze. The next blocker is `K3`:
 turn / ops / barrier coupling.

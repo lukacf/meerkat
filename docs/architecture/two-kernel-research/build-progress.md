@@ -5,6 +5,90 @@ Status: active implementation log
 This file tracks the slow, verified implementation path from the research docs
 toward real code.
 
+Historical note:
+
+- slices 173 onward used an older internal `M1` / `M2` / `M3` numbering for
+  Meerkat sub-freeze items
+- those labels are now superseded by `K1` / `K2` / `K3` in
+  `meerkat-cutover-checklist.md`
+- top-level machine milestones are:
+  - `M1` = full `MeerkatMachine`
+  - `M2` = `MobMachine`
+- read the old slice labels as historical shorthand only, not as the current
+  milestone scheme
+
+## 2026-04-09 — Slice 172: TLC target scaffold caught destroyed-rebind ambiguity
+
+The first executable TLC pass on the target-state `MeerkatMachine` scaffold
+found a real freeze omission rather than a code issue: the target docs did not
+say whether `DestroyRuntime` was terminal for the machine instance, so the
+model allowed `PrepareBindings` to rebind from `Destroyed` and immediately
+violated the destroyed-shape invariant.
+
+The freeze package now closes that explicitly:
+
+- `DestroyRuntime` is terminal for the machine instance
+- `PrepareBindings` requires the pre-binding initializing state
+- rebinding after destroy is outside this machine and belongs to a fresh
+  `Init`
+- `Destroyed` is now explicitly stutter-only for the machine instance
+
+## 2026-04-09 — Slice 173: First executable target TLC scaffold
+
+Added the first non-generated target-state TLA+ scaffold in:
+
+- `tla/MeerkatMachineTarget.tla`
+- `tla/MeerkatMachineTarget.cfg`
+- `tla/README.md`
+
+The scaffold encodes:
+
+- the full frozen region schema
+- canonical `Init`
+- derived predicates
+- a broad grouped `Next` touching every machine region
+- a first safety invariant set derived from the proof obligations
+
+This was the first direct executable pressure test of the target-state
+`MeerkatMachine` freeze rather than of the exact-current baseline.
+
+## 2026-04-09 — Slice 174: Bounded TLC passes on target machine scaffold
+
+After closing the destroyed-state ambiguity, the target machine scaffold now
+passes bounded TLC in both the base and widened stress configs:
+
+- `tla/MeerkatMachineTarget.cfg`
+- `tla/MeerkatMachineTargetStress.cfg`
+
+The widened run explored 189,575 distinct states to depth 7 with no invariant
+violations. This does not replace the full proof, but it is strong evidence
+that the freeze package is now executable and internally consistent at the
+target-machine level.
+
+## 2026-04-09 — Slice 175: Strengthened target safety invariants survive TLC
+
+Raised the executable target model to a stronger safety set derived more
+directly from the frozen proof obligations:
+
+- `Running => HasActiveRun`
+- active-run phase restriction
+- non-empty contributors for active runs
+- ready-turn shape
+- non-empty `wait_all` identity when active
+- `active_count` equals the number of pending/running ops
+- visible surfaces require machine base state
+- snapshot alignment monotonicity
+- non-inactive drain requires both a live binding and a non-disabled drain mode
+
+Both bounded TLC configurations still passed after those invariants were added:
+
+- base config: 25,129 distinct states, depth 6
+- stress config: 189,575 distinct states, depth 7
+
+At this point the target `MeerkatMachine` freeze is not just documented and
+cross-linked; it has an executable bounded model that survives a nontrivial
+safety suite.
+
 ## 2026-04-09 — Slice 1: Meerkat runtime spine snapshot
 
 Goal:
@@ -11846,7 +11930,7 @@ Goal:
 
 What landed:
 
-- `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+- `docs/architecture/two-kernel-research/meerkat-interrupt-freeze.md`
   - added a dedicated exact-current-state freeze note for Meerkat `M1`
   - freezes:
     - plain and attached `interrupt_current_run`
@@ -11975,7 +12059,7 @@ Goal:
 
 What landed:
 
-- `docs/architecture/two-kernel-research/meerkat-m2-freeze.md`
+- `docs/architecture/two-kernel-research/meerkat-detached-wake-freeze.md`
   - added a dedicated exact-current-state freeze note for detached wake and
     continuation interaction
   - freezes:
@@ -12038,7 +12122,7 @@ Goal:
 
 What landed:
 
-- re-audited `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+- re-audited `docs/architecture/two-kernel-research/meerkat-interrupt-freeze.md`
   against the current codebase
 - re-traced live interrupt and cancel-adjacent callsites across:
   - `meerkat-runtime`
@@ -12097,7 +12181,7 @@ Goal:
 
 What landed:
 
-- `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+- `docs/architecture/two-kernel-research/meerkat-interrupt-freeze.md`
   - added a dedicated reviewer verification lane
   - added explicit reopen conditions
   - added explicit non-reopen conditions so adjacent Meerkat work does not
@@ -12291,7 +12375,7 @@ What landed:
     binding hooks
   - removed the extracted `wait_interrupt.rs` module restoration
 - updated:
-  - `meerkat-m1-freeze.md`
+  - `meerkat-interrupt-freeze.md`
   - `meerkat-cutover-checklist.md`
   so the freeze story now says this explicitly
 
@@ -12601,7 +12685,7 @@ What landed:
   pre-existing structural vestige tied to `InboxSender::send()`, not merge
   damage
 - confirmed the remaining detached-wake legacy fallback is already frozen as
-  exact-current compatibility behavior in `meerkat-m2-freeze.md`
+  exact-current compatibility behavior in `meerkat-detached-wake-freeze.md`
 
 Why this slice matters:
 
@@ -12658,3 +12742,655 @@ Result:
 
 - the peer-input drain bridge is now documented as a live seam
 - no credible rebase-fallout narrative mismatch remains in the Meerkat baseline
+
+## Slice 190 - K3 exact-current turn / ops / barrier freeze lands in code
+
+Goal:
+
+- stop treating turn / ops / barrier coupling as the last undefined Meerkat
+  red zone
+- freeze only the exact joined invariants the current code can honestly
+  support
+
+What landed:
+
+- added exact-current K3 validator rules in `meerkat/src/meerkat_machine.rs`:
+  - `WaitingForOps` requires `tool_calls_pending > 0`
+  - pending ops outside `WaitingForOps` are invalid
+  - barrier flag / barrier id-set coherence is explicit
+  - unsatisfied barrier without barrier ops is invalid
+  - pending op ids must resolve in the ops registry snapshot
+  - barrier op ids must resolve in the ops registry snapshot
+  - barrier op ids must be a subset of pending op ids
+- added focused negative proof:
+  - `validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations`
+
+Why this slice matters:
+
+- it turns `K3` from “known hard area” into a bounded exact-current freeze
+  surface
+- it freezes the live runner lowering without pretending the cross-crate
+  snapshot is fully atomic
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+
+Result:
+
+- the exact-current K3 validator holds on the widened Meerkat lane
+- no owner-boundary movement was needed
+
+## Slice 191 - Full MeerkatMachine freeze set is assembled
+
+Goal:
+
+- stop treating Meerkat freeze as a checklist with floating blockers
+- produce the actual exact-current freeze set we can hand to TLA+
+
+What landed:
+
+- closed `K3` with `meerkat-turn-ops-barrier-freeze.md`
+- closed `K4` with `meerkat-peer-ingress-freeze.md`
+- closed `K5` with `meerkat-tool-surface-freeze.md`
+- closed `K6` with `meerkat-drain-freeze.md`
+- closed `K7` with `meerkat-input-effect-alphabet.md`
+- closed `K8` with `meerkat-lowering-map.md`
+- closed `K9` with `meerkat-ownership-decisions.md`
+- closed `K10` and top-level `M1` with `meerkat-machine-freeze.md`
+- updated `meerkat-cutover-checklist.md` from active blocker list to closed
+  exact-current freeze checklist
+
+Why this slice matters:
+
+- this is the point where `MeerkatMachine` becomes a reviewable exact-current
+  machine asset rather than a collection of good partial notes
+- it is the first honest point at which the next step can be “TLA+ proof of
+  frozen Meerkat,” not “keep discovering Meerkat boundaries”
+
+Verification:
+
+- focused K1-K6 lanes as listed in the freeze notes
+- workspace-wide lib / test / compile lanes
+
+Result:
+
+- top-level `M1 = MeerkatMachine` is now frozen as an exact-current asset
+- the next active blocker is no longer Meerkat freeze; it is TLA+ proof of the
+  frozen machine
+
+## Slice 192 - K1 final audit removes stale session-layer interrupt claim
+
+Goal:
+
+- make the full `MeerkatMachine` freeze honest by removing the one remaining
+  stale proof claim in `K1`
+- verify that the exact-current interrupt boundary is the runtime-adapter seam,
+  not a separate `meerkat-session` action that no longer exists
+
+What landed:
+
+- re-audited `meerkat-session` and confirmed there is no current top-level
+  `interrupt_yielding` entrypoint, control verb, or contract test there
+- narrowed `meerkat-interrupt-freeze.md` to the actual exact-current boundary:
+  - `interrupt_current_run`
+  - runtime-adapter `InterruptYielding`
+  - explicit absence of a second session-layer interrupt lowering
+- updated `meerkat-machine-freeze.md`, `meerkat-cutover-checklist.md`, and
+  `meerkat-lowering-map.md` to match that exact-current classification
+
+Why this slice matters:
+
+- without it, the full Meerkat freeze still cited a proof that no longer
+  existed
+- with it, the freeze set stops overclaiming and becomes review-safe enough
+  for exact-current TLA+ work
+
+Verification:
+
+- `rg -n "interrupt_yielding|InterruptYielding|CancelCurrentRun" meerkat-session meerkat-runtime meerkat-core`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `K1` is now frozen as the actual exact-current runtime-adapter interrupt
+  boundary
+- the top-level `MeerkatMachine` freeze no longer depends on a nonexistent
+  session-layer proof seam
+
+## Slice 193 - Full MeerkatMachine freeze reruns clean after final K1 audit
+
+Goal:
+
+- prove that the final `M1 = MeerkatMachine` freeze still holds after the K1
+  narrowing
+- rerun the full documented freeze surface instead of relying on older green
+  runs
+
+What landed:
+
+- reran the focused freeze lanes from `meerkat-machine-freeze.md`
+- reran the widened workspace test and compile lanes
+- confirmed the only remaining broad warnings are the expected observational
+  `dead_code` warnings from the diagnostic `MeerkatMachine` / `MobMachine`
+  scaffolding
+
+Why this slice matters:
+
+- this is the point where the top-level Meerkat freeze stops being “assembled”
+  and becomes “reverified after the last honest-boundary correction”
+- it closes the final gap between “the docs now say the right thing” and “the
+  machine is actually ready for exact-current TLA+ work”
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations`
+- `cargo test -p meerkat --lib --features comms capture_meerkat_machine_snapshot_joins_live_peer_runtime_state`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_peer_shape_violations`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_peer_authority_count_violations`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_peer_trust_shape_violations`
+- `cargo test -p meerkat --lib --features mcp capture_meerkat_machine_snapshot_joins_live_external_tool_surface_state`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_tool_surface_shape_violations`
+- `cargo test -p meerkat --lib capture_meerkat_machine_snapshot_joins_stopped_comms_drain_state`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_drain_shape_violations`
+- `cargo test --workspace --tests --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo check --workspace --tests --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+Result:
+
+- top-level `M1 = MeerkatMachine` is now an honest exact-current freeze asset
+- the next blocking milestone is TLA+ proof of frozen Meerkat, not more freeze
+  closure work
+
+## Slice 194 - Top-level M1 is promoted from exact-current baseline to target-state machine freeze
+
+Goal:
+
+- stop conflating the exact-current Meerkat baseline with the actual target
+  machine we intend to prove and cut over to
+- freeze one explicit target-state `MeerkatMachine` instead of forcing TLA+ to
+  infer target cleanup from scattered drafts
+
+What landed:
+
+- split the freeze story into two top-level assets:
+  - `meerkat-machine-exact-current-freeze.md` for the implementation baseline
+  - `meerkat-machine-freeze.md` for the target-state single-machine design
+- resolved the previously open target questions directly in the target freeze:
+  - explicit completion-waiter subregion
+  - `cancel_after_boundary` in the target alphabet
+  - replayable peer-ingress backlog
+  - tool-surface recovery as machine truth
+  - all drain modes as machine-owned state
+  - reset-driven epoch rotation
+  - removal of the legacy detached-wake fallback from the target machine
+- updated `meerkat-cutover-checklist.md` so it is clearly the audit trail for
+  the exact-current baseline, not the target freeze itself
+
+Why this slice matters:
+
+- without it, the top-level freeze would still be “what the code does today”
+  rather than “the single machine we actually intend to prove”
+- with it, `M1` is finally the target-state machine the user originally asked
+  for, and the exact-current baseline remains available as comparison evidence
+
+Verification:
+
+- `git diff --check`
+- architecture-doc consistency audit across:
+  - `meerkat-kernel-shape.md`
+  - `meerkat-state-machine-sketch.md`
+  - `meerkat-owned-facts-ledger.md`
+  - exact-current freeze notes
+
+Result:
+
+- top-level `M1 = MeerkatMachine` is now frozen as the target-state single
+  machine
+- the exact-current freeze remains preserved separately as implementation
+  baseline for TLA+ and review
+
+## Slice 195 - Target freeze removes the last implementation-colored lifecycle hedges
+
+Goal:
+
+- make the target `MeerkatMachine` read like architecture, not like a
+  half-translated implementation note
+
+What landed:
+
+- `InterruptCurrentRun` is now stated as a machine-owned cancellation request
+  observed at machine-visible cancellation boundaries
+- `InterruptYielding` is now stated as a machine input/effect regardless of one
+  implementation lowering using executor control
+- `RetireRuntime` is now described in target machine terms instead of
+  “exact-current drain” language
+
+Why this slice matters:
+
+- the target freeze should not preserve implementation-colored hedges once the
+  target design choice is already made
+
+Verification:
+
+- `git diff --check`
+
+Result:
+
+- the target freeze now reads as one closed target machine rather than a
+  near-final implementation note
+
+## Slice 196 - Target freeze gets a proof-obligations handoff package
+
+Goal:
+
+- turn the target `MeerkatMachine` freeze into a proof-ready package rather
+  than a standalone architecture note
+
+What landed:
+
+- added `meerkat-machine-proof-obligations.md`
+- made the target TLA+ boundary, finite abstraction rules, action families,
+  safety obligations, liveness obligations, and implementation-delta review
+  obligations explicit
+- updated `README.md` and `meerkat-machine-freeze.md` to point to the proof
+  handoff directly
+
+Why this slice matters:
+
+- the user asked for a full freeze that we can actually take into TLA+
+- this closes the gap between “frozen architecture” and “proof-ready machine”
+
+Verification:
+
+- `git diff --check`
+- doc consistency pass across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-exact-current-freeze.md`
+  - `meerkat-cutover-checklist.md`
+  - `meerkat-machine-proof-obligations.md`
+
+Result:
+
+- `M1 = MeerkatMachine` is now packaged as a proof-ready target-state freeze
+  plus exact-current comparison baseline
+
+## Slice 197 - Supporting Meerkat docs stop talking like the target is still open
+
+Goal:
+
+- remove the last support-doc wording that made the target freeze sound
+  provisional or half-formalized
+
+What landed:
+
+- `meerkat-kernel-shape.md` now treats the target decisions as closed design
+  decisions rather than “open questions”
+- `meerkat-state-machine-sketch.md` now states the reset/recover formalization
+  as complete target commitments, not future work
+- `meerkat-cutover-checklist.md` now points directly at
+  `meerkat-machine-proof-obligations.md` as part of the post-freeze handoff
+
+Why this slice matters:
+
+- a freeze is only believable if the surrounding docs also stop hedging
+
+Verification:
+
+- `git diff --check`
+- doc wording audit across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-proof-obligations.md`
+  - `meerkat-kernel-shape.md`
+  - `meerkat-state-machine-sketch.md`
+  - `meerkat-cutover-checklist.md`
+
+Result:
+
+- the active Meerkat support docs now all treat `M1` as a closed target-state
+  machine and proof handoff, not as an open design sketch
+
+## Slice 198 - Final broad validation after proof-package hardening
+
+Goal:
+
+- ensure the final proof-ready Meerkat freeze package is backed by a fresh
+  workspace-wide validation run, not only by earlier green lanes
+
+What landed:
+
+- reran the broad workspace test and compile lanes after the target freeze,
+  proof-obligations handoff, and support-doc consistency cleanup
+
+Why this slice matters:
+
+- this is the last honesty check before calling the Meerkat freeze package
+  ready for TLA+
+
+Verification:
+
+- `cargo test --workspace --tests --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+Result:
+
+- the full Meerkat freeze package is backed by a fresh green workspace run
+- the only broad warnings remaining are the expected observational
+  `dead_code` warnings from the diagnostic machine scaffolding
+
+## Slice 199 - Target freeze gets a canonical transition catalog
+
+Goal:
+
+- close the remaining gap between “frozen machine state” and “proof-ready
+  machine dynamics”
+
+What landed:
+
+- added `meerkat-machine-transition-catalog.md`
+- cataloged the target transition families across binding, admission, turn,
+  ops, detached wake, peer ingress, tool surface, drain, and lifecycle
+- made cross-region transition requirements explicit instead of leaving them
+  implicit in the freeze prose
+- linked the transition catalog from the target freeze and proof-obligations
+  handoff
+
+Why this slice matters:
+
+- a full single-machine freeze should include canonical transition semantics,
+  not only state, alphabet, and invariants
+
+Verification:
+
+- `git diff --check`
+- target-doc consistency pass across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-proof-obligations.md`
+  - `meerkat-machine-transition-catalog.md`
+
+Result:
+
+- the Meerkat freeze package now includes state, alphabet, invariants, proof
+  obligations, and canonical transitions for the target machine
+
+## Slice 200 - Target freeze gets frozen terminology and fairness assumptions
+
+Goal:
+
+- remove the last interpretive gaps that would otherwise be filled in ad hoc
+  during TLA+ work
+
+What landed:
+
+- added `meerkat-machine-glossary.md`
+- added `meerkat-machine-fairness-assumptions.md`
+- linked both into the target freeze and proof-obligations handoff
+
+Why this slice matters:
+
+- terms like `settled`, `quiescent`, `live binding`, and `ordinary admitted
+  input` should not be left to modeler interpretation
+- liveness claims should not rely on hidden fairness folklore
+
+Verification:
+
+- `git diff --check`
+- terminology/fairness consistency audit across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-proof-obligations.md`
+  - `meerkat-machine-transition-catalog.md`
+  - `meerkat-machine-glossary.md`
+  - `meerkat-machine-fairness-assumptions.md`
+
+Result:
+
+- the Meerkat freeze package now includes frozen state, transitions,
+  obligations, vocabulary, and fairness assumptions for TLA+ work
+
+## Slice 201 - Target freeze gets explicit alphabet and region coverage
+
+Goal:
+
+- prove that every target input, effect, and machine region now has an explicit
+  home in the freeze package
+
+What landed:
+
+- added `meerkat-machine-coverage-matrix.md`
+- fixed the transition catalog gap for:
+  - `WaitAllSatisfied`
+  - `ExecutorControl(StopRuntimeExecutor)`
+  - `PersistRecoverySnapshot`
+- linked the coverage matrix from the target freeze and proof handoff
+
+Why this slice matters:
+
+- this closes the exact sort of “looks complete but silently forgot an action”
+  gap that would otherwise show up only during TLA+ modeling
+
+Verification:
+
+- target alphabet coverage audit against:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-transition-catalog.md`
+  - `meerkat-machine-coverage-matrix.md`
+- `git diff --check`
+
+Result:
+
+- every target input, every target effect, and every machine region now has an
+  explicit home in the Meerkat freeze package
+
+## Slice 202 - Target freeze gets a canonical state schema and `Init`
+
+Goal:
+
+- close the remaining gap between “proof-ready transitions” and “proof-ready
+  state space”
+
+What landed:
+
+- added `meerkat-machine-state-schema.md`
+- defined canonical region schemas, phase/status domains, and the target
+  machine `Init`
+- added explicit region typing obligations so `TypeOK` does not have to be
+  reconstructed ad hoc during TLA+ work
+- linked the state schema from the target freeze and proof handoff
+
+Why this slice matters:
+
+- a full single-machine freeze is still incomplete if the modeler has to invent
+  `Init`, region domains, or phase lattices while writing the proof
+
+Verification:
+
+- `git diff --check`
+- target-package consistency pass across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-proof-obligations.md`
+  - `meerkat-machine-transition-catalog.md`
+  - `meerkat-machine-state-schema.md`
+
+Result:
+
+- the Meerkat freeze package now includes canonical target state, `Init`,
+  transitions, obligations, vocabulary, fairness, and coverage
+
+## Slice 203 - Target freeze gets explicit abstract domains and derived predicates
+
+Goal:
+
+- remove the remaining need for a modeler to invent abstract domains or key
+  machine predicates while writing TLA+
+
+What landed:
+
+- extended `meerkat-machine-state-schema.md` with explicit abstract scalar and
+  classification domains
+- added `meerkat-machine-derived-predicates.md`
+- linked both into the target freeze and proof handoff
+
+Why this slice matters:
+
+- a single-machine freeze is still softer than it should be if terms like
+  `Quiescent`, `SettledRetired`, `BarrierPending`, or `TurnPrimitiveKind`
+  remain implicit
+
+Verification:
+
+- `git diff --check`
+- target-package consistency pass across:
+  - `meerkat-machine-freeze.md`
+  - `meerkat-machine-state-schema.md`
+  - `meerkat-machine-derived-predicates.md`
+  - `meerkat-machine-proof-obligations.md`
+
+Result:
+
+- the Meerkat freeze package now includes explicit target domains and derived
+  predicates, not just raw fields and prose terminology
+
+## Slice 204 - Target TLC forced live-binding lifecycle preconditions
+
+Goal:
+
+- tighten the target machine so lifecycle verbs cannot act on a pre-binding
+  `Initializing` shell
+
+What landed:
+
+- strengthened target TLC preconditions so:
+  - `RetireRuntime` requires a live binding
+  - `StopRuntime` requires a live binding
+  - `DestroyRuntime` requires a live binding
+- aligned the transition catalog with those requirements
+
+Why this slice matters:
+
+- the stronger TLC invariant set immediately exposed that the earlier target
+  model allowed impossible lifecycle commands before a binding existed
+
+Verification:
+
+- bounded TLC base and stress runs after the lifecycle-precondition fix
+
+Result:
+
+- the target machine no longer permits “retire/stop/destroy before bind”
+  traces
+
+## Slice 205 - Target peer replay gets canonical terminalized lineage
+
+Goal:
+
+- make peer replay uniqueness provable from machine state instead of from
+  transient backlog shape
+
+What landed:
+
+- promoted peer lineage into canonical target state:
+  - `peer.terminalized_items`
+  - `peer.admitted_items`
+- updated the target freeze, state schema, glossary, proof obligations, and
+  transition catalog to treat that lineage as machine-owned truth
+- updated the TLC model so:
+  - available peer items exclude terminalized lineage
+  - peer admission terminalizes and records admitted lineage
+  - non-admitted peer drain terminalizes lineage
+
+Why this slice matters:
+
+- without terminalized peer lineage, the target machine could not honestly
+  prove “peer replay never duplicates already admitted peer work”
+
+Verification:
+
+- bounded TLC base and stress runs with the stronger peer lineage state
+- `git diff --check`
+
+Result:
+
+- peer replay uniqueness is now expressible and checked from canonical machine
+  state
+
+## Slice 206 - Stronger tool invariants exposed applied-state gaps
+
+Goal:
+
+- raise the tool-surface part of the target machine from loose visibility
+  subset checks to real applied-state consistency
+
+What landed:
+
+- added stronger target invariants for:
+  - visible surfaces matching applied base state
+  - staged surfaces remaining machine-known
+  - pending removal implying `Removing`
+  - inflight calls requiring applied surface state
+- TLC exposed two real target underspecs:
+  - `StageReload` was legal on known-but-never-applied surfaces
+  - final removal left stale staged remove lineage behind
+- fixed the target model so:
+  - `StageReload` requires an already applied surface
+  - both removal finalization paths clear staged remove lineage
+
+Why this slice matters:
+
+- these are exactly the sorts of cross-boundary tool-surface ambiguities that
+  become expensive if they are left to informal interpretation before proof
+
+Verification:
+
+- bounded TLC base and stress runs with the stronger tool-surface invariants
+
+Result:
+
+- the target machine now has a tighter and more honest applied-surface story
+
+## Slice 207 - Stronger target TLC safety set survives base and stress runs
+
+Goal:
+
+- confirm that the stricter peer, input, barrier, and tool invariants are
+  coherent as target-state commitments
+
+What landed:
+
+- expanded the TLC safety set with invariants for:
+  - live-binding lifecycle legality
+  - resolved waiters being truly cleared
+  - queue/steer disjointness and handling-mode legality
+  - contributor lifecycle legality
+  - terminal inputs excluded from queue/steer
+  - barrier satisfaction legality
+  - replayable peer-class correctness
+  - terminalized peer backlog exclusion
+  - admitted peer lineage inclusion
+  - applied-surface equality and staged/pending removal legality
+
+Verification:
+
+- base TLC:
+  - `56,757` states generated
+  - `14,954` distinct states
+  - depth `6`
+- stress TLC:
+  - `432,922` states generated
+  - `110,144` distinct states
+  - depth `7`
+- no invariant violations
+
+Result:
+
+- the target single-machine freeze is now materially stronger than the first
+  TLC pass, and the added obligations have already forced honest corrections
+  into the target model

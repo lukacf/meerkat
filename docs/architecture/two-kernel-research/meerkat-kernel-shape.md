@@ -1,6 +1,6 @@
 # Meerkat Kernel Shape
 
-Status: working draft
+Status: supporting design draft (target decisions frozen in `meerkat-machine-freeze.md`)
 
 ## Purpose
 
@@ -333,15 +333,16 @@ That implies:
 - the `MobMachine <-> MeerkatMachine` seam should stay thin precisely because
   the Meerkat internals are already dense
 
-## Open Questions
+## Resolved Target Decisions
 
-- Should in-place runtime `reset()` preserve or rotate the hidden execution
-  continuity token?
-- What is the exact lowering from future `MobMachine` work commands into current
-  admitted input kinds and run primitives?
-- Which remaining host-mode helper paths must be deleted before the kernel is
-  truly closed around the runtime-backed path?
-- Does any current tool-surface behavior still belong in a perimeter adapter
-  rather than in Meerkat kernel truth?
-- Which recovery obligations should be proved inside Meerkat directly versus
-  validated with Rust replay and crash tests?
+The top-level target freeze in `meerkat-machine-freeze.md` closes the earlier
+target-design ambiguities:
+
+- in-place `ResetRuntime` rotates the hidden execution continuity token
+- `MobMachine -> MeerkatMachine` lowering remains a thin seam and does not
+  widen the Meerkat kernel boundary
+- tool-surface lifecycle remains inside Meerkat kernel truth
+- completion waiters are modeled explicitly as machine state
+- recovery obligations are part of the Meerkat machine semantics and are proved
+  at the machine level, with Rust crash tests used as implementation
+  confirmation rather than as architectural substitute

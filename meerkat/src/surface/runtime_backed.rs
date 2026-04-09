@@ -215,6 +215,8 @@ fn ensure_materialized_session_id_matches(
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
+
     use meerkat_client::TestClient;
     use meerkat_core::SessionBuildOptions;
     use meerkat_runtime::completion::CompletionOutcome;
@@ -223,7 +225,8 @@ mod tests {
     use tokio::time::Duration;
 
     #[cfg(feature = "comms")]
-    use meerkat::CommsRuntime;
+    use crate::CommsRuntime;
+    use crate::{PersistenceBundle, SessionStore, SessionStoreError};
 
     fn make_request(build: SessionBuildOptions) -> CreateSessionRequest {
         CreateSessionRequest {

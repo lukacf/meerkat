@@ -1716,9 +1716,13 @@ async fn comms_send(
     match comms.send(cmd).await {
         Ok(receipt) => {
             let result = match receipt {
-                SendReceipt::InputAccepted { interaction_id } => json!({
+                SendReceipt::InputAccepted {
+                    interaction_id,
+                    stream_reserved,
+                } => json!({
                     "kind": "input_accepted",
                     "interaction_id": interaction_id.0.to_string(),
+                    "stream_reserved": stream_reserved,
                 }),
                 SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
                     "kind": "peer_message_sent",
@@ -1726,12 +1730,15 @@ async fn comms_send(
                     "acked": acked,
                 }),
                 SendReceipt::PeerRequestSent {
-                    request_id,
                     envelope_id,
+                    interaction_id,
+                    stream_reserved,
                 } => json!({
                     "kind": "peer_request_sent",
                     "envelope_id": envelope_id.to_string(),
-                    "request_id": request_id.0.to_string(),
+                    "interaction_id": interaction_id.0.to_string(),
+                    "request_id": interaction_id.0.to_string(),
+                    "stream_reserved": stream_reserved,
                 }),
                 SendReceipt::PeerResponseSent {
                     envelope_id,
@@ -4887,7 +4894,7 @@ mod tests {
         let ApiError::BadRequest(msg) = err else {
             unreachable!("expected bad request");
         };
-        assert_eq!(msg, "removed_unsupported_field");
+        assert_eq!(msg, "invalid stream: invalid");
     }
 
     #[test]

@@ -137,10 +137,14 @@ pub async fn handle_send(
     match comms.send(cmd).await {
         Ok(receipt) => {
             let result = match receipt {
-                meerkat_core::comms::SendReceipt::InputAccepted { interaction_id } => {
+                meerkat_core::comms::SendReceipt::InputAccepted {
+                    interaction_id,
+                    stream_reserved,
+                } => {
                     serde_json::json!({
                         "kind": "input_accepted",
                         "interaction_id": interaction_id.0.to_string(),
+                        "stream_reserved": stream_reserved,
                     })
                 }
                 meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
@@ -151,12 +155,15 @@ pub async fn handle_send(
                     })
                 }
                 meerkat_core::comms::SendReceipt::PeerRequestSent {
-                    request_id,
                     envelope_id,
+                    interaction_id,
+                    stream_reserved,
                 } => serde_json::json!({
                     "kind": "peer_request_sent",
                     "envelope_id": envelope_id.to_string(),
-                    "request_id": request_id.0.to_string(),
+                    "interaction_id": interaction_id.0.to_string(),
+                    "request_id": interaction_id.0.to_string(),
+                    "stream_reserved": stream_reserved,
                 }),
                 meerkat_core::comms::SendReceipt::PeerResponseSent {
                     envelope_id,
@@ -349,7 +356,7 @@ mod tests {
             &result.unwrap_err(),
         );
         assert_eq!(errors[0]["field"], "stream");
-        assert_eq!(errors[0]["issue"], "removed_unsupported_field");
+        assert_eq!(errors[0]["issue"], "invalid_value");
     }
 
     #[test]

@@ -2078,7 +2078,7 @@ async fn idle_non_host_sessions_do_not_spawn_background_comms_drains() {
 }
 
 #[tokio::test]
-async fn attached_sessions_spawn_attached_comms_drains_without_keep_alive() {
+async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
     use meerkat_core::agent::CommsRuntime;
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
@@ -2162,8 +2162,8 @@ async fn attached_sessions_spawn_attached_comms_drains_without_keep_alive() {
         .await;
 
     assert!(
-        spawned,
-        "attached sessions should spawn an AttachedSession comms drain even without keep_alive"
+        !spawned,
+        "attached sessions should not spawn a comms drain when keep_alive is disabled"
     );
 
     adapter.unregister_session(&sid).await;

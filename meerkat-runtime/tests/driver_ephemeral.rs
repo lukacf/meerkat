@@ -742,20 +742,33 @@ async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
 #[test]
 fn post_admission_signal_ordering() {
     assert!(PostAdmissionSignal::None < PostAdmissionSignal::WakeLoop);
-    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::RequestImmediateProcessing);
+    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::InterruptYielding);
+    assert!(
+        PostAdmissionSignal::InterruptYielding < PostAdmissionSignal::RequestImmediateProcessing
+    );
 }
 
 #[test]
 fn post_admission_signal_should_wake() {
     assert!(!PostAdmissionSignal::None.should_wake());
     assert!(PostAdmissionSignal::WakeLoop.should_wake());
+    assert!(PostAdmissionSignal::InterruptYielding.should_wake());
     assert!(PostAdmissionSignal::RequestImmediateProcessing.should_wake());
+}
+
+#[test]
+fn post_admission_signal_should_interrupt_yielding() {
+    assert!(!PostAdmissionSignal::None.should_interrupt_yielding());
+    assert!(!PostAdmissionSignal::WakeLoop.should_interrupt_yielding());
+    assert!(PostAdmissionSignal::InterruptYielding.should_interrupt_yielding());
+    assert!(PostAdmissionSignal::RequestImmediateProcessing.should_interrupt_yielding());
 }
 
 #[test]
 fn post_admission_signal_should_process_immediately() {
     assert!(!PostAdmissionSignal::None.should_process_immediately());
     assert!(!PostAdmissionSignal::WakeLoop.should_process_immediately());
+    assert!(!PostAdmissionSignal::InterruptYielding.should_process_immediately());
     assert!(PostAdmissionSignal::RequestImmediateProcessing.should_process_immediately());
 }
 
@@ -813,7 +826,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
 }
 
 #[tokio::test]
-async fn post_admission_signal_queue_peer_message_while_running_stays_passive() {
+async fn post_admission_signal_queue_peer_message_while_running_interrupts_yielding() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     // Admit a prompt to start a run
@@ -849,15 +862,19 @@ async fn post_admission_signal_queue_peer_message_while_running_stays_passive() 
 
     assert_eq!(
         signal,
-        PostAdmissionSignal::None,
-        "queue-mode peer message while running should not request wake/process, got {signal:?}"
+        PostAdmissionSignal::InterruptYielding,
+        "queue-mode peer message while running should request cooperative interrupt, got {signal:?}"
     );
 }
 
 #[test]
 fn post_admission_signal_request_immediate_ordering() {
     assert!(PostAdmissionSignal::None < PostAdmissionSignal::WakeLoop);
-    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::RequestImmediateProcessing);
+    assert!(PostAdmissionSignal::WakeLoop < PostAdmissionSignal::InterruptYielding);
+    assert!(
+        PostAdmissionSignal::InterruptYielding < PostAdmissionSignal::RequestImmediateProcessing
+    );
     assert!(!PostAdmissionSignal::WakeLoop.should_process_immediately());
+    assert!(!PostAdmissionSignal::InterruptYielding.should_process_immediately());
     assert!(PostAdmissionSignal::RequestImmediateProcessing.should_process_immediately());
 }

@@ -908,7 +908,7 @@ impl MobActor {
             if let Some(adapter) = self.runtime_adapter.clone() {
                 let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
                 let spawned = adapter
-                    .update_peer_ingress_context(session_id, true, comms_runtime)
+                    .maybe_spawn_comms_drain(&session_id, true, comms_runtime)
                     .await;
                 if spawned {
                     tracing::debug!(
@@ -5527,6 +5527,7 @@ impl MobActor {
                 "description": peer_description,
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
+            stream: meerkat_core::comms::InputStreamMode::None,
         };
 
         sender_comms.send(cmd).await?;
@@ -5567,6 +5568,7 @@ impl MobActor {
                 "role": other_peer_entry.profile.as_str(),
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
+            stream: meerkat_core::comms::InputStreamMode::None,
         };
 
         sender_comms.send(cmd).await?;

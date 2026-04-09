@@ -532,7 +532,12 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 .as_ref()
                 .is_some_and(|ext| ext.capabilities().ops_lifecycle);
         }
-        DispatcherCapabilities { ops_lifecycle }
+        let mut caps = DispatcherCapabilities { ops_lifecycle };
+        if let Some(ext) = self.external.as_ref() {
+            let ext_caps = ext.capabilities();
+            caps.ops_lifecycle |= ext_caps.ops_lifecycle;
+        }
+        caps
     }
 
     fn bind_ops_lifecycle(

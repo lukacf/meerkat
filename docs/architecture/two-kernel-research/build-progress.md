@@ -12142,3 +12142,519 @@ Next likely step:
 
 - move to `M3` and keep `M1` closed unless one of the explicit reopen
   conditions is triggered
+
+## Slice 179 - Post-rebase repair restores Meerkat freeze lanes and widened green surface
+
+Goal:
+
+- untangle the semantic fallout from rebasing `codex/machines-redux` onto
+  `origin/main`
+- restore the exact-current interrupt/cooperative-interrupt boundary instead of
+  allowing `main`'s flatter comms/runtime surface to silently redefine it
+- prove that the rebased branch is back to a reviewable green baseline before
+  continuing Meerkat freeze work
+
+What landed:
+
+- restored the missing core wait-interrupt compatibility surface in
+  `meerkat-core/src/wait_interrupt.rs`, plus the builder/agent wiring needed
+  by the rebased branch
+- restored the live `InterruptYielding` seam across:
+  - `meerkat-core/src/lifecycle/run_control.rs`
+  - `meerkat-runtime/src/policy.rs`
+  - `meerkat-runtime/src/policy_table.rs`
+  - `meerkat-runtime/src/runtime_ingress_authority.rs`
+  - `meerkat-runtime/src/driver/ephemeral.rs`
+- repaired the rebased comms command/envelope contract so peer
+  `handling_mode` survives from parsed commands into internal `MessageKind`
+  envelopes without regressing the restored `stream` contract
+- updated downstream consumers (`meerkat-tools`, `meerkat-mob`,
+  `meerkat-mob-mcp`, `meerkat`) to the rebased `DispatcherCapabilities`,
+  `CommsCommand`, kickoff, and event surfaces
+- corrected one stale mob persistence test so it asserts append-only event-log
+  preservation instead of exact event-count equality in the presence of
+  legitimate concurrent kickoff projections
+
+Why this slice matters:
+
+- the original narrow Meerkat failure after rebase was real: `main` had
+  flattened away `InterruptYielding` in policy/ingress, which broke the frozen
+  `M1` boundary
+- the repair keeps the current-machine interpretation honest by restoring the
+  live cooperative interrupt delivery path rather than silently redefining
+  Meerkat semantics to fit the rebased compile surface
+- the widened green lanes mean the rebased branch is no longer just "narrow
+  runtime tests pass"; the downstream mob and top-level Meerkat consumers are
+  back in agreement too
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+- `cargo check -p meerkat-comms --lib`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- the rebased branch is back to a clean green baseline for the Meerkat freeze
+  lanes plus the widened mob/top-level consumers
+- `M1` and `M2` remain frozen exact-current assets after rebase
+- the remaining Meerkat freeze blockers are still `M3+`, not rebase fallout
+
+Backtracks encountered:
+
+- a stale `DispatcherCapabilities` initializer in `meerkat-tools` that dropped
+  new capability fields
+- a stale top-level `service_factory` test constructor missing rebased fields
+- a mob persistence test that assumed exact event-count stability instead of
+  append-only event-log preservation
+- a false attached-steer mixed-seam hypothesis from earlier work stayed fixed;
+  no new boundary movement was introduced during rebase repair
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side overall, but the rebase
+  repair no longer blocks freeze work
+- the branch is healthy enough to resume accelerated work on `M3` rather than
+  spending more time on rebase untangling
+
+## Slice 180 - Widened comms lane exposes one stale trust assertion, not new fallout
+
+Goal:
+
+- finish the post-rebase widening pass across directly touched crates
+- determine whether `meerkat-comms --lib` still held hidden semantic fallout
+  after the constructor/field repair work
+
+What landed:
+
+- patched the remaining rebased `handling_mode` constructors across:
+  - `meerkat-comms/src/inbox.rs`
+  - `meerkat-comms/src/agent/types.rs`
+  - `meerkat-comms/src/classify.rs`
+  - `meerkat-comms/src/runtime/comms_runtime.rs`
+- reran the widened `meerkat-comms --lib` lane and reduced the remaining issue
+  from compile fallout to one live test mismatch
+- corrected `test_live_peer_authority_syncs_trust_receive_and_drain` to assert
+  the current truth: once trust is explicitly registered before the second
+  ingress, the queued peer entry records `trusted_snapshot = Some(true)`
+
+Why this slice matters:
+
+- it shows the remaining rebase damage was localized to stale constructor
+  shapes and one stale test expectation, not to a deeper semantic break in the
+  current comms authority model
+- the final mismatch was healthy to fix because it aligned the test with the
+  already-restored trust-sync behavior instead of reverting the runtime toward
+  older semantics
+
+Verification:
+
+- `cargo test -p meerkat-comms --lib`
+- `cargo test -p meerkat-core --lib`
+- `cargo test -p meerkat-tools --lib`
+- `cargo test -p meerkat-session --test ephemeral_contract`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- the widened post-rebase verification surface is green again
+- rebase fallout is no longer the thing blocking machine freeze work
+- the next real Meerkat blocker remains `M3`, not merge damage
+
+## Slice 181 - Restored wait-interrupt builder surface is removed, not preserved
+
+Goal:
+
+- resolve the last suspicious restored API surface before treating the rebased
+  machine baseline as trustworthy for freeze work
+- determine whether resurrected wait-interrupt builder/binder state was a
+  missing live wire or dead historical surface
+
+What landed:
+
+- re-audited all live reads of the restored wait-interrupt builder/binder
+  surface
+- confirmed there is no remaining local wait-tool binding on the current live
+  Meerkat path and no real consumer of the resurrected API
+- removed the dead restored surface instead of preserving it:
+  - removed the extra `AgentBuilder` wait-interrupt setters
+  - removed the extra `AgentToolDispatcher` wait-interrupt / completion-feed
+    binding hooks
+  - removed the extracted `wait_interrupt.rs` module restoration
+- updated:
+  - `meerkat-m1-freeze.md`
+  - `meerkat-cutover-checklist.md`
+  so the freeze story now says this explicitly
+
+Why this slice matters:
+
+- it resolves the last ambiguous restored API without inventing a target-state
+  consumer
+- the rebased baseline is now clearer: the current product shape does not
+  include a local wait-tool builder/binder seam
+- this removes the last suspicious “API came back from history” story from the
+  freeze baseline
+
+Verification:
+
+- `cargo check -p meerkat-core --lib`
+- `cargo test -p meerkat-core --lib`
+- `cargo test -p meerkat-session --test ephemeral_contract`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+- `cargo test -p meerkat-comms --lib`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- the rebased branch no longer has a credible “maybe a deleted wait-interrupt
+  API should really still exist” story
+- the remaining blockers to Meerkat freeze are once again semantic (`M3+`),
+  not rebase untangling
+
+## Slice 182 - Workspace-wide rebase audit restores missing peer-ingress surface seam
+
+Goal:
+
+- widen the post-rebase verification surface from the curated machine lanes to
+  workspace-level tests
+- determine whether any stale caller drift remained hidden outside the
+  Meerkat/Mob-focused lanes
+
+What landed:
+
+- widened to workspace test lanes, which exposed one real stale surface:
+  `RuntimeSessionAdapter::update_peer_ingress_context(...)` had been dropped
+  while the lower-level drain-lifecycle owner method
+  `maybe_spawn_comms_drain(...)` remained alive
+- restored `update_peer_ingress_context(...)` in
+  `meerkat-runtime/src/session_adapter.rs` as the live surface-facing seam
+  that delegates to the canonical drain-lifecycle owner method
+- kept the state model unchanged: no old per-session ingress context storage
+  was reintroduced; the restored surface just forwards to the current owner
+  seam
+
+Why this slice matters:
+
+- it proves the wider workspace audit was worthwhile: the narrower freeze lanes
+  were green, but one stale top-level surface/test seam still existed
+- it corrects the ownership story: `update_peer_ingress_context(...)` is not
+  just historical compatibility; it is still the live surface seam used across
+  CLI/REST/RPC/MCP and tests, while `maybe_spawn_comms_drain(...)` is the
+  lower-level owner method behind it
+
+Verification:
+
+- `cargo test --workspace --tests --quiet` exposed the missing method
+- follow-up narrowed lanes were rerun after the wrapper restore
+
+Result:
+
+- the last hidden caller-drift pocket exposed by the workspace audit is now
+  repaired
+- rebase fallout remains a non-blocker; the remaining Meerkat freeze blockers
+  are still semantic (`M3+`)
+
+## Slice 183 - Workspace-wide lib and test lanes confirm rebase fallout is closed
+
+Goal:
+
+- stop treating rebase cleanup as active machine work unless a fresh wide audit
+  shows otherwise
+- confirm the rebased branch is trustworthy enough that the remaining blockers
+  are semantic freeze blockers, not merge fallout
+
+What landed:
+
+- reran the widest practical verification lanes on the rebased tree:
+  - `cargo test --workspace --tests --quiet`
+  - `cargo test --workspace --lib --quiet`
+- kept `git diff --check` green after the final compatibility and expectation
+  fixes
+- rechecked the current Meerkat freeze posture against the widened green lanes
+
+Why this slice matters:
+
+- it closes the rebase-repair chapter with evidence instead of intuition
+- it means `M1` and `M2` are now standing on a rebased baseline that has been
+  validated outside the curated machine lanes
+- it lets the accelerated push move cleanly into `M3` without keeping one eye
+  on merge fallout
+
+Verification:
+
+- `cargo test --workspace --tests --quiet`
+- `cargo test --workspace --lib --quiet`
+- `git diff --check`
+
+Result:
+
+- the rebased baseline is now wide-lane green
+- rebase fallout is no longer an active Meerkat freeze blocker
+- the next real Meerkat blocker is `M3`, not merge damage
+
+## Slice 184 - All-targets audit confirms rebase fallout is fully flushed
+
+Goal:
+
+- make sure no last compile-only drift remains in bins/examples/test harnesses
+- stop spending machine-freeze time on merge fallout once the widest practical
+  audit surface is green
+
+What landed:
+
+- widened again to:
+  - `cargo check --workspace --tests --quiet`
+  - `cargo check --workspace --all-targets --quiet`
+- at that point, the restored `wait_interrupt` module still compiled cleanly;
+  Slice 185 later proved it should be removed, so this slice should be read as
+  the all-target audit only, not as the final classification of that surface
+- confirmed both lanes are green and only emit the expected observational
+  `dead_code` warnings from the diagnostic machine scaffolding
+- updated freeze docs so the branch state is explicit: rebase fallout is fully
+  closed, and the remaining blockers are semantic (`M3+`)
+
+Why this slice matters:
+
+- it closes the last plausible “maybe there is still hidden rebase drift in an
+  untested target” objection
+- it means the rebased machine baseline is now trustworthy across libs, tests,
+  and all-target compile surfaces
+- it lets the next push move directly into Meerkat semantic freeze work
+
+Verification:
+
+- `cargo test --workspace --tests --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo check --workspace --tests --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+Result:
+
+- rebase fallout is fully flushed from the Meerkat freeze baseline
+- the remaining Meerkat blockers are semantic freeze blockers, not merge
+  cleanup
+- the next active work should start at `M3`
+
+## Slice 185 - Restored wait-interrupt API is collapsed out of the baseline
+
+Goal:
+
+- remove the last suspicious resurrected API surface from the rebased machine
+  baseline
+- confirm that the real Meerkat interrupt boundary lives in runtime/session
+  semantics, not in a dead core builder/binder compatibility seam
+
+What landed:
+
+- traced the restored `wait_interrupt` surface and confirmed it had no live
+  consumers outside core-local tests and capability plumbing
+- removed the resurrected core surface:
+  - deleted the extracted `meerkat-core/src/wait_interrupt.rs` module
+  - removed the extra `AgentToolDispatcher` wait-interrupt / completion-feed
+    binding hooks
+  - collapsed `DispatcherCapabilities` back down to the live field
+    `ops_lifecycle`
+  - removed the extra `AgentBuilder` wait-interrupt compatibility setters
+- tightened the freeze docs so they no longer describe those removed seams as
+  compatibility no-ops; they are now simply absent from the current boundary
+
+Why this slice matters:
+
+- it removes the last “this API came back from history during rebase” smell
+  from the Meerkat freeze baseline
+- it makes the rebased branch smaller and more honest: only the real
+  runtime/session interrupt semantics remain
+- it improves freeze confidence because the surviving delta now tracks
+  semantic machine work, not a resurrected dead surface
+
+Verification:
+
+- `cargo test -p meerkat-core --lib --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `cargo test -p meerkat-session --test ephemeral_contract --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+Result:
+
+- the last suspicious resurrected rebase surface has been removed
+- the remaining rebase audit surface is the expected observational machine
+  scaffolding warnings only
+- the next real Meerkat blocker remains `M3`
+
+## Slice 186 - Final adversarial rebase audit closes the machine baseline
+
+Goal:
+
+- do one last exact-current-state pass for leftover merge artifacts before
+  declaring the rebase chapter closed
+- make the freeze record internally consistent so we do not carry forward
+  conflicting stories about what survived the repair
+
+What landed:
+
+- reran the widest practical audit lanes on the repaired branch:
+  - `cargo test --workspace --tests --quiet`
+  - `cargo test --workspace --lib --quiet`
+  - `cargo check --workspace --tests --quiet`
+  - `cargo check --workspace --all-targets --quiet`
+- rechecked for conflict markers outside `specs/**` and confirmed none remain
+- confirmed the restored `wait_interrupt` surface is now gone from code and
+  only remains in historical documentation / changelog references
+- aligned the freeze docs so the final story is singular:
+  the rebased baseline is trusted again, and the remaining blocker is `M3`,
+  not merge fallout
+
+Why this slice matters:
+
+- it changes the rebase status from “probably clean now” to “adversarially
+  rechecked and documented as closed”
+- it gives reviewers one final stop/go point for the repaired baseline before
+  semantic freeze work continues
+- it makes it safe to stop spending time on merge damage and spend that time on
+  real Meerkat cutover blockers
+
+Verification:
+
+- `cargo test --workspace --tests --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo check --workspace --tests --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `rg -n '^(<<<<<<< |=======$|>>>>>>> )' --glob '!specs/**' .`
+- `git diff --check`
+
+Result:
+
+- rebase fallout is now fully untangled enough to freeze the machine baseline
+- no credible merge-artifact blocker remains in the Meerkat freeze posture
+- the next real Meerkat blocker is `M3`
+
+## Slice 187 - Peer-ingress surface seam is reclassified as live, not compatibility-only
+
+Goal:
+
+- make sure the repaired baseline is frozen against the *actual* public seam
+  shape, not against an overly internalized story
+- remove one last narrative mismatch from the rebase-repair record
+
+What landed:
+
+- re-audited `RuntimeSessionAdapter::update_peer_ingress_context(...)` usage
+  across CLI, REST, RPC, MCP, examples, and tests
+- confirmed it is still the live surface-facing seam for peer-ingress/drain
+  updates, not merely a historical compatibility wrapper
+- updated the code comment in `meerkat-runtime/src/session_adapter.rs`
+- corrected the earlier slice narrative so the freeze story now matches the
+  live call graph: `update_peer_ingress_context(...)` is the public seam, and
+  `maybe_spawn_comms_drain(...)` is the lower-level owner method behind it
+
+Why this slice matters:
+
+- it removes one more place where the repaired branch could have frozen the
+  wrong story even though behavior was correct
+- it raises confidence that “rebase fallout is closed” now means both code and
+  documentation match the same exact-current seam map
+- it keeps the next freeze work focused on semantic blockers instead of
+  lingering baseline narration errors
+
+Verification:
+
+- `rg -n "update_peer_ingress_context\\(" .`
+- `git diff --check`
+
+Result:
+
+- the repaired baseline no longer treats a live public seam as compatibility
+  debt
+- the remaining Meerkat freeze blocker is still `M3`
+
+## Slice 188 - Remaining compatibility markers are classified as product seams, not rebase fallout
+
+Goal:
+
+- separate surviving compatibility/fallback wording from actual rebase damage
+- make sure we do not keep auditing intentional current-state seams as if they
+  were merge leftovers
+
+What landed:
+
+- re-audited the remaining compatibility/fallback markers in the repaired code
+- confirmed `drain_peer_input_candidates(...)` is still a live runtime drain
+  bridge over the newer classified-ingress noun, not rebase fallout
+- confirmed the raw `tx`/`rx` retained by `Inbox::new_classified(...)` are a
+  pre-existing structural vestige tied to `InboxSender::send()`, not merge
+  damage
+- confirmed the remaining detached-wake legacy fallback is already frozen as
+  exact-current compatibility behavior in `meerkat-m2-freeze.md`
+
+Why this slice matters:
+
+- it removes the last ambient suspicion that any surviving compatibility note
+  might still be hiding rebase fallout
+- it lets the branch freeze posture say something stronger than “tests are
+  green”: the remaining transitional seams are understood and intentionally
+  classified
+- it keeps the next push focused on semantic freeze blockers instead of more
+  branch archaeology
+
+Verification:
+
+- `rg -n "drain_peer_input_candidates\\(|drain_classified_inbox_interactions\\(" .`
+- `rg -n "InboxSender::send\\(|\\.send\\(" meerkat-comms/src/inbox.rs meerkat-comms/src/runtime/comms_runtime.rs`
+- `git diff --check`
+
+Result:
+
+- the remaining compatibility/fallback markers are now classified as
+  intentional current-state product seams
+- no credible rebase-fallout seam remains in the Meerkat baseline
+
+## Slice 189 - Runtime peer-input drain bridge is documented as a live seam
+
+Goal:
+
+- align the code comments with the final repaired freeze story
+- remove the last suggestion that the peer-input drain bridge is merely
+  historical compatibility debt
+
+What landed:
+
+- reclassified `AgentToolDispatcher::drain_peer_input_candidates(...)` in
+  `meerkat-core/src/agent.rs` as the live runtime drain bridge for callers
+  that still consume `PeerInputCandidate` directly
+- kept its implementation unchanged: the bridge still forwards to the
+  classified ingress drain path
+
+Why this slice matters:
+
+- it removes one more narrative mismatch between the repaired code and the
+  freeze record
+- it reinforces the current exact-state story: the remaining bridges are
+  intentional product seams, not rebase leftovers
+
+Verification:
+
+- `cargo test -p meerkat-comms --lib --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `git diff --check`
+
+Result:
+
+- the peer-input drain bridge is now documented as a live seam
+- no credible rebase-fallout narrative mismatch remains in the Meerkat baseline

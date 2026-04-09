@@ -29,6 +29,8 @@ impl fmt::Display for CommsDrainPhase {
 /// Mode for the comms drain task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommsDrainMode {
+    /// Legacy timed drain with idle timeout.
+    Timed,
     /// Live session ingress while a runtime-backed session is attached.
     AttachedSession,
     /// Long-lived host drain (no idle timeout, respawnable on failure).
@@ -38,6 +40,7 @@ pub enum CommsDrainMode {
 /// Reason the drain task exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainExitReason {
+    IdleTimeout,
     Dismissed,
     Failed,
     Aborted,

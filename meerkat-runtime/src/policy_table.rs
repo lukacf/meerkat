@@ -74,7 +74,7 @@ impl DefaultPolicyTable {
                     if runtime_idle {
                         WakeMode::WakeIfIdle
                     } else {
-                        WakeMode::None
+                        WakeMode::InterruptYielding
                     },
                     QueueMode::Fifo,
                     ConsumePoint::OnRunComplete,
@@ -112,7 +112,8 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // PeerInput(Message) — StageRunStart, WakeIfIdle (idle) / None (running)
+            // PeerInput(Message) — StageRunStart, WakeIfIdle (idle) /
+            // InterruptYielding (running)
             ("peer_message", true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
@@ -124,7 +125,7 @@ impl DefaultPolicyTable {
             ),
             ("peer_message", false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::None,
+                WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::QueueNextTurn,
@@ -144,7 +145,7 @@ impl DefaultPolicyTable {
             ),
             ("peer_request", false) => pd(
                 ApplyMode::StageRunStart,
-                WakeMode::None,
+                WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::QueueNextTurn,
@@ -244,7 +245,7 @@ impl DefaultPolicyTable {
             ),
             ("continuation", false) => pd(
                 ApplyMode::StageRunBoundary,
-                WakeMode::None,
+                WakeMode::InterruptYielding,
                 QueueMode::Fifo,
                 ConsumePoint::OnRunComplete,
                 DrainPolicy::SteerBatch,
@@ -357,7 +358,7 @@ mod tests {
             "peer_message",
             false,
             ApplyMode::StageRunStart,
-            WakeMode::None,
+            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -381,7 +382,7 @@ mod tests {
             "peer_request",
             false,
             ApplyMode::StageRunStart,
-            WakeMode::None,
+            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,
@@ -501,7 +502,7 @@ mod tests {
             "continuation",
             false,
             ApplyMode::StageRunBoundary,
-            WakeMode::None,
+            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             false,
@@ -595,23 +596,18 @@ mod tests {
         let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_message"), false);
         assert_eq!(
             decision.wake_mode,
-            WakeMode::None,
-            "peer_message while running must not request a wake"
-        );
-        assert_ne!(
-            decision.wake_mode,
-            WakeMode::WakeIfIdle,
-            "peer_message while running must not use WakeIfIdle"
+            WakeMode::InterruptYielding,
+            "peer_message while running must interrupt cooperative yielding"
         );
     }
 
     #[test]
-    fn peer_request_running_stays_queued_without_wake() {
+    fn peer_request_running_interrupts_yielding() {
         let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_request"), false);
         assert_eq!(
             decision.wake_mode,
-            WakeMode::None,
-            "peer_request while running must not request a wake"
+            WakeMode::InterruptYielding,
+            "peer_request while running must interrupt cooperative yielding"
         );
     }
 

@@ -751,6 +751,7 @@ mod tests {
             blocks: None,
             source: InputSource::Rpc,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
+            stream: meerkat_core::comms::InputStreamMode::None,
             allow_self_session: true,
         }
     }

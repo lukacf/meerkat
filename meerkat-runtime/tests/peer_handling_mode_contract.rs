@@ -39,21 +39,21 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
 }
 
 #[tokio::test]
-async fn running_queue_peer_message_stays_passive() {
+async fn running_queue_peer_message_interrupts_yielding() {
     let mut driver = EphemeralRuntimeDriver::new(runtime_id());
     driver.start_run(RunId::new()).expect("start run");
 
     let input = peer_message_input(None);
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, WakeMode::None);
+    assert_eq!(policy.wake_mode, WakeMode::InterruptYielding);
     assert_eq!(policy.routing_disposition, RoutingDisposition::Queue);
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::InterruptYielding
     );
     assert!(!driver.take_wake_requested());
 }
@@ -66,7 +66,7 @@ async fn running_steer_peer_message_requests_immediate_processing() {
     let input = peer_message_input(Some(HandlingMode::Steer));
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, ApplyMode::StageRunBoundary);
-    assert_eq!(policy.wake_mode, WakeMode::None);
+    assert_eq!(policy.wake_mode, WakeMode::InterruptYielding);
     assert_eq!(policy.routing_disposition, RoutingDisposition::Steer);
 
     let outcome = driver.accept_input(input).await.expect("accept input");

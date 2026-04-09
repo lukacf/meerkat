@@ -115,7 +115,7 @@ impl IngressClassificationContext {
                         None,
                         None,
                     ),
-                    MessageKind::Request { intent, params } => {
+                    MessageKind::Request { intent, params, .. } => {
                         let typed_intent = MessageIntent::from(intent.as_str());
                         match typed_intent {
                             MessageIntent::PeerAdded => {
@@ -196,7 +196,7 @@ impl IngressClassificationContext {
                 };
 
                 let content_shape = match &envelope.kind {
-                    MessageKind::Message { body, blocks } => {
+                    MessageKind::Message { body, blocks, .. } => {
                         content_shape_for_text_and_blocks(body, blocks.as_deref())
                     }
                     MessageKind::Request { .. }
@@ -334,6 +334,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -353,6 +354,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -406,6 +408,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -424,6 +427,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -442,6 +446,7 @@ mod tests {
             MessageKind::Request {
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -461,6 +466,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -478,6 +484,7 @@ mod tests {
             MessageKind::Message {
                 blocks: None,
                 body: "hello".to_string(),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -529,6 +536,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({}),
+                handling_mode: None,
             },
         );
         let item = InboxItem::External { envelope };
@@ -583,6 +591,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
+                handling_mode: None,
             },
         );
         let prepared = ctx
@@ -641,6 +650,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
+                handling_mode: None,
             },
         );
         let prepared = ctx

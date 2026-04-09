@@ -535,6 +535,7 @@ mod tests {
             kind: MessageKind::Message {
                 blocks: None,
                 body: "test".to_string(),
+                handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
         }
@@ -548,6 +549,7 @@ mod tests {
             kind: MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
+                handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
         }
@@ -778,6 +780,7 @@ mod tests {
         envelope.kind = MessageKind::Request {
             intent: "review".to_string(),
             params: serde_json::json!({}),
+            handling_mode: None,
         };
 
         sender
@@ -875,6 +878,7 @@ mod tests {
         envelope.kind = MessageKind::Request {
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({"peer": "new-agent"}),
+            handling_mode: None,
         };
 
         sender

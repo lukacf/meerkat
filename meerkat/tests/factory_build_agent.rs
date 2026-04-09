@@ -559,12 +559,15 @@ async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
             .await
             .unwrap(),
     );
-    comms_runtime.upsert_trusted_peer(TrustedPeer {
-        name: "peer-a".into(),
-        pubkey: Keypair::generate().public_key(),
-        addr: "tcp://127.0.0.1:9999".into(),
-        meta: Default::default(),
-    });
+    comms_runtime
+        .register_trusted_peer(TrustedPeer {
+            name: "peer-a".into(),
+            pubkey: Keypair::generate().public_key(),
+            addr: "tcp://127.0.0.1:9999".into(),
+            meta: Default::default(),
+        })
+        .await
+        .unwrap();
     let factory = temp_factory(&temp)
         .comms(true)
         .with_comms_runtime(comms_runtime)

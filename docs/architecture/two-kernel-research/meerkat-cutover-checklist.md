@@ -37,6 +37,17 @@ What is already relatively converged:
   interrupt behavior
 - exact-current-state `M1` freeze note in `meerkat-m1-freeze.md`
 - exact-current-state `M2` freeze note in `meerkat-m2-freeze.md`
+- widened post-rebase validation is green again, including workspace-wide lib,
+  test, test-check, and all-target compile lanes, so merge fallout is no
+  longer a standalone freeze blocker
+- resurrected wait-interrupt builder/binder API has been removed again, so the
+  interrupt boundary is back to the real runtime/session seams only
+- final adversarial rebase audit is clean: no remaining conflict markers
+  outside `specs/**`, no resurrected source surfaces left in code, and only
+  the expected observational machine warnings remain
+- remaining compatibility/fallback markers have been classified as intentional
+  current-state product seams (`drain_peer_input_candidates`, classified-inbox
+  raw channel vestige, detached-wake legacy fallback), not as merge fallout
 - settled teardown behavior for `current_run_id`, queue/steer visibility, and
   completion-waiter teardown across most lifecycle families
 

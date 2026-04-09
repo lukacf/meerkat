@@ -15,7 +15,7 @@ use meerkat_core::interaction::{
     InboxInteraction, InteractionContent, InteractionId, ResponseStatus,
 };
 use meerkat_runtime::comms_bridge::interaction_to_peer_input;
-use meerkat_runtime::driver::ephemeral::EphemeralRuntimeDriver;
+use meerkat_runtime::driver::ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
 use meerkat_runtime::input_state::InputLifecycleState;
@@ -416,10 +416,10 @@ async fn no_input_no_wake() {
 }
 
 // ---------------------------------------------------------------------------
-// Additional: Message while running — queue policy, no wake
+// Additional: Message while running — queue policy, cooperative interrupt
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn message_while_running_queues_without_wake() {
+async fn message_while_running_requests_cooperative_interrupt() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Start a run
@@ -430,13 +430,20 @@ async fn message_while_running_queues_without_wake() {
     let interaction = make_message("peer-1", "hello");
     let input = interaction_to_peer_input(&interaction, &rid());
 
-    // peer_message + running → StageRunStart + NoWake (queue semantics)
+    // peer_message + running → StageRunStart + cooperative interrupt
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::InterruptYielding
+    );
     assert!(!driver.take_wake_requested());
 }
 
@@ -528,10 +535,14 @@ async fn terminal_response_with_steer_policy_while_running() {
     };
     let input = interaction_to_peer_input(&interaction, &rid());
 
-    // While running: explicit steer keeps WakeMode::None at the policy layer,
-    // but ingress still requests immediate processing via the typed steer signal.
+    // While running: explicit steer uses cooperative interrupt semantics at the
+    // policy layer, and ingress still requests immediate processing via the
+    // typed steer signal.
     let policy = DefaultPolicyTable::resolve(&input, false);
-    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
     assert_eq!(
         policy.routing_disposition,
         meerkat_runtime::RoutingDisposition::Steer

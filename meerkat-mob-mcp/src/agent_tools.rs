@@ -129,6 +129,7 @@ impl AgentMobToolSurface {
                     "description": description,
                 }),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
+                stream: meerkat_core::comms::InputStreamMode::None,
             })
             .await
             .is_ok()
@@ -1773,7 +1774,9 @@ mod tests {
     };
     use meerkat_core::event::AgentEvent;
     use meerkat_core::event_injector::{InteractionSubscription, SubscribableInjector};
-    use meerkat_core::interaction::{InboxInteraction, InteractionContent, InteractionId};
+    use meerkat_core::interaction::{
+        InboxInteraction, InteractionContent, InteractionId, PeerInputCandidate, PeerInputClass,
+    };
     use meerkat_core::service::{
         AppendSystemContextRequest, AppendSystemContextResult, MobToolAuthorityContext,
         MobToolSnapshotContext, MobToolsFactory, OpaquePrincipalToken, SessionControlError,
@@ -1899,6 +1902,7 @@ mod tests {
                     intent,
                     params,
                     handling_mode: _,
+                    stream: _,
                 } => {
                     let trusted = self.trusted.read().await;
                     if !trusted.values().any(|peer| peer.name == to.as_str()) {
@@ -1920,8 +1924,9 @@ mod tests {
                     });
                     recipient.notify.notify_waiters();
                     Ok(SendReceipt::PeerRequestSent {
-                        request_id: InteractionId(uuid::Uuid::new_v4()),
                         envelope_id: uuid::Uuid::new_v4(),
+                        interaction_id: InteractionId(uuid::Uuid::new_v4()),
+                        stream_reserved: false,
                     })
                 }
                 unsupported => Err(SendError::Unsupported(format!(
@@ -1959,13 +1964,13 @@ mod tests {
             self.notify.clone()
         }
 
-        async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+        async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
             self.drain_inbox_interactions()
                 .await
                 .into_iter()
-                .map(|interaction| meerkat_core::PeerInputCandidate {
+                .map(|interaction| PeerInputCandidate {
                     interaction,
-                    class: meerkat_core::PeerInputClass::ActionableRequest,
+                    class: PeerInputClass::ActionableRequest,
                     lifecycle_peer: None,
                 })
                 .collect()

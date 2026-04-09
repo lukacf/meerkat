@@ -1426,6 +1426,7 @@ mod tests {
             error: None,
             is_final: false,
             current_session_id,
+            kickoff: entry.kickoff,
         }
     }
 

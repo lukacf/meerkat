@@ -49,6 +49,13 @@ pub enum PostAdmissionSignal {
     None,
     /// Wake the runtime loop to process queued work (idle → running).
     WakeLoop,
+    /// Interrupt cooperative yielding points within an active turn.
+    ///
+    /// This is weaker than immediate processing but still stronger than a
+    /// plain wake. The current ingress authority no longer emits this
+    /// independently, but the runtime/control seam still uses the noun and the
+    /// stronger `RequestImmediateProcessing` implies it.
+    InterruptYielding,
     /// Request immediate steer/checkpoint processing within the current turn.
     /// Implies WakeLoop — strictly strongest.
     RequestImmediateProcessing,
@@ -58,6 +65,11 @@ impl PostAdmissionSignal {
     /// Whether the runtime loop should be woken.
     pub fn should_wake(self) -> bool {
         self >= Self::WakeLoop
+    }
+
+    /// Whether cooperative yield points should be interrupted.
+    pub fn should_interrupt_yielding(self) -> bool {
+        self >= Self::InterruptYielding
     }
 
     /// Whether immediate in-turn processing was requested.
@@ -246,6 +258,11 @@ impl EphemeralRuntimeDriver {
                 RuntimeIngressEffect::WakeRuntime => {
                     if self.post_admission_signal < PostAdmissionSignal::WakeLoop {
                         self.post_admission_signal = PostAdmissionSignal::WakeLoop;
+                    }
+                }
+                RuntimeIngressEffect::InterruptYielding => {
+                    if self.post_admission_signal < PostAdmissionSignal::InterruptYielding {
+                        self.post_admission_signal = PostAdmissionSignal::InterruptYielding;
                     }
                 }
                 RuntimeIngressEffect::RequestImmediateProcessing => {

@@ -24,6 +24,12 @@ pub enum RunControlCommand {
         #[serde(default)]
         reason: String,
     },
+    /// Interrupt cooperative yielding points within the running turn.
+    ///
+    /// This is not a hard cancel. It asks the agent to break out of a wait-tool
+    /// yield or equivalent cooperative checkpoint so queued work can proceed
+    /// after the current turn boundary.
+    InterruptYielding,
 }
 
 #[cfg(test)]
@@ -49,6 +55,15 @@ mod tests {
         };
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["command"], "stop_runtime_executor");
+        let parsed: RunControlCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(cmd, parsed);
+    }
+
+    #[test]
+    fn interrupt_yielding_serde_roundtrip() {
+        let cmd = RunControlCommand::InterruptYielding;
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(json["command"], "interrupt_yielding");
         let parsed: RunControlCommand = serde_json::from_value(json).unwrap();
         assert_eq!(cmd, parsed);
     }

@@ -140,6 +140,19 @@ impl CommsCommandRequest {
                     }
                 };
 
+                let stream = match self.stream.as_deref() {
+                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                    Some("none") | None => InputStreamMode::None,
+                    Some(other) => {
+                        errors.push(CommsCommandValidationError::new(
+                            "stream",
+                            "invalid_value",
+                            Some(other.to_string()),
+                        ));
+                        return Err(errors);
+                    }
+                };
+
                 Ok(CommsCommand::Input {
                     session_id: session_id.clone(),
                     body,
@@ -157,35 +170,25 @@ impl CommsCommandRequest {
                         }
                     },
                     source,
+                    stream,
                     allow_self_session: self.allow_self_session.unwrap_or(false),
                 })
             }
             "peer_message" => {
                 let to = to_peer_name(self.to.as_ref(), &mut errors);
                 let handling_mode = match self.handling_mode.as_deref() {
-                    Some("steer") => Some(HandlingMode::Steer),
-                    Some("queue") => Some(HandlingMode::Queue),
-                    None => {
-                        errors.push(CommsCommandValidationError::new(
-                            "handling_mode",
-                            "required_field",
-                            None,
-                        ));
-                        None
-                    }
+                    Some("steer") => HandlingMode::Steer,
+                    Some("queue") | None => HandlingMode::Queue,
                     Some(other) => {
                         errors.push(CommsCommandValidationError::new(
                             "handling_mode",
                             "invalid_value",
                             Some(other.to_string()),
                         ));
-                        None
+                        return Err(errors);
                     }
                 };
                 if let Some(to) = to {
-                    let Some(handling_mode) = handling_mode else {
-                        return Err(errors);
-                    };
                     Ok(CommsCommand::PeerMessage {
                         to,
                         body: self.body.clone().unwrap_or_default(),
@@ -206,39 +209,32 @@ impl CommsCommandRequest {
                     ));
                     return Err(errors);
                 };
-                if let Some(stream) = &self.stream {
-                    errors.push(CommsCommandValidationError::new(
-                        "stream",
-                        "removed_unsupported_field",
-                        Some(stream.clone()),
-                    ));
-                    return Err(errors);
-                }
-                let handling_mode = match self.handling_mode.as_deref() {
-                    Some("steer") => Some(HandlingMode::Steer),
-                    Some("queue") => Some(HandlingMode::Queue),
-                    None => {
+                let stream = match self.stream.as_deref() {
+                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
+                    Some("none") | None => InputStreamMode::None,
+                    Some(other) => {
                         errors.push(CommsCommandValidationError::new(
-                            "handling_mode",
-                            "required_field",
-                            None,
+                            "stream",
+                            "invalid_value",
+                            Some(other.to_string()),
                         ));
-                        None
+                        return Err(errors);
                     }
+                };
+                let handling_mode = match self.handling_mode.as_deref() {
+                    Some("steer") => HandlingMode::Steer,
+                    Some("queue") | None => HandlingMode::Queue,
                     Some(other) => {
                         errors.push(CommsCommandValidationError::new(
                             "handling_mode",
                             "invalid_value",
                             Some(other.to_string()),
                         ));
-                        None
+                        return Err(errors);
                     }
                 };
                 if errors.is_empty() {
                     let Some(to) = to else {
-                        return Err(errors);
-                    };
-                    let Some(handling_mode) = handling_mode else {
                         return Err(errors);
                     };
                     Ok(CommsCommand::PeerRequest {
@@ -250,6 +246,7 @@ impl CommsCommandRequest {
                             (None, None) => serde_json::Value::Object(Default::default()),
                         },
                         handling_mode,
+                        stream,
                     })
                 } else {
                     Err(errors)
@@ -413,6 +410,16 @@ impl From<InputSource> for crate::config::PlainEventSource {
     }
 }
 
+/// Whether this input/peer command should reserve a local interaction stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputStreamMode {
+    /// Do not reserve any stream.
+    None,
+    /// Reserve an interaction stream for the command.
+    ReserveInteraction,
+}
+
 /// Transport-independent comms command envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsCommand {
@@ -423,6 +430,7 @@ pub enum CommsCommand {
         blocks: Option<Vec<ContentBlock>>,
         handling_mode: HandlingMode,
         source: InputSource,
+        stream: InputStreamMode,
         allow_self_session: bool,
     },
     /// Send a one-way peer message.
@@ -438,6 +446,7 @@ pub enum CommsCommand {
         intent: String,
         params: serde_json::Value,
         handling_mode: HandlingMode,
+        stream: InputStreamMode,
     },
     /// Send a response to a prior peer request.
     PeerResponse {
@@ -465,14 +474,16 @@ impl CommsCommand {
 pub enum SendReceipt {
     InputAccepted {
         interaction_id: InteractionId,
+        stream_reserved: bool,
     },
     PeerMessageSent {
         envelope_id: uuid::Uuid,
         acked: bool,
     },
     PeerRequestSent {
-        request_id: InteractionId,
         envelope_id: uuid::Uuid,
+        interaction_id: InteractionId,
+        stream_reserved: bool,
     },
     PeerResponseSent {
         envelope_id: uuid::Uuid,
@@ -544,6 +555,7 @@ impl TrustedPeerSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StreamScope {
     Session(crate::types::SessionId),
+    Interaction(InteractionId),
 }
 
 /// Typed stream over enveloped agent events.
@@ -552,8 +564,12 @@ pub type EventStream = Pin<Box<dyn Stream<Item = EventEnvelope<AgentEvent>> + Se
 /// Errors for stream attachment and lookup.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum StreamError {
+    #[error("interaction not reserved: {0}")]
+    NotReserved(InteractionId),
     #[error("stream not found: {0}")]
     NotFound(String),
+    #[error("already attached: {0}")]
+    AlreadyAttached(InteractionId),
     #[error("stream closed")]
     Closed,
     #[error("permission denied: {0}")]
@@ -580,6 +596,17 @@ pub enum SendError {
     Validation(String),
     #[error("internal: {0}")]
     Internal(String),
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SendAndStreamError {
+    #[error("send failed: {0}")]
+    Send(#[from] SendError),
+    #[error("stream attach failed: receipt={receipt:?}, error={error}")]
+    StreamAttach {
+        receipt: SendReceipt,
+        error: StreamError,
+    },
 }
 
 #[cfg(test)]
@@ -633,7 +660,6 @@ mod tests {
     fn peer_request_cmd(
         params: Option<Value>,
         body: Option<String>,
-        handling_mode: Option<&str>,
     ) -> Result<CommsCommand, Vec<CommsCommandValidationError>> {
         let req = CommsCommandRequest {
             kind: "peer_request".to_string(),
@@ -648,27 +674,17 @@ mod tests {
             source: None,
             stream: None,
             allow_self_session: None,
-            handling_mode: handling_mode.map(str::to_string),
+            handling_mode: None,
         };
         req.parse(&crate::types::SessionId::new())
     }
 
     #[test]
     fn peer_request_with_params_only() {
-        let cmd = peer_request_cmd(
-            Some(serde_json::json!({"key": "value"})),
-            None,
-            Some("queue"),
-        )
-        .unwrap();
+        let cmd = peer_request_cmd(Some(serde_json::json!({"key": "value"})), None).unwrap();
         match cmd {
-            CommsCommand::PeerRequest {
-                params,
-                handling_mode,
-                ..
-            } => {
+            CommsCommand::PeerRequest { params, .. } => {
                 assert_eq!(params["key"], "value");
-                assert_eq!(handling_mode, HandlingMode::Queue);
             }
             other => panic!("expected PeerRequest, got {other:?}"),
         }
@@ -676,7 +692,7 @@ mod tests {
 
     #[test]
     fn peer_request_with_body_only_promotes_to_params() {
-        let cmd = peer_request_cmd(None, Some("hello world".to_string()), Some("queue")).unwrap();
+        let cmd = peer_request_cmd(None, Some("hello world".to_string())).unwrap();
         match cmd {
             CommsCommand::PeerRequest { params, .. } => {
                 assert_eq!(
@@ -693,7 +709,6 @@ mod tests {
         let cmd = peer_request_cmd(
             Some(serde_json::json!({"explicit": true})),
             Some("ignored body".to_string()),
-            Some("queue"),
         )
         .unwrap();
         match cmd {
@@ -710,7 +725,7 @@ mod tests {
 
     #[test]
     fn peer_request_with_neither_gives_empty_object() {
-        let cmd = peer_request_cmd(None, None, Some("queue")).unwrap();
+        let cmd = peer_request_cmd(None, None).unwrap();
         match cmd {
             CommsCommand::PeerRequest { params, .. } => {
                 assert!(params.is_object(), "params should be an object");
@@ -724,61 +739,12 @@ mod tests {
     }
 
     #[test]
-    fn peer_request_requires_handling_mode() {
-        let result = peer_request_cmd(None, None, None);
-        assert!(
-            result.is_err(),
-            "peer_request without handling_mode must be rejected"
-        );
-        let errors = result.unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "handling_mode" && e.issue == "required_field"),
-            "expected required handling_mode error, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn peer_message_requires_handling_mode() {
-        let req = CommsCommandRequest {
-            kind: "peer_message".to_string(),
-            to: Some("peer-1".to_string()),
-            body: Some("hello".to_string()),
-            ..Default::default()
-        };
-        let result = req.parse(&crate::SessionId::new());
-        assert!(
-            result.is_err(),
-            "peer_message without handling_mode must be rejected"
-        );
-        let errors = result.unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "handling_mode" && e.issue == "required_field"),
-            "expected required handling_mode error, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn peer_message_with_handling_mode_is_accepted() {
-        let req = CommsCommandRequest {
-            kind: "peer_message".to_string(),
-            to: Some("peer-1".to_string()),
-            body: Some("hello".to_string()),
-            handling_mode: Some("steer".to_string()),
-            ..Default::default()
-        };
-        let cmd = req
-            .parse(&crate::SessionId::new())
-            .expect("peer_message with handling_mode should parse");
-        match cmd {
-            CommsCommand::PeerMessage { handling_mode, .. } => {
-                assert_eq!(handling_mode, HandlingMode::Steer);
-            }
-            other => panic!("expected PeerMessage, got {other:?}"),
-        }
+    fn input_stream_mode_roundtrip() -> Result<(), serde_json::Error> {
+        let mode = InputStreamMode::ReserveInteraction;
+        let serialized = serde_json::to_value(mode)?;
+        assert_eq!(serialized.as_str(), Some("reserve_interaction"));
+        assert_eq!(serde_json::from_value::<InputStreamMode>(serialized)?, mode);
+        Ok(())
     }
 
     #[test]

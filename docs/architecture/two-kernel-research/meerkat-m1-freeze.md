@@ -19,6 +19,12 @@ This freeze covers:
 This freeze does **not** claim that every authority verb already has a live
 lowering.
 
+There is no longer a live or compatibility local wait-tool builder/binder seam
+at this boundary. During the rebase audit, the briefly resurrected
+wait-interrupt builder/binder API was removed again because it had no real
+consumer on the current Meerkat path, so the frozen boundary is back to the
+runtime/session seams only.
+
 ## Exact current semantics
 
 ### 1. `interrupt_current_run`
@@ -139,6 +145,10 @@ The following do **not** reopen `M1` by themselves:
 ## Freeze Posture
 
 This is now a review-ready exact-current-state asset.
+
+The rebase audit for this asset is closed: widened workspace lib, test,
+test-check, and all-target compile lanes are green, so merge fallout is no
+longer an active blocker to reviewing or freezing this boundary.
 
 It is not target-state architecture. It is the explicit current cutover
 classification for the interrupt/cancel boundary, including the decision to

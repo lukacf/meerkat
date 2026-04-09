@@ -2252,9 +2252,13 @@ async fn handle_meerkat_mob_event_stream_close(
 #[cfg(feature = "comms")]
 fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value {
     match receipt {
-        meerkat_core::comms::SendReceipt::InputAccepted { interaction_id } => json!({
+        meerkat_core::comms::SendReceipt::InputAccepted {
+            interaction_id,
+            stream_reserved,
+        } => json!({
             "kind": "input_accepted",
             "interaction_id": interaction_id.0.to_string(),
+            "stream_reserved": stream_reserved,
         }),
         meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
             "kind": "peer_message_sent",
@@ -2262,12 +2266,15 @@ fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value 
             "acked": acked,
         }),
         meerkat_core::comms::SendReceipt::PeerRequestSent {
-            request_id,
             envelope_id,
+            interaction_id,
+            stream_reserved,
         } => json!({
             "kind": "peer_request_sent",
             "envelope_id": envelope_id.to_string(),
-            "request_id": request_id.0.to_string(),
+            "interaction_id": interaction_id.0.to_string(),
+            "request_id": interaction_id.0.to_string(),
+            "stream_reserved": stream_reserved,
         }),
         meerkat_core::comms::SendReceipt::PeerResponseSent {
             envelope_id,

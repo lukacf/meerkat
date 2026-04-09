@@ -25,7 +25,7 @@ use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
 use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerSpec};
 use meerkat_core::error::ToolError;
-use meerkat_core::interaction::InteractionId;
+use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
@@ -1257,6 +1257,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Ok(SendReceipt::InputAccepted {
             interaction_id: InteractionId(uuid::Uuid::nil()),
+            stream_reserved: false,
         })
     }
 
@@ -1268,7 +1269,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
         self.notify.clone()
     }
 
-    async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+    async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
         Vec::new()
     }
 }
@@ -2459,6 +2460,7 @@ mod tests {
     use meerkat_core::event_injector::{
         EventInjector, EventInjectorError, InteractionSubscription, SubscribableInjector,
     };
+    use meerkat_core::interaction::PeerInputCandidate;
     use meerkat_core::service::InitialTurnPolicy;
     use meerkat_core::service::SessionService;
     use meerkat_core::service::{
@@ -2553,6 +2555,7 @@ mod tests {
         async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
             Ok(SendReceipt::InputAccepted {
                 interaction_id: meerkat_core::interaction::InteractionId(uuid::Uuid::nil()),
+                stream_reserved: false,
             })
         }
 
@@ -2564,7 +2567,7 @@ mod tests {
             self.notify.clone()
         }
 
-        async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
+        async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
             Vec::new()
         }
     }

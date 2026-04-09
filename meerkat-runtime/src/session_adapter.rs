@@ -1563,6 +1563,27 @@ impl RuntimeSessionAdapter {
     /// Returns `true` if a new drain was spawned.
     ///
     /// All state transitions go through `CommsDrainLifecycleAuthority`.
+    ///
+    /// `update_peer_ingress_context(...)` remains the live surface-facing seam
+    /// used by CLI/REST/RPC/MCP callers and tests; it delegates to the
+    /// canonical drain-lifecycle owner method below.
+    pub async fn update_peer_ingress_context(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        keep_alive: bool,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> bool {
+        self.maybe_spawn_comms_drain(session_id, keep_alive, comms_runtime)
+            .await
+    }
+
+    /// Manage the comms drain lifecycle for a session based on keep_alive intent.
+    ///
+    /// When `keep_alive` is true, spawns a drain if one is not already running.
+    /// When `keep_alive` is false, aborts any running drain for the session.
+    /// Returns `true` if a new drain was spawned.
+    ///
+    /// All state transitions go through `CommsDrainLifecycleAuthority`.
     pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
@@ -1612,7 +1633,7 @@ impl RuntimeSessionAdapter {
                 CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
                     let idle_timeout = match spawn_mode {
                         CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
-                        CommsDrainMode::Timed => None,
+                        CommsDrainMode::Timed | CommsDrainMode::AttachedSession => None,
                     };
                     let handle = crate::comms_drain::spawn_comms_drain(
                         Arc::clone(self),

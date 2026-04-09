@@ -64,7 +64,6 @@ pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod types;
-pub mod wait_interrupt;
 
 // Re-export main types at crate root
 pub use agent::{
@@ -227,7 +226,4 @@ pub use types::{
     SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolProvenance, ToolResult, ToolSourceKind, Usage, UserMessage, VideoData, has_images,
     has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
-};
-pub use wait_interrupt::{
-    WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver, WaitInterruptSender,
 };

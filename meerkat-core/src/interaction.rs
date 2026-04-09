@@ -149,6 +149,9 @@ pub struct PeerInputCandidate {
     pub lifecycle_peer: Option<String>,
 }
 
+/// Back-compat alias for older runtime and diagnostic seams.
+pub type ClassifiedInboxInteraction = PeerInputCandidate;
+
 /// Coarse source kind for a queued peer-ingress item.
 ///
 /// This is a diagnostic shape for MeerkatMachine mapping work. It records the

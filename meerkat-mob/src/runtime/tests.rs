@@ -1420,6 +1420,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MobReset => "MobReset",
             MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
             MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
+            MobEventKind::MeerkatKickoffUpdated { .. } => "MeerkatKickoffUpdated",
             MobEventKind::PeersWired { .. } => "PeersWired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
@@ -3677,7 +3678,7 @@ async fn test_stop_persists_all_state_and_rejects_mutations() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn");
-    let event_count_before = handle.events().replay_all().await.expect("replay").len();
+    let events_before = handle.events().replay_all().await.expect("replay");
 
     handle.stop().await.expect("stop");
     assert_eq!(handle.status(), MobState::Stopped);
@@ -3686,10 +3687,22 @@ async fn test_stop_persists_all_state_and_rejects_mutations() {
         1,
         "stop should not archive active sessions"
     );
-    assert_eq!(
-        handle.events().replay_all().await.expect("replay").len(),
-        event_count_before,
+    let events_after = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events_after.len() >= events_before.len(),
         "stop should not delete persisted events"
+    );
+    let before_cursors = events_before
+        .iter()
+        .map(|event| event.cursor)
+        .collect::<Vec<_>>();
+    let after_prefix_cursors = events_after[..events_before.len()]
+        .iter()
+        .map(|event| event.cursor)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_prefix_cursors, before_cursors,
+        "stop should preserve the existing event log prefix even if a concurrent lifecycle projection appends later"
     );
 
     let err = handle
@@ -13420,6 +13433,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                     data: "aGVsbG8=".into(),
                 },
             ]),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
         },
     )
     .await
@@ -13672,6 +13686,7 @@ async fn test_wire_enables_peer_request_delivery() {
         to: peer_name,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
     let receipt = CoreCommsRuntime::send(&*comms_a, cmd)
@@ -14453,10 +14468,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
     }
 
     fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
-        meerkat_core::agent::DispatcherCapabilities {
-            wait_interrupt: true,
-            ..meerkat_core::agent::DispatcherCapabilities::default()
-        }
+        meerkat_core::agent::DispatcherCapabilities::default()
     }
 }
 
@@ -14495,12 +14507,6 @@ async fn test_name_filtered_dispatcher() {
         })
         .await;
     assert!(result.is_ok(), "non-excluded tool should delegate to inner");
-
-    // capabilities delegates
-    assert!(
-        filtered.capabilities().wait_interrupt,
-        "should delegate capabilities().wait_interrupt to inner"
-    );
 }
 
 // ── RuntimeBinding TDD tests ────────────────────────────────────────────

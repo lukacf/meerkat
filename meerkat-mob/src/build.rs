@@ -45,6 +45,11 @@ pub struct BuildAgentConfigParams<'a> {
     pub additional_instructions: Option<Vec<String>>,
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     pub mob_tool_access_context: MobToolAccessContext,
+    /// Pre-resolved inherited tool filter from spawn tooling.
+    ///
+    /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the session
+    /// so `AgentBuilder::build()` recovers it as a base filter on ToolScope.
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
 }
 
 pub struct BuildResumedAgentConfigParams<'a> {
@@ -77,6 +82,7 @@ pub async fn build_agent_config(
         additional_instructions,
         shell_env,
         mob_tool_access_context,
+        inherited_tool_filter,
     } = params;
 
     if !profile.tools.comms {
@@ -169,6 +175,17 @@ pub async fn build_agent_config(
             compat: Default::default(),
             format: Default::default(),
         });
+    }
+
+    // Inherited tool filter: inject into session metadata so AgentBuilder::build()
+    // recovers it as a base filter on ToolScope.
+    if let Some(filter) = inherited_tool_filter {
+        if let Ok(value) = serde_json::to_value(&filter) {
+            config.initial_metadata_entries.insert(
+                meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY.to_string(),
+                value,
+            );
+        }
     }
 
     Ok(config)
@@ -438,6 +455,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -463,6 +481,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -492,6 +511,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -527,6 +547,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -558,6 +579,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -593,6 +615,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -632,6 +655,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: injected_authority(),
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -693,6 +717,7 @@ mod tests {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: MobToolAccessContext::None,
+                inherited_tool_filter: None,
             },
             expected_session_id: &session_id,
             resumed_session,
@@ -736,6 +761,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await;
         assert!(
@@ -762,6 +788,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -794,6 +821,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -826,6 +854,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -860,6 +889,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -885,6 +915,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -910,6 +941,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -956,6 +988,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -1009,6 +1042,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config should resolve path skill");
@@ -1056,6 +1090,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect_err("missing path skill should fail");
@@ -1088,6 +1123,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -1117,6 +1153,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -1154,6 +1191,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");
@@ -1202,6 +1240,7 @@ mod tests {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await
         .expect("build_agent_config");

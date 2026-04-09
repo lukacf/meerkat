@@ -317,6 +317,12 @@ pub struct AgentBuildConfig {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed. See [`RuntimeBuildMode`] for details.
     pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
+    /// Pre-resolved metadata entries to inject into the session before agent build.
+    ///
+    /// These are set on the session's internal metadata map before `AgentBuilder::build()`
+    /// runs, so they are available for early-stage recovery (e.g. inherited tool filter).
+    /// Entries here take precedence over any resumed session metadata for the same key.
+    pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -435,6 +441,7 @@ impl AgentBuildConfig {
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
+            initial_metadata_entries: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1415,7 +1422,12 @@ impl AgentFactory {
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
-        let session = build_config.resume_session.clone().unwrap_or_default();
+        let mut session = build_config.resume_session.clone().unwrap_or_default();
+        // Inject pre-resolved metadata entries (e.g. inherited tool filter from
+        // spawn tooling) before the builder reads metadata for early-stage recovery.
+        for (key, value) in &build_config.initial_metadata_entries {
+            session.set_metadata(key, value.clone());
+        }
         let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
         // If the factory has a pre-built runtime (surface with stable identity),

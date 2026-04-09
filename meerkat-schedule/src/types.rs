@@ -644,17 +644,106 @@ pub enum ScheduledMobAction {
     },
 }
 
+/// How the scheduled helper's tool surface should be determined.
+///
+/// Schedule-local mirror of `meerkat_mob::SpawnTooling`, wire-compatible.
+/// `InheritParent` and `Minimal` require an active parent agent context and
+/// are rejected by public schedule APIs — they are only valid when a schedule
+/// is created through agent tools (where the parent can snapshot its tools).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ScheduleSpawnTooling {
+    /// Inherit the parent's currently visible tools (ToolScope snapshot).
+    InheritParent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_overlay: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deny_overlay: Option<Vec<String>>,
+    },
+    /// Minimal: only comms tools.
+    Minimal,
+    /// Use a specific named profile for model/tool resolution.
+    Profile {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_overlay: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deny_overlay: Option<Vec<String>>,
+    },
+}
+
+impl ScheduleSpawnTooling {
+    /// Returns true if this tooling mode requires an active parent agent context.
+    pub fn requires_parent_context(&self) -> bool {
+        matches!(self, Self::InheritParent { .. } | Self::Minimal)
+    }
+}
+
+/// Pre-resolved spawn snapshot captured at schedule creation time.
+///
+/// When `ScheduleSpawnTooling::InheritParent` or `Minimal` is specified through
+/// agent tools, the parent's visible tool set is snapshotted and stored here.
+/// At execution time, the schedule driver uses this snapshot directly — no
+/// parent context is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSpawnSnapshot {
+    /// The tool filter to apply as the child's inherited base filter.
+    pub tool_filter: meerkat_core::tool_scope::ToolFilter,
+    /// The model to use for the child agent.
+    pub model: String,
+    /// Optional provider-specific parameters for the child agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HelperOptionsSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_name: Option<String>,
+    /// Role name (profile key) for the helper in the mob roster.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "profile_name"
+    )]
+    pub role_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_mode: Option<ScheduledMobRuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<ScheduledMobBackendKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<ToolAccessPolicy>,
+    /// Tooling mode request for the helper's tool surface.
+    ///
+    /// This is an input-side field consumed during schedule creation.
+    /// `InheritParent` and `Minimal` are resolved into `resolved_spawn_snapshot`
+    /// by the agent tool path; they are rejected by public schedule APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub tooling: Option<ScheduleSpawnTooling>,
+    /// Pre-resolved tool/model snapshot, populated when `tooling` is consumed.
+    ///
+    /// At execution time, the schedule driver reads this field directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub resolved_spawn_snapshot: Option<ResolvedSpawnSnapshot>,
+}
+
+impl HelperOptionsSpec {
+    /// Validate that the tooling mode is acceptable for public schedule APIs.
+    ///
+    /// `InheritParent` and `Minimal` require an active parent agent context and
+    /// are only valid when created through agent tools. Public APIs must reject them.
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        if let Some(tooling) = &self.tooling {
+            if tooling.requires_parent_context() {
+                return Err("schedule spawn tooling mode requires parent agent context \
+                     (inherit_parent/minimal are only valid through agent tools)"
+                    .to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1011,8 +1100,232 @@ pub fn default_planning_horizon_occurrences() -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    // -----------------------------------------------------------------------
+    // ScheduleSpawnTooling serde roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schedule_spawn_tooling_inherit_parent_roundtrip() {
+        let tooling = ScheduleSpawnTooling::InheritParent {
+            allow_overlay: Some(vec!["shell".into()]),
+            deny_overlay: None,
+        };
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: ScheduleSpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn schedule_spawn_tooling_minimal_roundtrip() {
+        let tooling = ScheduleSpawnTooling::Minimal;
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: ScheduleSpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn schedule_spawn_tooling_profile_roundtrip() {
+        let tooling = ScheduleSpawnTooling::Profile {
+            name: "worker-v2".into(),
+            allow_overlay: None,
+            deny_overlay: Some(vec!["dangerous".into()]),
+        };
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: ScheduleSpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn schedule_spawn_tooling_requires_parent_context() {
+        assert!(
+            ScheduleSpawnTooling::InheritParent {
+                allow_overlay: None,
+                deny_overlay: None,
+            }
+            .requires_parent_context()
+        );
+        assert!(ScheduleSpawnTooling::Minimal.requires_parent_context());
+        assert!(
+            !ScheduleSpawnTooling::Profile {
+                name: "x".into(),
+                allow_overlay: None,
+                deny_overlay: None,
+            }
+            .requires_parent_context()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ResolvedSpawnSnapshot serde roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolved_spawn_snapshot_roundtrip_allow_filter() {
+        let snapshot = ResolvedSpawnSnapshot {
+            tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(HashSet::from([
+                "shell".to_string(),
+                "read_file".to_string(),
+            ])),
+            model: "claude-opus-4-6".into(),
+            provider_params: Some(serde_json::json!({"thinking_budget": 8192})),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn resolved_spawn_snapshot_roundtrip_deny_filter() {
+        let snapshot = ResolvedSpawnSnapshot {
+            tool_filter: meerkat_core::tool_scope::ToolFilter::Deny(HashSet::from([
+                "dangerous_tool".to_string(),
+            ])),
+            model: "gpt-5.4".into(),
+            provider_params: None,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn resolved_spawn_snapshot_roundtrip_all_filter() {
+        let snapshot = ResolvedSpawnSnapshot {
+            tool_filter: meerkat_core::tool_scope::ToolFilter::All,
+            model: "gemini-3.1-pro-preview".into(),
+            provider_params: None,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: ResolvedSpawnSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, snapshot);
+    }
+
+    // -----------------------------------------------------------------------
+    // HelperOptionsSpec with tooling/snapshot fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn helper_options_spec_with_tooling_roundtrip() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Profile {
+                name: "worker".into(),
+                allow_overlay: None,
+                deny_overlay: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: HelperOptionsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn helper_options_spec_with_resolved_snapshot_roundtrip() {
+        let spec = HelperOptionsSpec {
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(HashSet::from([
+                    "shell".to_string()
+                ])),
+                model: "claude-sonnet-4-6".into(),
+                provider_params: None,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: HelperOptionsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn helper_options_spec_default_omits_tooling_fields() {
+        let spec = HelperOptionsSpec::default();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("tooling"));
+        assert!(!json.contains("resolved_spawn_snapshot"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Public API validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_public_api_rejects_inherit_parent() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::InheritParent {
+                allow_overlay: None,
+                deny_overlay: None,
+            }),
+            ..Default::default()
+        };
+        let result = spec.validate_public_api();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("requires parent agent context")
+        );
+    }
+
+    #[test]
+    fn validate_public_api_rejects_minimal() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Minimal),
+            ..Default::default()
+        };
+        assert!(spec.validate_public_api().is_err());
+    }
+
+    #[test]
+    fn validate_public_api_accepts_profile() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Profile {
+                name: "worker".into(),
+                allow_overlay: None,
+                deny_overlay: None,
+            }),
+            ..Default::default()
+        };
+        assert!(spec.validate_public_api().is_ok());
+    }
+
+    #[test]
+    fn validate_public_api_accepts_none_tooling() {
+        let spec = HelperOptionsSpec::default();
+        assert!(spec.validate_public_api().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // role_name backward compat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn helper_options_spec_role_name_is_canonical_field() {
+        let spec = HelperOptionsSpec {
+            role_name: Some("worker".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("role_name"));
+        assert!(!json.contains("profile_name"));
+        let parsed: HelperOptionsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.role_name, Some("worker".into()));
+    }
+
+    #[test]
+    fn helper_options_spec_profile_name_alias_deserializes() {
+        let json = r#"{"profile_name":"legacy-worker"}"#;
+        let parsed: HelperOptionsSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.role_name, Some("legacy-worker".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn target_binding_round_trips_without_duplicate_type_fields() -> Result<(), String> {

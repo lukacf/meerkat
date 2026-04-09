@@ -222,8 +222,8 @@ pub struct MemberSessionRef {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct HelperOptions {
-    /// Profile to use. If None, requires a default profile in the definition.
-    pub profile_name: Option<ProfileName>,
+    /// Role name (profile key) to use. If None, requires a default profile in the definition.
+    pub role_name: Option<ProfileName>,
     /// Runtime mode override.
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     /// Backend override.
@@ -347,7 +347,11 @@ pub struct MobEventsView {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SpawnMemberSpec {
-    pub profile_name: ProfileName,
+    /// The role name (profile key) for this member in the mob roster.
+    ///
+    /// When `tooling` is present it controls model/tool resolution;
+    /// `role_name` remains a roster/topology label.
+    pub role_name: ProfileName,
     pub meerkat_id: MeerkatId,
     pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
@@ -368,12 +372,17 @@ pub struct SpawnMemberSpec {
     pub additional_instructions: Option<Vec<String>>,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Pre-resolved inherited tool filter from spawn tooling resolution.
+    ///
+    /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the child
+    /// session metadata so `AgentBuilder::build()` recovers it as a base filter.
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
 }
 
 impl SpawnMemberSpec {
     pub fn new(profile: impl Into<ProfileName>, meerkat_id: impl Into<MeerkatId>) -> Self {
         Self {
-            profile_name: profile.into(),
+            role_name: profile.into(),
             meerkat_id: meerkat_id.into(),
             initial_message: None,
             runtime_mode: None,
@@ -386,6 +395,7 @@ impl SpawnMemberSpec {
             auto_wire_parent: false,
             additional_instructions: None,
             shell_env: None,
+            inherited_tool_filter: None,
         }
     }
 
@@ -1807,7 +1817,7 @@ impl MobHandle {
         options: HelperOptions,
     ) -> Result<HelperResult, MobError> {
         let profile_name = options
-            .profile_name
+            .role_name
             .or_else(|| self.definition.profiles.keys().next().cloned())
             .ok_or_else(|| {
                 MobError::Internal("no profile specified and definition has no profiles".into())
@@ -1844,7 +1854,7 @@ impl MobHandle {
         options: HelperOptions,
     ) -> Result<HelperResult, MobError> {
         let profile_name = options
-            .profile_name
+            .role_name
             .or_else(|| self.definition.profiles.keys().next().cloned())
             .ok_or_else(|| {
                 MobError::Internal("no profile specified and definition has no profiles".into())

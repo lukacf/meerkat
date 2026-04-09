@@ -628,7 +628,7 @@ fn helper_options_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "profile_name": { "type": "string" },
+            "role_name": { "type": "string" },
             "runtime_mode": { "enum": ["autonomous_host", "turn_driven"] },
             "backend": { "enum": ["session", "external"] },
             "tool_access_policy": { "type": "object" }

@@ -1416,8 +1416,8 @@ struct SpawnHelperRequest {
     prompt: String,
     #[serde(default)]
     meerkat_id: Option<String>,
-    #[serde(default)]
-    profile_name: Option<String>,
+    #[serde(default, alias = "profile_name")]
+    role_name: Option<String>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -1437,8 +1437,8 @@ async fn mob_spawn_helper(
             .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
     );
     let mut options = meerkat_mob::HelperOptions::default();
-    if let Some(profile) = req.profile_name {
-        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    if let Some(role) = req.role_name {
+        options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
     options.runtime_mode = req.runtime_mode;
     options.backend = req.backend;
@@ -1461,8 +1461,8 @@ struct ForkHelperRequest {
     prompt: String,
     #[serde(default)]
     meerkat_id: Option<String>,
-    #[serde(default)]
-    profile_name: Option<String>,
+    #[serde(default, alias = "profile_name")]
+    role_name: Option<String>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -1521,8 +1521,8 @@ async fn mob_fork_helper(
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
     let mut options = meerkat_mob::HelperOptions::default();
-    if let Some(profile) = req.profile_name {
-        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    if let Some(role) = req.role_name {
+        options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
     options.runtime_mode = req.runtime_mode;
     options.backend = req.backend;

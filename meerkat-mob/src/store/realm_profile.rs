@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 /// A realm-scoped reusable profile with revision metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StoredRealmProfile {
     /// Unique name within the realm.
     pub name: String,

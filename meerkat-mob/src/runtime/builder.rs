@@ -258,6 +258,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            storage.realm_profiles.clone(),
         ))
     }
 
@@ -445,6 +446,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            storage.realm_profiles.clone(),
         ))
     }
 
@@ -571,6 +573,7 @@ impl MobBuilder {
                             additional_instructions: None,
                             shell_env: None,
                             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                            inherited_tool_filter: None,
                         },
                         expected_session_id: &session_id,
                         resumed_session: stored_session,
@@ -635,6 +638,7 @@ impl MobBuilder {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter: None,
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -832,6 +836,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
@@ -874,6 +879,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            realm_profile_store,
         )
     }
 
@@ -888,6 +894,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
@@ -1021,6 +1028,7 @@ impl MobBuilder {
             spawn_policy,
             lifecycle_authority,
             default_external_tools_provider,
+            realm_profile_store,
         };
         tokio::spawn(actor.run(command_rx));
 

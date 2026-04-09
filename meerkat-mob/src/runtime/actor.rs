@@ -221,6 +221,7 @@ pub(super) struct MobActor {
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
 }
 
 impl MobActor {
@@ -1848,7 +1849,7 @@ impl MobActor {
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
         let super::handle::SpawnMemberSpec {
-            profile_name,
+            role_name: profile_name,
             meerkat_id,
             initial_message,
             runtime_mode,
@@ -1861,6 +1862,7 @@ impl MobActor {
             auto_wire_parent,
             additional_instructions,
             shell_env,
+            inherited_tool_filter,
         } = spec;
         // Normalize launch-mode resume/fork details for the provisioning path.
         let (resume_session_id, fork_spec) = match launch_mode {
@@ -1906,10 +1908,20 @@ impl MobActor {
                 }
             }
 
-            let profile = self
-                .definition
-                .resolve_inline_profile(&profile_name)
-                .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
+            let profile = match self.definition.profiles.get(&profile_name) {
+                Some(crate::profile::ProfileBinding::Inline(p)) => p.clone(),
+                Some(crate::profile::ProfileBinding::RealmRef { realm_profile }) => {
+                    let store = self.realm_profile_store.as_ref()
+                        .ok_or_else(|| MobError::Internal(
+                            "realm profile store not available for RealmRef resolution".into(),
+                        ))?;
+                    store.get(realm_profile).await
+                        .map_err(MobError::from)?
+                        .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?
+                        .profile
+                }
+                None => return Err(MobError::ProfileNotFound(profile_name.clone())),
+            };
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
 
@@ -1984,14 +1996,14 @@ impl MobActor {
                             ))
                         })?;
 
-                    let external_tools = self.external_tools_for_profile(profile)?;
+                    let external_tools = self.external_tools_for_profile(&profile)?;
                     let mut config = build::build_resumed_agent_config(
                         build::BuildResumedAgentConfigParams {
                             base: build::BuildAgentConfigParams {
                                 mob_id: &self.definition.id,
                                 profile_name: &profile_name,
                                 meerkat_id: &meerkat_id,
-                                profile,
+                                profile: &profile,
                                 definition: &self.definition,
                                 external_tools,
                                 context,
@@ -1999,6 +2011,7 @@ impl MobActor {
                                 additional_instructions,
                                 shell_env,
                                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                                inherited_tool_filter: inherited_tool_filter.clone(),
                             },
                             expected_session_id: &resume_id,
                             resumed_session: stored_session,
@@ -2108,12 +2121,12 @@ impl MobActor {
                 None
             };
 
-            let external_tools = self.external_tools_for_profile(profile)?;
+            let external_tools = self.external_tools_for_profile(&profile)?;
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &self.definition.id,
                 profile_name: &profile_name,
                 meerkat_id: &meerkat_id,
-                profile,
+                profile: &profile,
                 definition: &self.definition,
                 external_tools,
                 context,
@@ -2121,6 +2134,7 @@ impl MobActor {
                 additional_instructions,
                 shell_env,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter,
             })
             .await?;
             config.keep_alive =
@@ -2524,6 +2538,7 @@ impl MobActor {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await?;
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -3108,6 +3123,7 @@ impl MobActor {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await?;
         config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;

@@ -104,6 +104,8 @@ pub struct MobMcpState {
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
+    /// Shared realm-scoped profile store for cross-mob profile CRUD.
+    realm_profile_store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
 }
 
 impl MobMcpState {
@@ -126,7 +128,22 @@ impl MobMcpState {
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
+            realm_profile_store: None,
         }
+    }
+
+    /// Set the shared realm profile store for cross-mob profile CRUD.
+    pub fn with_realm_profile_store(
+        mut self,
+        store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    ) -> Self {
+        self.realm_profile_store = store;
+        self
+    }
+
+    /// Returns a reference to the realm profile store, if configured.
+    pub fn realm_profile_store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
+        self.realm_profile_store.as_ref()
     }
 
     pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
@@ -1094,12 +1111,89 @@ impl MobMcpState {
             .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))
     }
 
+    // ─── Realm profile CRUD ──────────────────────────────────────────
+
+    fn require_realm_profile_store(
+        &self,
+    ) -> Result<&Arc<dyn meerkat_mob::RealmProfileStore>, meerkat_mob::MobError> {
+        self.realm_profile_store.as_ref().ok_or_else(|| {
+            meerkat_mob::MobError::Internal("realm profile store not configured".to_string())
+        })
+    }
+
+    /// Create a new realm profile.
+    pub async fn realm_profile_create(
+        &self,
+        name: &str,
+        profile: &meerkat_mob::Profile,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .create(name, profile)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Get a realm profile by name.
+    pub async fn realm_profile_get(
+        &self,
+        name: &str,
+    ) -> Result<Option<meerkat_mob::StoredRealmProfile>, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .get(name)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// List all realm profiles.
+    pub async fn realm_profile_list(
+        &self,
+    ) -> Result<Vec<meerkat_mob::StoredRealmProfile>, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .list()
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Update a realm profile with CAS revision.
+    pub async fn realm_profile_update(
+        &self,
+        name: &str,
+        profile: &meerkat_mob::Profile,
+        expected_revision: u64,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .update(name, profile, expected_revision)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Delete a realm profile with CAS revision.
+    pub async fn realm_profile_delete(
+        &self,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .delete(name, expected_revision)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        Arc::new(Self::new_with_runtime_adapter(
+        let state = Self::new_with_runtime_adapter(
             Arc::new(LocalSessionService::new()),
             Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
-        ))
+        )
+        .with_realm_profile_store(Some(Arc::new(
+            meerkat_mob::InMemoryRealmProfileStore::new(),
+        )));
+        Arc::new(state)
     }
 }
 

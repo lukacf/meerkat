@@ -139,6 +139,34 @@ struct MeerkatMobWaitKickoffInput {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobProfileCreateInput {
+    name: String,
+    profile: meerkat_mob::Profile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobProfileNameInput {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobProfileUpdateInput {
+    name: String,
+    profile: meerkat_mob::Profile,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobProfileDeleteInput {
+    name: String,
+    expected_revision: u64,
+}
+
 const fn default_limit() -> usize {
     100
 }
@@ -166,6 +194,11 @@ pub fn public_tool_names() -> &'static [&'static str] {
         "meerkat_mob_force_cancel",
         "meerkat_mob_member_status",
         "meerkat_mob_wait_kickoff",
+        "meerkat_mob_profile_create",
+        "meerkat_mob_profile_get",
+        "meerkat_mob_profile_list",
+        "meerkat_mob_profile_update",
+        "meerkat_mob_profile_delete",
     ]
 }
 
@@ -275,6 +308,59 @@ pub fn public_tools_list() -> Vec<Value> {
             "meerkat_mob_wait_kickoff",
             "Wait for autonomous kickoff turns to complete.",
             schema_for!(MeerkatMobWaitKickoffInput),
+        ),
+        tool_json(
+            "meerkat_mob_profile_create",
+            "Create a new realm profile for spawning mob members.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Unique profile name"},
+                    "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
+                },
+                "required": ["name", "profile"]
+            }),
+        ),
+        tool_json(
+            "meerkat_mob_profile_get",
+            "Get a realm profile by name.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to retrieve"}
+                },
+                "required": ["name"]
+            }),
+        ),
+        tool_json(
+            "meerkat_mob_profile_list",
+            "List all realm profiles.",
+            json!({ "type": "object", "properties": {}, "required": [] }),
+        ),
+        tool_json(
+            "meerkat_mob_profile_update",
+            "Update a realm profile with CAS revision check.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to update"},
+                    "profile": {"type": "object", "description": "Updated profile definition"},
+                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                },
+                "required": ["name", "profile", "expected_revision"]
+            }),
+        ),
+        tool_json(
+            "meerkat_mob_profile_delete",
+            "Delete a realm profile.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to delete"},
+                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                },
+                "required": ["name", "expected_revision"]
+            }),
         ),
     ]
 }
@@ -617,6 +703,45 @@ pub async fn handle_public_tools_call(
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({ "members": members }))
+        }
+        "meerkat_mob_profile_create" => {
+            let input: MeerkatMobProfileCreateInput = parse_args(arguments)?;
+            let stored = state
+                .realm_profile_create(&input.name, &input.profile)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!(stored))
+        }
+        "meerkat_mob_profile_get" => {
+            let input: MeerkatMobProfileNameInput = parse_args(arguments)?;
+            match state.realm_profile_get(&input.name).await {
+                Ok(Some(stored)) => Ok(json!(stored)),
+                Ok(None) => Ok(json!({"not_found": true, "name": input.name})),
+                Err(err) => Err(McpToolError::invalid_params(err.to_string())),
+            }
+        }
+        "meerkat_mob_profile_list" => {
+            let profiles = state
+                .realm_profile_list()
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!({"profiles": profiles}))
+        }
+        "meerkat_mob_profile_update" => {
+            let input: MeerkatMobProfileUpdateInput = parse_args(arguments)?;
+            let stored = state
+                .realm_profile_update(&input.name, &input.profile, input.expected_revision)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!(stored))
+        }
+        "meerkat_mob_profile_delete" => {
+            let input: MeerkatMobProfileDeleteInput = parse_args(arguments)?;
+            let deleted = state
+                .realm_profile_delete(&input.name, input.expected_revision)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!({"name": deleted.name, "deleted_revision": deleted.revision}))
         }
         _ => Err(McpToolError::method_not_found(format!(
             "Method not found: {name}"

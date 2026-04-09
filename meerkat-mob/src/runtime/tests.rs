@@ -11,7 +11,7 @@ use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
 use crate::storage::MobStorage;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobStoreError,
+    MobStoreError, RealmProfileStore,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -4123,7 +4123,7 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
             helper_id.clone(),
             "summarize this",
             HelperOptions {
-                profile_name: Some(ProfileName::from("worker")),
+                role_name: Some(ProfileName::from("worker")),
                 runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
                 ..HelperOptions::default()
             },
@@ -4168,7 +4168,7 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
             "continue from source",
             crate::launch::ForkContext::FullHistory,
             HelperOptions {
-                profile_name: Some(ProfileName::from("worker")),
+                role_name: Some(ProfileName::from("worker")),
                 runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
                 ..HelperOptions::default()
             },
@@ -4207,7 +4207,7 @@ async fn test_spawn_helper_defaults_to_turn_driven_even_when_profile_is_autonomo
             MeerkatId::from("helper-default"),
             "summarize this",
             HelperOptions {
-                profile_name: Some(ProfileName::from("worker")),
+                role_name: Some(ProfileName::from("worker")),
                 ..HelperOptions::default()
             },
         ),
@@ -6320,6 +6320,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter: None,
             },
             expected_session_id: &wrong_session_id,
             resumed_session: resumed,
@@ -16577,4 +16578,145 @@ async fn test_list_members_does_not_stall_during_concurrent_spawn() {
     spawn_task.await.expect("spawn task should complete");
     let count = list_task.await.expect("list task should complete");
     assert!(count >= 3, "expected at least 3 members, got {count}");
+}
+
+// -----------------------------------------------------------------------
+// T2.2: RealmRef profile resolution in spawn path
+// -----------------------------------------------------------------------
+
+/// Definition that has a RealmRef profile binding (references realm store).
+fn sample_definition_with_realm_ref_profile() -> MobDefinition {
+    let mut def = sample_definition();
+    def.profiles.insert(
+        ProfileName::from("realm-worker"),
+        ProfileBinding::RealmRef {
+            realm_profile: "shared-worker".into(),
+        },
+    );
+    def
+}
+
+async fn create_test_mob_with_realm_store(
+    definition: MobDefinition,
+    realm_store: Arc<dyn crate::store::RealmProfileStore>,
+) -> (MobHandle, Arc<MockSessionService>) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage {
+        events: Arc::new(InMemoryMobEventStore::new()),
+        runs: Arc::new(InMemoryMobRunStore::new()),
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+        realm_profiles: Some(realm_store),
+    };
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob with realm store");
+    (handle, service)
+}
+
+#[tokio::test]
+async fn test_spawn_inline_profile_still_works() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let result = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await;
+    assert!(result.is_ok(), "inline profile spawn should succeed");
+}
+
+#[tokio::test]
+async fn test_spawn_realm_ref_resolves_from_store() {
+    use crate::store::InMemoryRealmProfileStore;
+
+    let realm_store = Arc::new(InMemoryRealmProfileStore::new());
+    let worker_profile = Profile {
+        model: "claude-sonnet-4-5".into(),
+        skills: vec![],
+        tools: ToolConfig {
+            comms: true,
+            ..ToolConfig::default()
+        },
+        peer_description: "realm worker".into(),
+        external_addressable: false,
+        backend: None,
+        runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+        max_inline_peer_notifications: None,
+        output_schema: None,
+        provider_params: None,
+    };
+    realm_store
+        .create("shared-worker", &worker_profile)
+        .await
+        .expect("seed realm profile");
+
+    let (handle, _service) =
+        create_test_mob_with_realm_store(sample_definition_with_realm_ref_profile(), realm_store)
+            .await;
+
+    let result = handle
+        .spawn(
+            ProfileName::from("realm-worker"),
+            MeerkatId::from("rw-1"),
+            None,
+        )
+        .await;
+    assert!(result.is_ok(), "realm ref profile spawn should succeed");
+}
+
+#[tokio::test]
+async fn test_spawn_realm_ref_nonexistent_returns_profile_not_found() {
+    use crate::store::InMemoryRealmProfileStore;
+
+    let realm_store = Arc::new(InMemoryRealmProfileStore::new());
+    // Do NOT seed "shared-worker" — it should fail.
+    let (handle, _service) =
+        create_test_mob_with_realm_store(sample_definition_with_realm_ref_profile(), realm_store)
+            .await;
+
+    let result = handle
+        .spawn(
+            ProfileName::from("realm-worker"),
+            MeerkatId::from("rw-1"),
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MobError::ProfileNotFound(_))),
+        "missing realm profile should return ProfileNotFound, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_realm_ref_without_store_returns_error() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage {
+        events: Arc::new(InMemoryMobEventStore::new()),
+        runs: Arc::new(InMemoryMobRunStore::new()),
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+        realm_profiles: None, // no realm store
+    };
+    let handle = MobBuilder::new(sample_definition_with_realm_ref_profile(), storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+
+    let result = handle
+        .spawn(
+            ProfileName::from("realm-worker"),
+            MeerkatId::from("rw-1"),
+            None,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "realm ref without store should fail: {result:?}"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MobError::Internal(_)),
+        "expected Internal error for missing store, got: {err:?}"
+    );
 }

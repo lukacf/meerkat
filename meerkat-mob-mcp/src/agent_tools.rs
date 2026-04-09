@@ -41,6 +41,12 @@ const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
 const TOOL_MOB_LIST: &str = "mob_list";
+const TOOL_MOB_PROFILE_CREATE: &str = "mob_profile_create";
+const TOOL_MOB_PROFILE_GET: &str = "mob_profile_get";
+const TOOL_MOB_PROFILE_LIST: &str = "mob_profile_list";
+const TOOL_MOB_PROFILE_UPDATE: &str = "mob_profile_update";
+const TOOL_MOB_PROFILE_DELETE: &str = "mob_profile_delete";
+const TOOL_MOB_PROFILE_LIST_SOURCES: &str = "mob_profile_list_sources";
 
 // ─── AgentMobToolSurface ─────────────────────────────────────────────────
 
@@ -68,6 +74,8 @@ pub struct AgentMobToolSurface {
     comms_peer_id: Option<String>,
     /// Parent agent's comms runtime for bidirectional wiring.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    /// Context for capturing a parent agent's tool scope snapshot.
+    snapshot_context: meerkat_core::service::MobToolSnapshotContext,
 }
 
 impl AgentMobToolSurface {
@@ -139,6 +147,7 @@ impl AgentMobToolSurface {
             comms_name,
             comms_peer_id,
             comms_runtime,
+            meerkat_core::service::MobToolSnapshotContext::Standalone,
         )
     }
 
@@ -156,8 +165,14 @@ impl AgentMobToolSurface {
         comms_name: Option<String>,
         comms_peer_id: Option<String>,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+        snapshot_context: meerkat_core::service::MobToolSnapshotContext,
     ) -> Self {
-        let tools = build_tool_defs();
+        let has_profile_store = state.realm_profile_store().is_some();
+        let has_snapshot_provider = matches!(
+            &snapshot_context,
+            meerkat_core::service::MobToolSnapshotContext::ParentOwned(_)
+        );
+        let tools = build_tool_defs_with_profile_support(has_profile_store, has_snapshot_provider);
         Self {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
@@ -168,6 +183,7 @@ impl AgentMobToolSurface {
             comms_name,
             comms_peer_id,
             comms_runtime,
+            snapshot_context,
         }
     }
 
@@ -237,6 +253,107 @@ impl AgentMobToolSurface {
             return Ok(());
         }
         Err(ToolError::access_denied(tool_name))
+    }
+
+    /// Resolve spawn tooling into an inherited tool filter for the child session.
+    ///
+    /// - `InheritParent`: snapshot parent's visible tools, apply overlays
+    /// - `Minimal`: only comms tools (send, send_message, send_request, send_response, peers)
+    /// - `Profile`: resolve from realm or inline profile (tool filter from profile not implemented yet)
+    fn resolve_spawn_tooling(
+        &self,
+        tooling: &meerkat_mob::SpawnTooling,
+    ) -> Result<Option<meerkat_core::tool_scope::ToolFilter>, ToolError> {
+        match tooling {
+            meerkat_mob::SpawnTooling::InheritParent {
+                allow_overlay,
+                deny_overlay,
+            } => {
+                let provider = match &self.snapshot_context {
+                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
+                    meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                        return Err(ToolError::execution_failed(
+                            "InheritParent tooling requires a parent tool scope (ParentOwned context), \
+                             but this agent is running in Standalone mode",
+                        ));
+                    }
+                };
+                let tools = provider.snapshot_visible_tools();
+                let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
+                let allow_set = allow_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let deny_set = deny_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let filter = snapshot.with_overlays(allow_set.as_ref(), deny_set.as_ref());
+                Ok(Some(filter))
+            }
+            meerkat_mob::SpawnTooling::Minimal => {
+                match &self.snapshot_context {
+                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(_) => {}
+                    meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                        return Err(ToolError::execution_failed(
+                            "Minimal tooling requires a parent tool scope (ParentOwned context), \
+                             but this agent is running in Standalone mode",
+                        ));
+                    }
+                }
+                let comms_tools: std::collections::HashSet<String> = [
+                    "send",
+                    "send_message",
+                    "send_request",
+                    "send_response",
+                    "peers",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                Ok(Some(meerkat_core::tool_scope::ToolFilter::Allow(
+                    comms_tools,
+                )))
+            }
+            meerkat_mob::SpawnTooling::Profile {
+                source: _,
+                allow_overlay,
+                deny_overlay,
+            } => {
+                // Profile mode: the profile's ToolConfig controls categories (builtins,
+                // shell, etc.) through build_agent_config(). Overlays become the
+                // inherited filter on session metadata.
+                if allow_overlay.is_none() && deny_overlay.is_none() {
+                    return Ok(None);
+                }
+                // When overlays are present but we need a base set from the parent
+                // to apply them against, require ParentOwned.
+                let provider = match &self.snapshot_context {
+                    meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
+                    meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                        return Err(ToolError::execution_failed(
+                            "Profile tooling with overlays requires a parent tool scope",
+                        ));
+                    }
+                };
+                let tools = provider.snapshot_visible_tools();
+                let snapshot = meerkat_mob::snapshot::ParentToolScopeSnapshot::from_tools(&tools);
+                let allow_set = allow_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let deny_set = deny_overlay.as_ref().map(|v| {
+                    v.iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                });
+                let filter = snapshot.with_overlays(allow_set.as_ref(), deny_set.as_ref());
+                Ok(Some(filter))
+            }
+        }
     }
 
     async fn record_successful_operator_action(
@@ -430,6 +547,15 @@ impl AgentMobToolSurface {
             spec.additional_instructions = Some(vec![instructions]);
         }
 
+        // Resolve spawn tooling: default to InheritParent for delegates
+        let tooling = args
+            .tooling
+            .unwrap_or(meerkat_mob::SpawnTooling::InheritParent {
+                allow_overlay: None,
+                deny_overlay: None,
+            });
+        spec.inherited_tool_filter = self.resolve_spawn_tooling(&tooling)?;
+
         // Spawn via MobMcpState
         let member_ref = self
             .state
@@ -558,6 +684,9 @@ impl AgentMobToolSurface {
         if let Some(auto_wire) = args.auto_wire_parent {
             spec.auto_wire_parent = auto_wire;
         }
+        if let Some(tooling) = args.tooling {
+            spec.inherited_tool_filter = self.resolve_spawn_tooling(&tooling)?;
+        }
 
         let member_ref = self
             .state
@@ -663,6 +792,121 @@ impl AgentMobToolSurface {
 
         Self::encode_result(call, json!({"mobs": mob_list}))
     }
+    // ─── Profile CRUD dispatch ────────────────────────────────────────
+
+    async fn dispatch_mob_profile_create(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ProfileCreateArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let stored = self
+            .state
+            .realm_profile_create(&args.name, &args.profile)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(call, json!(stored))
+    }
+
+    async fn dispatch_mob_profile_get(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ProfileNameArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let stored = self
+            .state
+            .realm_profile_get(&args.name)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        match stored {
+            Some(profile) => Self::encode_result(call, json!(profile)),
+            None => Self::encode_result(call, json!({"not_found": true, "name": args.name})),
+        }
+    }
+
+    async fn dispatch_mob_profile_list(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let profiles = self
+            .state
+            .realm_profile_list()
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(call, json!({"profiles": profiles}))
+    }
+
+    async fn dispatch_mob_profile_update(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ProfileUpdateArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let stored = self
+            .state
+            .realm_profile_update(&args.name, &args.profile, args.expected_revision)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(call, json!(stored))
+    }
+
+    async fn dispatch_mob_profile_delete(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ProfileDeleteArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let deleted = self
+            .state
+            .realm_profile_delete(&args.name, args.expected_revision)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(
+            call,
+            json!({"name": deleted.name, "deleted_revision": deleted.revision}),
+        )
+    }
+
+    async fn dispatch_mob_profile_list_sources(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let provider = match &self.snapshot_context {
+            meerkat_core::service::MobToolSnapshotContext::ParentOwned(p) => p,
+            meerkat_core::service::MobToolSnapshotContext::Standalone => {
+                return Err(ToolError::not_found(call.name));
+            }
+        };
+        let tools = provider.snapshot_visible_tools();
+        let mut groups: std::collections::BTreeMap<(String, String), Vec<String>> =
+            std::collections::BTreeMap::new();
+        for tool in &tools {
+            let (kind, source_id) = match &tool.provenance {
+                Some(p) => (format!("{:?}", p.kind), p.source_id.clone()),
+                None => ("Unknown".to_string(), "unknown".to_string()),
+            };
+            groups
+                .entry((kind, source_id))
+                .or_default()
+                .push(tool.name.clone());
+        }
+        let sources: Vec<serde_json::Value> = groups
+            .into_iter()
+            .map(|((kind, source_id), tool_names)| {
+                json!({
+                    "kind": kind,
+                    "source_id": source_id,
+                    "tool_names": tool_names,
+                })
+            })
+            .collect();
+        Self::encode_result(call, json!({"sources": sources}))
+    }
 }
 
 // ─── MobToolsFactory implementation ─────────────────────────────────────
@@ -715,6 +959,7 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
             args.comms_name,
             comms_peer_id,
             args.comms_runtime,
+            args.snapshot_context,
         );
         Ok(Arc::new(surface))
     }
@@ -757,6 +1002,12 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members(call).await,
             TOOL_MOB_LIST => self.dispatch_mob_list(call).await,
+            TOOL_MOB_PROFILE_CREATE => self.dispatch_mob_profile_create(call).await,
+            TOOL_MOB_PROFILE_GET => self.dispatch_mob_profile_get(call).await,
+            TOOL_MOB_PROFILE_LIST => self.dispatch_mob_profile_list(call).await,
+            TOOL_MOB_PROFILE_UPDATE => self.dispatch_mob_profile_update(call).await,
+            TOOL_MOB_PROFILE_DELETE => self.dispatch_mob_profile_delete(call).await,
+            TOOL_MOB_PROFILE_LIST_SOURCES => self.dispatch_mob_profile_list_sources(call).await,
             _ => Err(ToolError::not_found(call.name)),
         }
     }
@@ -776,8 +1027,16 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
     })
 }
 
+#[cfg(test)]
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
-    vec![
+    build_tool_defs_with_profile_support(false, false)
+}
+
+fn build_tool_defs_with_profile_support(
+    has_profile_store: bool,
+    has_snapshot_provider: bool,
+) -> Arc<[Arc<ToolDef>]> {
+    let mut defs = vec![
         tool_def(
             TOOL_DELEGATE,
             "Delegate a task to a helper agent. Creates an implicit mob on first use, \
@@ -902,8 +1161,79 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
                 "properties": {}
             }),
         ),
-    ]
-    .into()
+    ];
+
+    if has_profile_store {
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_CREATE,
+            "Create a new realm profile for spawning mob members.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Unique profile name"},
+                    "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
+                },
+                "required": ["name", "profile"]
+            }),
+        ));
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_GET,
+            "Get a realm profile by name.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to retrieve"}
+                },
+                "required": ["name"]
+            }),
+        ));
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_LIST,
+            "List all realm profiles.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ));
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_UPDATE,
+            "Update a realm profile with CAS revision check.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to update"},
+                    "profile": {"type": "object", "description": "Updated profile definition"},
+                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                },
+                "required": ["name", "profile", "expected_revision"]
+            }),
+        ));
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_DELETE,
+            "Delete a realm profile.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Profile name to delete"},
+                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                },
+                "required": ["name", "expected_revision"]
+            }),
+        ));
+    }
+
+    if has_profile_store && has_snapshot_provider {
+        defs.push(tool_def(
+            TOOL_MOB_PROFILE_LIST_SOURCES,
+            "List visible tool sources grouped by provenance (kind and source).",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ));
+    }
+
+    defs.into()
 }
 
 // ─── Argument types ──────────────────────────────────────────────────────
@@ -915,6 +1245,8 @@ struct DelegateArgs {
     member_id: Option<String>,
     #[serde(default)]
     additional_instructions: Option<String>,
+    #[serde(default)]
+    tooling: Option<meerkat_mob::SpawnTooling>,
 }
 
 #[derive(Deserialize)]
@@ -940,12 +1272,38 @@ struct SpawnMemberArgs {
     backend: Option<MobBackendKind>,
     #[serde(default)]
     auto_wire_parent: Option<bool>,
+    #[serde(default)]
+    tooling: Option<meerkat_mob::SpawnTooling>,
 }
 
 #[derive(Deserialize)]
 struct MemberArgs {
     mob_id: String,
     member_id: String,
+}
+
+#[derive(Deserialize)]
+struct ProfileCreateArgs {
+    name: String,
+    profile: meerkat_mob::Profile,
+}
+
+#[derive(Deserialize)]
+struct ProfileNameArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ProfileUpdateArgs {
+    name: String,
+    profile: meerkat_mob::Profile,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+struct ProfileDeleteArgs {
+    name: String,
+    expected_revision: u64,
 }
 
 // ─── Mob cleanup helper ─────────────────────────────────────────────────
@@ -985,10 +1343,10 @@ mod tests {
     use meerkat_core::interaction::{InboxInteraction, InteractionContent, InteractionId};
     use meerkat_core::service::{
         AppendSystemContextRequest, AppendSystemContextResult, MobToolAuthorityContext,
-        MobToolsFactory, OpaquePrincipalToken, SessionControlError, SessionHistoryPage,
-        SessionHistoryQuery, SessionInfo, SessionQuery, SessionServiceCommsExt,
+        MobToolSnapshotContext, MobToolsFactory, OpaquePrincipalToken, SessionControlError,
+        SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionServiceCommsExt,
         SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage,
-        SessionView, StartTurnRequest,
+        SessionView, StartTurnRequest, VisibleToolSnapshotProvider,
     };
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, RunResult, Usage};
@@ -2177,5 +2535,544 @@ mod tests {
             }),
             "delegate wiring must emit mob.peer_added to the helper"
         );
+    }
+
+    // ─── Profile CRUD tests ─────────────────────────────────────────
+
+    fn sample_profile_json(model: &str) -> serde_json::Value {
+        json!({
+            "model": model,
+            "peer_description": "test profile",
+            "runtime_mode": "autonomous_host"
+        })
+    }
+
+    fn surface_with_profiles(state: Arc<MobMcpState>) -> AgentMobToolSurface {
+        AgentMobToolSurface::new(
+            state,
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_profile_tools_present_when_store_available() {
+        let defs = build_tool_defs_with_profile_support(true, false);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"mob_profile_create"));
+        assert!(names.contains(&"mob_profile_get"));
+        assert!(names.contains(&"mob_profile_list"));
+        assert!(names.contains(&"mob_profile_update"));
+        assert!(names.contains(&"mob_profile_delete"));
+        // list_sources requires snapshot provider
+        assert!(!names.contains(&"mob_profile_list_sources"));
+    }
+
+    #[test]
+    fn test_profile_tools_absent_without_store() {
+        let defs = build_tool_defs_with_profile_support(false, false);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(!names.contains(&"mob_profile_create"));
+        assert!(!names.contains(&"mob_profile_list_sources"));
+    }
+
+    #[test]
+    fn test_list_sources_tool_present_when_both_store_and_provider() {
+        let defs = build_tool_defs_with_profile_support(true, true);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"mob_profile_list_sources"));
+    }
+
+    #[tokio::test]
+    async fn test_profile_crud_roundtrip() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+
+        // Create
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "worker",
+                "profile": sample_profile_json("claude-opus-4-6")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let create_result = surface
+            .dispatch(ToolCallView {
+                id: "c1",
+                name: "mob_profile_create",
+                args: &create_args,
+            })
+            .await
+            .expect("profile create should succeed");
+        let created: serde_json::Value =
+            serde_json::from_str(&create_result.result.text_content()).unwrap();
+        assert_eq!(created["name"], "worker");
+        assert_eq!(created["revision"], 1);
+
+        // Get
+        let get_args =
+            serde_json::value::RawValue::from_string(json!({"name": "worker"}).to_string())
+                .unwrap();
+        let get_result = surface
+            .dispatch(ToolCallView {
+                id: "g1",
+                name: "mob_profile_get",
+                args: &get_args,
+            })
+            .await
+            .expect("profile get should succeed");
+        let got: serde_json::Value =
+            serde_json::from_str(&get_result.result.text_content()).unwrap();
+        assert_eq!(got["name"], "worker");
+        assert_eq!(got["profile"]["model"], "claude-opus-4-6");
+
+        // List
+        let list_args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let list_result = surface
+            .dispatch(ToolCallView {
+                id: "l1",
+                name: "mob_profile_list",
+                args: &list_args,
+            })
+            .await
+            .expect("profile list should succeed");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_result.result.text_content()).unwrap();
+        assert_eq!(listed["profiles"].as_array().unwrap().len(), 1);
+
+        // Update
+        let update_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "worker",
+                "profile": sample_profile_json("claude-sonnet-4-6"),
+                "expected_revision": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let update_result = surface
+            .dispatch(ToolCallView {
+                id: "u1",
+                name: "mob_profile_update",
+                args: &update_args,
+            })
+            .await
+            .expect("profile update should succeed");
+        let updated: serde_json::Value =
+            serde_json::from_str(&update_result.result.text_content()).unwrap();
+        assert_eq!(updated["revision"], 2);
+
+        // Delete
+        let delete_args = serde_json::value::RawValue::from_string(
+            json!({"name": "worker", "expected_revision": 2}).to_string(),
+        )
+        .unwrap();
+        let delete_result = surface
+            .dispatch(ToolCallView {
+                id: "d1",
+                name: "mob_profile_delete",
+                args: &delete_args,
+            })
+            .await
+            .expect("profile delete should succeed");
+        let deleted: serde_json::Value =
+            serde_json::from_str(&delete_result.result.text_content()).unwrap();
+        assert_eq!(deleted["name"], "worker");
+        assert_eq!(deleted["deleted_revision"], 2);
+
+        // Confirm deleted
+        let get_result2 = surface
+            .dispatch(ToolCallView {
+                id: "g2",
+                name: "mob_profile_get",
+                args: &get_args,
+            })
+            .await
+            .expect("profile get after delete should succeed");
+        let got2: serde_json::Value =
+            serde_json::from_str(&get_result2.result.text_content()).unwrap();
+        assert_eq!(got2["not_found"], true);
+    }
+
+    #[tokio::test]
+    async fn test_profile_get_nonexistent_returns_not_found() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(state);
+
+        let args =
+            serde_json::value::RawValue::from_string(json!({"name": "ghost"}).to_string()).unwrap();
+        let result = surface
+            .dispatch(ToolCallView {
+                id: "g1",
+                name: "mob_profile_get",
+                args: &args,
+            })
+            .await
+            .expect("get nonexistent should return result, not error");
+        let got: serde_json::Value = serde_json::from_str(&result.result.text_content()).unwrap();
+        assert_eq!(got["not_found"], true);
+    }
+
+    #[tokio::test]
+    async fn test_profile_update_wrong_revision_fails() {
+        let state = MobMcpState::new_in_memory();
+        let surface = surface_with_profiles(Arc::clone(&state));
+
+        // Create first
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "stale",
+                "profile": sample_profile_json("claude-opus-4-6")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "c1",
+                name: "mob_profile_create",
+                args: &create_args,
+            })
+            .await
+            .expect("create");
+
+        // Update with wrong revision
+        let update_args = serde_json::value::RawValue::from_string(
+            json!({
+                "name": "stale",
+                "profile": sample_profile_json("claude-sonnet-4-6"),
+                "expected_revision": 99
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let update_result = surface
+            .dispatch(ToolCallView {
+                id: "u1",
+                name: "mob_profile_update",
+                args: &update_args,
+            })
+            .await;
+        assert!(
+            update_result.is_err(),
+            "update with wrong revision should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_sources_standalone_returns_not_found() {
+        let state = MobMcpState::new_in_memory();
+        // Standalone context — list_sources should not be in tools()
+        let surface = surface_with_profiles(state);
+        let tools = surface.tools();
+        let names: Vec<&str> = tools.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.contains(&"mob_profile_list_sources"),
+            "list_sources must not appear in Standalone context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_sources_with_parent_provider() {
+        use meerkat_core::service::{MobToolSnapshotContext, VisibleToolSnapshotProvider};
+
+        struct TestSnapshotProvider;
+        impl VisibleToolSnapshotProvider for TestSnapshotProvider {
+            fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+                vec![
+                    Arc::new(ToolDef {
+                        name: "tool_a".to_string(),
+                        description: "Tool A".to_string(),
+                        input_schema: json!({"type": "object"}),
+                        provenance: Some(ToolProvenance {
+                            kind: ToolSourceKind::Builtin,
+                            source_id: "core".to_string(),
+                        }),
+                    }),
+                    Arc::new(ToolDef {
+                        name: "tool_b".to_string(),
+                        description: "Tool B".to_string(),
+                        input_schema: json!({"type": "object"}),
+                        provenance: Some(ToolProvenance {
+                            kind: ToolSourceKind::Mob,
+                            source_id: "mob".to_string(),
+                        }),
+                    }),
+                ]
+            }
+        }
+
+        let state = MobMcpState::new_in_memory();
+        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(TestSnapshotProvider);
+        let surface = AgentMobToolSurface::new_with_effective_authority(
+            Arc::clone(&state),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+            MobToolSnapshotContext::ParentOwned(provider),
+        );
+
+        // list_sources should be in tools
+        let tools = surface.tools();
+        let names: Vec<&str> = tools.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"mob_profile_list_sources"));
+
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let result = surface
+            .dispatch(ToolCallView {
+                id: "ls1",
+                name: "mob_profile_list_sources",
+                args: &args,
+            })
+            .await
+            .expect("list_sources should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).unwrap();
+        let sources = parsed["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2, "two provenance groups expected");
+    }
+
+    // ─── SpawnTooling resolution tests (T2.3) ───────────────────────────
+
+    /// Snapshot provider with comms + non-comms tools for overlay testing.
+    struct ToolingTestSnapshotProvider;
+    impl VisibleToolSnapshotProvider for ToolingTestSnapshotProvider {
+        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+            [
+                "send",
+                "send_message",
+                "send_request",
+                "send_response",
+                "peers",
+                "read_file",
+                "write_file",
+                "bash",
+            ]
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: name.to_string(),
+                    description: format!("{name} tool"),
+                    input_schema: json!({"type": "object"}),
+                    provenance: None,
+                })
+            })
+            .collect()
+        }
+    }
+
+    fn surface_with_parent_tools() -> AgentMobToolSurface {
+        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(ToolingTestSnapshotProvider);
+        AgentMobToolSurface::new_with_effective_authority(
+            MobMcpState::new_in_memory(),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+            MobToolSnapshotContext::ParentOwned(provider),
+        )
+    }
+
+    fn surface_standalone() -> AgentMobToolSurface {
+        AgentMobToolSurface::new(
+            MobMcpState::new_in_memory(),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_inherit_parent_captures_all_visible() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        match filter {
+            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
+                assert_eq!(names.len(), 8, "should inherit all 8 parent tools");
+                assert!(names.contains("send"));
+                assert!(names.contains("read_file"));
+                assert!(names.contains("bash"));
+            }
+            other => panic!("expected Some(Allow), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_inherit_parent_with_deny_overlay() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: None,
+            deny_overlay: Some(vec!["bash".to_string(), "write_file".to_string()]),
+        };
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        match filter {
+            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
+                assert_eq!(names.len(), 6);
+                assert!(!names.contains("bash"));
+                assert!(!names.contains("write_file"));
+                assert!(names.contains("read_file"));
+                assert!(names.contains("send"));
+            }
+            other => panic!("expected Some(Allow), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_inherit_parent_with_allow_overlay() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: Some(vec!["send".to_string(), "read_file".to_string()]),
+            deny_overlay: None,
+        };
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        match filter {
+            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
+                assert_eq!(names.len(), 2);
+                assert!(names.contains("send"));
+                assert!(names.contains("read_file"));
+            }
+            other => panic!("expected Some(Allow), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_inherit_parent_standalone_errors() {
+        let surface = surface_standalone();
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let err = surface.resolve_spawn_tooling(&tooling).unwrap_err();
+        assert!(
+            matches!(err, ToolError::ExecutionFailed { .. }),
+            "InheritParent in Standalone context should return ExecutionFailed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_minimal_returns_comms_only() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::Minimal;
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        match filter {
+            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
+                assert_eq!(names.len(), 5);
+                assert!(names.contains("send"));
+                assert!(names.contains("send_message"));
+                assert!(names.contains("send_request"));
+                assert!(names.contains("send_response"));
+                assert!(names.contains("peers"));
+                assert!(!names.contains("bash"));
+                assert!(!names.contains("read_file"));
+            }
+            other => panic!("expected Some(Allow), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_minimal_standalone_errors() {
+        let surface = surface_standalone();
+        let tooling = meerkat_mob::SpawnTooling::Minimal;
+        let err = surface.resolve_spawn_tooling(&tooling).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_profile_no_overlays_returns_none() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::Profile {
+            source: meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "test".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        assert!(
+            filter.is_none(),
+            "Profile without overlays should return None (no inherited filter)"
+        );
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_profile_with_deny_overlay() {
+        let surface = surface_with_parent_tools();
+        let tooling = meerkat_mob::SpawnTooling::Profile {
+            source: meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "test".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+            allow_overlay: None,
+            deny_overlay: Some(vec!["bash".to_string()]),
+        };
+        let filter = surface.resolve_spawn_tooling(&tooling).unwrap();
+        match filter {
+            Some(meerkat_core::tool_scope::ToolFilter::Allow(names)) => {
+                assert!(!names.contains("bash"));
+                assert!(names.contains("read_file"));
+            }
+            other => panic!("expected Some(Allow), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_spawn_tooling_profile_with_overlays_standalone_errors() {
+        let surface = surface_standalone();
+        let tooling = meerkat_mob::SpawnTooling::Profile {
+            source: meerkat_mob::ProfileSource::Inline(meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "test".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+            allow_overlay: Some(vec!["send".to_string()]),
+            deny_overlay: None,
+        };
+        let err = surface.resolve_spawn_tooling(&tooling).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 }

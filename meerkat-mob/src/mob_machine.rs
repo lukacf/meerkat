@@ -1397,6 +1397,7 @@ mod tests {
         let inserted = roster.add(RosterAddEntry {
             meerkat_id: MeerkatId::from(name),
             profile: ProfileName::from("worker"),
+            effective_profile_override: None,
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id.clone()),
             peer_id: Some(format!("peer-{name}")),

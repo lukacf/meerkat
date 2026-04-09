@@ -17,9 +17,11 @@ impl CaptureClient {
         self.seen_tools.lock().expect("capture lock").clone()
     }
 
-    #[allow(dead_code)]
     pub fn user_messages(&self) -> Vec<String> {
-        self.seen_user_messages.lock().expect("capture lock").clone()
+        self.seen_user_messages
+            .lock()
+            .expect("capture lock")
+            .clone()
     }
 }
 
@@ -29,14 +31,15 @@ impl LlmClient for CaptureClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         *self.seen_tools.lock().expect("capture lock") =
             request.tools.iter().map(|tool| tool.name.clone()).collect();
-        *self.seen_user_messages.lock().expect("capture lock") = request
+        let seen_user_messages = request
             .messages
             .iter()
             .filter_map(|message| match message {
-                Message::User(message) => Some(message.text_content()),
+                Message::User(user) => Some(user.text_content()),
                 _ => None,
             })
             .collect();
+        *self.seen_user_messages.lock().expect("capture lock") = seen_user_messages;
         self.inner.stream(request)
     }
 

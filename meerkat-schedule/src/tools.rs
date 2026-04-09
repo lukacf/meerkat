@@ -61,7 +61,7 @@ pub fn schedule_tools_list() -> Vec<Value> {
     vec![
         tool_descriptor(
             "meerkat_schedule_create",
-            "Create a realm-scoped schedule from typed trigger and target data.",
+            "Create a realm-scoped schedule. Use an explicit TriggerSpec and TargetBinding; the input schema includes the exact JSON shapes for once, interval, calendar, session, and mob schedules. For follow-ups in an existing long-lived session such as TUX, use target_kind=session with type=exact_session or resumable_session and a real session_id. If you do not have a session_id, use materialize_on_demand_session instead.",
             create_schedule_schema(),
         ),
         tool_descriptor(
@@ -76,7 +76,7 @@ pub fn schedule_tools_list() -> Vec<Value> {
         ),
         tool_descriptor(
             "meerkat_schedule_update",
-            "Update a persisted schedule by schedule_id.",
+            "Update a persisted schedule by schedule_id. Any provided trigger or target must use the same typed shapes as meerkat_schedule_create.",
             update_schedule_schema(),
         ),
         tool_descriptor(
@@ -325,23 +325,11 @@ fn create_schedule_schema() -> Value {
         "properties": {
             "name": { "type": "string" },
             "description": { "type": "string" },
-            "trigger": {
-                "type": "object",
-                "description": "Typed trigger specification; canonical truth is TriggerSpec, not a cron string."
-            },
-            "target": {
-                "type": "object",
-                "description": "Typed session or mob target binding."
-            },
-            "misfire_policy": {
-                "description": "Misfire policy value; e.g. skip or catch_up_within."
-            },
-            "overlap_policy": {
-                "description": "Overlap policy value; e.g. allow_concurrent or skip_if_running."
-            },
-            "missing_target_policy": {
-                "description": "Missing target policy value; e.g. skip or mark_misfired."
-            },
+            "trigger": trigger_spec_schema(),
+            "target": target_binding_schema(),
+            "misfire_policy": misfire_policy_schema(),
+            "overlap_policy": overlap_policy_schema(),
+            "missing_target_policy": missing_target_policy_schema(),
             "labels": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -370,17 +358,11 @@ fn update_schedule_schema() -> Value {
             },
             "name": { "type": "string" },
             "description": { "type": "string" },
-            "trigger": {
-                "type": "object",
-                "description": "Updated typed trigger specification."
-            },
-            "target": {
-                "type": "object",
-                "description": "Updated typed session or mob target binding."
-            },
-            "misfire_policy": { "description": "Updated misfire policy." },
-            "overlap_policy": { "description": "Updated overlap policy." },
-            "missing_target_policy": { "description": "Updated missing-target policy." },
+            "trigger": trigger_spec_schema(),
+            "target": target_binding_schema(),
+            "misfire_policy": misfire_policy_schema(),
+            "overlap_policy": overlap_policy_schema(),
+            "missing_target_policy": missing_target_policy_schema(),
             "labels": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -396,6 +378,385 @@ fn update_schedule_schema() -> Value {
         },
         "required": ["schedule_id"],
         "additionalProperties": false,
+    })
+}
+
+fn date_time_schema(description: &'static str) -> Value {
+    json!({
+        "type": "string",
+        "format": "date-time",
+        "description": description,
+    })
+}
+
+fn trigger_spec_schema() -> Value {
+    json!({
+        "description": "TriggerSpec uses externally tagged JSON. Example once trigger: {\"Once\":{\"due_at_utc\":\"2026-04-09T12:00:00Z\"}}. Example interval trigger: {\"Interval\":{\"start_at_utc\":\"2026-04-09T12:00:00Z\",\"every_seconds\":60}}.",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "Once": {
+                        "type": "object",
+                        "properties": {
+                            "due_at_utc": date_time_schema("Deliver once at this UTC timestamp.")
+                        },
+                        "required": ["due_at_utc"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["Once"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "Interval": {
+                        "type": "object",
+                        "properties": {
+                            "start_at_utc": date_time_schema("First due time in UTC."),
+                            "every_seconds": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Repeat cadence in seconds."
+                            },
+                            "end_at_utc": date_time_schema("Optional final due time in UTC.")
+                        },
+                        "required": ["start_at_utc", "every_seconds"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["Interval"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "Calendar": {
+                        "type": "object",
+                        "properties": {
+                            "timezone": {
+                                "type": "string",
+                                "description": "IANA timezone such as Europe/Stockholm or UTC."
+                            },
+                            "minute": calendar_field_schema("Minute values."),
+                            "hour": calendar_field_schema("Hour values, 0-23."),
+                            "day_of_month": calendar_field_schema("Day-of-month values, 1-31."),
+                            "month": calendar_field_schema("Month values, 1-12."),
+                            "day_of_week": calendar_field_schema("Weekday values, Monday=1 style domain used by the scheduler."),
+                            "year": calendar_field_schema("Optional year filter.")
+                        },
+                        "required": ["timezone"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["Calendar"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn calendar_field_schema(description: &'static str) -> Value {
+    json!({
+        "description": description,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": { "kind": { "const": "any" } },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "values" },
+                    "values": {
+                        "type": "array",
+                        "items": { "type": "integer", "minimum": 0 }
+                    }
+                },
+                "required": ["kind", "values"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn target_binding_schema() -> Value {
+    json!({
+        "description": "TargetBinding selects a session or mob recipient. For a follow-up in the current TUX session, use target_kind=session with type=exact_session or resumable_session and a real session_id. If you need a fresh scheduled session, use materialize_on_demand_session.",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "target_kind": { "const": "session" },
+                    "type": {
+                        "enum": ["exact_session", "resumable_session", "materialize_on_demand_session"]
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Required for exact_session and resumable_session."
+                    },
+                    "action": scheduled_session_action_schema(),
+                    "create": session_materialization_spec_schema(),
+                    "bound_session_id": {
+                        "type": "string",
+                        "description": "Only used by persisted materialize_on_demand_session schedules after the first materialization."
+                    }
+                },
+                "required": ["target_kind", "type", "action"],
+                "allOf": [
+                    {
+                        "if": { "properties": { "type": { "const": "materialize_on_demand_session" } } },
+                        "then": { "required": ["create"] }
+                    },
+                    {
+                        "if": {
+                            "properties": {
+                                "type": { "enum": ["exact_session", "resumable_session"] }
+                            }
+                        },
+                        "then": { "required": ["session_id"] }
+                    }
+                ],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "target_kind": { "const": "mob" },
+                    "type": { "enum": ["member", "flow", "spawn_helper", "fork_helper"] },
+                    "mob_id": { "type": "string" },
+                    "member_id": { "type": "string" },
+                    "source_member_id": { "type": "string" },
+                    "flow_id": { "type": "string" },
+                    "params": {
+                        "description": "Raw JSON value for mob flow parameters."
+                    },
+                    "prompt": { "type": "string" },
+                    "action": scheduled_mob_action_schema(),
+                    "fork_context": fork_context_schema(),
+                    "options": helper_options_schema()
+                },
+                "required": ["target_kind", "type", "mob_id"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn scheduled_session_action_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "prompt" },
+                    "prompt": content_input_schema(),
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "Only supported when materializing a new session."
+                    },
+                    "render_metadata": { "type": "object" },
+                    "skill_references": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Canonical skill references in source_uuid/skill-name form."
+                    },
+                    "additional_instructions": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["type", "prompt"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "event" },
+                    "event_type": { "type": "string" },
+                    "payload": {},
+                    "render_metadata": { "type": "object" }
+                },
+                "required": ["type", "event_type", "payload"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn session_materialization_spec_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "model": { "type": "string" },
+            "system_prompt": { "type": "string" },
+            "max_tokens": { "type": "integer", "minimum": 1 },
+            "provider": { "enum": ["anthropic", "openai", "gemini", "other"] },
+            "output_schema": { "type": "object" },
+            "structured_output_retries": { "type": "integer", "minimum": 0 },
+            "provider_params": { "type": "object" },
+            "comms_name": { "type": "string" },
+            "peer_meta": { "type": "object" },
+            "labels": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+            },
+            "preload_skills": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "additional_instructions": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "realm_id": { "type": "string" },
+            "instance_id": { "type": "string" },
+            "backend": { "type": "string" },
+            "config_generation": { "type": "integer", "minimum": 0 },
+            "keep_alive": { "type": "boolean" },
+            "app_context": { "type": "object" }
+        },
+        "required": ["model"],
+        "additionalProperties": false
+    })
+}
+
+fn scheduled_mob_action_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "type": { "const": "send" },
+            "content": content_input_schema(),
+            "render_metadata": { "type": "object" }
+        },
+        "required": ["type", "content"],
+        "additionalProperties": false
+    })
+}
+
+fn helper_options_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "profile_name": { "type": "string" },
+            "runtime_mode": { "enum": ["autonomous_host", "turn_driven"] },
+            "backend": { "enum": ["session", "external"] },
+            "tool_access_policy": { "type": "object" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn fork_context_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": { "type": { "const": "full_history" } },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "last_messages" },
+                    "count": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["type", "count"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn content_input_schema() -> Value {
+    json!({
+        "description": "Either a plain text string or a list of multimodal content blocks.",
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "image" },
+                                "media_type": { "type": "string" },
+                                "source": { "enum": ["inline", "blob"] },
+                                "data": { "type": "string" },
+                                "blob_id": { "type": "string" }
+                            },
+                            "required": ["type", "media_type", "source"],
+                            "additionalProperties": true
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "video" },
+                                "media_type": { "type": "string" },
+                                "duration_ms": { "type": "integer", "minimum": 0 },
+                                "source": { "const": "inline" },
+                                "data": { "type": "string" }
+                            },
+                            "required": ["type", "media_type", "duration_ms", "source", "data"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }
+        ]
+    })
+}
+
+fn misfire_policy_schema() -> Value {
+    json!({
+        "description": "Misfire policy object. Most schedules should use {\"type\":\"skip\"}.",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": { "type": { "const": "skip" } },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": { "const": "catch_up_within" },
+                    "window_seconds": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["type", "window_seconds"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn overlap_policy_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["allow_concurrent", "skip_if_running"],
+        "description": "How to handle overlapping occurrences for the same schedule."
+    })
+}
+
+fn missing_target_policy_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["skip", "mark_misfired"],
+        "description": "What to do if the target session or mob is missing when the occurrence becomes due."
     })
 }
 

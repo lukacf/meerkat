@@ -9,6 +9,7 @@ use crate::{
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
+use meerkat_models::ModelTier;
 use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,7 @@ pub struct Config {
     pub rest: RestServerConfig,
     pub hooks: HooksConfig,
     pub skills: crate::skills_config::SkillsConfig,
+    pub self_hosted: SelfHostedConfig,
 }
 
 impl Default for Config {
@@ -69,11 +71,17 @@ impl Default for Config {
             rest: RestServerConfig::default(),
             hooks: HooksConfig::default(),
             skills: crate::skills_config::SkillsConfig::default(),
+            self_hosted: SelfHostedConfig::default(),
         }
     }
 }
 
 impl Config {
+    /// Build the effective model registry for this config snapshot.
+    pub fn model_registry(&self) -> Result<crate::ModelRegistry, ConfigError> {
+        crate::ModelRegistry::from_config(self)
+    }
+
     /// Return the config template as TOML.
     pub fn template_toml() -> &'static str {
         CONFIG_TEMPLATE_TOML
@@ -318,6 +326,9 @@ impl Config {
                 self.hooks.background_max_concurrency = other.hooks.background_max_concurrency;
             }
             self.hooks.entries.extend(other.hooks.entries);
+        }
+        if other.self_hosted != SelfHostedConfig::default() {
+            self.self_hosted = other.self_hosted;
         }
     }
 
@@ -584,6 +595,8 @@ impl Config {
             }
         }
 
+        crate::model_registry::ModelRegistry::from_config(self)?;
+
         Ok(())
     }
 }
@@ -841,6 +854,95 @@ pub struct StoreConfig {
 pub struct ProviderSettings {
     pub base_urls: Option<HashMap<String, String>>,
     pub api_keys: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfHostedTransport {
+    #[default]
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfHostedApiStyle {
+    #[default]
+    Responses,
+    ChatCompletions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(default)]
+pub struct SelfHostedServerConfig {
+    pub transport: SelfHostedTransport,
+    pub base_url: String,
+    pub api_style: SelfHostedApiStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token_env: Option<String>,
+}
+
+impl Default for SelfHostedServerConfig {
+    fn default() -> Self {
+        Self {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: String::new(),
+            api_style: SelfHostedApiStyle::Responses,
+            bearer_token: None,
+            bearer_token_env: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(default)]
+pub struct SelfHostedModelConfig {
+    pub server: String,
+    pub remote_model: String,
+    pub display_name: String,
+    pub family: String,
+    pub tier: ModelTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    pub vision: bool,
+    pub image_tool_results: bool,
+    pub inline_video: bool,
+    pub supports_temperature: bool,
+    pub supports_thinking: bool,
+    pub supports_reasoning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
+}
+
+impl Default for SelfHostedModelConfig {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            remote_model: String::new(),
+            display_name: String::new(),
+            family: String::new(),
+            tier: ModelTier::Supported,
+            context_window: None,
+            max_output_tokens: None,
+            vision: false,
+            image_tool_results: false,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            call_timeout_secs: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
+#[serde(default)]
+pub struct SelfHostedConfig {
+    pub servers: HashMap<String, SelfHostedServerConfig>,
+    pub models: HashMap<String, SelfHostedModelConfig>,
 }
 
 /// Runtime limits configured at the config layer.

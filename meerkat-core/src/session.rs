@@ -751,6 +751,8 @@ pub struct SessionMetadata {
     pub structured_output_retries: u32,
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
     pub tooling: SessionTooling,
     #[serde(default)]
@@ -784,6 +786,8 @@ pub struct SessionLlmIdentity {
     pub model: String,
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_hosted_server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
 }
 
@@ -793,6 +797,7 @@ impl SessionMetadata {
         SessionLlmIdentity {
             model: self.model.clone(),
             provider: self.provider,
+            self_hosted_server_id: self.self_hosted_server_id.clone(),
             provider_params: self.provider_params.clone(),
         }
     }
@@ -801,6 +806,7 @@ impl SessionMetadata {
     pub fn apply_llm_identity(&mut self, identity: &SessionLlmIdentity) {
         self.model = identity.model.clone();
         self.provider = identity.provider;
+        self.self_hosted_server_id = identity.self_hosted_server_id.clone();
         self.provider_params = identity.provider_params.clone();
     }
 }

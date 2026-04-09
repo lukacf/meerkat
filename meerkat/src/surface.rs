@@ -96,48 +96,54 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
 ///
 /// This is a pure function with no config dependency — the catalog is static data
 /// compiled into the binary from `meerkat-models`.
-pub fn build_models_catalog_response() -> meerkat_contracts::ModelsCatalogResponse {
-    let providers = meerkat_models::provider_defaults()
-        .iter()
-        .map(|pd| {
-            let models = pd
-                .models
-                .iter()
-                .map(|entry| {
-                    let profile = meerkat_models::profile_for(entry.provider, entry.id).map(|p| {
-                        meerkat_contracts::WireModelProfile {
-                            model_family: p.model_family,
-                            supports_temperature: p.supports_temperature,
-                            supports_thinking: p.supports_thinking,
-                            supports_reasoning: p.supports_reasoning,
-                            inline_video: p.inline_video,
-                            params_schema: p.params_schema,
+pub fn build_models_catalog_response(
+    config: &meerkat_core::Config,
+) -> meerkat_contracts::ModelsCatalogResponse {
+    let providers = match config.model_registry() {
+        Ok(registry) => registry
+            .provider_defaults()
+            .map(|(provider, default_model_id)| {
+                let models = registry
+                    .entries_for_provider(provider)
+                    .map(|entry| {
+                        let profile = Some(meerkat_contracts::WireModelProfile {
+                            model_family: entry.profile.model_family.clone(),
+                            supports_temperature: entry.profile.supports_temperature,
+                            supports_thinking: entry.profile.supports_thinking,
+                            supports_reasoning: entry.profile.supports_reasoning,
+                            inline_video: entry.profile.inline_video,
+                            params_schema: entry.profile.params_schema.clone(),
+                        });
+                        meerkat_contracts::CatalogModelEntry {
+                            id: entry.id.clone(),
+                            display_name: entry.display_name.clone(),
+                            tier: match entry.tier {
+                                meerkat_models::ModelTier::Recommended => {
+                                    meerkat_contracts::WireModelTier::Recommended
+                                }
+                                meerkat_models::ModelTier::Supported => {
+                                    meerkat_contracts::WireModelTier::Supported
+                                }
+                            },
+                            context_window: entry.context_window,
+                            max_output_tokens: entry.max_output_tokens,
+                            server_id: entry
+                                .self_hosted
+                                .as_ref()
+                                .map(|server| server.server_id.clone()),
+                            profile,
                         }
-                    });
-                    meerkat_contracts::CatalogModelEntry {
-                        id: entry.id.to_string(),
-                        display_name: entry.display_name.to_string(),
-                        tier: match entry.tier {
-                            meerkat_models::ModelTier::Recommended => {
-                                meerkat_contracts::WireModelTier::Recommended
-                            }
-                            meerkat_models::ModelTier::Supported => {
-                                meerkat_contracts::WireModelTier::Supported
-                            }
-                        },
-                        context_window: entry.context_window,
-                        max_output_tokens: entry.max_output_tokens,
-                        profile,
-                    }
-                })
-                .collect();
-            meerkat_contracts::ProviderCatalog {
-                provider: pd.provider.to_string(),
-                default_model_id: pd.default_model_id.to_string(),
-                models,
-            }
-        })
-        .collect();
+                    })
+                    .collect();
+                meerkat_contracts::ProviderCatalog {
+                    provider: provider.as_str().to_string(),
+                    default_model_id: default_model_id.to_string(),
+                    models,
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
     meerkat_contracts::ModelsCatalogResponse {
         contract_version: ContractVersion::CURRENT,

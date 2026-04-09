@@ -45,6 +45,7 @@ impl ProviderResolver {
             Provider::Gemini => env("RKAT_GEMINI_API_KEY")
                 .or_else(|| env("GEMINI_API_KEY"))
                 .or_else(|| env("GOOGLE_API_KEY")),
+            Provider::SelfHosted => None,
             Provider::Other => None,
         }
     }
@@ -84,6 +85,7 @@ fn map_provider(provider: Provider) -> Option<LlmProvider> {
         Provider::Anthropic => Some(LlmProvider::Anthropic),
         Provider::OpenAI => Some(LlmProvider::OpenAi),
         Provider::Gemini => Some(LlmProvider::Gemini),
+        Provider::SelfHosted => None,
         Provider::Other => None,
     }
 }

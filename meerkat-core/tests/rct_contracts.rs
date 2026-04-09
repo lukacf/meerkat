@@ -87,6 +87,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: 1234,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
         provider_params: None,
         tooling: meerkat_core::SessionTooling {
             builtins: meerkat_core::ToolCategoryOverride::Enable,
@@ -255,6 +256,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         max_tokens: 999,
         structured_output_retries: 2,
         provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
         provider_params: None,
         tooling: meerkat_core::SessionTooling::default(),
         keep_alive: false,

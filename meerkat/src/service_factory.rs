@@ -202,6 +202,10 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn sync_system_context_state(&mut self) {
+        self.agent.sync_system_context_state_to_session();
+    }
+
     fn cancel(&mut self) {
         self.agent.cancel();
     }

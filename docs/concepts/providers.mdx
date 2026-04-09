@@ -1,10 +1,10 @@
 ---
 title: "Providers"
-description: "Provider-agnostic: same tools, same sessions across Anthropic, OpenAI, and Gemini."
+description: "Provider-agnostic: same tools, same sessions across Anthropic, OpenAI, Gemini, and configured self-hosted models."
 icon: "server"
 ---
 
-Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration work identically across Anthropic, OpenAI, and Gemini. Switch providers by changing the model name -- no code changes. Set an API key for at least one.
+Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration work identically across Anthropic, OpenAI, Gemini, and configured self-hosted models. Switch providers by changing the model name. If you register a self-hosted alias such as `gemma-4-31b`, it behaves like any other model ID in the runtime.
 
 ## Provider setup
 
@@ -59,6 +59,31 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
     max_tokens_per_turn = 8192
     ```
   </Tab>
+  <Tab title="Self-hosted">
+    Configure an OpenAI-compatible local or remote server, then register aliases under `self_hosted.models`.
+
+    ```toml config.toml (active realm)
+    [self_hosted.servers.ollama]
+    transport = "openai_compatible"
+    base_url = "http://127.0.0.1:11434"
+    api_style = "chat_completions"
+
+    [self_hosted.models.gemma-4-31b]
+    server = "ollama"
+    remote_model = "gemma4:31b"
+    display_name = "Gemma 4 31B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    ```
+  </Tab>
 </Tabs>
 
 ## Environment variables
@@ -72,6 +97,8 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
 <Note>
 The `RKAT_*` variants take precedence over provider-native names, so you can run Meerkat with dedicated keys separate from other tools.
 </Note>
+
+Self-hosted servers use the configured `bearer_token_env` or `bearer_token` on each server definition instead of the shared provider env vars above.
 
 ## SDK feature flags
 
@@ -135,7 +162,7 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
 
 ## Model catalog
 
-The `meerkat-models` crate maintains a curated catalog of all supported models with their capabilities, context windows, output limits, and provider profile rules. This catalog is the single source of truth for model defaults, allowlists, and capability detection.
+The `meerkat-models` crate maintains the curated built-in catalog. At runtime, Meerkat merges that catalog with any configured self-hosted aliases into one effective model registry used for capability detection, provider resolution, and catalog responses.
 
 Query the catalog programmatically from any surface:
 
@@ -143,6 +170,10 @@ Query the catalog programmatically from any surface:
 - **RPC**: `models/catalog`
 - **REST**: `GET /models/catalog`
 - **MCP**: `meerkat_models_catalog`
+
+Configured self-hosted aliases appear under the `self_hosted` provider group and include their backing `server_id`.
+
+For Gemma 4 specifically, prefer `chat_completions` as the default OpenAI-compatible interface. It is the clearest common path for tool calling across Ollama, LM Studio, and vLLM, while reasoning-trace semantics still vary by server.
 
 ## Auto-detection
 
@@ -152,4 +183,10 @@ The provider is automatically inferred from the model name:
 - `gpt-*`, `o1-*`, `o3-*`, `chatgpt-*` models use OpenAI
 - `gemini-*` models use Gemini
 
-You can override this with `--provider` on the CLI or `provider` in API requests.
+Configured self-hosted aliases are resolved by exact model ID match before prefix inference. That means an alias such as `gemma-4-31b` works without `--provider`.
+
+You can still override this with `--provider` on the CLI or `provider` in API requests.
+
+## Recommended next step
+
+Follow [Self-hosted Gemma 4](/guides/self-hosted-gemma4) for complete Ollama, LM Studio, and vLLM setup recipes.

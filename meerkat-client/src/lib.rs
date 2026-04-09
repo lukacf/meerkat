@@ -25,6 +25,8 @@ pub mod anthropic;
 
 #[cfg(feature = "openai")]
 pub mod openai;
+#[cfg(feature = "openai")]
+pub mod openai_compatible;
 
 #[cfg(feature = "gemini")]
 pub mod gemini;
@@ -44,6 +46,8 @@ pub use anthropic::AnthropicClient;
 
 #[cfg(feature = "openai")]
 pub use openai::OpenAiClient;
+#[cfg(feature = "openai")]
+pub use openai_compatible::{OpenAiCompatibleClient, OpenAiCompatibleMode};
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiClient;

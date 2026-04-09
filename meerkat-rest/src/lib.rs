@@ -2023,9 +2023,12 @@ async fn get_capabilities(
     Json(meerkat::surface::build_capabilities_response(&config))
 }
 
-/// Get the compiled-in model catalog.
-async fn get_models_catalog() -> Json<meerkat_contracts::ModelsCatalogResponse> {
-    Json(meerkat::surface::build_models_catalog_response())
+/// Get the effective model catalog for the current config.
+async fn get_models_catalog(
+    State(state): State<AppState>,
+) -> Json<meerkat_contracts::ModelsCatalogResponse> {
+    let config = state.config_store.get().await.unwrap_or_default();
+    Json(meerkat::surface::build_models_catalog_response(&config))
 }
 
 /// Get the current config
@@ -3404,6 +3407,7 @@ async fn continue_session_inner(
                     model: state.default_model.to_string(),
                     provider: meerkat_core::Provider::infer_from_model(&state.default_model)
                         .unwrap_or(meerkat_core::Provider::Other),
+                    self_hosted_server_id: None,
                     provider_params: None,
                 })
             });

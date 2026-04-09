@@ -1307,6 +1307,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                     .await
                     .map_err(SessionControlError::Session)?;
 
+                let _ = self
+                    .inner
+                    .enqueue_system_context_append(id, req.clone(), accepted_at)
+                    .await;
+
                 let commit_result = {
                     let mut guard = match state_arc.lock() {
                         Ok(guard) => guard,
@@ -1330,6 +1335,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 
                 if let Some(live_status) = commit_result {
                     debug_assert_eq!(live_status, status);
+                    let _ = self.inner.sync_system_context_state(id).await;
                     drop(gate_guard);
                     return Ok(AppendSystemContextResult { status });
                 }

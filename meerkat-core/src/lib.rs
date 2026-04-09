@@ -40,6 +40,7 @@ pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
+pub mod model_registry;
 pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_meta;
@@ -86,6 +87,7 @@ pub use compact::{
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
+pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
 pub use peer_meta::PeerMeta;
 
 pub use completion_feed::{
@@ -96,8 +98,9 @@ pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
     HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
-    PlainEventSource, ProviderConfig, ProviderSettings, RetryConfig, ShellDefaults, StorageConfig,
-    StoreConfig, ToolsConfig,
+    PlainEventSource, ProviderConfig, ProviderSettings, RetryConfig, SelfHostedApiStyle,
+    SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
+    ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{

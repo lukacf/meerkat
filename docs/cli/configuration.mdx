@@ -49,6 +49,47 @@ Compatibility files still exist:
 
 These are useful for templates (`rkat init`) and compatibility workflows, but realm config is the runtime source of truth for CLI/RPC/REST/MCP surfaces.
 
+## Self-hosted model config
+
+Self-hosted models are defined directly in realm config:
+
+```toml
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+bearer_token_env = "LOCAL_LLM_TOKEN"
+
+[self_hosted.models.gemma-4-31b]
+server = "local"
+remote_model = "gemma4:31b"
+display_name = "Gemma 4 31B"
+family = "gemma-4"
+tier = "supported"
+context_window = 256000
+max_output_tokens = 8192
+vision = true
+image_tool_results = true
+inline_video = false
+supports_temperature = true
+supports_thinking = true
+supports_reasoning = true
+call_timeout_secs = 600
+```
+
+`transport` is currently `openai_compatible` only.
+
+`api_style` chooses the upstream API shape:
+
+- `responses` for Ollama and LM Studio style servers
+- `chat_completions` for vLLM style deployments
+
+For Gemma 4, prefer `chat_completions` unless you have verified a server-specific `responses` workflow you want to use.
+
+`supports_thinking` and `supports_reasoning` describe the behavior you intend Meerkat to expose through that configured transport. Gemma 4 models themselves are reasoning-capable, but some servers expose those capabilities with provider-specific conventions.
+
+Use `bearer_token_env` instead of `bearer_token` whenever possible.
+
 ## Session storage layout
 
 Realm storage lives under platform data dir:

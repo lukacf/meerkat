@@ -1612,7 +1612,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models { command } => match command {
-            ModelsCommands::Catalog => handle_models_catalog().await,
+            ModelsCommands::Catalog => handle_models_catalog(&cli_scope).await,
         },
         Commands::Doctor => handle_doctor(&cli_scope).await,
     };
@@ -2075,8 +2075,9 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_models_catalog() -> anyhow::Result<()> {
-    let response = meerkat::surface::build_models_catalog_response();
+async fn handle_models_catalog(scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (config, _) = load_config(scope).await?;
+    let response = meerkat::surface::build_models_catalog_response(&config);
     println!(
         "{}",
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
@@ -2086,6 +2087,7 @@ async fn handle_models_catalog() -> anyhow::Result<()> {
 
 async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     let mut ok = true;
+    let (config, _) = load_config(scope).await?;
     let config_path =
         meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
             .config_path;
@@ -2110,6 +2112,87 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             println!("ok\tprovider\t{provider} via {env_key}");
         } else {
             println!("warn\tprovider\t{provider} missing {env_key}");
+        }
+    }
+
+    if config.self_hosted.servers.is_empty() {
+        println!("ok\tself_hosted\tno self-hosted servers configured");
+    } else {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build doctor HTTP client: {e}"))?;
+
+        for (server_id, server) in &config.self_hosted.servers {
+            let base_url = meerkat_core::model_registry::normalize_base_url(&server.base_url);
+            let models_url = format!("{base_url}/models");
+            let mut request = http.get(&models_url);
+
+            if let Some(token) = server.bearer_token.clone().or_else(|| {
+                server
+                    .bearer_token_env
+                    .as_deref()
+                    .and_then(|env_key| std::env::var(env_key).ok())
+            }) {
+                request = request.bearer_auth(token);
+            }
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    println!("ok\tself_hosted\tserver {server_id} reachable at {models_url}");
+
+                    let configured_models: Vec<_> = config
+                        .self_hosted
+                        .models
+                        .iter()
+                        .filter(|(_, model)| model.server == *server_id)
+                        .map(|(alias, model)| (alias.as_str(), model.remote_model.as_str()))
+                        .collect();
+
+                    match response.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            let available: std::collections::HashSet<String> = json["data"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|entry| entry["id"].as_str().map(ToString::to_string))
+                                .collect();
+                            for (alias, remote_model) in configured_models {
+                                if available.is_empty() {
+                                    break;
+                                }
+                                if available.contains(remote_model) {
+                                    println!(
+                                        "ok\tself_hosted\talias {alias} -> {remote_model} listed by {server_id}"
+                                    );
+                                } else {
+                                    println!(
+                                        "warn\tself_hosted\talias {alias} -> {remote_model} not listed by {server_id}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            println!(
+                                "warn\tself_hosted\tserver {server_id} did not return a parseable /models payload"
+                            );
+                        }
+                    }
+                }
+                Ok(response) => {
+                    ok = false;
+                    println!(
+                        "warn\tself_hosted\tserver {server_id} returned {} from {models_url}",
+                        response.status()
+                    );
+                }
+                Err(err) => {
+                    ok = false;
+                    println!(
+                        "warn\tself_hosted\tserver {server_id} unreachable at {models_url}: {err}"
+                    );
+                }
+            }
         }
     }
 
@@ -7135,6 +7218,8 @@ pub enum Provider {
     Openai,
     /// Google Gemini models
     Gemini,
+    /// Self-hosted models registered in config
+    SelfHosted,
 }
 
 impl Provider {
@@ -7171,6 +7256,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Openai => "openai",
             Provider::Gemini => "gemini",
+            Provider::SelfHosted => "self_hosted",
         }
     }
 
@@ -7180,6 +7266,7 @@ impl Provider {
             Provider::Anthropic => meerkat_core::Provider::Anthropic,
             Provider::Openai => meerkat_core::Provider::OpenAI,
             Provider::Gemini => meerkat_core::Provider::Gemini,
+            Provider::SelfHosted => meerkat_core::Provider::SelfHosted,
         }
     }
 
@@ -7189,6 +7276,7 @@ impl Provider {
             meerkat_core::Provider::Anthropic => Some(Provider::Anthropic),
             meerkat_core::Provider::OpenAI => Some(Provider::Openai),
             meerkat_core::Provider::Gemini => Some(Provider::Gemini),
+            meerkat_core::Provider::SelfHosted => Some(Provider::SelfHosted),
             meerkat_core::Provider::Other => None,
         }
     }

@@ -48,6 +48,9 @@ pub struct CatalogModelEntry {
     /// Maximum output tokens per response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Backing self-hosted server ID for configured aliases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
     /// Model profile with capability flags and parameter schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<WireModelProfile>,

@@ -1,0 +1,262 @@
+---
+title: "Self-hosted Gemma 4"
+description: "Configure Ollama, LM Studio, or vLLM so Gemma 4 aliases work in Meerkat like built-in models."
+icon: "microchip"
+---
+
+Meerkat can now treat configured self-hosted models as first-class model IDs. Once you register an alias such as `gemma-4-31b`, you can use it anywhere you would use `gpt-5.4` or `gemini-3.1-pro-preview`.
+
+This guide uses the four Gemma 4 aliases we recommend for Meerkat:
+
+- `gemma-4-e2b`
+- `gemma-4-e4b`
+- `gemma-4-26b-a4b`
+- `gemma-4-31b`
+
+Gemma 4 is a reasoning-capable family with native `system` role support and native function calling. All four variants support text and image input, while `E2B` and `E4B` also expose native audio support in the model capability tables. For Meerkat, the safest OpenAI-compatible serving default today is `chat_completions`, because that is the path most clearly documented for Gemma 4 tool calling across the serving stacks below.
+
+<Warning>
+Treat `supports_thinking` and `supports_reasoning` as transport-facing settings, not raw model facts. Gemma 4 itself is reasoning-capable, but normalized reasoning controls and trace streaming still vary by serving stack.
+</Warning>
+
+## What you configure
+
+Every self-hosted setup has two pieces:
+
+1. A server definition under `self_hosted.servers.<server_id>`
+2. One or more model aliases under `self_hosted.models.<alias>`
+
+The alias is the model name users type. The `remote_model` is whatever your serving stack exposes upstream.
+
+<Note>
+Prefer `bearer_token_env` over `bearer_token` so secrets stay out of checked-in config files.
+</Note>
+
+## Common Meerkat config
+
+This is the shared shape Meerkat expects regardless of serving stack:
+
+```toml config.toml
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+bearer_token_env = "LOCAL_LLM_TOKEN"
+
+[self_hosted.models.gemma-4-31b]
+server = "local"
+remote_model = "gemma4:31b"
+display_name = "Gemma 4 31B"
+family = "gemma-4"
+tier = "supported"
+context_window = 256000
+max_output_tokens = 8192
+vision = true
+image_tool_results = true
+inline_video = false
+supports_temperature = true
+supports_thinking = true
+supports_reasoning = true
+call_timeout_secs = 600
+```
+
+## Quick use
+
+Once the alias is present in your active realm config:
+
+```bash
+rkat run -m gemma-4-31b "Summarize the architecture of this repository"
+rkat resume last -m gemma-4-e4b "Keep going, but faster"
+rkat models catalog
+rkat doctor
+```
+
+## Ollama
+
+Use Ollama when the model runs on the same machine as Meerkat and you want the lightest setup.
+
+<Steps>
+  <Step title="Serve Gemma 4">
+    Pull the model you want and make sure Ollama is running.
+
+    ```bash
+    ollama pull gemma4:31b
+    ollama list
+    ```
+  </Step>
+  <Step title="Register the server">
+    Prefer `chat_completions` mode for Gemma 4 agent flows.
+
+    ```toml config.toml
+    [self_hosted.servers.ollama]
+    transport = "openai_compatible"
+    base_url = "http://127.0.0.1:11434"
+    api_style = "chat_completions"
+    ```
+  </Step>
+  <Step title="Add aliases">
+    Map friendly Meerkat aliases to Ollama model IDs.
+
+    ```toml config.toml
+    [self_hosted.models.gemma-4-e2b]
+    server = "ollama"
+    remote_model = "gemma4:e2b"
+    display_name = "Gemma 4 E2B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 128000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+
+    [self_hosted.models.gemma-4-31b]
+    server = "ollama"
+    remote_model = "gemma4:31b"
+    display_name = "Gemma 4 31B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+    ```
+  </Step>
+</Steps>
+
+## LM Studio
+
+Use LM Studio when you want a desktop app with a local OpenAI-compatible server.
+
+<Steps>
+  <Step title="Start the local server">
+    Load your Gemma 4 model in LM Studio, then start the local server.
+  </Step>
+  <Step title="Register LM Studio">
+    Prefer `chat_completions` for Gemma 4 tool use and structured output.
+
+    ```toml config.toml
+    [self_hosted.servers.lmstudio]
+    transport = "openai_compatible"
+    base_url = "http://127.0.0.1:1234"
+    api_style = "chat_completions"
+    ```
+  </Step>
+  <Step title="Alias the served model">
+    Use the model name LM Studio exposes in its `/v1/models` output.
+
+    ```toml config.toml
+    [self_hosted.models.gemma-4-e4b]
+    server = "lmstudio"
+    remote_model = "google/gemma-4-e4b"
+    display_name = "Gemma 4 E4B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 128000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    ```
+  </Step>
+</Steps>
+
+## vLLM
+
+Use vLLM when you want a self-managed server and the most control over deployment.
+
+<Steps>
+  <Step title="Launch vLLM">
+    Start vLLM with the Gemma 4 model you want to expose.
+  </Step>
+  <Step title="Register the server">
+    Use `chat_completions` mode for vLLM.
+
+    ```toml config.toml
+    [self_hosted.servers.vllm]
+    transport = "openai_compatible"
+    base_url = "http://my-gpu-box:8000"
+    api_style = "chat_completions"
+    bearer_token_env = "VLLM_API_TOKEN"
+    ```
+  </Step>
+  <Step title="Add remote aliases">
+    Point aliases at the exact model name your vLLM endpoint exposes.
+
+    ```toml config.toml
+    [self_hosted.models.gemma-4-26b-a4b]
+    server = "vllm"
+    remote_model = "google/gemma-4-26b-a4b"
+    display_name = "Gemma 4 26B A4B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+
+    [self_hosted.models.gemma-4-31b]
+    server = "vllm"
+    remote_model = "google/gemma-4-31b"
+    display_name = "Gemma 4 31B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+    ```
+  </Step>
+</Steps>
+
+## Reasoning and transport notes
+
+- `chat_completions` is the recommended Gemma 4 default for Ollama, LM Studio, and vLLM.
+- Text, image, and tool-calling requests fit well through OpenAI-compatible APIs today.
+- Reasoning traces and reasoning controls are less uniform. Some servers expose Gemma 4 thinking through Gemma-specific mechanisms rather than OpenAI-native reasoning events, so validate the exact behavior you need before depending on it in production.
+- If you only need chat, coding, tools, and image input, OpenAI-compatible serving is a good fit for Gemma 4.
+
+## Choosing a Gemma 4 size
+
+| Alias | Good default use |
+|-------|-------------------|
+| `gemma-4-e2b` | Lowest-footprint local experiments |
+| `gemma-4-e4b` | Fast local iteration with a bit more headroom |
+| `gemma-4-26b-a4b` | Stronger quality on a serious local or remote GPU setup |
+| `gemma-4-31b` | Best quality of the four, usually best on a dedicated server |
+
+`E2B` and `E4B` are also the sizes with native audio support in the upstream capability tables; `26B A4B` and `31B` are text+image models.
+
+## Validation checklist
+
+- `rkat models catalog` shows a `self_hosted` provider group and your aliases
+- `rkat doctor` reports the server as reachable
+- `rkat run -m gemma-4-31b "say hello"` works without `--provider`
+- The alias you configured matches the upstream `remote_model` shown by `/v1/models`
+
+## See also
+
+- [Providers](/concepts/providers)
+- [CLI configuration](/cli/configuration)
+- [CLI commands](/cli/commands)

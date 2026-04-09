@@ -42,6 +42,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/self-hosted-gemma4",
               "guides/structured-output",
               "guides/memory",
               "guides/hooks",

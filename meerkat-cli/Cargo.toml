@@ -67,6 +67,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
+reqwest = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule"]

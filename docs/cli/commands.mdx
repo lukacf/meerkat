@@ -50,9 +50,9 @@ rkat [--realm <id>] [--isolated] [--instance <id>] \
 | `rkat mcp ...` | Manage local/project MCP server config |
 | `rkat mob ...` | Pack, inspect, validate, deploy, and build mob artifacts |
 | `rkat skills ...` | Inspect available skills |
-| `rkat models catalog` | List available models with provider profiles |
+| `rkat models catalog` | List built-in models plus configured self-hosted aliases |
 | `rkat capabilities` | Show runtime capabilities |
-| `rkat doctor` | Check local setup and common prerequisites |
+| `rkat doctor` | Check local setup, provider keys, and self-hosted server reachability |
 | `rkat init` | Create project config from the global template |
 
 ## Prompt-first usage
@@ -76,7 +76,7 @@ rkat --yolo --param temperature=0.2 "take the gloves off"
 ### Common run flags
 
 - `-m, --model <MODEL>`
-- `-p, --provider <anthropic|openai|gemini>`
+- `-p, --provider <anthropic|openai|gemini|self_hosted>`
 - `-o, --output <text|json>`
 - `--json`
 - `-s, --stream`
@@ -181,6 +181,12 @@ tail -f app.log | rkat resume last --stdin lines "watch for new incidents"
 
 Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 
+Self-hosted aliases work the same way:
+
+```bash
+rkat resume last -m gemma-4-31b "Continue with the local model"
+```
+
 ## continue
 
 ```bash
@@ -215,7 +221,28 @@ Examples:
 rkat config get --format toml
 rkat config set ./.rkat/config.toml
 rkat config patch '{"agent":{"model":"gpt-5.2"}}'
+rkat config patch '{"self_hosted":{"servers":{"ollama":{"transport":"openai_compatible","base_url":"http://127.0.0.1:11434","api_style":"chat_completions"}}}}'
 ```
+
+## models catalog
+
+```bash
+rkat models catalog
+```
+
+This prints the effective runtime model registry for the active realm, including configured `self_hosted` aliases and their `server_id`.
+
+## doctor
+
+```bash
+rkat doctor
+```
+
+For self-hosted setups, `doctor` checks the normalized `/v1/models` endpoint for each configured server and warns when configured aliases are missing from the returned model list.
+
+For Gemma 4, prefer `chat_completions` in your server config unless you have validated a specific `responses` path for your serving stack.
+
+Follow [Self-hosted Gemma 4](/guides/self-hosted-gemma4) for complete examples.
 
 ## mcp
 

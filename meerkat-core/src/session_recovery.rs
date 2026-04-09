@@ -294,6 +294,7 @@ mod tests {
                 max_tokens: 4096,
                 structured_output_retries: 3,
                 provider: Provider::Anthropic,
+                self_hosted_server_id: None,
                 provider_params: Some(json!({ "temperature": 0.1 })),
                 tooling: SessionTooling {
                     builtins: ToolCategoryOverride::Disable,

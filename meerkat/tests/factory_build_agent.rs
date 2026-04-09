@@ -17,9 +17,10 @@ use meerkat_client::{LlmClient, TestClient};
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
-    AgentToolDispatcher, Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata,
-    SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef, ToolDispatchOutcome, ToolError,
-    UserMessage,
+    AgentToolDispatcher, Config, Provider, ProviderConfig, SelfHostedApiStyle,
+    SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, Session, SessionId,
+    SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef,
+    ToolDispatchOutcome, ToolError, UserMessage,
 };
 use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
@@ -347,6 +348,58 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.comms_name.is_none());
 }
 
+/// 4b. Configured self-hosted aliases resolve as first-class model IDs.
+#[tokio::test]
+async fn build_agent_resolves_self_hosted_alias_from_registry() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.self_hosted.servers.insert(
+        "local".to_string(),
+        SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::Responses,
+            bearer_token: None,
+            bearer_token_env: None,
+        },
+    );
+    config.self_hosted.models.insert(
+        "gemma-4-31b".to_string(),
+        SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "gemma4:31b".to_string(),
+            display_name: "Gemma 4 31B".to_string(),
+            family: "gemma-4".to_string(),
+            tier: meerkat_models::ModelTier::Supported,
+            context_window: Some(256_000),
+            max_output_tokens: Some(8_192),
+            vision: true,
+            image_tool_results: true,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            call_timeout_secs: Some(600),
+        },
+    );
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("gemma-4-31b")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+
+    assert_eq!(metadata.model, "gemma-4-31b");
+    assert_eq!(metadata.provider, Provider::SelfHosted);
+    assert_eq!(metadata.self_hosted_server_id.as_deref(), Some("local"));
+}
+
 /// 5. `build_agent` with `enable_builtins=true` produces agent with builtin tools.
 #[tokio::test]
 async fn build_agent_with_builtins_has_tools() {
@@ -537,6 +590,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         provider_params: Some(json!({
             "reasoning": { "budget_tokens": 2048 }
         })),
+        self_hosted_server_id: None,
         tooling: SessionTooling {
             builtins: ToolCategoryOverride::Enable,
             shell: ToolCategoryOverride::Disable,
@@ -616,6 +670,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             provider_params: Some(json!({
                 "reasoning": { "budget_tokens": 2048 }
             })),
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Disable,
                 shell: ToolCategoryOverride::Disable,
@@ -692,6 +747,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Disable,
@@ -743,6 +799,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Inherit,
@@ -794,6 +851,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Disable,
@@ -870,6 +928,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Disable,
@@ -1191,6 +1250,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Disable,
                 shell: ToolCategoryOverride::Disable,
@@ -1331,6 +1391,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
@@ -1381,6 +1442,7 @@ async fn resume_with_disable_mob_stays_disabled() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
@@ -1429,6 +1491,7 @@ async fn resume_with_enable_mob_stays_enabled() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
@@ -1499,6 +1562,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
@@ -1572,6 +1636,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,
@@ -1663,6 +1728,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
             structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
+            self_hosted_server_id: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,
                 shell: ToolCategoryOverride::Enable,

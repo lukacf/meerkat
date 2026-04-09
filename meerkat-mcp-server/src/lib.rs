@@ -1386,7 +1386,8 @@ pub async fn handle_tools_call_with_notifier(
             .await
             .map(wrap_tool_payload)
             .map_err(ToolCallError::internal),
-        "meerkat_models_catalog" => handle_meerkat_models_catalog()
+        "meerkat_models_catalog" => handle_meerkat_models_catalog(state)
+            .await
             .map(wrap_tool_payload)
             .map_err(ToolCallError::internal),
         "meerkat_skills" => {
@@ -1611,8 +1612,14 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 
-fn handle_meerkat_models_catalog() -> Result<Value, String> {
-    let response = meerkat::surface::build_models_catalog_response();
+async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value, String> {
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_default();
+    let response = meerkat::surface::build_models_catalog_response(&config);
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 

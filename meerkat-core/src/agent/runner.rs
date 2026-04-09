@@ -232,7 +232,8 @@ where
     }
 
     /// Synchronize the shared system-context state into the in-memory session metadata.
-    pub(crate) fn sync_system_context_state_to_session(&mut self) {
+    #[doc(hidden)]
+    pub fn sync_system_context_state_to_session(&mut self) {
         let state = match self.system_context_state.lock() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => {

@@ -3,13 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported LLM providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,
     OpenAI,
     Gemini,
+    SelfHosted,
     Other,
 }
 
@@ -20,6 +21,7 @@ impl Provider {
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAI,
             "gemini" => Self::Gemini,
+            "self_hosted" => Self::SelfHosted,
             _ => Self::Other,
         }
     }
@@ -31,6 +33,7 @@ impl Provider {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::OpenAI),
             "gemini" => Some(Self::Gemini),
+            "self_hosted" => Some(Self::SelfHosted),
             _ => None,
         }
     }
@@ -64,11 +67,16 @@ impl Provider {
             Self::Anthropic => "anthropic",
             Self::OpenAI => "openai",
             Self::Gemini => "gemini",
+            Self::SelfHosted => "self_hosted",
             Self::Other => "other",
         }
     }
 
     /// All concrete (non-Other) providers.
-    pub const ALL_CONCRETE: &'static [Provider] =
-        &[Provider::Anthropic, Provider::OpenAI, Provider::Gemini];
+    pub const ALL_CONCRETE: &'static [Provider] = &[
+        Provider::Anthropic,
+        Provider::OpenAI,
+        Provider::Gemini,
+        Provider::SelfHosted,
+    ];
 }

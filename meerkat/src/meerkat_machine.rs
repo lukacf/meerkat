@@ -173,6 +173,25 @@ pub(crate) enum MeerkatMachineInvariantViolation {
         turn_run_id: Option<meerkat_core::lifecycle::RunId>,
     },
     WaitingForOpsWithoutPendingOperations,
+    WaitingForOpsWithoutToolCalls,
+    PendingOperationsOutsideWaitingPhase {
+        turn_phase: TurnPhase,
+        pending_operation_count: usize,
+    },
+    BarrierFlagWithoutOperations,
+    BarrierOperationsWithoutFlag {
+        barrier_operation_count: usize,
+    },
+    UnsatisfiedBarrierWithoutBarrierOps,
+    PendingOperationUnknown {
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    BarrierOperationUnknown {
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    BarrierOperationNotPending {
+        operation_id: meerkat_core::ops::OperationId,
+    },
     PeerAuthorityQueueMismatch {
         authority_phase: PeerIngressAuthorityPhase,
         submission_queue_len: usize,
@@ -778,6 +797,71 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         {
             violations
                 .push(MeerkatMachineInvariantViolation::WaitingForOpsWithoutPendingOperations);
+        }
+
+        if turn.turn_phase == TurnPhase::WaitingForOps && turn.tool_calls_pending == 0 {
+            violations.push(MeerkatMachineInvariantViolation::WaitingForOpsWithoutToolCalls);
+        }
+
+        if turn.turn_phase != TurnPhase::WaitingForOps
+            && let Some(pending_operation_ids) = &turn.pending_operation_ids
+            && !pending_operation_ids.is_empty()
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::PendingOperationsOutsideWaitingPhase {
+                    turn_phase: turn.turn_phase,
+                    pending_operation_count: pending_operation_ids.len(),
+                },
+            );
+        }
+
+        if turn.has_barrier_ops && turn.barrier_operation_ids.is_empty() {
+            violations.push(MeerkatMachineInvariantViolation::BarrierFlagWithoutOperations);
+        }
+        if !turn.has_barrier_ops && !turn.barrier_operation_ids.is_empty() {
+            violations.push(
+                MeerkatMachineInvariantViolation::BarrierOperationsWithoutFlag {
+                    barrier_operation_count: turn.barrier_operation_ids.len(),
+                },
+            );
+        }
+        if !turn.has_barrier_ops && !turn.barrier_satisfied {
+            violations.push(MeerkatMachineInvariantViolation::UnsatisfiedBarrierWithoutBarrierOps);
+        }
+
+        let ops_operation_ids: HashSet<_> = ops
+            .operations
+            .iter()
+            .map(|operation| operation.id.clone())
+            .collect();
+        let pending_operation_id_set: HashSet<_> = turn
+            .pending_operation_ids
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        for operation_id in &pending_operation_id_set {
+            if !ops_operation_ids.contains(operation_id) {
+                violations.push(MeerkatMachineInvariantViolation::PendingOperationUnknown {
+                    operation_id: operation_id.clone(),
+                });
+            }
+        }
+
+        for operation_id in &turn.barrier_operation_ids {
+            if !ops_operation_ids.contains(operation_id) {
+                violations.push(MeerkatMachineInvariantViolation::BarrierOperationUnknown {
+                    operation_id: operation_id.clone(),
+                });
+            }
+            if !pending_operation_id_set.contains(operation_id) {
+                violations.push(
+                    MeerkatMachineInvariantViolation::BarrierOperationNotPending {
+                        operation_id: operation_id.clone(),
+                    },
+                );
+            }
         }
     }
 
@@ -2469,6 +2553,149 @@ mod tests {
                 visible: true,
                 base_state: ExternalToolSurfaceBaseState::Removed,
             } if surface_id == "invalid-visible-removed-surface"
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let base_snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let pending_only_id = OperationId::new();
+        let barrier_only_id = OperationId::new();
+        let mut waiting_snapshot = base_snapshot.clone();
+        let turn = waiting_snapshot
+            .turn
+            .as_mut()
+            .ok_or_else(|| "live session should expose execution snapshot".to_string())?;
+        turn.turn_phase = TurnPhase::WaitingForOps;
+        turn.tool_calls_pending = 0;
+        turn.pending_operation_ids = Some(vec![pending_only_id.clone()]);
+        turn.barrier_operation_ids = vec![barrier_only_id.clone()];
+        turn.has_barrier_ops = false;
+        turn.barrier_satisfied = false;
+        waiting_snapshot.spine.ops.operations.clear();
+        waiting_snapshot.spine.ops.operation_count = 0;
+        waiting_snapshot.spine.ops.active_count = 0;
+
+        let waiting_violations = validate_meerkat_machine_snapshot(&waiting_snapshot);
+
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitingForOpsWithoutToolCalls
+        )));
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::BarrierOperationsWithoutFlag {
+                barrier_operation_count: 1,
+            }
+        )));
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::UnsatisfiedBarrierWithoutBarrierOps
+        )));
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::PendingOperationUnknown { operation_id }
+                if operation_id == &pending_only_id
+        )));
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::BarrierOperationUnknown { operation_id }
+                if operation_id == &barrier_only_id
+        )));
+        assert!(waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::BarrierOperationNotPending { operation_id }
+                if operation_id == &barrier_only_id
+        )));
+
+        let mut outside_waiting_snapshot = base_snapshot.clone();
+        let known_operation_id = OperationId::new();
+        let turn = outside_waiting_snapshot
+            .turn
+            .as_mut()
+            .ok_or_else(|| "live session should expose execution snapshot".to_string())?;
+        turn.turn_phase = TurnPhase::CallingLlm;
+        turn.tool_calls_pending = 1;
+        turn.pending_operation_ids = Some(vec![known_operation_id.clone()]);
+        turn.barrier_operation_ids.clear();
+        turn.has_barrier_ops = false;
+        turn.barrier_satisfied = true;
+        outside_waiting_snapshot.spine.ops.operations = vec![OperationLifecycleSnapshot {
+            started_at_ms: Some(1),
+            ..invalid_operation_snapshot(
+                known_operation_id.clone(),
+                OperationKind::BackgroundToolOp,
+                OperationStatus::Running,
+            )
+        }];
+        outside_waiting_snapshot.spine.ops.operation_count = 1;
+        outside_waiting_snapshot.spine.ops.active_count = 1;
+
+        let outside_waiting_violations =
+            validate_meerkat_machine_snapshot(&outside_waiting_snapshot);
+
+        assert!(outside_waiting_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::PendingOperationsOutsideWaitingPhase {
+                turn_phase: TurnPhase::CallingLlm,
+                pending_operation_count: 1,
+            }
+        )));
+
+        let mut missing_barrier_snapshot = base_snapshot;
+        let turn = missing_barrier_snapshot
+            .turn
+            .as_mut()
+            .ok_or_else(|| "live session should expose execution snapshot".to_string())?;
+        turn.turn_phase = TurnPhase::WaitingForOps;
+        turn.tool_calls_pending = 1;
+        turn.pending_operation_ids = Some(vec![known_operation_id]);
+        turn.barrier_operation_ids.clear();
+        turn.has_barrier_ops = true;
+        turn.barrier_satisfied = false;
+        missing_barrier_snapshot.spine.ops.operations = vec![OperationLifecycleSnapshot {
+            started_at_ms: Some(1),
+            ..invalid_operation_snapshot(
+                OperationId::new(),
+                OperationKind::BackgroundToolOp,
+                OperationStatus::Running,
+            )
+        }];
+        missing_barrier_snapshot.spine.ops.operation_count = 1;
+        missing_barrier_snapshot.spine.ops.active_count = 1;
+
+        let missing_barrier_violations =
+            validate_meerkat_machine_snapshot(&missing_barrier_snapshot);
+
+        assert!(missing_barrier_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::BarrierFlagWithoutOperations
         )));
 
         Ok(())

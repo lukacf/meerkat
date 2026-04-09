@@ -765,7 +765,7 @@ pub struct SessionMetadata {
     /// Optional process/agent instance identifier within a realm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
-    /// Backend pinned by the realm manifest (e.g. "redb", "jsonl").
+    /// Backend pinned by the realm manifest (e.g. "sqlite", "jsonl").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     /// Config generation used when this session was created/resumed.

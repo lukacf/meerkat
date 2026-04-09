@@ -60,10 +60,10 @@ fn renders_route_aliases_and_literals_in_compositions() {
         render_composition_mapping_coverage(&peer_runtime_bundle_composition(), &coverage);
 
     assert!(rendered.contains(
-        "peer_candidate_enters_runtime_admission == peer_comms.SubmitPeerInputCandidate -> runtime_control.SubmitWork [Immediate]"
+        "peer_candidate_enters_runtime_admission == peer_comms.EnqueueClassifiedEntry -> runtime_control.SubmitWork [Immediate]"
     ));
     assert!(rendered.contains("raw_item_id ~> work_id"));
-    assert!(rendered.contains("handling_mode := \"Steer\""));
+    assert!(rendered.contains("normalized_handling_mode -> handling_mode"));
     assert!(mapping.contains("### Code Anchors"));
     assert!(mapping.contains("peer-message-admission"));
 }

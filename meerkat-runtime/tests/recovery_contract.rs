@@ -24,8 +24,6 @@ use meerkat_store::MemoryBlobStore;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-#[cfg(feature = "redb-store")]
-use meerkat_runtime::store::RedbRuntimeStore;
 #[cfg(feature = "sqlite-store")]
 use meerkat_runtime::store::SqliteRuntimeStore;
 
@@ -50,19 +48,6 @@ fn supported_store_harnesses() -> Vec<StoreHarness> {
         let store = Arc::new(SqliteRuntimeStore::new(&db_path).unwrap());
         harnesses.push(StoreHarness {
             name: "sqlite",
-            store,
-            _tempdir: Some(tempdir),
-        });
-    }
-
-    #[cfg(feature = "redb-store")]
-    {
-        let tempdir = TempDir::new().unwrap();
-        let db_path = tempdir.path().join("runtime.redb");
-        let db = Arc::new(redb::Database::create(&db_path).unwrap());
-        let store = Arc::new(RedbRuntimeStore::new(db).unwrap());
-        harnesses.push(StoreHarness {
-            name: "redb",
             store,
             _tempdir: Some(tempdir),
         });

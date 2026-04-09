@@ -8,7 +8,7 @@ requires_capabilities: [session_store]
 
 ## Session Persistence
 
-Sessions are persisted via the event store (redb backend). The `.rkat/sessions/`
+Sessions are persisted via the realm-backed durable store. The `.rkat/sessions/`
 directory contains derived projection files — NOT canonical state. Deleting
 them and replaying from the event store produces identical content.
 

@@ -3,7 +3,7 @@
 //! Each session is stored as a single file with the session as JSON.
 
 use crate::error::into_session_store_error;
-use crate::index::RedbSessionIndex;
+use crate::index::SqliteSessionIndex;
 use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
@@ -19,7 +19,7 @@ pub struct JsonlStore {
     dir: PathBuf,
     /// Whether to use pretty-printed JSON (default: true for readability)
     pretty_print: bool,
-    index: RwLock<Option<Arc<RedbSessionIndex>>>,
+    index: RwLock<Option<Arc<SqliteSessionIndex>>>,
 }
 
 /// Builder for configuring JsonlStore
@@ -78,7 +78,7 @@ impl JsonlStore {
     }
 
     fn index_path(&self) -> PathBuf {
-        self.dir.join("session_index.redb")
+        self.dir.join("session_index.sqlite3")
     }
 
     async fn read_all_metadata_sidecars(&self) -> Result<Vec<SessionMeta>, StoreError> {
@@ -110,14 +110,14 @@ impl JsonlStore {
         Ok(sessions)
     }
 
-    async fn open_index(&self) -> Result<Arc<RedbSessionIndex>, StoreError> {
+    async fn open_index(&self) -> Result<Arc<SqliteSessionIndex>, StoreError> {
         self.init().await?;
 
         let index_path = self.index_path();
 
         let open_attempt = {
             let index_path = index_path.clone();
-            spawn_blocking(move || RedbSessionIndex::open(index_path)).await
+            spawn_blocking(move || SqliteSessionIndex::open(index_path)).await
         };
 
         let index = match open_attempt {
@@ -134,7 +134,7 @@ impl JsonlStore {
                         };
                     let filename = match index_path.file_name() {
                         Some(file) => file.to_string_lossy().to_string(),
-                        None => "session_index.redb".to_string(),
+                        None => "session_index.sqlite3".to_string(),
                     };
                     let quarantine_path =
                         index_path.with_file_name(format!("{filename}.corrupt-{ts}"));
@@ -154,7 +154,7 @@ impl JsonlStore {
 
                 let retry = {
                     let index_path = index_path.clone();
-                    spawn_blocking(move || RedbSessionIndex::open(index_path)).await
+                    spawn_blocking(move || SqliteSessionIndex::open(index_path)).await
                 };
                 match retry {
                     Ok(Ok(index)) => Arc::new(index),
@@ -205,7 +205,7 @@ impl JsonlStore {
         Ok(index)
     }
 
-    async fn index(&self) -> Result<Arc<RedbSessionIndex>, StoreError> {
+    async fn index(&self) -> Result<Arc<SqliteSessionIndex>, StoreError> {
         if let Some(index) = self.index.read().await.as_ref() {
             return Ok(Arc::clone(index));
         }
@@ -489,7 +489,7 @@ mod tests {
         };
 
         // Remove the index file to force an index rebuild from `.meta` sidecars.
-        let index_path = store_path.join("session_index.redb");
+        let index_path = store_path.join("session_index.sqlite3");
         fs::remove_file(&index_path).await?;
 
         let store = JsonlStore::new(store_path);

@@ -21,7 +21,7 @@ host = "127.0.0.1"
 port = 8080
 
 [store]
-# database_dir = "/path/to/db"  # redb session database directory (server surfaces)
+# database_dir = "/path/to/db"  # session database directory (server surfaces)
 
 [compaction]
 auto_compact_threshold = 100000

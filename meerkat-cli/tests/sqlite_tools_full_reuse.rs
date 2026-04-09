@@ -55,7 +55,7 @@ async fn write_test_config(
 }
 
 #[tokio::test]
-async fn run_tools_full_redb_reuses_open_realm() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_tools_full_sqlite_reuses_open_realm() -> Result<(), Box<dyn std::error::Error>> {
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
 
     let temp_dir = TempDir::new()?;
@@ -76,7 +76,7 @@ async fn run_tools_full_redb_reuses_open_realm() -> Result<(), Box<dyn std::erro
             .env("RKAT_TEST_CLIENT", "1")
             .args([
                 "--realm-backend",
-                "redb",
+                "sqlite",
                 "run",
                 "hello",
                 "--tools",
@@ -90,7 +90,7 @@ async fn run_tools_full_redb_reuses_open_realm() -> Result<(), Box<dyn std::erro
 
     assert!(
         output.status.success(),
-        "rkat run with --tools full and redb backend failed (exit {:?}): {}",
+        "rkat run with --tools full and sqlite backend failed (exit {:?}): {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );

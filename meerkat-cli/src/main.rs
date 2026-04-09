@@ -603,7 +603,6 @@ enum RealmBackendArg {
     #[cfg(feature = "jsonl-store")]
     Jsonl,
     Sqlite,
-    Redb,
 }
 
 impl From<RealmBackendArg> for RealmBackend {
@@ -612,7 +611,6 @@ impl From<RealmBackendArg> for RealmBackend {
             #[cfg(feature = "jsonl-store")]
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
-            RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
 }
@@ -2421,11 +2419,8 @@ async fn create_persistence_bundle(
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     match manifest.backend {
-        #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        RealmBackend::Sqlite | RealmBackend::Redb => paths.root,
-        #[cfg(not(feature = "jsonl-store"))]
-        _ => paths.root,
+        RealmBackend::Sqlite => paths.root,
     }
 }
 
@@ -3247,6 +3242,8 @@ async fn run_agent(
 ) -> anyhow::Result<()> {
     let keep_alive = resolve_keep_alive(keep_alive)?;
     let effective_mob = enable_mob || config.tools.mob_enabled;
+    #[cfg(not(feature = "comms"))]
+    let _ = line_format;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let run_initial_turn_during_create = flow_tool_overlay.is_none();
@@ -3553,31 +3550,35 @@ async fn run_agent(
         eprintln!("\nShutting down...");
     }
 
-    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
-        // Abort the comms drain so the CLI can exit cleanly.
-        #[cfg(feature = "comms")]
-        {
-            runtime_adapter.abort_comms_drain(&session_id).await;
-        }
+    let result = Box::pin(finalize_cli_runtime_backed_turn(
+        output_pipeline,
+        turn_result,
+        async {
+            // Abort the comms drain so the CLI can exit cleanly.
+            #[cfg(feature = "comms")]
+            {
+                runtime_adapter.abort_comms_drain(&session_id).await;
+            }
 
-        // Abort stdin reader if it was running.
-        #[cfg(feature = "comms")]
-        if let Some(h) = stdin_reader_handle {
-            h.abort();
-        }
+            // Abort stdin reader if it was running.
+            #[cfg(feature = "comms")]
+            if let Some(h) = stdin_reader_handle {
+                h.abort();
+            }
 
-        // Shutdown the session service and MCP connections gracefully.
-        // Unregister the runtime-backed executor before awaiting stream tasks.
-        // The adapter owns the boxed executor, and the executor now holds the
-        // caller stream sender for runtime-backed turns.
-        runtime_adapter.unregister_session(&session_id).await;
-        service.shutdown().await;
-        shutdown_mcp(&mcp_adapter).await;
-        if let Some(ref mut mob_ctx) = run_mob_tools {
-            mob_ctx.persist(scope).await?;
-        }
-        Ok(())
-    })
+            // Shutdown the session service and MCP connections gracefully.
+            // Unregister the runtime-backed executor before awaiting stream tasks.
+            // The adapter owns the boxed executor, and the executor now holds the
+            // caller stream sender for runtime-backed turns.
+            runtime_adapter.unregister_session(&session_id).await;
+            service.shutdown().await;
+            shutdown_mcp(&mcp_adapter).await;
+            if let Some(ref mut mob_ctx) = run_mob_tools {
+                mob_ctx.persist(scope).await?;
+            }
+            Ok(())
+        },
+    ))
     .await?;
 
     // Output the result
@@ -4026,28 +4027,32 @@ async fn resume_session_with_llm_override(
     }
     .await;
 
-    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
-        // The resume turn is complete — abort the comms drain so the CLI can
-        // return. Same rationale as run_agent: one-shot commands must not block.
-        #[cfg(feature = "comms")]
-        {
-            resume_adapter.abort_comms_drain(&session_id).await;
-        }
+    let result = Box::pin(finalize_cli_runtime_backed_turn(
+        output_pipeline,
+        turn_result,
+        async {
+            // The resume turn is complete — abort the comms drain so the CLI can
+            // return. Same rationale as run_agent: one-shot commands must not block.
+            #[cfg(feature = "comms")]
+            {
+                resume_adapter.abort_comms_drain(&session_id).await;
+            }
 
-        log_stage("service.create_session(done)");
+            log_stage("service.create_session(done)");
 
-        // Shutdown the session service and MCP connections gracefully.
-        resume_adapter.unregister_session(&session_id).await;
-        log_stage("service.shutdown");
-        service.shutdown().await;
-        log_stage("shutdown_mcp");
-        shutdown_mcp(&mcp_adapter).await;
-        log_stage("persist_mob_registry");
-        if let Some(ref mut mob_ctx) = run_mob_tools {
-            mob_ctx.persist(scope).await?;
-        }
-        Ok(())
-    })
+            // Shutdown the session service and MCP connections gracefully.
+            resume_adapter.unregister_session(&session_id).await;
+            log_stage("service.shutdown");
+            service.shutdown().await;
+            log_stage("shutdown_mcp");
+            shutdown_mcp(&mcp_adapter).await;
+            log_stage("persist_mob_registry");
+            if let Some(ref mut mob_ctx) = run_mob_tools {
+                mob_ctx.persist(scope).await?;
+            }
+            Ok(())
+        },
+    ))
     .await?;
 
     // Output the result
@@ -5445,14 +5450,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         };
         println!(
             "{}",
-            execute_mob_deploy(
+            Box::pin(execute_mob_deploy(
                 scope,
                 pack,
                 prompt,
                 *trust_policy,
                 *surface,
                 deploy_overrides,
-            )
+            ))
             .await?
         );
         return Ok(());
@@ -6253,7 +6258,7 @@ async fn execute_mob_deploy(
     surface: DeploySurfaceArg,
     cli_overrides: CliOverrides,
 ) -> anyhow::Result<String> {
-    execute_mob_deploy_internal(
+    Box::pin(execute_mob_deploy_internal(
         scope,
         pack,
         prompt,
@@ -6264,7 +6269,7 @@ async fn execute_mob_deploy(
             rpc_io: None,
             config_observer: None,
         },
-    )
+    ))
     .await
 }
 
@@ -6547,7 +6552,6 @@ where
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
-                sessions_redb_path: paths.sessions_redb_path.display().to_string(),
                 sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -6820,7 +6824,7 @@ mod tests {
                 realm_id: realm_id.to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
@@ -8518,14 +8522,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack succeeds");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             None,
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("missing capability should reject deploy");
         assert!(
@@ -8545,14 +8549,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack succeeds");
 
-        let output = execute_mob_deploy(
+        let output = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             None,
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect("deploy should succeed");
         assert!(
@@ -8586,14 +8590,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("write archive");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             None,
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("missing packed skill path should fail");
         assert!(
@@ -8625,14 +8629,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("write archive");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             None,
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("invalid UTF-8 skill bytes should fail");
         assert!(
@@ -8661,7 +8665,7 @@ capabilities = ["definitely_missing_capability"]
         let scope_for_deploy = scope.clone();
         let pack_for_deploy = pack_out.clone();
         let mut deploy_task = tokio::spawn(async move {
-            execute_mob_deploy_internal(
+            Box::pin(execute_mob_deploy_internal(
                 &scope_for_deploy,
                 &pack_for_deploy,
                 "hello",
@@ -8672,7 +8676,7 @@ capabilities = ["definitely_missing_capability"]
                     rpc_io: Some((Box::new(BufReader::new(server_in)), Box::new(server_out))),
                     config_observer: None,
                 },
-            )
+            ))
             .await
         });
 
@@ -8709,14 +8713,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack succeeds");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("strict mode must reject unsigned pack");
         assert!(
@@ -8737,14 +8741,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack succeeds");
 
-        let output = execute_mob_deploy(
+        let output = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect("permissive mode should allow unsigned pack");
         assert!(
@@ -8797,14 +8801,14 @@ capabilities = ["definitely_missing_capability"]
         )
         .expect("write trusted signers");
 
-        let output = execute_mob_deploy(
+        let output = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect("strict trusted signed deploy should succeed");
         assert!(
@@ -8829,14 +8833,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack should succeed");
 
-        let output = execute_mob_deploy(
+        let output = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             None,
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect("deploy should succeed");
 
@@ -8893,14 +8897,14 @@ capabilities = ["definitely_missing_capability"]
         )
         .expect("write trust store");
 
-        let output = execute_mob_deploy(
+        let output = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect("strict signed deploy should succeed");
 
@@ -8925,14 +8929,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("pack should succeed");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("strict mode must reject unsigned pack");
         assert!(
@@ -8959,14 +8963,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("signed pack should succeed");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &pack_out,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("strict mode must reject unknown signer");
         assert!(
@@ -9029,14 +9033,14 @@ capabilities = ["definitely_missing_capability"]
         )
         .expect("write trust store");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &tampered_pack,
             "hello",
             Some(TrustPolicyArg::Strict),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("strict mode must reject tampered content");
         assert!(
@@ -9098,14 +9102,14 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("write archive");
 
-        let err = execute_mob_deploy(
+        let err = Box::pin(execute_mob_deploy(
             &scope,
             &bad_signature_pack,
             "hello",
             Some(TrustPolicyArg::Permissive),
             DeploySurfaceArg::Cli,
             CliOverrides::default(),
-        )
+        ))
         .await
         .expect_err("permissive mode must reject invalid signatures when present");
         assert!(
@@ -9201,7 +9205,7 @@ capabilities = ["definitely_missing_capability"]
                     Some((config.tools.mob_enabled, config.agent.model.clone()));
             }
         });
-        let output = execute_mob_deploy_internal(
+        let output = Box::pin(execute_mob_deploy_internal(
             &scope,
             &pack_out,
             "hello",
@@ -9218,7 +9222,7 @@ capabilities = ["definitely_missing_capability"]
                 rpc_io: None,
                 config_observer: Some(observer),
             },
-        )
+        ))
         .await
         .expect("deploy succeeds");
 
@@ -9956,7 +9960,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .expect("create root");
         let manifest = serde_json::json!({
             "realm_id": realm_id,
-            "backend": "redb",
+            "backend": "sqlite",
             "created_at": "1"
         });
         tokio::fs::write(
@@ -9982,7 +9986,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10018,7 +10022,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10065,7 +10069,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             let (_manifest, store) = meerkat_store::open_realm_session_store_in(
                 &state_root,
                 realm_id,
-                Some(RealmBackend::Redb),
+                Some(RealmBackend::Sqlite),
                 Some(RealmOrigin::Explicit),
             )
             .await
@@ -10094,7 +10098,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                 realm_id: "test-realm".to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: Some(root),
             user_config_root: None,

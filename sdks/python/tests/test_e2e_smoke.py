@@ -44,7 +44,7 @@ def persistent_realm_kwargs(tmp_path: Path) -> dict[str, str]:
     state_root.mkdir(parents=True, exist_ok=True)
     return {
         "realm_id": f"python-live-smoke-{uuid4()}",
-        "realm_backend": "redb",
+        "realm_backend": "sqlite",
         "state_root": str(state_root),
     }
 

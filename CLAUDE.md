@@ -67,12 +67,12 @@ meerkat-models    → Curated model catalog and provider profile rules (leaf cra
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
 meerkat-client    → LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
-meerkat-store     → Session persistence (SqliteSessionStore, JsonlStore, MemoryStore, RedbSessionStore) implementing SessionStore
+meerkat-store     → Session persistence (SqliteSessionStore, JsonlStore, MemoryStore) implementing SessionStore
 meerkat-tools     → Tool registry and validation implementing AgentToolDispatcher
 meerkat-session   → Session service orchestration (EphemeralSessionService, DefaultCompactor)
-                     Features: session-store (PersistentSessionService, RedbEventStore),
+                     Features: session-store (PersistentSessionService),
                                session-compaction (DefaultCompactor)
-meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + redb, SimpleMemoryStore for tests)
+meerkat-memory    → Semantic memory (HnswMemoryStore via hnsw_rs + SQLite, SimpleMemoryStore for tests)
 meerkat-mcp       → MCP protocol client, McpRouter for tool routing
 meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume, meerkat_config, meerkat_capabilities)
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
@@ -194,9 +194,7 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
 - `meerkat-session/src/compactor.rs` - DefaultCompactor implementation
 - `meerkat-session/src/event_store.rs` - EventStore trait
-- `meerkat-session/src/redb_events.rs` - RedbEventStore implementation
 - `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
-- `meerkat-store/src/redb_store.rs` - RedbSessionStore implementation
 - `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
 - `meerkat-models/src/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
 - `meerkat-models/src/profile/mod.rs` - Model profile rules (capability detection, param schemas)

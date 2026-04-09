@@ -383,12 +383,11 @@ mod tests {
             metadata: Some(ConfigStoreMetadata {
                 realm_id: Some("team".to_string()),
                 instance_id: Some("instance".to_string()),
-                backend: Some("redb".to_string()),
+                backend: Some("sqlite".to_string()),
                 resolved_paths: Some(ConfigResolvedPaths {
                     root: "/tmp/root".to_string(),
                     manifest_path: "/tmp/root/realm_manifest.json".to_string(),
                     config_path: "/tmp/root/config.toml".to_string(),
-                    sessions_redb_path: "/tmp/root/sessions.redb".to_string(),
                     sessions_sqlite_path: Some("/tmp/root/sessions.sqlite3".to_string()),
                     sessions_jsonl_dir: "/tmp/root/sessions_jsonl".to_string(),
                 }),

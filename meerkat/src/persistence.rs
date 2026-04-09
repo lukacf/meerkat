@@ -21,8 +21,8 @@ use meerkat_store::SqliteSessionStore;
 use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
-    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, RedbScheduleStore, RedbSessionStore,
-    SqliteScheduleStore, StoreError, ensure_realm_manifest_in, realm_paths_in,
+    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, SqliteScheduleStore, StoreError,
+    ensure_realm_manifest_in, realm_paths_in,
 };
 
 #[cfg(feature = "session-store")]
@@ -189,7 +189,6 @@ pub async fn open_realm_persistence_in(
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir.clone(),
         RealmBackend::Sqlite => paths.root.clone(),
-        RealmBackend::Redb => paths.root.clone(),
     };
 
     let bundle = match manifest.backend {
@@ -202,7 +201,7 @@ pub async fn open_realm_persistence_in(
             let schedule_store: Arc<dyn ScheduleStore> = Arc::new(DisabledScheduleStore);
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
-                store_path.clone(),
+                store_path,
                 session_store,
                 None,
                 blob_store,
@@ -223,35 +222,8 @@ pub async fn open_realm_persistence_in(
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
-                store_path.clone(),
+                store_path,
                 sqlite_store as Arc<dyn SessionStore>,
-                Some(runtime_store),
-                blob_store,
-                schedule_store,
-            )
-        }
-        RealmBackend::Redb => {
-            if let Some(parent) = paths.sessions_redb_path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(StoreError::Io)?;
-            }
-            let redb_path = paths.sessions_redb_path.clone();
-            let redb_store = tokio::task::spawn_blocking(move || RedbSessionStore::open(redb_path))
-                .await
-                .map_err(StoreError::Join)??;
-            let redb_store = Arc::new(redb_store);
-            let schedule_store = Arc::new(RedbScheduleStore::from_database(redb_store.database())?)
-                as Arc<dyn ScheduleStore>;
-            let runtime_store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(
-                redb_store.database(),
-            )?) as Arc<dyn RuntimeStore>;
-            let blob_store: Arc<dyn BlobStore> =
-                Arc::new(FsBlobStore::new(paths.root.join("blobs")));
-            PersistenceBundle::with_realm_context(
-                manifest.clone(),
-                store_path.clone(),
-                redb_store as Arc<dyn SessionStore>,
                 Some(runtime_store),
                 blob_store,
                 schedule_store,
@@ -297,14 +269,16 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_redb_store_can_keep_runtime_companion() -> Result<(), Box<dyn std::error::Error>> {
+    fn wrapped_sqlite_store_can_keep_runtime_companion() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
-        let redb_store = Arc::new(RedbSessionStore::open(temp.path().join("sessions.redb"))?);
+        let sqlite_store = Arc::new(SqliteSessionStore::open(
+            temp.path().join("sessions.sqlite3"),
+        )?);
         let wrapped: Arc<dyn SessionStore> = Arc::new(WrappedStore {
-            inner: redb_store.clone(),
+            inner: sqlite_store.clone(),
         });
-        let runtime_store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(
-            redb_store.database(),
+        let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
+            sqlite_store.path().to_path_buf(),
         )?) as Arc<dyn RuntimeStore>;
 
         let bundle = PersistenceBundle::new(
@@ -320,14 +294,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_realm_persistence_redb_builds_runtime_companion()
+    async fn open_realm_persistence_sqlite_builds_runtime_companion()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
 
         let (_manifest, bundle) = open_realm_persistence_in(
             temp.path(),
-            "redb-realm",
-            Some(RealmBackend::Redb),
+            "sqlite-realm",
+            Some(RealmBackend::Sqlite),
             Some(RealmOrigin::Explicit),
         )
         .await?;
@@ -372,18 +346,6 @@ mod tests {
         assert!(
             sqlite_bundle.blob_store().is_persistent(),
             "sqlite realms must not pair durable stores with an in-memory blob store"
-        );
-
-        let (_redb_manifest, redb_bundle) = open_realm_persistence_in(
-            temp.path(),
-            "redb-realm-2",
-            Some(RealmBackend::Redb),
-            Some(RealmOrigin::Explicit),
-        )
-        .await?;
-        assert!(
-            redb_bundle.blob_store().is_persistent(),
-            "redb realms must not pair durable stores with an in-memory blob store"
         );
 
         Ok(())

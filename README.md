@@ -113,7 +113,7 @@ Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider l
 
 **Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is inferred from the model name -- switch models with a flag, not a code change.
 
-**Sessions and memory.** Persistent sessions (JSONL or redb), automatic context compaction for long conversations, and semantic memory with HNSW indexing for recall across sessions.
+**Sessions and memory.** Persistent sessions (SQLite or JSONL), automatic context compaction for long conversations, and semantic memory with HNSW indexing for recall across sessions.
 
 **Tools and integration.** Custom tool dispatchers, native MCP client for connecting external tool servers, JSON-schema-validated structured output, and built-in tools for task management, utility edits like `apply_patch`, shell access, and more. Live tool scoping lets you add, remove, or filter tools mid-session without restarting the agent.
 

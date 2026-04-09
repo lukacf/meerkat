@@ -1,6 +1,6 @@
 //! SQLite-backed store implementations.
 //!
-//! Unlike the redb backend, SQLite uses WAL mode with no exclusive file lock,
+//! SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
 use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
@@ -1585,7 +1585,7 @@ mod tests {
         );
     }
 
-    /// Regression test: redb held an exclusive file lock that prevented
+    /// Regression test: durable persistence must allow
     /// reopening the same database path after drop within the same process.
     /// SQLite WAL mode does not have this limitation.
     #[tokio::test]

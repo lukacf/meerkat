@@ -25,7 +25,7 @@ graph TD
     CLI["meerkat-cli"]
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     SESSION["meerkat-session<br/>Ephemeral / Persistent / Compactor"]
-    STORE["meerkat-store<br/>SQLite / JSONL / redb / Memory"]
+    STORE["meerkat-store<br/>SQLite / JSONL / Memory"]
     MCP["meerkat-mcp<br/>McpRouter / Stdio / HTTP+SSE"]
     TOOLS["meerkat-tools<br/>Registry / Validation"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
@@ -149,7 +149,7 @@ graph TD
     RUNT["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver<br/>OpsLifecycleAuthority / InputLifecycleAuthority"]
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     TOOLS["meerkat-tools<br/>Registry / Dispatch / Validation"]
-    STORE["meerkat-store<br/>SQLite / JSONL / redb / Memory"]
+    STORE["meerkat-store<br/>SQLite / JSONL / Memory"]
     SESSION["meerkat-session<br/>Ephemeral / Persistent / Compactor"]
     MEMORY["meerkat-memory<br/>HNSW / Simple"]
     MCP["meerkat-mcp<br/>McpRouter / Stdio / HTTP"]
@@ -295,7 +295,6 @@ Session persistence:
 
 - **JsonlStore**: production storage using append-only JSONL files
 - **SqliteSessionStore**: sqlite-backed storage for the default persistent same-realm workflow
-- **RedbSessionStore**: redb-backed storage for explicit single-owner embedded workflows
 - **MemoryStore**: in-memory storage for testing
 - **SessionStore trait**: implement for custom backends
 </Accordion>
@@ -317,7 +316,7 @@ Feature gates: `session-store`, `session-compaction`.
 <Accordion title="meerkat-memory">
 Semantic memory indexing:
 
-- **HnswMemoryStore**: production memory store using hnsw_rs + redb (feature: `memory-store-session`)
+- **HnswMemoryStore**: production memory store using hnsw_rs + SQLite (feature: `memory-store-session`)
 - **SimpleMemoryStore**: in-memory implementation for testing
 - **MemoryStore trait** (defined in meerkat-core): indexing, retrieval, similarity search
 </Accordion>
@@ -441,7 +440,7 @@ Durable scheduler for automated agent task execution:
 - **ScheduleDriver**: tick loop that claims due occurrences, dispatches delivery, and monitors completion
 - **ScheduleLifecycleAuthority**: authority-backed schedule state transitions (Active, Paused, Completed, Cancelled)
 - **OccurrenceLifecycleAuthority**: authority-backed occurrence state transitions (Pending, Claimed, Delivering, Completed, Skipped, Failed)
-- **ScheduleStore**: persistence trait with Memory, SQLite, and Redb implementations
+- **ScheduleStore**: persistence trait with Memory and SQLite implementations
 - **Schedule tools**: agent-facing tools (`schedule_create`, `schedule_list`, `schedule_read`, `schedule_update`, `schedule_pause`, `schedule_resume`, `schedule_delete`)
 - **Triggers**: `Cron(CalendarTriggerSpec)` and `Interval(IntervalTriggerSpec)` with `next_due_after()` computation
 - **Policies**: `MisfirePolicy`, `OverlapPolicy`, `MissingTargetPolicy` for configurable delivery behavior
@@ -799,7 +798,7 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 | `meerkat-machine-schema` | Machine definitions, composition ontology, handoff protocols |
 | `meerkat-machine-kernels` | Generated sealed mutator implementations |
 | `meerkat-runtime` | Runtime control plane, `RuntimeDriver`, `InputLifecycleAuthority`, `OpsLifecycleAuthority` |
-| `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, redb, in-memory) |
+| `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
 | `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, persistence helpers, `build_persistent_service`, `build_ephemeral_service` |

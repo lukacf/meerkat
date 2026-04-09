@@ -59,10 +59,9 @@ Backends are selected once per realm and pinned in `realm_manifest.json`.
 | Backend | Notes |
 |---------|-------|
 | `sqlite` | Durable embedded database; default for new persistent realms when compiled |
-| `redb` | Durable embedded database |
 | `jsonl` | File-based, inspectable, useful for debugging |
 
-A realm created as `sqlite` stays `sqlite`; a realm created as `jsonl` stays `jsonl`; a realm created as `redb` stays `redb`.
+A realm created as `sqlite` stays `sqlite`; a realm created as `jsonl` stays `jsonl`.
 
 ## Concurrency guarantees
 

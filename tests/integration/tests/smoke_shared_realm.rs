@@ -132,11 +132,11 @@ async fn run_binary(
     Ok(timeout(Duration::from_secs(180), cmd.output()).await??)
 }
 
-fn is_redb_lock_failure(output: &std::process::Output) -> bool {
+fn is_transient_backend_lock_failure(output: &std::process::Output) -> bool {
     String::from_utf8_lossy(&output.stderr).contains("Database already open. Cannot acquire lock.")
 }
 
-async fn run_binary_with_redb_retry(
+async fn run_binary_with_backend_retry(
     binary: &Path,
     cwd: &Path,
     args: &[&str],
@@ -145,7 +145,7 @@ async fn run_binary_with_redb_retry(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let output = run_binary(binary, cwd, args, api_key).await?;
-        if output.status.success() || !is_redb_lock_failure(&output) {
+        if output.status.success() || !is_transient_backend_lock_failure(&output) {
             return Ok(output);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1133,7 +1133,7 @@ async fn e2e_scenario_50_rest_cli_shared_realm_roundtrip() -> Result<(), Box<dyn
     ];
     eprintln!("scenario 50: starting CLI resume");
     let resume_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
     eprintln!("scenario 50: CLI resume finished");
     let resume_stdout =
         output_ok_or_err(resume_out, "rkat", &resume_args).map_err(std::io::Error::other)?;
@@ -1374,7 +1374,7 @@ async fn e2e_scenario_52_cli_rpc_shared_realm_roundtrip() -> Result<(), Box<dyn 
         "json",
     ];
     let run_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &run_args, Some(&api_key)).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &run_args, Some(&api_key)).await?;
     let run_stdout = output_ok_or_err(run_out, "rkat", &run_args).map_err(std::io::Error::other)?;
     let session_id = extract_json_string_field(&run_stdout, "session_id")
         .ok_or("session_id missing from CLI run output")?;
@@ -1447,7 +1447,7 @@ async fn e2e_scenario_52_cli_rpc_shared_realm_roundtrip() -> Result<(), Box<dyn 
         "What is my codename now? Reply with just the codename.",
     ];
     let resume_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
     let resume_stdout =
         output_ok_or_err(resume_out, "rkat", &resume_args).map_err(std::io::Error::other)?;
     assert!(
@@ -1497,7 +1497,7 @@ async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
         "json",
     ];
     let run_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &run_args, Some(&api_key)).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &run_args, Some(&api_key)).await?;
     let run_stdout = output_ok_or_err(run_out, "rkat", &run_args).map_err(std::io::Error::other)?;
     let session_id = extract_json_string_field(&run_stdout, "session_id")
         .ok_or("session_id missing from CLI run output")?;
@@ -1575,7 +1575,7 @@ async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
         "Confirm the codename one more time.",
     ];
     let resume_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &resume_args, Some(&api_key)).await?;
     let resume_stdout =
         output_ok_or_err(resume_out, "rkat", &resume_args).map_err(std::io::Error::other)?;
     assert!(
@@ -1839,7 +1839,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     shutdown_stdio_process(rpc).await?;
 
     let sessions_out =
-        run_binary_with_redb_retry(&rkat, &project_dir, &sessions_args, None).await?;
+        run_binary_with_backend_retry(&rkat, &project_dir, &sessions_args, None).await?;
     let sessions_stdout =
         output_ok_or_err(sessions_out, "rkat", &sessions_args).map_err(std::io::Error::other)?;
     for session_id in session_ids.iter().take(3) {

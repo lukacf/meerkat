@@ -117,12 +117,11 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "phase1-rest".to_string(),
         instance_id: None,
-        backend: "redb".to_string(),
+        backend: "sqlite".to_string(),
         resolved_paths: meerkat_core::ConfigResolvedPaths {
             root: store_path.display().to_string(),
             manifest_path: String::new(),
             config_path: String::new(),
-            sessions_redb_path: String::new(),
             sessions_sqlite_path: None,
             sessions_jsonl_dir: String::new(),
         },

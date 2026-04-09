@@ -29,7 +29,7 @@ pub enum RealmSelection {
 pub struct RealmConfig {
     pub selection: RealmSelection,
     pub instance_id: Option<String>,
-    /// String hint (e.g. "redb", "jsonl"), interpreted by surface/store layers.
+    /// String hint (e.g. "sqlite", "jsonl"), interpreted by surface/store layers.
     pub backend_hint: Option<String>,
     /// Root directory containing all realm directories.
     pub state_root: Option<PathBuf>,

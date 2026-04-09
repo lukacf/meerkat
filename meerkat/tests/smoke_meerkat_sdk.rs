@@ -1284,7 +1284,7 @@ mod scenario_10_memory {
             return;
         };
 
-        // Use SimpleMemoryStore (keyword-matching, no HNSW/redb needed for test)
+        // Use SimpleMemoryStore (keyword-matching, no HNSW persistence needed for test)
         let memory_store =
             Arc::new(SimpleMemoryStore::new()) as Arc<dyn meerkat_core::memory::MemoryStore>;
 

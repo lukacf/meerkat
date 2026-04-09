@@ -157,6 +157,7 @@ impl MobMcpState {
         runtime_root.join("mobs")
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn escape_mob_id_for_path(mob_id: &MobId) -> String {
         let mut escaped = String::with_capacity(mob_id.to_string().len() * 3);
         for byte in mob_id.to_string().bytes() {
@@ -170,6 +171,7 @@ impl MobMcpState {
         escaped
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn persistent_storage_path(root: &Path, mob_id: &MobId) -> PathBuf {
         root.join(format!("{}.db", Self::escape_mob_id_for_path(mob_id)))
     }
@@ -200,6 +202,9 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
     ) -> Result<(MobStorage, Option<PathBuf>), MobError> {
+        #[cfg(target_arch = "wasm32")]
+        let _ = mob_id;
+
         #[cfg(not(target_arch = "wasm32"))]
         if self.session_service.supports_persistent_sessions()
             && let Some(root) = &self.persistent_storage_root
@@ -219,6 +224,9 @@ impl MobMcpState {
     }
 
     async fn maybe_remove_storage_file(path: Option<&Path>) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = path;
+
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = path
             && let Err(error) = tokio::fs::remove_file(path).await

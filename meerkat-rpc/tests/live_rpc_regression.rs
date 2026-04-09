@@ -35,10 +35,10 @@ fn spawn_test_server(
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
     let store =
-        Arc::new(meerkat::RedbSessionStore::open(temp.path().join("sessions.redb")).unwrap());
-    let runtime_store =
-        Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(store.database()).unwrap())
-            as Arc<dyn meerkat_runtime::RuntimeStore>;
+        Arc::new(meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3")).unwrap());
+    let runtime_store = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new(store.path().to_path_buf()).unwrap(),
+    ) as Arc<dyn meerkat_runtime::RuntimeStore>;
     let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(temp.path().join("blobs")));
     let mut runtime = SessionRuntime::new(
         factory,

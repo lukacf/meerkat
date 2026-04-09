@@ -6,7 +6,7 @@ to find relevant past knowledge.
 
 ## Concepts
 - `MemoryStore` trait — index and search interface
-- `HnswMemoryStore` — production HNSW-based implementation (redb)
+- `HnswMemoryStore` — production HNSW-based implementation (SQLite)
 - `SimpleMemoryStore` — in-memory for tests
 - `memory_store` / `memory_search` — built-in agent tools
 

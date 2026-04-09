@@ -57,7 +57,6 @@ pub enum ScheduleStoreKind {
     Memory,
     Jsonl,
     Sqlite,
-    Redb,
     Custom,
 }
 
@@ -68,7 +67,6 @@ impl ScheduleStoreKind {
             Self::Memory => "memory",
             Self::Jsonl => "jsonl",
             Self::Sqlite => "sqlite",
-            Self::Redb => "redb",
             Self::Custom => "custom",
         }
     }

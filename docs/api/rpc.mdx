@@ -43,7 +43,7 @@ The RPC surface is fully runtime-backed:
 `rkat-rpc` accepts global scope flags:
 
 ```bash
-rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|redb|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
+rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|jsonl>] [--state-root <path>] [--context-root <path>] [--user-config-root <path>]
 ```
 
 - `--realm`: explicit sharing/isolation key
@@ -1021,12 +1021,12 @@ Read current realm config envelope.
     "generation": 3,
     "realm_id": "team-alpha",
     "instance_id": "rpc-worker-1",
-    "backend": "redb",
+    "backend": "sqlite",
     "resolved_paths": {
       "root": "/.../meerkat/realms/team-alpha",
       "manifest_path": "/.../realm_manifest.json",
       "config_path": "/.../config.toml",
-      "sessions_redb_path": "/.../sessions.redb",
+      "sessions_sqlite_path": "/.../sessions.sqlite3",
       "sessions_jsonl_dir": "/.../sessions_jsonl"
     }
   }
@@ -1060,7 +1060,7 @@ Replace config, optionally using generation CAS.
     "generation": 4,
     "realm_id": "team-alpha",
     "instance_id": null,
-    "backend": "redb",
+    "backend": "sqlite",
     "resolved_paths": { "...": "..." }
   }
 }
@@ -1093,7 +1093,7 @@ Merge-patch the config (RFC 7396).
     "generation": 5,
     "realm_id": "team-alpha",
     "instance_id": null,
-    "backend": "redb",
+    "backend": "sqlite",
     "resolved_paths": { "...": "..." }
   }
 }

@@ -15,7 +15,7 @@ To make a meerkat crate compile for wasm32, apply this pattern:
 ```toml
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-redb = { workspace = true }
+rusqlite = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

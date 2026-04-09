@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -169,12 +169,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -194,6 +194,14 @@ legacy-surface-gate:
 legacy-surface-inventory:
 	@echo "$(GREEN)Generating legacy surface inventory baseline...$(NC)"
 	@scripts/m0_legacy_surface_scan.sh --no-fail --output=artifacts/m0_legacy_surface_inventory.txt
+
+deprecated-backend-gate:
+	@echo "$(GREEN)Checking for deprecated backend references...$(NC)"
+	@scripts/deprecated_backend_scan.sh
+
+deprecated-backend-inventory:
+	@echo "$(GREEN)Generating deprecated backend inventory...$(NC)"
+	@scripts/deprecated_backend_scan.sh --no-fail --output=artifacts/deprecated_backend_scan.txt
 
 # Quick check - compile without producing output
 check:

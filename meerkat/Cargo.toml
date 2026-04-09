@@ -77,7 +77,6 @@ sqlite-store = ["meerkat-store/sqlite", "meerkat-runtime/sqlite-store"]
 # Session capabilities
 session-store = [
     "meerkat-session/session-store",
-    "meerkat-runtime/redb-store",
     "meerkat-runtime/sqlite-store",
     "meerkat-store/sqlite",
     "meerkat-tools/sqlite",

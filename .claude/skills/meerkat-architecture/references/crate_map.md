@@ -8,7 +8,7 @@ meerkat-models        (leaf crate — model catalog, provider profiles, paramete
 meerkat-core          (depends on meerkat-models — pure types, traits, agent loop, session-store contract)
   ├── meerkat-contracts   (wire types, capability registry, error codes)
   ├── meerkat-client      (LLM providers: Anthropic, OpenAI, Gemini)
-  ├── meerkat-store       (session persistence: SQLite, Jsonl, Memory, Redb)
+  ├── meerkat-store       (session persistence: SQLite, Jsonl, Memory)
   ├── meerkat-tools       (tool registry, builtins, shell, session-scoped task store)
   ├── meerkat-session     (session service: Ephemeral, Persistent)
   ├── meerkat-runtime     (runtime control plane, input lifecycle, policy engine, detached wake)
@@ -44,7 +44,7 @@ Surface binaries:
 | `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
 | `AgentToolDispatcher` | Tool routing and dispatch | `CompositeDispatcher` (meerkat-tools), `DynamicToolComposite` / `ToolGateway` (meerkat-core), `AgentMobToolSurface` (meerkat-mob-mcp), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Agent-loop-facing persistence adapter | `StoreAdapter<S>` (meerkat-store) |
-| `SessionStore` | Canonical session persistence contract for backend authors | `MemoryStore`, `JsonlStore`, `SqliteSessionStore`, `RedbSessionStore` (meerkat-store) |
+| `SessionStore` | Canonical session persistence contract for backend authors | `MemoryStore`, `JsonlStore`, `SqliteSessionStore` (meerkat-store) |
 | `SessionService` | Full substrate lifecycle; runtime-backed surfaces layer canonical runtime semantics on top | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
@@ -189,6 +189,6 @@ MobHandle::run_flow(flow_id, params)
 - `SessionStore` moved into `meerkat-core`; `meerkat-store` now re-exports and implements it.
 - Agent delegation tools are mob-backed and session-scoped via `owner_session_id` / `is_implicit`; operator authority is injected, not ambient.
 - Tooling persistence is tri-state via `ToolCategoryOverride`; resume paths must preserve `Inherit`.
-- Mob persistence switched to SQLite/WAL; the redb-backed mob store is gone.
+- Mob persistence switched to SQLite/WAL; the previous exclusive-handle mob store is gone.
 - Flow loops are machine-backed through `FlowFrameMachine`, `LoopIterationMachine`, and the generated `flow_frame_loop` composition.
 - `FlowEngine::execute_step_with_all_guards()` is the single canonical step path for both flat and frame execution.

@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // SimpleMemoryStore is an in-memory implementation that uses keyword matching.
     // For production, use HnswMemoryStore which provides true vector-embedding
-    // similarity search backed by hnsw_rs + redb persistence.
+    // similarity search backed by hnsw_rs + SQLite persistence.
 
     let memory_store = Arc::new(SimpleMemoryStore::new());
 
@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Two implementations:
   - SimpleMemoryStore: In-memory, keyword matching (this example)
-  - HnswMemoryStore:   Persistent, vector embeddings (hnsw_rs + redb)
+  - HnswMemoryStore:   Persistent, vector embeddings (hnsw_rs + SQLite)
 
 Wiring in the factory (AgentFactory::build_agent):
   1. Creates HnswMemoryStore from .rkat/memory/ directory

@@ -4,10 +4,10 @@
 //! shows the different storage backends and how session lifecycle works.
 //!
 //! ## What you'll learn
-//! - JsonlStore vs MemoryStore vs RedbSessionStore
+//! - JsonlStore vs MemoryStore vs SqliteSessionStore
 //! - Saving and loading sessions
 //! - Session lifecycle: create → turns → archive
-//! - Event sourcing with RedbEventStore
+//! - Durable realm-backed session persistence
 //!
 //! ## Run
 //! ```bash
@@ -88,10 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 |------------------|-----------------|-------------|-----------------------------|
 | JsonlStore       | jsonl-store     | File (JSONL)| Development, simple deploy  |
 | MemoryStore      | memory-store    | None (RAM)  | Tests, ephemeral agents     |
-| RedbSessionStore | session-store   | redb (B+)   | Production, multi-session   |
+| SqliteSessionStore | session-store | SQLite/WAL  | Production, multi-session   |
 
-RedbSessionStore also supports:
-- Event sourcing via RedbEventStore
+SqliteSessionStore also supports:
 - Session projection via SessionProjector
 - Realm-based isolation for multi-tenant setups
 

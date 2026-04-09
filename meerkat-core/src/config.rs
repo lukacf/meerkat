@@ -831,7 +831,7 @@ fn template_defaults() -> &'static TemplateDefaults {
 pub struct StoreConfig {
     pub sessions_path: Option<PathBuf>,
     pub tasks_path: Option<PathBuf>,
-    /// Directory for the redb session database (server surfaces).
+    /// Directory for the realm-scoped session database (server surfaces).
     pub database_dir: Option<PathBuf>,
 }
 

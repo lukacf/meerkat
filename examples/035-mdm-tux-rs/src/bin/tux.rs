@@ -2406,8 +2406,10 @@ fn tui_loop(
     }
     let _guard = TermGuard;
 
+    let mut last_stale_tick = Instant::now();
     loop {
-        if crossterm::event::poll(Duration::from_millis(16))? {
+        let mut dirty = false;
+        if crossterm::event::poll(Duration::from_millis(100))? {
             match crossterm::event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(
@@ -2418,6 +2420,7 @@ fn tui_loop(
                         claims.as_deref(),
                         &runtime,
                     );
+                    dirty = true;
                 }
                 Event::Paste(text) => {
                     let line_count = text.lines().count();
@@ -2425,12 +2428,14 @@ fn tui_loop(
                     if line_count > 1 {
                         app.push_notice("pasted input", &format!("{line_count} lines"));
                     }
+                    dirty = true;
                 }
                 _ => {}
             }
         }
 
         while let Ok(ev) = event_rx.try_recv() {
+            dirty = true;
             match ev {
                 TuiEvent::CommsMessage {
                     from_target_id,
@@ -2602,30 +2607,37 @@ fn tui_loop(
             rebuild_kennel_projection(&mut app, claims);
         }
 
-        let stale_after_ms = Duration::from_secs(30).as_millis() as i64;
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let runtime_targets = runtime.read().target_ids();
-        for target in runtime_targets {
-            let before = runtime.read().phase(&target);
-            runtime.write().apply(
-                &target,
-                RuntimeEvent::TickStale {
-                    now_ms,
-                    stale_after_ms,
-                },
-            );
-            if before != RuntimePhase::Stalled
-                && runtime.read().phase(&target) == RuntimePhase::Stalled
-            {
-                let display_name = app
-                    .target_name_for_id(&target)
-                    .unwrap_or_else(|| target.clone());
-                app.flush_streaming(&display_name);
-                app.push_notice("target unresponsive", &display_name);
+        let stale_tick_due = last_stale_tick.elapsed() >= Duration::from_secs(1);
+        if stale_tick_due {
+            last_stale_tick = Instant::now();
+            let stale_after_ms = Duration::from_secs(30).as_millis() as i64;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let runtime_targets = runtime.read().target_ids();
+            for target in runtime_targets {
+                let before = runtime.read().phase(&target);
+                runtime.write().apply(
+                    &target,
+                    RuntimeEvent::TickStale {
+                        now_ms,
+                        stale_after_ms,
+                    },
+                );
+                if before != RuntimePhase::Stalled
+                    && runtime.read().phase(&target) == RuntimePhase::Stalled
+                {
+                    dirty = true;
+                    let display_name = app
+                        .target_name_for_id(&target)
+                        .unwrap_or_else(|| target.clone());
+                    app.flush_streaming(&display_name);
+                    app.push_notice("target unresponsive", &display_name);
+                }
             }
         }
 
-        terminal.draw(|f| render(f, &mut app, &runtime))?;
+        if dirty || stale_tick_due {
+            terminal.draw(|f| render(f, &mut app, &runtime))?;
+        }
         if app.quit {
             break;
         }

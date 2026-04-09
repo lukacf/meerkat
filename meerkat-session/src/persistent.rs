@@ -1775,6 +1775,7 @@ mod tests {
                         max_tokens: 0,
                         structured_output_retries: 2,
                         provider: identity.provider,
+                        self_hosted_server_id: None,
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
                         keep_alive: false,
@@ -2006,6 +2007,7 @@ mod tests {
                         max_tokens: 0,
                         structured_output_retries: 2,
                         provider: identity.provider,
+                        self_hosted_server_id: None,
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
                         keep_alive: false,
@@ -3249,6 +3251,7 @@ mod tests {
                 max_tokens: 1024,
                 structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 provider_params: None,
                 tooling: meerkat_core::SessionTooling {
                     builtins: meerkat_core::ToolCategoryOverride::Enable,
@@ -3409,6 +3412,7 @@ mod tests {
                 max_tokens: 1024,
                 structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 provider_params: None,
                 tooling: meerkat_core::SessionTooling {
                     builtins: meerkat_core::ToolCategoryOverride::Enable,
@@ -3490,6 +3494,7 @@ mod tests {
                 max_tokens: 1024,
                 structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 provider_params: None,
                 tooling: meerkat_core::SessionTooling {
                     builtins: meerkat_core::ToolCategoryOverride::Enable,
@@ -3644,6 +3649,7 @@ mod tests {
             max_tokens: 1024,
             structured_output_retries: 2,
             provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
             provider_params: None,
             tooling: meerkat_core::SessionTooling::default(),
             keep_alive: false,

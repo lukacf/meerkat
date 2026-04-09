@@ -108,6 +108,15 @@ jobs:
             cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
 
+      - name: Ad-hoc codesign macOS binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
+          done
+
       - name: Package artifacts
         shell: bash
         env:
@@ -214,6 +223,108 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+  update_homebrew:
+    name: Update Homebrew tap formula
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish_github_release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: lukacf/homebrew-meerkat
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-meerkat
+
+      - name: Download checksums
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${GITHUB_REF_NAME}/checksums.sha256" -o checksums.sha256
+
+      - name: Generate updated formula
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          TAG="${GITHUB_REF_NAME}"
+          BASE="https://github.com/lukacf/meerkat/releases/download/${TAG}"
+
+          get_sha() { grep "$1" checksums.sha256 | awk '{print $1}'; }
+
+          gen_resource() {
+            local name="$1" target="$2"
+            echo "  resource \"${name}\" do"
+            echo "    url \"${BASE}/${name}-${VERSION}-${target}.tar.gz\""
+            echo "    sha256 \"$(get_sha "${name}-${VERSION}-${target}.tar.gz")\""
+            echo "  end"
+          }
+
+          gen_platform() {
+            local target="$1"
+            echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
+            echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
+            echo ""
+            for r in rkat-rpc rkat-rest rkat-mcp; do
+              gen_resource "$r" "$target"
+              echo ""
+            done
+          }
+
+          {
+            echo 'class Rkat < Formula'
+            echo '  desc "Minimal, high-performance agent harness for LLM-powered applications"'
+            echo '  homepage "https://github.com/lukacf/meerkat"'
+            echo "  version \"${VERSION}\""
+            echo '  license "MIT"'
+            echo ''
+            echo '  on_macos do'
+            echo '    on_arm do'
+            gen_platform "aarch64-apple-darwin"
+            echo '    end'
+            echo ''
+            echo '    on_intel do'
+            gen_platform "x86_64-apple-darwin"
+            echo '    end'
+            echo '  end'
+            echo ''
+            echo '  on_linux do'
+            echo '    on_arm do'
+            gen_platform "aarch64-unknown-linux-gnu"
+            echo '    end'
+            echo ''
+            echo '    on_intel do'
+            gen_platform "x86_64-unknown-linux-gnu"
+            echo '    end'
+            echo '  end'
+            echo ''
+            echo '  def install'
+            echo '    bin.install "rkat"'
+            echo ''
+            echo '    %w[rkat-rpc rkat-rest rkat-mcp].each do |name|'
+            echo '      resource(name).stage do'
+            echo '        bin.install name'
+            echo '      end'
+            echo '    end'
+            echo '  end'
+            echo ''
+            echo '  test do'
+            echo '    assert_match "rkat #{version}", shell_output("#{bin}/rkat --version")'
+            echo '  end'
+            echo 'end'
+          } > homebrew-meerkat/rkat.rb
+
+      - name: Commit and push formula
+        working-directory: homebrew-meerkat
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add rkat.rb
+          git commit -m "Update rkat to ${GITHUB_REF_NAME#v}"
+          git push
 
   # Registry publishing runs automatically on tag pushes alongside binary
   # builds. For recovery (e.g. npm was down during the tag-triggered run),

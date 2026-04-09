@@ -231,10 +231,6 @@ pub use meerkat_store::JsonlStore;
 pub use meerkat_store::MemoryStore;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use meerkat_store::RedbScheduleStore;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use meerkat_store::RedbSessionStore;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteScheduleStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteSessionStore;

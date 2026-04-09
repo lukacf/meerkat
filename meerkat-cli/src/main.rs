@@ -615,7 +615,6 @@ enum RealmBackendArg {
     #[cfg(feature = "jsonl-store")]
     Jsonl,
     Sqlite,
-    Redb,
 }
 
 impl From<RealmBackendArg> for RealmBackend {
@@ -624,7 +623,6 @@ impl From<RealmBackendArg> for RealmBackend {
             #[cfg(feature = "jsonl-store")]
             RealmBackendArg::Jsonl => RealmBackend::Jsonl,
             RealmBackendArg::Sqlite => RealmBackend::Sqlite,
-            RealmBackendArg::Redb => RealmBackend::Redb,
         }
     }
 }
@@ -2435,7 +2433,7 @@ fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScop
     match manifest.backend {
         #[cfg(feature = "jsonl-store")]
         RealmBackend::Jsonl => paths.sessions_jsonl_dir,
-        RealmBackend::Sqlite | RealmBackend::Redb => paths.root,
+        RealmBackend::Sqlite => paths.root,
         #[cfg(not(feature = "jsonl-store"))]
         _ => paths.root,
     }
@@ -6968,7 +6966,6 @@ where
                 root: paths.root.display().to_string(),
                 manifest_path: paths.manifest_path.display().to_string(),
                 config_path: paths.config_path.display().to_string(),
-                sessions_redb_path: paths.sessions_redb_path.display().to_string(),
                 sessions_sqlite_path: Some(paths.sessions_sqlite_path.display().to_string()),
                 sessions_jsonl_dir: paths.sessions_jsonl_dir.display().to_string(),
             }),
@@ -7241,7 +7238,7 @@ mod tests {
                 realm_id: realm_id.to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
@@ -10463,7 +10460,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10499,7 +10496,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let _manifest = meerkat_store::ensure_realm_manifest_in(
             &state_root,
             realm_id,
-            Some(meerkat_store::RealmBackend::Redb),
+            Some(meerkat_store::RealmBackend::Sqlite),
             Some(meerkat_store::RealmOrigin::Generated),
         )
         .await
@@ -10546,7 +10543,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             let (_manifest, store) = meerkat_store::open_realm_session_store_in(
                 &state_root,
                 realm_id,
-                Some(RealmBackend::Redb),
+                Some(RealmBackend::Sqlite),
                 Some(RealmOrigin::Explicit),
             )
             .await
@@ -10575,7 +10572,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                 realm_id: "test-realm".to_string(),
             },
             instance_id: None,
-            backend_hint: Some(RealmBackend::Redb),
+            backend_hint: Some(RealmBackend::Sqlite),
             origin_hint: RealmOrigin::Explicit,
             context_root: Some(root),
             user_config_root: None,

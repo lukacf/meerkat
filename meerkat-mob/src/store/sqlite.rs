@@ -1341,6 +1341,39 @@ pub struct SqliteRealmProfileStore {
     path: PathBuf,
 }
 
+impl SqliteRealmProfileStore {
+    /// Open a standalone realm profile store at the given database path.
+    ///
+    /// Creates the parent directory and initializes the schema if needed.
+    pub fn open(db_path: &std::path::Path) -> Result<Self, MobStoreError> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                MobStoreError::Internal(format!(
+                    "failed to create realm profile store directory: {e}"
+                ))
+            })?;
+        }
+        let conn = rusqlite::Connection::open(db_path).map_err(|e| {
+            MobStoreError::Internal(format!("failed to open realm profile store: {e}"))
+        })?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .map_err(se)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS realm_profiles (
+                name TEXT PRIMARY KEY,
+                profile_json BLOB NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .map_err(se)?;
+        Ok(Self {
+            path: db_path.to_path_buf(),
+        })
+    }
+}
+
 impl std::fmt::Debug for SqliteRealmProfileStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqliteRealmProfileStore")

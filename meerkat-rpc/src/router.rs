@@ -4532,11 +4532,10 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if recorded_requests
+                if !recorded_requests
                     .lock()
                     .expect("recorded requests lock poisoned")
-                    .len()
-                    >= 1
+                    .is_empty()
                 {
                     break;
                 }

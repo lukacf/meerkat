@@ -26,7 +26,6 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-redb = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 dirs = { workspace = true }
 
@@ -42,7 +41,6 @@ toml = { workspace = true }
 default = ["jsonl", "memory"]
 jsonl = []
 memory = []
-redb-store = ["dep:redb"]
 sqlite = ["dep:rusqlite"]
 
 [package.metadata.cargo-machete]

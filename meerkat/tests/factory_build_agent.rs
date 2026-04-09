@@ -14,6 +14,7 @@ use futures::stream;
 use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClient, TestClient};
+#[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
@@ -115,10 +116,12 @@ impl AgentToolDispatcher for EmptyDispatcher {
     }
 }
 
+#[cfg(feature = "comms")]
 struct NamedDispatcher {
     tools: Arc<[Arc<ToolDef>]>,
 }
 
+#[cfg(feature = "comms")]
 impl NamedDispatcher {
     fn new(name: &str) -> Self {
         Self {
@@ -135,6 +138,7 @@ impl NamedDispatcher {
     }
 }
 
+#[cfg(feature = "comms")]
 #[async_trait]
 impl AgentToolDispatcher for NamedDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -165,10 +169,12 @@ impl meerkat_core::service::MobToolsFactory for RecordingMobToolsFactory {
     }
 }
 
+#[cfg(feature = "comms")]
 struct StaticMobToolsFactory {
     dispatcher: Arc<dyn AgentToolDispatcher>,
 }
 
+#[cfg(feature = "comms")]
 #[async_trait]
 impl meerkat_core::service::MobToolsFactory for StaticMobToolsFactory {
     async fn build_mob_tools(
@@ -423,6 +429,7 @@ async fn build_agent_without_scheduler_keeps_injected_scheduler_tools_hidden() {
     );
 }
 
+#[cfg(feature = "comms")]
 #[tokio::test]
 async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
     let temp = tempfile::tempdir().unwrap();

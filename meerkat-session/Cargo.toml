@@ -28,7 +28,6 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 meerkat-skills = { workspace = true, optional = true }
 inventory = { workspace = true, optional = true }
-redb = { workspace = true, optional = true }
 meerkat-runtime = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -43,7 +42,6 @@ meerkat-store = { workspace = true, features = ["memory"] }
 default = []
 session-store = ["dep:meerkat-runtime", "capability-registrations"]
 capability-registrations = ["dep:inventory"]
-redb-events = ["dep:redb"]
 skill-registrations = ["capability-registrations", "dep:meerkat-skills"]
 session-compaction = ["capability-registrations"]
 

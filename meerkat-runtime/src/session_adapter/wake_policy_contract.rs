@@ -6,6 +6,13 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use super::*;
+use crate::{
+    CompletionHandle, CompletionOutcome, Input, InputDurability, InputHeader, InputLifecycleState,
+    InputOrigin, InputTerminalOutcome, InputVisibility, LogicalRuntimeId, PeerConvention,
+    PeerInput, PromptInput, ResponseProgressPhase, RuntimeControlPlane, RuntimeState,
+    SessionServiceRuntimeExt,
+};
 use chrono::Utc;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
@@ -13,12 +20,6 @@ use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
-use meerkat_runtime::{
-    CompletionOutcome, Input, InputDurability, InputHeader, InputLifecycleState, InputOrigin,
-    InputTerminalOutcome, InputVisibility, LogicalRuntimeId, PeerConvention, PeerInput,
-    PromptInput, ResponseProgressPhase, RuntimeControlPlane, RuntimeSessionAdapter, RuntimeState,
-    SessionServiceRuntimeExt,
-};
 use tokio::sync::Notify;
 
 fn make_prompt(text: &str) -> Input {
@@ -144,10 +145,7 @@ async fn wait_for_apply_count(apply_calls: &Arc<AtomicUsize>, expected: usize) {
     .expect("executor apply count should advance");
 }
 
-async fn assert_completed_without_result(
-    handle: Option<meerkat_runtime::CompletionHandle>,
-    context: &str,
-) {
+async fn assert_completed_without_result(handle: Option<CompletionHandle>, context: &str) {
     let result = tokio::time::timeout(Duration::from_secs(2), handle.expect(context).wait())
         .await
         .expect("completion should resolve");

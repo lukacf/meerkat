@@ -1,7 +1,5 @@
 #[cfg(feature = "jsonl")]
 use crate::JsonlStore;
-#[cfg(feature = "redb-store")]
-use crate::RedbSessionStore;
 #[cfg(feature = "sqlite")]
 use crate::SqliteSessionStore;
 use crate::{SessionStore, StoreError};
@@ -23,7 +21,6 @@ pub enum RealmBackend {
     Jsonl,
     #[cfg(feature = "sqlite")]
     Sqlite,
-    Redb,
 }
 
 impl RealmBackend {
@@ -33,7 +30,6 @@ impl RealmBackend {
             Self::Jsonl => "jsonl",
             #[cfg(feature = "sqlite")]
             Self::Sqlite => "sqlite",
-            Self::Redb => "redb",
         }
     }
 }
@@ -70,12 +66,20 @@ pub struct RealmManifest {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedRealmManifest {
+    pub realm_id: String,
+    pub backend: String,
+    #[serde(default)]
+    pub origin: RealmOrigin,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RealmPaths {
     pub root: PathBuf,
     pub manifest_path: PathBuf,
     pub config_path: PathBuf,
-    pub sessions_redb_path: PathBuf,
     pub sessions_sqlite_path: PathBuf,
     pub sessions_jsonl_dir: PathBuf,
 }
@@ -250,7 +254,6 @@ pub fn realm_paths_in(realms_root: &Path, realm_id: &str) -> RealmPaths {
     RealmPaths {
         manifest_path: root.join("realm_manifest.json"),
         config_path: root.join("config.toml"),
-        sessions_redb_path: root.join("sessions.redb"),
         sessions_sqlite_path: root.join("sessions.sqlite3"),
         sessions_jsonl_dir: root.join("sessions_jsonl"),
         root,
@@ -501,18 +504,20 @@ pub async fn ensure_realm_manifest_in(
     create_or_read_manifest_under_lock(&paths, realm_id, backend_hint, origin_hint).await
 }
 
-fn default_backend() -> RealmBackend {
+fn default_backend() -> Result<RealmBackend, StoreError> {
     #[cfg(feature = "sqlite")]
     {
-        RealmBackend::Sqlite
+        Ok(RealmBackend::Sqlite)
     }
     #[cfg(all(not(feature = "sqlite"), feature = "jsonl"))]
     {
-        RealmBackend::Jsonl
+        Ok(RealmBackend::Jsonl)
     }
     #[cfg(all(not(feature = "sqlite"), not(feature = "jsonl")))]
     {
-        RealmBackend::Redb
+        Err(StoreError::Internal(
+            "realm support requires at least one persistent backend".to_string(),
+        ))
     }
 }
 
@@ -547,10 +552,15 @@ async fn create_or_read_manifest_under_lock(
         return Ok(existing);
     }
 
+    let backend = match backend_hint {
+        Some(backend) => backend,
+        None => default_backend()?,
+    };
+    let origin = origin_hint.unwrap_or(RealmOrigin::Explicit);
     let manifest = RealmManifest {
         realm_id: realm_id.to_string(),
-        backend: backend_hint.unwrap_or_else(default_backend),
-        origin: origin_hint.unwrap_or(RealmOrigin::Explicit),
+        backend,
+        origin,
         created_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -602,13 +612,13 @@ async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match tokio::fs::read(path).await {
-            Ok(bytes) => match serde_json::from_slice::<RealmManifest>(&bytes) {
+            Ok(bytes) => match parse_manifest_bytes(&bytes) {
                 Ok(manifest) => return Ok(manifest),
                 Err(_err) if Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
-                Err(err) => return Err(StoreError::Serialization(err)),
+                Err(err) => return Err(err),
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -616,6 +626,31 @@ async fn read_existing_manifest(path: &Path) -> Result<RealmManifest, StoreError
             }
             Err(err) => return Err(StoreError::Io(err)),
         }
+    }
+}
+
+fn parse_manifest_bytes(bytes: &[u8]) -> Result<RealmManifest, StoreError> {
+    let persisted: PersistedRealmManifest =
+        serde_json::from_slice(bytes).map_err(StoreError::Serialization)?;
+    let backend = parse_realm_backend(&persisted.realm_id, &persisted.backend)?;
+    Ok(RealmManifest {
+        realm_id: persisted.realm_id,
+        backend,
+        origin: persisted.origin,
+        created_at: persisted.created_at,
+    })
+}
+
+fn parse_realm_backend(realm_id: &str, backend: &str) -> Result<RealmBackend, StoreError> {
+    match backend {
+        #[cfg(feature = "jsonl")]
+        "jsonl" => Ok(RealmBackend::Jsonl),
+        #[cfg(feature = "sqlite")]
+        "sqlite" => Ok(RealmBackend::Sqlite),
+        _ => Err(StoreError::UnsupportedRealmBackend {
+            realm_id: realm_id.to_string(),
+            backend: backend.to_string(),
+        }),
     }
 }
 
@@ -633,41 +668,37 @@ pub async fn open_realm_session_store_in(
     backend_hint: Option<RealmBackend>,
     origin_hint: Option<RealmOrigin>,
 ) -> Result<(RealmManifest, Arc<dyn SessionStore>), StoreError> {
-    let manifest =
-        ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
-    match manifest.backend {
+    #[cfg(not(any(feature = "jsonl", feature = "sqlite")))]
+    {
+        let _ = (realms_root, realm_id, backend_hint, origin_hint);
+        Err(StoreError::Internal(
+            "realm support requires at least one persistent backend".to_string(),
+        ))
+    }
+
+    #[cfg(any(feature = "jsonl", feature = "sqlite"))]
+    {
+        let manifest =
+            ensure_realm_manifest_in(realms_root, realm_id, backend_hint, origin_hint).await?;
+        let paths = realm_paths_in(realms_root, realm_id);
+
         #[cfg(feature = "jsonl")]
-        RealmBackend::Jsonl => {
-            let paths = realm_paths_in(realms_root, realm_id);
-            Ok((
+        if manifest.backend == RealmBackend::Jsonl {
+            return Ok((
                 manifest,
                 Arc::new(JsonlStore::new(paths.sessions_jsonl_dir)),
-            ))
+            ));
         }
+
         #[cfg(feature = "sqlite")]
-        RealmBackend::Sqlite => {
-            let paths = realm_paths_in(realms_root, realm_id);
+        if manifest.backend == RealmBackend::Sqlite {
             let sqlite_store = SqliteSessionStore::open(paths.sessions_sqlite_path)?;
-            Ok((manifest, Arc::new(sqlite_store)))
+            return Ok((manifest, Arc::new(sqlite_store)));
         }
-        #[cfg(feature = "redb-store")]
-        RealmBackend::Redb => {
-            let paths = realm_paths_in(realms_root, realm_id);
-            if let Some(parent) = paths.sessions_redb_path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(StoreError::Io)?;
-            }
-            let redb_path = paths.sessions_redb_path.clone();
-            let redb_store = tokio::task::spawn_blocking(move || RedbSessionStore::open(redb_path))
-                .await
-                .map_err(StoreError::Join)??;
-            Ok((manifest, Arc::new(redb_store)))
-        }
-        #[cfg(not(feature = "redb-store"))]
-        RealmBackend::Redb => Err(StoreError::Internal(
-            "redb-store feature is not enabled for realm persistence".to_string(),
-        )),
+
+        Err(StoreError::Internal(
+            "realm manifest resolved to a backend that is not compiled into this build".to_string(),
+        ))
     }
 }
 
@@ -698,6 +729,17 @@ pub fn generate_realm_id() -> String {
 mod tests {
     use super::*;
 
+    fn supported_backend() -> RealmBackend {
+        #[cfg(feature = "sqlite")]
+        {
+            RealmBackend::Sqlite
+        }
+        #[cfg(all(not(feature = "sqlite"), feature = "jsonl"))]
+        {
+            RealmBackend::Jsonl
+        }
+    }
+
     #[tokio::test]
     async fn ensure_realm_manifest_concurrent_create_is_consistent() {
         let temp = tempfile::tempdir().unwrap();
@@ -709,7 +751,7 @@ mod tests {
             let root = realms_root.clone();
             handles.push(tokio::spawn(async move {
                 let _ = idx;
-                let backend_hint = Some(RealmBackend::Redb);
+                let backend_hint = Some(supported_backend());
                 ensure_realm_manifest_in(
                     &root,
                     realm_id,
@@ -750,14 +792,14 @@ mod tests {
         let created = ensure_realm_manifest_in(
             &realms_root,
             realm_id,
-            Some(RealmBackend::Redb),
+            Some(supported_backend()),
             Some(RealmOrigin::Explicit),
         )
         .await
         .unwrap();
-        assert_eq!(created.backend, RealmBackend::Redb);
+        assert_eq!(created.backend, supported_backend());
 
-        #[cfg(feature = "jsonl")]
+        #[cfg(all(feature = "jsonl", feature = "sqlite"))]
         {
             let err = ensure_realm_manifest_in(
                 &realms_root,
@@ -777,21 +819,16 @@ mod tests {
         let realms_root = temp.path().join("realms");
         let realm_id = "conflict-race";
 
+        #[cfg(all(feature = "jsonl", feature = "sqlite"))]
         let mut handles = Vec::new();
+        #[cfg(all(feature = "jsonl", feature = "sqlite"))]
         for idx in 0..32 {
             let root = realms_root.clone();
             handles.push(tokio::spawn(async move {
                 let backend_hint = if idx % 2 == 0 {
-                    Some(RealmBackend::Redb)
+                    Some(RealmBackend::Sqlite)
                 } else {
-                    #[cfg(feature = "jsonl")]
-                    {
-                        Some(RealmBackend::Jsonl)
-                    }
-                    #[cfg(not(feature = "jsonl"))]
-                    {
-                        Some(RealmBackend::Redb)
-                    }
+                    Some(RealmBackend::Jsonl)
                 };
                 ensure_realm_manifest_in(
                     &root,
@@ -803,25 +840,36 @@ mod tests {
             }));
         }
 
-        let mut pinned_backend: Option<RealmBackend> = None;
-        for handle in handles {
-            match handle.await.unwrap() {
-                Ok(manifest) => {
-                    pinned_backend = Some(manifest.backend);
-                }
-                Err(StoreError::RealmBackendMismatch { existing, .. }) => {
-                    if let Some(pinned) = pinned_backend {
-                        assert_eq!(existing, pinned.as_str());
+        #[cfg(all(feature = "jsonl", feature = "sqlite"))]
+        {
+            let mut pinned_backend: Option<RealmBackend> = None;
+            for handle in handles {
+                match handle.await.unwrap() {
+                    Ok(manifest) => {
+                        pinned_backend = Some(manifest.backend);
                     }
+                    Err(StoreError::RealmBackendMismatch { existing, .. }) => {
+                        if let Some(pinned) = pinned_backend {
+                            assert_eq!(existing, pinned.as_str());
+                        }
+                    }
+                    Err(err) => panic!("unexpected error: {err}"),
                 }
-                Err(err) => panic!("unexpected error: {err}"),
             }
+
+            let manifest = ensure_realm_manifest_in(&realms_root, realm_id, None, None)
+                .await
+                .unwrap();
+            assert_eq!(pinned_backend, Some(manifest.backend));
         }
 
-        let manifest = ensure_realm_manifest_in(&realms_root, realm_id, None, None)
-            .await
-            .unwrap();
-        assert_eq!(pinned_backend, Some(manifest.backend));
+        #[cfg(not(all(feature = "jsonl", feature = "sqlite")))]
+        {
+            let manifest = ensure_realm_manifest_in(&realms_root, realm_id, None, None)
+                .await
+                .unwrap();
+            assert_eq!(manifest.backend, supported_backend());
+        }
     }
 
     #[tokio::test]
@@ -833,7 +881,7 @@ mod tests {
         tokio::fs::create_dir_all(&paths.root).await.unwrap();
         let legacy = serde_json::json!({
             "realm_id": realm_id,
-            "backend": "redb",
+            "backend": supported_backend().as_str(),
             "created_at": "1234567890"
         });
         tokio::fs::write(
@@ -850,6 +898,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_manifest_backend_is_rejected_before_store_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let realms_root = temp.path().join("realms");
+        let realm_id = "unsupported-backend";
+        let paths = realm_paths_in(&realms_root, realm_id);
+        tokio::fs::create_dir_all(&paths.root).await.unwrap();
+        let manifest = serde_json::json!({
+            "realm_id": realm_id,
+            "backend": "unsupported_backend",
+            "created_at": "1234567890"
+        });
+        tokio::fs::write(
+            &paths.manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let err = match open_realm_session_store_in(&realms_root, realm_id, None, None).await {
+            Ok(_) => panic!("unsupported manifest backend should fail before opening a store"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            StoreError::UnsupportedRealmBackend { ref realm_id, ref backend }
+                if realm_id == "unsupported-backend" && backend == "unsupported_backend"
+        ));
+    }
+
+    #[tokio::test]
     async fn manifest_is_never_observed_partially_written() {
         let temp = tempfile::tempdir().unwrap();
         let realms_root = temp.path().join("realms");
@@ -862,7 +940,7 @@ mod tests {
                 ensure_realm_manifest_in(
                     &root,
                     realm_id,
-                    Some(RealmBackend::Redb),
+                    Some(supported_backend()),
                     Some(RealmOrigin::Generated),
                 )
                 .await

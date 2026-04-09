@@ -13,8 +13,8 @@ mod schedule_host;
 mod stdio_json;
 
 pub use host_tools::{
-    HOST_TOOL_ACKNOWLEDGED, HostToolBridge, HostToolDispatchMode, HostToolDispatcher,
-    HostToolRegistry,
+    HOST_TOOL_ACKNOWLEDGED, HostToolBridge, HostToolCallbackResult, HostToolDispatchMode,
+    HostToolDispatcher, HostToolRegistry,
 };
 pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

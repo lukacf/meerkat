@@ -76,6 +76,7 @@ default = [
     "builtin-tools",
     "hooks",
     "jsonl-store",
+    "sqlite-store",
     "session-store",
     "skills",
     "comms",
@@ -92,6 +93,7 @@ hooks = ["meerkat/hooks"]
 
 # Storage backends (forwarded to facade)
 jsonl-store = ["meerkat/jsonl-store"]
+sqlite-store = ["meerkat/sqlite-store"]
 
 # Session capabilities (forwarded to facade)
 session-store = ["meerkat/session-store"]

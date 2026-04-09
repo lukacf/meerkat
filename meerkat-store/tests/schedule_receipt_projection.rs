@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-#![cfg(any(feature = "redb-store", feature = "sqlite"))]
+#![cfg(feature = "sqlite")]
 
 use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
@@ -9,14 +9,11 @@ use meerkat_schedule::{
     OverlapPolicy, Schedule, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
     TargetBinding, TriggerSpec,
 };
-#[cfg(feature = "redb-store")]
-use meerkat_store::RedbScheduleStore;
 #[cfg(feature = "sqlite")]
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "redb-store", feature = "sqlite"))]
 fn sample_schedule() -> Schedule {
     Schedule::new(CreateScheduleRequest {
         name: Some("receipt-projection".to_string()),
@@ -43,7 +40,6 @@ fn sample_schedule() -> Schedule {
     })
 }
 
-#[cfg(any(feature = "redb-store", feature = "sqlite"))]
 fn sample_in_flight_occurrence(schedule: &Schedule) -> Occurrence {
     let mut occurrence = Occurrence::planned_from_schedule(
         schedule,
@@ -56,7 +52,6 @@ fn sample_in_flight_occurrence(schedule: &Schedule) -> Occurrence {
     occurrence
 }
 
-#[cfg(any(feature = "redb-store", feature = "sqlite"))]
 async fn assert_append_receipt_updates_occurrence_projection(
     store: Arc<dyn ScheduleStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -94,16 +89,6 @@ async fn assert_append_receipt_updates_occurrence_projection(
     let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
     assert_eq!(receipts, vec![receipt]);
     Ok(())
-}
-
-#[cfg(feature = "redb-store")]
-#[tokio::test]
-async fn redb_append_receipt_updates_occurrence_projection()
--> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbScheduleStore::open(dir.path().join("schedule.redb"))?)
-        as Arc<dyn ScheduleStore>;
-    assert_append_receipt_updates_occurrence_projection(store).await
 }
 
 #[cfg(feature = "sqlite")]

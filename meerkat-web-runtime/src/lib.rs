@@ -70,7 +70,8 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 use meerkat::surface::{
-    HostToolBridge, HostToolDispatchMode, HostToolDispatcher, HostToolRegistry,
+    HostToolBridge, HostToolCallbackResult, HostToolDispatchMode, HostToolDispatcher,
+    HostToolRegistry,
 };
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
@@ -977,6 +978,30 @@ impl JsHostToolBridge {
             state.js_tools.callback(name)
         })
     }
+
+    fn parse_callback_result_json(
+        result_json: &str,
+    ) -> Result<HostToolCallbackResult, meerkat_core::error::ToolError> {
+        let value: serde_json::Value = serde_json::from_str(result_json).map_err(|err| {
+            meerkat_core::error::ToolError::execution_failed(format!(
+                "invalid tool result JSON: {err}"
+            ))
+        })?;
+        let content = value
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                meerkat_core::error::ToolError::execution_failed(
+                    "invalid tool result JSON: missing string 'content'".to_string(),
+                )
+            })?
+            .to_string();
+        let is_error = value
+            .get("is_error")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        Ok(HostToolCallbackResult::new(content, is_error))
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -994,7 +1019,7 @@ impl HostToolBridge for JsHostToolBridge {
         &self,
         name: &str,
         args_json: &str,
-    ) -> Result<String, meerkat_core::error::ToolError> {
+    ) -> Result<HostToolCallbackResult, meerkat_core::error::ToolError> {
         let callback = Self::get_callback(name)
             .ok_or_else(|| meerkat_core::error::ToolError::not_found(name))?;
         let js_args = JsValue::from_str(args_json);
@@ -1009,7 +1034,12 @@ impl HostToolBridge for JsHostToolBridge {
                     "JS promise rejected: {e:?}"
                 ))
             })?;
-        Ok(result_val.as_string().unwrap_or_default())
+        let result_json = result_val.as_string().ok_or_else(|| {
+            meerkat_core::error::ToolError::execution_failed(
+                "JS callback must resolve to a JSON string".to_string(),
+            )
+        })?;
+        Self::parse_callback_result_json(&result_json)
     }
 }
 

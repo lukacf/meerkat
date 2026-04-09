@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-#![cfg(any(feature = "redb-store", feature = "sqlite"))]
+#![cfg(feature = "sqlite")]
 
 use chrono::{Duration, Utc};
 use meerkat_core::{ContentInput, SessionId};
@@ -8,14 +8,11 @@ use meerkat_schedule::{
     OccurrencePhase, OverlapPolicy, PendingSupersession, Schedule, ScheduleStore,
     ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
 };
-#[cfg(feature = "redb-store")]
-use meerkat_store::RedbScheduleStore;
 #[cfg(feature = "sqlite")]
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[cfg(any(feature = "redb-store", feature = "sqlite"))]
 fn sample_schedule() -> Schedule {
     Schedule::new(CreateScheduleRequest {
         name: Some("atomic-mutation".to_string()),
@@ -42,7 +39,6 @@ fn sample_schedule() -> Schedule {
     })
 }
 
-#[cfg(any(feature = "redb-store", feature = "sqlite"))]
 async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     store: Arc<dyn ScheduleStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -110,16 +106,6 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
     );
 
     Ok(())
-}
-
-#[cfg(feature = "redb-store")]
-#[tokio::test]
-async fn redb_atomic_schedule_mutation_supersedes_old_pending()
--> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbScheduleStore::open(dir.path().join("schedule.redb"))?)
-        as Arc<dyn ScheduleStore>;
-    assert_atomic_schedule_mutation_supersedes_old_pending(store).await
 }
 
 #[cfg(feature = "sqlite")]

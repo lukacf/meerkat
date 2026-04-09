@@ -6,7 +6,7 @@ use meerkat_core::{SessionId, SessionStoreError};
 ///
 /// External consumers should use [`SessionStoreError`] (from `meerkat-core`) for
 /// the `SessionStore` trait boundary. This type carries backend-specific variants
-/// (redb, rusqlite) that the trait contract intentionally erases.
+/// (for example rusqlite) that the trait contract intentionally erases.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("IO error: {0}")]
@@ -15,11 +15,7 @@ pub enum StoreError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
-    #[error("Database error: {0}")]
-    Database(#[from] Box<redb::Error>),
-
-    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+    #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
@@ -49,6 +45,10 @@ pub enum StoreError {
         requested: String,
         existing: String,
     },
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("unsupported realm backend for '{realm_id}': '{backend}'")]
+    UnsupportedRealmBackend { realm_id: String, backend: String },
 }
 
 impl StoreError {
@@ -69,7 +69,7 @@ impl StoreError {
 /// Used as `.map_err(into_session_store_error)` in `SessionStore` trait impls.
 /// Only needed on native targets where the persistent store backends exist.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
+#[cfg(any(feature = "jsonl", feature = "sqlite"))]
 pub(crate) fn into_session_store_error(e: StoreError) -> SessionStoreError {
     e.into_session_store_error()
 }

@@ -15,6 +15,18 @@ pub enum HostToolDispatchMode {
     FireAndForget,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostToolCallbackResult {
+    pub content: String,
+    pub is_error: bool,
+}
+
+impl HostToolCallbackResult {
+    pub fn new(content: String, is_error: bool) -> Self {
+        Self { content, is_error }
+    }
+}
+
 enum HostToolMode<T> {
     Callback(T),
     FireAndForget,
@@ -121,7 +133,11 @@ pub trait HostToolBridge: Send + Sync {
 
     fn dispatch_mode(&self, name: &str) -> Option<HostToolDispatchMode>;
 
-    async fn invoke_callback(&self, name: &str, args_json: &str) -> Result<String, ToolError>;
+    async fn invoke_callback(
+        &self,
+        name: &str,
+        args_json: &str,
+    ) -> Result<HostToolCallbackResult, ToolError>;
 }
 
 pub struct HostToolDispatcher<B> {
@@ -153,40 +169,15 @@ where
             )
             .into()),
             Some(HostToolDispatchMode::Callback) => {
-                let result_json = self
+                let result = self
                     .bridge
                     .invoke_callback(call.name, call.args.get())
                     .await?;
-                let parsed = parse_callback_result(&result_json)?;
-                Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
+                Ok(ToolResult::new(call.id.to_string(), result.content, result.is_error).into())
             }
             None => Err(ToolError::not_found(call.name)),
         }
     }
-}
-
-struct HostToolCallbackResult {
-    content: String,
-    is_error: bool,
-}
-
-fn parse_callback_result(result_json: &str) -> Result<HostToolCallbackResult, ToolError> {
-    let value: Value = serde_json::from_str(result_json)
-        .map_err(|err| ToolError::execution_failed(format!("invalid tool result JSON: {err}")))?;
-    let content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ToolError::execution_failed(
-                "invalid tool result JSON: missing string 'content'".to_string(),
-            )
-        })?
-        .to_string();
-    let is_error = value
-        .get("is_error")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Ok(HostToolCallbackResult { content, is_error })
 }
 
 #[cfg(test)]
@@ -201,7 +192,8 @@ mod tests {
     use serde_json::json;
     use serde_json::value::RawValue;
 
-    type CallbackFuture = Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send>>;
+    type CallbackFuture =
+        Pin<Box<dyn Future<Output = Result<HostToolCallbackResult, ToolError>> + Send>>;
     type TestCallback = Arc<dyn Fn(String) -> CallbackFuture + Send + Sync>;
 
     struct TestBridge {
@@ -218,7 +210,11 @@ mod tests {
             self.registry.dispatch_mode(name)
         }
 
-        async fn invoke_callback(&self, name: &str, args_json: &str) -> Result<String, ToolError> {
+        async fn invoke_callback(
+            &self,
+            name: &str,
+            args_json: &str,
+        ) -> Result<HostToolCallbackResult, ToolError> {
             let callback = self
                 .registry
                 .callback(name)
@@ -235,7 +231,10 @@ mod tests {
             let seen_args = seen_args_for_callback.clone();
             Box::pin(async move {
                 seen_args.lock().unwrap().push(args_json.clone());
-                Ok(r#"{"content":"browser callback ok","is_error":false}"#.to_string())
+                Ok(HostToolCallbackResult::new(
+                    "browser callback ok".to_string(),
+                    false,
+                ))
             })
         });
 
@@ -306,9 +305,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_tool_contract_invalid_callback_results_are_rejected() {
-        let callback: TestCallback =
-            Arc::new(|_args_json| Box::pin(async { Ok("not-json".to_string()) }));
+    async fn host_tool_contract_callback_errors_are_propagated() {
+        let callback: TestCallback = Arc::new(|_args_json| {
+            Box::pin(async {
+                Err(ToolError::execution_failed(
+                    "callback failed before producing a typed result".to_string(),
+                ))
+            })
+        });
 
         let mut registry = HostToolRegistry::default();
         registry.register_callback(
@@ -327,12 +331,13 @@ mod tests {
         };
 
         let err = match dispatcher.dispatch(call).await {
-            Ok(_) => panic!("expected invalid json result"),
+            Ok(_) => panic!("expected callback error"),
             Err(err) => err,
         };
 
         assert!(
-            err.to_string().contains("invalid tool result JSON"),
+            err.to_string()
+                .contains("callback failed before producing a typed result"),
             "unexpected error: {err}"
         );
     }

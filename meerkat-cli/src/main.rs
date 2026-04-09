@@ -2554,18 +2554,10 @@ fn resolve_session_comms_name(
     explicit_name: Option<String>,
     disabled: bool,
 ) -> Option<String> {
-    #[cfg(feature = "comms")]
-    {
-        if disabled {
-            return None;
-        }
-        explicit_name.or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
-    }
-
-    #[cfg(not(feature = "comms"))]
-    {
-        let _ = (session_id, keep_alive, explicit_name, disabled);
+    if disabled {
         None
+    } else {
+        explicit_name.or_else(|| keep_alive.then(|| format!("cli/{session_id}")))
     }
 }
 

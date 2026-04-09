@@ -109,6 +109,8 @@ impl AnthropicClient {
         request_timeout: Duration,
         pool_idle_timeout: Duration,
     ) -> Result<Arc<dyn TransportClient>, LlmError> {
+        #[cfg(target_arch = "wasm32")]
+        let _ = (connect_timeout, request_timeout, pool_idle_timeout);
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
             .connect_timeout(connect_timeout)

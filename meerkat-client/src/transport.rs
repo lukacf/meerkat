@@ -154,23 +154,12 @@ impl TransportError {
         false
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn looks_like_connection_reset(err: &reqwest::Error) -> bool {
-        err.is_connect() || Self::source_chain_contains_connection_reset(err) || {
-            let message = err.to_string().to_ascii_lowercase();
-            message.contains("connection reset")
-                || message.contains("connection closed before message completed")
-                || message.contains("unexpected eof")
-                || message.contains("error reading a body from connection")
-        }
-    }
-
     fn from_reqwest_error(err: reqwest::Error) -> Self {
         if err.is_timeout() {
             Self::Timeout { duration_ms: 30000 }
         } else {
             #[cfg(not(target_arch = "wasm32"))]
-            if Self::looks_like_connection_reset(&err) {
+            if Self::source_chain_contains_connection_reset(&err) {
                 return Self::ConnectionReset;
             }
             Self::Other {

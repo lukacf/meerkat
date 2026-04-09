@@ -1,6 +1,9 @@
+#[cfg(any(feature = "session-store", feature = "session-compaction"))]
 use meerkat::{Config, surface::build_capabilities_response};
+#[cfg(any(feature = "session-store", feature = "session-compaction"))]
 use meerkat_contracts::CapabilityId;
 
+#[cfg(any(feature = "session-store", feature = "session-compaction"))]
 fn capability_ids(config: &Config) -> Vec<CapabilityId> {
     build_capabilities_response(config)
         .capabilities

@@ -1,13 +1,11 @@
 //! meerkat-session — Session service orchestration for Meerkat.
 //!
 //! This crate provides `EphemeralSessionService` (always available) and,
-//! behind feature gates, `PersistentSessionService`, `DefaultCompactor`,
-//! and `RedbEventStore`.
+//! behind feature gates, `PersistentSessionService` and `DefaultCompactor`.
 //!
 //! # Features
 //!
 //! - `session-store`: Enables generic `PersistentSessionService` orchestration.
-//! - `redb-events`: Enables `RedbEventStore`.
 //! - `capability-registrations`: Enables capability inventory entries.
 //! - `skill-registrations`: Enables builtin skill inventory entries.
 //! - `session-compaction`: Enables `DefaultCompactor` and `CompactionConfig`.
@@ -19,6 +17,7 @@ pub mod tokio {
 }
 
 pub mod ephemeral;
+pub mod session_turn_admission_authority;
 
 #[cfg(feature = "session-compaction")]
 pub mod compactor;
@@ -31,9 +30,6 @@ pub mod persistent;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub mod projector;
-
-#[cfg(all(feature = "redb-events", not(target_arch = "wasm32")))]
-pub mod redb_events;
 
 pub use ephemeral::{EphemeralSessionService, SessionAgent, SessionAgentBuilder, SessionSnapshot};
 

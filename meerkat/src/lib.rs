@@ -150,9 +150,8 @@ pub use meerkat_core::SessionServiceControlExt;
 pub use meerkat_core::SessionServiceHistoryExt;
 #[cfg(feature = "comms")]
 pub use meerkat_core::{
-    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
-    StreamScope,
+    CommsCommand, EventStream, InputSource, PeerDirectoryEntry, PeerDirectorySource, PeerName,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
 
 // Re-export client types
@@ -168,10 +167,10 @@ pub use meerkat_schedule::{
     SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
     ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService, ScheduleStore,
     ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe,
-    ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call,
-    schedule_tools_list,
+    ScheduleToolDispatcher, ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind,
+    ScheduledMobRuntimeMode, ScheduledSessionAction, SessionMaterializationSpec,
+    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
+    handle_schedule_tools_call, schedule_tools_list,
 };
 
 // AgentFactory and build_agent types
@@ -187,11 +186,7 @@ pub use persistence::PersistenceBundle;
 pub use persistence::PersistenceError;
 #[cfg(all(
     feature = "session-store",
-    any(
-        feature = "jsonl-store",
-        feature = "sqlite-store",
-        feature = "redb-store"
-    ),
+    any(feature = "jsonl-store", feature = "sqlite-store"),
     not(target_arch = "wasm32")
 ))]
 pub use persistence::open_realm_persistence_in;
@@ -239,10 +234,6 @@ pub use meerkat_store::JsonlStore;
 #[cfg(feature = "memory-store")]
 pub use meerkat_store::MemoryStore;
 
-#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
-pub use meerkat_store::RedbScheduleStore;
-#[cfg(all(feature = "redb-store", not(target_arch = "wasm32")))]
-pub use meerkat_store::RedbSessionStore;
 #[cfg(all(feature = "sqlite-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteScheduleStore;
 #[cfg(all(feature = "sqlite-store", not(target_arch = "wasm32")))]

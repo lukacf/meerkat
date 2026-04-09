@@ -1,174 +1,89 @@
 //! Session index interfaces.
 //!
-//! Phase 0 contract: define the SessionIndex API surface; implementations (e.g. redb-backed)
-//! arrive in later phases.
+//! SQLite-backed implementation used by `JsonlStore` to avoid per-list
+//! directory scans and per-session metadata file reads.
 
-use crate::SessionFilter;
-#[cfg(feature = "redb-store")]
-use crate::StoreError;
+use crate::{SessionFilter, StoreError};
 use meerkat_core::{SessionId, SessionMeta};
-#[cfg(feature = "redb-store")]
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
-#[cfg(feature = "redb-store")]
-use std::path::Path;
-#[cfg(feature = "redb-store")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use rusqlite::{Connection, OptionalExtension, params};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "redb-store")]
-const SESSIONS_BY_ID: TableDefinition<&[u8], &[u8]> = TableDefinition::new("sessions_by_id");
-#[cfg(feature = "redb-store")]
-const SESSIONS_BY_UPDATED: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("sessions_by_updated");
-#[cfg(feature = "redb-store")]
-const EMPTY_VALUE: &[u8] = &[];
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
-#[cfg(feature = "redb-store")]
-fn system_time_millis(time: SystemTime) -> u64 {
+const CREATE_SESSION_INDEX_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS session_index (
+    session_id TEXT PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    meta_json BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_index_updated_idx
+ON session_index(updated_at_ms DESC, session_id ASC)";
+
+fn system_time_millis(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
         Err(_) => 0,
     }
 }
 
-#[cfg(feature = "redb-store")]
-fn session_id_key(id: &SessionId) -> [u8; 16] {
-    *id.0.as_bytes()
+fn open_connection(path: &Path) -> Result<Connection, StoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.execute_batch(CREATE_SESSION_INDEX_SQL)?;
+    Ok(conn)
 }
 
-#[cfg(feature = "redb-store")]
-fn updated_key(id: &SessionId, updated_at: SystemTime) -> [u8; 24] {
-    let inverted = u64::MAX - system_time_millis(updated_at);
-    let mut key = [0u8; 24];
-    key[..8].copy_from_slice(&inverted.to_be_bytes());
-    key[8..].copy_from_slice(id.0.as_bytes());
-    key
+/// SQLite-backed [`SessionIndex`] implementation.
+pub struct SqliteSessionIndex {
+    path: PathBuf,
 }
 
-/// redb-backed [`SessionIndex`] implementation.
-///
-/// This is a write-through index used by JsonlStore to avoid per-list directory scans and
-/// per-session metadata file reads.
-#[cfg(feature = "redb-store")]
-pub struct RedbSessionIndex {
-    db: Database,
-}
-
-#[cfg(feature = "redb-store")]
-impl RedbSessionIndex {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let db = Database::create(path).map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-        // Ensure required tables exist.
-        let write_txn = db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            let _ = write_txn
-                .open_table(SESSIONS_BY_ID)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let _ = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-        Ok(Self { db })
+impl SqliteSessionIndex {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        let path = path.into();
+        let conn = open_connection(&path)?;
+        drop(conn);
+        Ok(Self { path })
     }
 
     pub fn is_empty(&self) -> Result<bool, StoreError> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let table = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let mut iter = table
-            .iter()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        Ok(iter.next().is_none())
+        let conn = open_connection(&self.path)?;
+        let exists = conn
+            .query_row("SELECT 1 FROM session_index LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+        Ok(exists.is_none())
     }
 
-    /// Count the number of sessions in the index
     pub fn entry_count(&self) -> Result<usize, StoreError> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let table = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let count = table
-            .len()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        Ok(count as usize)
+        let conn = open_connection(&self.path)?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM session_index", [], |row| row.get(0))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 
     pub fn lookup_meta(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let table = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let key = session_id_key(id);
-        let Some(meta_bytes) = table
-            .get(key.as_ref())
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?
-        else {
-            return Ok(None);
-        };
-        let meta: SessionMeta =
-            serde_json::from_slice(meta_bytes.value()).map_err(StoreError::Serialization)?;
-        Ok(Some(meta))
+        let conn = open_connection(&self.path)?;
+        conn.query_row(
+            "SELECT meta_json FROM session_index WHERE session_id = ?1",
+            params![id.to_string()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Serialization))
+        .transpose()
     }
 
     pub fn insert_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
-        let meta_bytes = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
-
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            let mut by_id = write_txn
-                .open_table(SESSIONS_BY_ID)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let mut by_updated = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            let id_key = session_id_key(&meta.id);
-
-            // If this session already exists, remove the old updated_at index entry.
-            if let Some(existing) = by_id
-                .get(id_key.as_ref())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
-            {
-                let existing_meta: SessionMeta =
-                    serde_json::from_slice(existing.value()).map_err(StoreError::Serialization)?;
-                let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
-                let _ = by_updated
-                    .remove(old_key.as_ref())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            }
-
-            by_id
-                .insert(id_key.as_ref(), meta_bytes.as_slice())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            let new_key = updated_key(&meta.id, meta.updated_at);
-            by_updated
-                .insert(new_key.as_ref(), EMPTY_VALUE)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        Ok(())
+        self.insert_many(vec![meta])
     }
 
     pub fn insert_many(&self, metas: Vec<SessionMeta>) -> Result<(), StoreError> {
@@ -176,152 +91,68 @@ impl RedbSessionIndex {
             return Ok(());
         }
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            let mut by_id = write_txn
-                .open_table(SESSIONS_BY_ID)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let mut by_updated = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            for meta in metas {
-                let meta_bytes = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
-                let id_key = session_id_key(&meta.id);
-
-                // Remove stale updated_at entry if session already exists with different timestamp
-                if let Some(existing) = by_id
-                    .get(id_key.as_ref())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?
-                {
-                    let existing_meta: SessionMeta = serde_json::from_slice(existing.value())
-                        .map_err(StoreError::Serialization)?;
-                    // Only remove if timestamp changed to avoid duplicate entries
-                    if existing_meta.updated_at != meta.updated_at {
-                        let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
-                        let _ = by_updated
-                            .remove(old_key.as_ref())
-                            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-                    }
-                }
-
-                by_id
-                    .insert(id_key.as_ref(), meta_bytes.as_slice())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-                let new_key = updated_key(&meta.id, meta.updated_at);
-                by_updated
-                    .insert(new_key.as_ref(), EMPTY_VALUE)
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            }
+        let mut conn = open_connection(&self.path)?;
+        let tx = conn.transaction()?;
+        for meta in metas {
+            let meta_json = serde_json::to_vec(&meta).map_err(StoreError::Serialization)?;
+            tx.execute(
+                r"
+                INSERT INTO session_index (session_id, created_at_ms, updated_at_ms, meta_json)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    created_at_ms = excluded.created_at_ms,
+                    updated_at_ms = excluded.updated_at_ms,
+                    meta_json = excluded.meta_json
+                ",
+                params![
+                    meta.id.to_string(),
+                    system_time_millis(meta.created_at),
+                    system_time_millis(meta.updated_at),
+                    meta_json,
+                ],
+            )?;
         }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn remove(&self, id: &SessionId) -> Result<(), StoreError> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        {
-            let mut by_id = write_txn
-                .open_table(SESSIONS_BY_ID)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let mut by_updated = write_txn
-                .open_table(SESSIONS_BY_UPDATED)
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-
-            let id_key = session_id_key(id);
-            if let Some(existing) = by_id
-                .get(id_key.as_ref())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
-            {
-                let existing_meta: SessionMeta =
-                    serde_json::from_slice(existing.value()).map_err(StoreError::Serialization)?;
-                let old_key = updated_key(&existing_meta.id, existing_meta.updated_at);
-                let _ = by_updated
-                    .remove(old_key.as_ref())
-                    .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            }
-
-            let _ = by_id
-                .remove(id_key.as_ref())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let conn = open_connection(&self.path)?;
+        conn.execute(
+            "DELETE FROM session_index WHERE session_id = ?1",
+            params![id.to_string()],
+        )?;
         Ok(())
     }
 
     pub fn list_meta(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        let limit = filter.limit.unwrap_or(usize::MAX);
-        let mut offset = filter.offset.unwrap_or(0);
+        let conn = open_connection(&self.path)?;
+        let created_after = filter.created_after.map(system_time_millis);
+        let updated_after = filter.updated_after.map(system_time_millis);
+        let limit = i64::try_from(filter.limit.unwrap_or(usize::MAX)).unwrap_or(i64::MAX);
+        let offset = i64::try_from(filter.offset.unwrap_or(0)).unwrap_or(i64::MAX);
 
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let by_updated = read_txn
-            .open_table(SESSIONS_BY_UPDATED)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
-        let by_id = read_txn
-            .open_table(SESSIONS_BY_ID)
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+        let mut stmt = conn.prepare(
+            r"
+            SELECT meta_json
+            FROM session_index
+            WHERE (?1 IS NULL OR created_at_ms >= ?1)
+              AND (?2 IS NULL OR updated_at_ms >= ?2)
+            ORDER BY updated_at_ms DESC, session_id ASC
+            LIMIT ?3 OFFSET ?4
+            ",
+        )?;
+        let rows = stmt.query_map(
+            params![created_after, updated_after, limit, offset],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
 
-        let mut results = Vec::new();
-
-        for row in by_updated
-            .iter()
-            .map_err(|e| StoreError::Database(Box::new(e.into())))?
-        {
-            let (key, _value) = row.map_err(|e| StoreError::Database(Box::new(e.into())))?;
-            let key_bytes = key.value();
-            if key_bytes.len() != 24 {
-                continue;
-            }
-
-            let mut id_bytes = [0u8; 16];
-            id_bytes.copy_from_slice(&key_bytes[8..]);
-            let Some(meta_bytes) = by_id
-                .get(id_bytes.as_ref())
-                .map_err(|e| StoreError::Database(Box::new(e.into())))?
-            else {
-                continue;
-            };
-            let meta: SessionMeta =
-                serde_json::from_slice(meta_bytes.value()).map_err(StoreError::Serialization)?;
-
-            if let Some(updated_after) = filter.updated_after {
-                // Because the index is ordered by descending updated_at, we can stop early.
-                if meta.updated_at < updated_after {
-                    break;
-                }
-            }
-            if let Some(created_after) = filter.created_after
-                && meta.created_at < created_after
-            {
-                continue;
-            }
-
-            if offset > 0 {
-                offset -= 1;
-                continue;
-            }
-
-            results.push(meta);
-            if results.len() >= limit {
-                break;
-            }
+        let mut metas = Vec::new();
+        for row in rows {
+            let bytes = row?;
+            metas.push(serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?);
         }
-
-        Ok(results)
+        Ok(metas)
     }
 }
 
@@ -333,8 +164,7 @@ pub trait SessionIndex: Send + Sync {
     fn list(&self, filter: SessionFilter) -> Vec<SessionMeta>;
 }
 
-#[cfg(feature = "redb-store")]
-impl SessionIndex for RedbSessionIndex {
+impl SessionIndex for SqliteSessionIndex {
     fn lookup(&self, id: &SessionId) -> Option<SessionMeta> {
         match self.lookup_meta(id) {
             Ok(meta) => meta,

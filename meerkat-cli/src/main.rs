@@ -10419,12 +10419,23 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let tools = dispatcher.tools();
         let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
-        assert!(tool_names.contains(&"send"));
+        assert!(
+            tool_names.contains(&"send_message"),
+            "expected send_message tool, got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"send_request"),
+            "expected send_request tool, got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"send_response"),
+            "expected send_response tool, got: {tool_names:?}"
+        );
         assert!(tool_names.contains(&"peers"));
     }
 
     #[tokio::test]
-    async fn test_prune_inner_skips_legacy_unknown_without_force() {
+    async fn test_prune_inner_rejects_unsupported_redb_backend() {
         let temp = tempfile::tempdir().expect("tempdir");
         let state_root = temp.path().join("realms");
         let realm_id = "legacy-skip";
@@ -10444,11 +10455,16 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         .await
         .expect("write manifest");
 
-        let outcome = prune_realms_inner(&state_root, true, 0, false)
-            .await
-            .expect("prune outcome");
-        assert_eq!(outcome.removed, 0);
-        assert_eq!(outcome.skipped_legacy, 1);
+        let result = prune_realms_inner(&state_root, true, 0, false).await;
+        assert!(
+            result.is_err(),
+            "redb backend must be rejected as unsupported"
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("unsupported") || error.contains("redb"),
+            "error should mention unsupported backend: {error}"
+        );
     }
 
     #[tokio::test]

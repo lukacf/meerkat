@@ -864,6 +864,7 @@ impl SessionService for MockSessionService {
                 provider: build
                     .and_then(|b| b.provider)
                     .unwrap_or(Provider::Anthropic),
+                self_hosted_server_id: None,
                 provider_params: build.and_then(|b| b.provider_params.clone()),
                 tooling: SessionTooling {
                     builtins: build
@@ -6279,6 +6280,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             max_tokens: 4096,
             structured_output_retries: 2,
             provider: Provider::Anthropic,
+            self_hosted_server_id: None,
             provider_params: None,
             tooling: SessionTooling {
                 builtins: ToolCategoryOverride::Enable,

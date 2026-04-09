@@ -3238,6 +3238,7 @@ mod tests {
             max_tokens: 4096,
             structured_output_retries: 2,
             provider: Provider::Anthropic,
+            self_hosted_server_id: None,
             provider_params: None,
             tooling: SessionTooling {
                 comms: ToolCategoryOverride::Enable,
@@ -3272,6 +3273,7 @@ mod tests {
             max_tokens: 4096,
             structured_output_retries: 2,
             provider: Provider::Anthropic,
+            self_hosted_server_id: None,
             provider_params: None,
             tooling: SessionTooling {
                 comms: ToolCategoryOverride::Enable,
@@ -3311,6 +3313,7 @@ mod tests {
             max_tokens: 4096,
             structured_output_retries: 2,
             provider: Provider::Anthropic,
+            self_hosted_server_id: None,
             provider_params: None,
             tooling: SessionTooling {
                 comms: ToolCategoryOverride::Enable,

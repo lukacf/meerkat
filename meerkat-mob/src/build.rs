@@ -685,6 +685,7 @@ mod tests {
                 max_tokens: 2048,
                 structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 provider_params: None,
                 tooling: meerkat_core::session::SessionTooling {
                     builtins: meerkat_core::session::ToolCategoryOverride::Enable,

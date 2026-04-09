@@ -7,7 +7,9 @@ use crate::definition::{
 use crate::event::MobEvent;
 use crate::profile::{Profile, ProfileBinding, ToolConfig};
 use crate::run::MobRunStatus;
-use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
+use crate::run::{
+    FailureLedgerEntry, MobRun, RunCollectionPolicyKind, StepLedgerEntry, StepRunStatus,
+};
 use crate::storage::MobStorage;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
@@ -68,7 +70,6 @@ struct MockCommsBehavior {
     fail_send_peer_added: bool,
     fail_send_peer_retired: bool,
     fail_send_peer_unwired: bool,
-    hang_peers: bool,
 }
 
 struct MockCommsRuntime {
@@ -248,8 +249,9 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
                 self.sent_intents.write().await.push(intent);
                 Ok(SendReceipt::PeerRequestSent {
-                    request_id: InteractionId(uuid::Uuid::new_v4()),
                     envelope_id: uuid::Uuid::new_v4(),
+                    interaction_id: InteractionId(uuid::Uuid::new_v4()),
+                    stream_reserved: false,
                 })
             }
             unsupported => Err(SendError::Unsupported(format!(
@@ -260,14 +262,6 @@ impl CoreCommsRuntime for MockCommsRuntime {
     }
 
     async fn peers(&self) -> Vec<PeerDirectoryEntry> {
-        if self
-            .behavior
-            .read()
-            .expect("poisoned behavior lock in mock runtime")
-            .hang_peers
-        {
-            return std::future::pending().await;
-        }
         let trusted = self.trusted_peers.read().await;
         let peer_statuses = self.peer_statuses.read().await;
         trusted
@@ -304,10 +298,6 @@ impl CoreCommsRuntime for MockCommsRuntime {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
     }
-
-    async fn drain_peer_input_candidates(&self) -> Vec<meerkat_core::PeerInputCandidate> {
-        Vec::new()
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -332,17 +322,6 @@ struct CreateSessionRecord {
     initial_turn: meerkat_core::service::InitialTurnPolicy,
     comms_name: Option<String>,
     peer_meta_labels: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug)]
-enum MockKeepAliveTurnMode {
-    WaitForNotifier,
-    CompleteImmediately,
-    CallbackPending {
-        tool_name: String,
-        args: serde_json::Value,
-    },
-    Fail(String),
 }
 
 /// A mock session service that creates sessions with mock comms runtimes.
@@ -375,7 +354,7 @@ struct MockSessionService {
     fail_inject: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
-    keep_alive_turn_mode: std::sync::Mutex<MockKeepAliveTurnMode>,
+    keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
@@ -415,7 +394,7 @@ impl MockSessionService {
             fail_inject: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
-            keep_alive_turn_mode: std::sync::Mutex::new(MockKeepAliveTurnMode::WaitForNotifier),
+            keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
@@ -633,38 +612,8 @@ impl MockSessionService {
     }
 
     fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
-        let mut guard = self
-            .keep_alive_turn_mode
-            .lock()
-            .expect("keep_alive_turn_mode mutex");
-        *guard = if enabled {
-            MockKeepAliveTurnMode::CompleteImmediately
-        } else {
-            MockKeepAliveTurnMode::WaitForNotifier
-        };
-    }
-
-    fn set_keep_alive_turn_callback_pending(
-        &self,
-        tool_name: impl Into<String>,
-        args: serde_json::Value,
-    ) {
-        let mut guard = self
-            .keep_alive_turn_mode
-            .lock()
-            .expect("keep_alive_turn_mode mutex");
-        *guard = MockKeepAliveTurnMode::CallbackPending {
-            tool_name: tool_name.into(),
-            args,
-        };
-    }
-
-    fn set_keep_alive_turn_failure(&self, reason: impl Into<String>) {
-        let mut guard = self
-            .keep_alive_turn_mode
-            .lock()
-            .expect("keep_alive_turn_mode mutex");
-        *guard = MockKeepAliveTurnMode::Fail(reason.into());
+        self.keep_alive_turns_complete_immediately
+            .store(enabled, Ordering::Relaxed);
     }
 
     fn interrupt_call_count(&self) -> u64 {
@@ -1011,27 +960,14 @@ impl SessionService for MockSessionService {
         drop(sessions);
 
         if is_keep_alive {
-            let mode = self
-                .keep_alive_turn_mode
-                .lock()
-                .expect("keep_alive_turn_mode mutex")
-                .clone();
-            match mode {
-                MockKeepAliveTurnMode::CompleteImmediately => {
-                    return Ok(mock_run_result(
-                        id.clone(),
-                        "Autonomous kickoff completed".to_string(),
-                    ));
-                }
-                MockKeepAliveTurnMode::CallbackPending { tool_name, args } => {
-                    return Err(SessionError::Agent(
-                        meerkat_core::error::AgentError::CallbackPending { tool_name, args },
-                    ));
-                }
-                MockKeepAliveTurnMode::Fail(reason) => {
-                    return Err(SessionError::Store(Box::new(std::io::Error::other(reason))));
-                }
-                MockKeepAliveTurnMode::WaitForNotifier => {}
+            let complete_immediately = self
+                .keep_alive_turns_complete_immediately
+                .load(Ordering::Relaxed);
+            if complete_immediately {
+                return Ok(mock_run_result(
+                    id.clone(),
+                    "Autonomous kickoff completed".to_string(),
+                ));
             }
             let notifier = self
                 .keep_alive_notifiers
@@ -1425,30 +1361,20 @@ impl MobSessionService for MockSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-            run_id,
-            boundary,
-            contributing_input_ids,
-            conversation_digest: None,
-            message_count: 0,
-            sequence: 0,
-        };
-        match <Self as SessionService>::start_turn(self, session_id, req).await {
-            Ok(_) => Ok(
-                meerkat_core::lifecycle::core_executor::CoreApplyOutput::without_terminal(
-                    receipt, None,
-                ),
-            ),
-            Err(SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
-                tool_name,
-                args,
-            })) => Ok(
-                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_callback_pending(
-                    receipt, None, tool_name, args,
-                ),
-            ),
-            Err(error) => Err(error),
-        }
+        <Self as SessionService>::start_turn(self, session_id, req).await?;
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -1494,7 +1420,6 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MobReset => "MobReset",
             MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
             MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
-            MobEventKind::MeerkatKickoffUpdated { .. } => "MeerkatKickoffUpdated",
             MobEventKind::PeersWired { .. } => "PeersWired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
@@ -3014,149 +2939,6 @@ impl MobSessionService for InactiveReadSessionService {
     }
 }
 
-struct HangingReadWithoutLiveSessionService {
-    inner: Arc<MockSessionService>,
-}
-
-impl HangingReadWithoutLiveSessionService {
-    fn new(inner: Arc<MockSessionService>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl SessionService for HangingReadWithoutLiveSessionService {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        self.inner.create_session(req).await
-    }
-
-    async fn start_turn(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-    ) -> Result<RunResult, SessionError> {
-        self.inner.start_turn(id, req).await
-    }
-
-    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.inner.interrupt(id).await
-    }
-
-    async fn read(&self, _id: &SessionId) -> Result<SessionView, SessionError> {
-        std::future::pending().await
-    }
-
-    async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        self.inner.list(query).await
-    }
-
-    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.inner.archive(id).await
-    }
-
-    async fn has_live_session(&self, _id: &SessionId) -> Result<bool, SessionError> {
-        Ok(false)
-    }
-
-    async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
-        SessionService::subscribe_session_events(&*self.inner, id).await
-    }
-}
-
-#[async_trait]
-impl SessionServiceCommsExt for HangingReadWithoutLiveSessionService {
-    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
-        self.inner.comms_runtime(session_id).await
-    }
-
-    async fn event_injector(&self, session_id: &SessionId) -> Option<Arc<dyn EventInjector>> {
-        self.inner.event_injector(session_id).await
-    }
-
-    async fn interaction_event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn SubscribableInjector>> {
-        self.inner.interaction_event_injector(session_id).await
-    }
-}
-
-#[async_trait]
-impl SessionServiceHistoryExt for HangingReadWithoutLiveSessionService {
-    async fn read_history(
-        &self,
-        id: &SessionId,
-        query: meerkat_core::service::SessionHistoryQuery,
-    ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
-        self.inner.read_history(id, query).await
-    }
-}
-
-#[async_trait]
-impl SessionServiceControlExt for HangingReadWithoutLiveSessionService {
-    async fn append_system_context(
-        &self,
-        id: &SessionId,
-        req: AppendSystemContextRequest,
-    ) -> Result<AppendSystemContextResult, SessionControlError> {
-        self.inner.append_system_context(id, req).await
-    }
-}
-
-#[async_trait]
-impl MobSessionService for HangingReadWithoutLiveSessionService {
-    async fn subscribe_session_events(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<EventStream, StreamError> {
-        SessionService::subscribe_session_events(&*self.inner, session_id).await
-    }
-
-    fn supports_persistent_sessions(&self) -> bool {
-        self.inner.supports_persistent_sessions()
-    }
-
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        self.inner.runtime_adapter()
-    }
-
-    async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
-        self.inner.session_belongs_to_mob(session_id, mob_id).await
-    }
-
-    async fn load_persisted_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<Session>, SessionError> {
-        self.inner.load_persisted_session(session_id).await
-    }
-
-    async fn apply_runtime_turn(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        req: StartTurnRequest,
-        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        self.inner
-            .apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
-            .await
-    }
-
-    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        self.inner.discard_live_session(session_id).await
-    }
-
-    async fn cancel_all_checkpointers(&self) {
-        self.inner.cancel_all_checkpointers().await;
-    }
-
-    async fn rearm_all_checkpointers(&self) {
-        self.inner.rearm_all_checkpointers().await;
-    }
-}
-
 async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> MobHandle {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -3891,15 +3673,10 @@ async fn test_lifecycle_updates_mcp_server_states() {
 #[tokio::test]
 async fn test_stop_persists_all_state_and_rejects_mutations() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    service.set_keep_alive_turns_complete_immediately(true);
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn");
-    handle
-        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
-        .await
-        .expect("kickoff should settle before counting persisted events");
     let event_count_before = handle.events().replay_all().await.expect("replay").len();
 
     handle.stop().await.expect("stop");
@@ -4554,16 +4331,6 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
         !snapshots.is_empty(),
         "barrier should return snapshots for spawned members"
     );
-    let kickoff = snapshots[0]
-        .1
-        .kickoff
-        .clone()
-        .expect("successful autonomous kickoff should be recorded");
-    assert_eq!(
-        kickoff.phase,
-        crate::roster::MobMemberKickoffPhase::Started,
-        "successful initial autonomous turn should mark kickoff as started"
-    );
 }
 
 #[tokio::test]
@@ -4651,254 +4418,6 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
         crate::runtime::handle::MobMemberStatus::Broken
     );
     assert!(broken_snapshot.1.error.is_some());
-}
-
-#[tokio::test]
-async fn test_wait_for_kickoff_complete_exposes_failed_kickoff_without_marking_member_broken() {
-    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
-    service.set_keep_alive_turn_failure("provider overloaded");
-
-    let member = MeerkatId::from("lead-kickoff-failed");
-    handle
-        .spawn(ProfileName::from("lead"), member.clone(), None)
-        .await
-        .expect("spawn lead");
-
-    let snapshots = handle
-        .wait_for_members_kickoff_complete(
-            std::slice::from_ref(&member),
-            Some(Duration::from_secs(2)),
-        )
-        .await
-        .expect("kickoff barrier succeeds");
-
-    let snapshot = &snapshots[0].1;
-    assert_eq!(
-        snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-    let kickoff = snapshot.kickoff.clone().expect("kickoff snapshot");
-    assert_eq!(kickoff.phase, crate::roster::MobMemberKickoffPhase::Failed);
-    assert!(
-        kickoff
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("provider overloaded")),
-        "kickoff failure should preserve the underlying reason: {kickoff:?}"
-    );
-    assert!(
-        snapshot.error.is_none(),
-        "kickoff failure should not overload canonical member corruption error state"
-    );
-}
-
-#[tokio::test]
-async fn test_resume_restores_persisted_kickoff_failure_state() {
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let storage = MobStorage::in_memory();
-    let events = storage.events.clone();
-
-    let handle = MobBuilder::new(sample_definition(), storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create mob");
-    service.set_keep_alive_turn_failure("provider overloaded");
-
-    let member = MeerkatId::from("lead-kickoff-resume");
-    handle
-        .spawn(ProfileName::from("lead"), member.clone(), None)
-        .await
-        .expect("spawn lead");
-    handle
-        .wait_for_members_kickoff_complete(
-            std::slice::from_ref(&member),
-            Some(Duration::from_secs(2)),
-        )
-        .await
-        .expect("kickoff barrier succeeds");
-    handle.stop().await.expect("stop mob before resume");
-
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume mob");
-
-    let snapshot = resumed.member_status(&member).await.expect("member status");
-    assert_eq!(
-        snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-    let kickoff = snapshot.kickoff.expect("kickoff snapshot");
-    assert_eq!(kickoff.phase, crate::roster::MobMemberKickoffPhase::Failed);
-    assert!(
-        kickoff
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("provider overloaded")),
-        "resumed kickoff state should preserve persisted failure reason: {kickoff:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_callback_pending_kickoff_does_not_block_follow_up_messages() {
-    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
-    service.set_keep_alive_turn_callback_pending(
-        "browser.open",
-        serde_json::json!({ "url": "https://example.test" }),
-    );
-
-    let member = MeerkatId::from("lead-kickoff-callback");
-    handle
-        .spawn(ProfileName::from("lead"), member.clone(), None)
-        .await
-        .expect("spawn lead");
-
-    let snapshots = handle
-        .wait_for_members_kickoff_complete(
-            std::slice::from_ref(&member),
-            Some(Duration::from_secs(2)),
-        )
-        .await
-        .expect("kickoff barrier succeeds");
-    let snapshot = &snapshots[0].1;
-    assert_eq!(
-        snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-    assert_eq!(
-        snapshot.kickoff.as_ref().expect("kickoff snapshot").phase,
-        crate::roster::MobMemberKickoffPhase::CallbackPending
-    );
-
-    let baseline_injects = service.inject_call_count();
-    handle
-        .member(&member)
-        .await
-        .expect("member handle")
-        .send(
-            "follow-up while callback pending",
-            meerkat_core::types::HandlingMode::Queue,
-        )
-        .await
-        .expect("member should remain sendable while kickoff is callback pending");
-    assert!(
-        service.inject_call_count() > baseline_injects,
-        "follow-up messaging should still route through the live injector"
-    );
-
-    let post_snapshot = handle.member_status(&member).await.expect("member status");
-    assert_eq!(
-        post_snapshot
-            .kickoff
-            .as_ref()
-            .expect("kickoff snapshot")
-            .phase,
-        crate::roster::MobMemberKickoffPhase::CallbackPending
-    );
-}
-
-#[tokio::test]
-async fn test_failed_kickoff_emits_lifecycle_notice_to_wired_peer() {
-    let (handle, service) =
-        create_test_mob_with_runtime_adapter(sample_definition_with_auto_wire()).await;
-    service.set_keep_alive_turns_complete_immediately(true);
-
-    let parent_sid = handle
-        .spawn(
-            ProfileName::from("lead"),
-            MeerkatId::from("lead-parent"),
-            None,
-        )
-        .await
-        .expect("spawn lead")
-        .session_id()
-        .expect("session-backed lead")
-        .clone();
-
-    service.set_keep_alive_turn_failure("provider overloaded");
-    let helper = MeerkatId::from("worker-failing");
-    let helper_sid = handle
-        .spawn(ProfileName::from("worker"), helper.clone(), None)
-        .await
-        .expect("spawn worker")
-        .session_id()
-        .expect("session-backed worker")
-        .clone();
-
-    let snapshots = handle
-        .wait_for_members_kickoff_complete(
-            std::slice::from_ref(&helper),
-            Some(Duration::from_secs(2)),
-        )
-        .await
-        .expect("worker kickoff barrier succeeds");
-    assert_eq!(
-        snapshots[0]
-            .1
-            .kickoff
-            .as_ref()
-            .expect("kickoff snapshot")
-            .phase,
-        crate::roster::MobMemberKickoffPhase::Failed
-    );
-
-    let helper_intents = service.sent_intents(&helper_sid).await;
-    assert!(
-        helper_intents
-            .iter()
-            .any(|intent| intent == "mob.kickoff_failed"),
-        "helper should emit a kickoff failure lifecycle notice"
-    );
-
-    let parent_sent = service.sent_intents(&parent_sid).await;
-    assert!(
-        !parent_sent
-            .iter()
-            .any(|intent| intent == "mob.kickoff_failed"),
-        "kickoff failure notice should originate from the helper bridge side"
-    );
-}
-
-#[tokio::test]
-async fn test_retire_during_bootstrap_emits_kickoff_cancelled_notice() {
-    let (handle, service) =
-        create_test_mob_with_runtime_adapter(sample_definition_with_auto_wire()).await;
-    service.set_keep_alive_turns_complete_immediately(true);
-
-    handle
-        .spawn(
-            ProfileName::from("lead"),
-            MeerkatId::from("lead-parent"),
-            None,
-        )
-        .await
-        .expect("spawn lead");
-
-    service.set_start_turn_delay_ms(600_000);
-    let helper = MeerkatId::from("worker-cancelled");
-    let helper_sid = handle
-        .spawn(ProfileName::from("worker"), helper.clone(), None)
-        .await
-        .expect("spawn worker")
-        .session_id()
-        .expect("session-backed worker")
-        .clone();
-
-    handle
-        .retire(helper.clone())
-        .await
-        .expect("retire during bootstrap should succeed");
-
-    let helper_intents = service.sent_intents(&helper_sid).await;
-    assert!(
-        helper_intents
-            .iter()
-            .any(|intent| intent == "mob.kickoff_cancelled"),
-        "helper should emit a kickoff cancellation lifecycle notice"
-    );
 }
 
 #[tokio::test]
@@ -7606,159 +7125,6 @@ async fn test_member_status_omits_peer_connectivity_without_live_comms_runtime()
     assert!(
         snapshot.peer_connectivity.is_none(),
         "member snapshot should omit connectivity when no live comms runtime exists"
-    );
-}
-
-#[tokio::test]
-async fn test_list_members_does_not_block_on_peer_connectivity_resolution() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
-    let member_id = MeerkatId::from("l-1");
-    handle
-        .spawn(ProfileName::from("lead"), member_id.clone(), None)
-        .await
-        .expect("spawn lead");
-    service
-        .set_comms_behavior(
-            &test_comms_name("lead", "l-1"),
-            MockCommsBehavior {
-                hang_peers: true,
-                ..MockCommsBehavior::default()
-            },
-        )
-        .await;
-
-    let members = tokio::time::timeout(Duration::from_millis(200), handle.list_members())
-        .await
-        .expect("list_members should not wait on peer connectivity")
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    assert_eq!(members.len(), 1, "spawned member should still be listed");
-    assert_eq!(members[0].meerkat_id, member_id);
-    assert_eq!(
-        members[0].status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-}
-
-#[tokio::test]
-async fn test_list_members_including_retiring_does_not_block_on_peer_connectivity_resolution() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
-    let member_id = MeerkatId::from("l-1");
-    handle
-        .spawn(ProfileName::from("lead"), member_id.clone(), None)
-        .await
-        .expect("spawn lead");
-    service
-        .set_comms_behavior(
-            &test_comms_name("lead", "l-1"),
-            MockCommsBehavior {
-                hang_peers: true,
-                ..MockCommsBehavior::default()
-            },
-        )
-        .await;
-
-    let members = tokio::time::timeout(
-        Duration::from_millis(200),
-        handle.list_members_including_retiring(),
-    )
-    .await
-    .expect("list_members_including_retiring should not wait on peer connectivity")
-    .into_iter()
-    .collect::<Vec<_>>();
-
-    assert_eq!(members.len(), 1, "spawned member should still be listed");
-    assert_eq!(members[0].meerkat_id, member_id);
-    assert_eq!(
-        members[0].status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-}
-
-#[tokio::test]
-async fn test_list_runnable_members_does_not_block_on_peer_connectivity_resolution() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
-    let member_id = MeerkatId::from("l-1");
-    handle
-        .spawn(ProfileName::from("lead"), member_id.clone(), None)
-        .await
-        .expect("spawn lead");
-    service
-        .set_comms_behavior(
-            &test_comms_name("lead", "l-1"),
-            MockCommsBehavior {
-                hang_peers: true,
-                ..MockCommsBehavior::default()
-            },
-        )
-        .await;
-
-    let members = tokio::time::timeout(Duration::from_millis(200), handle.list_runnable_members())
-        .await
-        .expect("list_runnable_members should not wait on peer connectivity");
-
-    assert_eq!(members.len(), 1, "active member should remain runnable");
-    assert_eq!(members[0].meerkat_id, member_id);
-    assert_eq!(
-        members[0].status,
-        crate::runtime::handle::MobMemberStatus::Active
-    );
-}
-
-#[tokio::test]
-async fn test_list_members_avoids_blocking_read_fallback_when_no_live_session_exists() {
-    let inner = Arc::new(MockSessionService::new());
-    let _ = inner.enable_runtime_adapter();
-    let service = Arc::new(HangingReadWithoutLiveSessionService::new(inner));
-    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
-        .with_session_service(service)
-        .create()
-        .await
-        .expect("create mob");
-    let member_id = MeerkatId::from("l-1");
-    handle
-        .spawn(ProfileName::from("lead"), member_id.clone(), None)
-        .await
-        .expect("spawn lead");
-
-    let members = tokio::time::timeout(Duration::from_millis(200), handle.list_members())
-        .await
-        .expect("list_members should use live-only session observation")
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    assert_eq!(members.len(), 1, "spawned member should still be listed");
-    assert_eq!(members[0].meerkat_id, member_id);
-    assert_eq!(
-        members[0].status,
-        crate::runtime::handle::MobMemberStatus::Completed,
-        "without a live session, the cheap list projection should return promptly instead of blocking on read()"
-    );
-}
-
-#[tokio::test]
-async fn test_list_runnable_members_avoids_blocking_read_fallback_when_no_live_session_exists() {
-    let inner = Arc::new(MockSessionService::new());
-    let _ = inner.enable_runtime_adapter();
-    let service = Arc::new(HangingReadWithoutLiveSessionService::new(inner));
-    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
-        .with_session_service(service)
-        .create()
-        .await
-        .expect("create mob");
-    handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
-        .await
-        .expect("spawn lead");
-
-    let members = tokio::time::timeout(Duration::from_millis(200), handle.list_runnable_members())
-        .await
-        .expect("list_runnable_members should use live-only session observation");
-
-    assert!(
-        members.is_empty(),
-        "members without a live session should not remain runnable"
     );
 }
 
@@ -14054,7 +13420,6 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                     data: "aGVsbG8=".into(),
                 },
             ]),
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
         },
     )
     .await
@@ -14307,7 +13672,7 @@ async fn test_wire_enables_peer_request_delivery() {
         to: peer_name,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
-        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        stream: meerkat_core::comms::InputStreamMode::None,
     };
     let receipt = CoreCommsRuntime::send(&*comms_a, cmd)
         .await
@@ -15089,7 +14454,8 @@ impl AgentToolDispatcher for MultiToolDispatcher {
 
     fn capabilities(&self) -> meerkat_core::agent::DispatcherCapabilities {
         meerkat_core::agent::DispatcherCapabilities {
-            ops_lifecycle: true,
+            wait_interrupt: true,
+            ..meerkat_core::agent::DispatcherCapabilities::default()
         }
     }
 }
@@ -15132,8 +14498,8 @@ async fn test_name_filtered_dispatcher() {
 
     // capabilities delegates
     assert!(
-        filtered.capabilities().ops_lifecycle,
-        "should delegate capabilities().ops_lifecycle to inner"
+        filtered.capabilities().wait_interrupt,
+        "should delegate capabilities().wait_interrupt to inner"
     );
 }
 
@@ -16676,49 +16042,4010 @@ async fn test_root_loop_body_failure_stops_after_first_failed_iteration() {
 }
 
 #[tokio::test]
-async fn test_list_members_does_not_stall_during_concurrent_spawn() {
-    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
-    service.set_keep_alive_turns_complete_immediately(true);
+async fn test_capture_mob_machine_snapshot_joins_live_roster_and_member_projection() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
 
-    // Spawn members in the background
-    let handle_clone = handle.clone();
-    let spawn_task = tokio::spawn(async move {
-        for i in 0..3 {
-            let name = format!("worker-{i}");
-            handle_clone
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("wire members");
+
+    let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+
+    assert_eq!(snapshot.phase, MobState::Running);
+    assert_eq!(snapshot.members.len(), 2);
+    assert!(
+        snapshot
+            .members
+            .iter()
+            .all(|entry| entry.status == MobMemberStatus::Active),
+        "fresh spawned members should project as active"
+    );
+    assert!(
+        violations.is_empty(),
+        "live mob snapshot should satisfy current MobMachine invariants: {violations:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_topology_coherence() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    let initial = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let initial_violations = crate::mob_machine::validate_mob_machine_snapshot(&initial);
+    assert!(
+        initial_violations.is_empty(),
+        "fresh mob snapshot should satisfy topology-aware MobMachine invariants: {initial_violations:?}"
+    );
+    let initial_orchestrator = initial
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("sample_definition mob should include orchestrator");
+    assert_eq!(
+        initial.kernel.topology.coordinator_bound,
+        initial_orchestrator.coordinator_bound
+    );
+    assert_eq!(
+        initial.kernel.topology.revision,
+        initial_orchestrator.topology_revision
+    );
+
+    service.set_create_session_delay_ms(150);
+    let spawn_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
                 .spawn(
                     ProfileName::from("worker"),
-                    MeerkatId::from(name.as_str()),
+                    MeerkatId::from("w-topology"),
                     None,
                 )
                 .await
-                .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
-        }
-    });
+        })
+    };
 
-    // Concurrently poll list_members — this must not deadlock
-    let list_task = tokio::spawn({
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let staged = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let staged_violations = crate::mob_machine::validate_mob_machine_snapshot(&staged);
+    assert!(
+        staged_violations.is_empty(),
+        "staged spawn snapshot should keep topology and orchestrator truth aligned: {staged_violations:?}"
+    );
+    let staged_orchestrator = staged
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("staged mob snapshot should include orchestrator");
+    assert_eq!(
+        staged.kernel.topology.revision,
+        staged_orchestrator.topology_revision
+    );
+
+    spawn_task.await.expect("spawn join").expect("spawn worker");
+    let settled = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let settled_violations = crate::mob_machine::validate_mob_machine_snapshot(&settled);
+    assert!(
+        settled_violations.is_empty(),
+        "settled spawn snapshot should keep topology and orchestrator truth aligned: {settled_violations:?}"
+    );
+    let settled_orchestrator = settled
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("settled mob snapshot should include orchestrator");
+    assert_eq!(
+        settled.kernel.topology.revision,
+        settled_orchestrator.topology_revision
+    );
+
+    handle.stop().await.expect("stop mob");
+    let stopped = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let stopped_violations = crate::mob_machine::validate_mob_machine_snapshot(&stopped);
+    assert!(
+        stopped_violations.is_empty(),
+        "stopped mob snapshot should keep topology and orchestrator truth aligned: {stopped_violations:?}"
+    );
+    let stopped_orchestrator = stopped
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("stopped mob snapshot should include orchestrator");
+    assert!(!stopped.kernel.topology.coordinator_bound);
+    assert_eq!(
+        stopped.kernel.topology.coordinator_bound,
+        stopped_orchestrator.coordinator_bound
+    );
+    assert_eq!(
+        stopped.kernel.topology.revision,
+        stopped_orchestrator.topology_revision
+    );
+
+    handle.resume().await.expect("resume mob");
+    let resumed = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let resumed_violations = crate::mob_machine::validate_mob_machine_snapshot(&resumed);
+    assert!(
+        resumed_violations.is_empty(),
+        "resumed mob snapshot should keep topology and orchestrator truth aligned: {resumed_violations:?}"
+    );
+    let resumed_orchestrator = resumed
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("resumed mob snapshot should include orchestrator");
+    assert!(resumed.kernel.topology.coordinator_bound);
+    assert_eq!(
+        resumed.kernel.topology.coordinator_bound,
+        resumed_orchestrator.coordinator_bound
+    );
+    assert_eq!(
+        resumed.kernel.topology.revision,
+        resumed_orchestrator.topology_revision
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_pending_spawn_lineage() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_create_session_delay_ms(150);
+
+    let spawn_task = {
         let handle = handle.clone();
-        async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                let members = handle.list_members().await;
-                if members.len() >= 3 {
-                    return members.len();
-                }
-                assert!(
-                    tokio::time::Instant::now() <= deadline,
-                    "list_members timed out: only {}/3 members visible",
-                    members.len()
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    });
+        tokio::spawn(async move {
+            handle
+                .spawn(
+                    ProfileName::from("worker"),
+                    MeerkatId::from("w-pending-lineage"),
+                    None,
+                )
+                .await
+        })
+    };
 
-    spawn_task.await.expect("spawn task should complete");
-    let count = list_task.await.expect("list task should complete");
-    assert!(count >= 3, "expected at least 3 members, got {count}");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let staged = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let staged_violations = crate::mob_machine::validate_mob_machine_snapshot(&staged);
+    assert!(
+        staged_violations.is_empty(),
+        "staged pending spawn snapshot should satisfy pending-lineage-aware MobMachine invariants: {staged_violations:?}"
+    );
+    let staged_orchestrator = staged
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("sample_definition mob should include orchestrator");
+    assert_eq!(staged_orchestrator.pending_spawn_count, 1);
+    assert_eq!(staged.kernel.pending_spawns.metadata_ticket_ids.len(), 1);
+    assert_eq!(
+        staged.kernel.pending_spawns.metadata_ticket_ids,
+        staged.kernel.pending_spawns.task_ticket_ids
+    );
+    assert!(
+        staged
+            .kernel
+            .pending_spawns
+            .ticket_members
+            .values()
+            .any(|meerkat_id| meerkat_id == &MeerkatId::from("w-pending-lineage")),
+        "pending spawn lineage should carry the staged member identity"
+    );
+    assert!(
+        staged
+            .kernel
+            .pending_spawns
+            .partial_progress_ticket_ids
+            .is_empty(),
+        "pending spawn progress should never surface a partial session/operation binding"
+    );
+    assert!(
+        staged
+            .roster
+            .get(&MeerkatId::from("w-pending-lineage"))
+            .is_none(),
+        "pending spawn member must not materialize in roster before finalization"
+    );
+    assert!(
+        staged
+            .members
+            .iter()
+            .all(|entry| entry.meerkat_id != MeerkatId::from("w-pending-lineage")),
+        "pending spawn member must not materialize in projected member view before finalization"
+    );
+
+    spawn_task.await.expect("spawn join").expect("spawn worker");
+    let settled = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let settled_violations = crate::mob_machine::validate_mob_machine_snapshot(&settled);
+    assert!(
+        settled_violations.is_empty(),
+        "settled pending spawn snapshot should satisfy pending-lineage-aware MobMachine invariants: {settled_violations:?}"
+    );
+    let settled_orchestrator = settled
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("sample_definition mob should include orchestrator");
+    assert_eq!(settled_orchestrator.pending_spawn_count, 0);
+    assert!(settled.kernel.pending_spawns.metadata_ticket_ids.is_empty());
+    assert!(
+        settled
+            .roster
+            .get(&MeerkatId::from("w-pending-lineage"))
+            .is_some(),
+        "spawned member should appear in roster after finalization"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_kickoff_barrier_state() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    service.set_start_turn_delay_ms(150);
+
+    handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-kickoff"),
+            None,
+        )
+        .await
+        .expect("spawn lead");
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let active = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let active_violations = crate::mob_machine::validate_mob_machine_snapshot(&active);
+    assert!(
+        active_violations.is_empty(),
+        "active kickoff snapshot should satisfy kickoff-aware MobMachine invariants: {active_violations:?}"
+    );
+    assert!(
+        active
+            .kernel
+            .kickoff_barrier
+            .pending_member_ids
+            .contains(&MeerkatId::from("lead-kickoff")),
+        "delayed autonomous kickoff should surface the live pending member"
+    );
+    assert!(
+        active
+            .kernel
+            .pending_spawns
+            .ticket_members
+            .values()
+            .all(|meerkat_id| meerkat_id != &MeerkatId::from("lead-kickoff")),
+        "kickoff-tracked members must already be past pending spawn lineage"
+    );
+    assert!(
+        active
+            .roster
+            .get(&MeerkatId::from("lead-kickoff"))
+            .is_some(),
+        "kickoff-tracked member should already exist in roster"
+    );
+    assert!(
+        active
+            .members
+            .iter()
+            .any(|entry| entry.meerkat_id == MeerkatId::from("lead-kickoff")
+                && entry.current_session_id.is_some()
+                && entry.status == MobMemberStatus::Active),
+        "kickoff-tracked member should already project as an active session-backed member"
+    );
+
+    handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("kickoff barrier should settle");
+
+    let settled = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let settled_violations = crate::mob_machine::validate_mob_machine_snapshot(&settled);
+    assert!(
+        settled_violations.is_empty(),
+        "settled kickoff snapshot should satisfy kickoff-aware MobMachine invariants: {settled_violations:?}"
+    );
+    assert!(
+        settled.kernel.kickoff_barrier.pending_member_ids.is_empty(),
+        "kickoff barrier should drain after the initial autonomous turn completes"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_restore_failure_projection() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-broken"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-broken"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+
+    let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&resumed).await;
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "broken restore snapshot should satisfy restore-aware MobMachine invariants: {violations:?}"
+    );
+
+    let broken = snapshot
+        .members
+        .iter()
+        .find(|entry| entry.meerkat_id == MeerkatId::from("w-broken"))
+        .expect("broken member should remain visible");
+    assert_eq!(broken.status, MobMemberStatus::Broken);
+    assert_eq!(broken.current_session_id, Some(old_sid.clone()));
+
+    let restore_failure = snapshot
+        .restore_failures
+        .get(&MeerkatId::from("w-broken"))
+        .expect("restore failure should be visible in joined MobMachine snapshot");
+    assert_eq!(restore_failure.session_id, old_sid);
+    assert!(
+        restore_failure.reason.contains("missing durable session"),
+        "restore failure should carry the canonical missing-session reason"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_flow_accounting_coherence() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(5_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"source":"mob-machine-flow-accounting"}),
+        )
+        .await
+        .expect("run flow");
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let active = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+    let active_violations = crate::mob_machine::validate_mob_machine_snapshot(&active);
+    assert!(
+        active_violations.is_empty(),
+        "active flow snapshot should satisfy flow-aware MobMachine invariants: {active_violations:?}"
+    );
+    let active_orchestrator = active
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("flow mob snapshot should include orchestrator");
+    assert_eq!(active.kernel.lifecycle.active_run_count, 1);
+    assert_eq!(active_orchestrator.active_flow_count, 1);
+    assert_eq!(active.kernel.flow_trackers.run_task_ids.len(), 1);
+    assert_eq!(
+        active.kernel.flow_trackers.run_task_ids,
+        active.kernel.flow_trackers.cancel_token_ids
+    );
+    assert!(active.kernel.flow_trackers.stream_ids.is_empty());
+    assert!(active.kernel.flow_trackers.run_task_ids.contains(&run_id));
+    let tracked_run = active
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked active flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked active flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+    assert_eq!(tracked_run.flow_id, FlowId::from("demo"));
+    assert!(
+        matches!(
+            &tracked_run.status,
+            MobRunStatus::Pending | MobRunStatus::Running
+        ),
+        "tracked active flow should still be pending/running before cleanup, got {:?}",
+        tracked_run.status
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active tracked flow must not expose a terminal completion timestamp"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start")],
+        "single-step demo flow should preserve the kernel ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        std::collections::BTreeMap::from([(step_id("start"), Vec::new())]),
+        "single-step demo flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        std::collections::BTreeMap::from([(step_id("start"), DependencyMode::All)]),
+        "single-step demo flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        std::collections::BTreeMap::from([(step_id("start"), false)]),
+        "single-step demo flow should preserve the condition-presence flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        std::collections::BTreeMap::from([(step_id("start"), None)]),
+        "single-step demo flow should preserve the branch label map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        std::collections::BTreeMap::from([(step_id("start"), RunCollectionPolicyKind::All)]),
+        "single-step demo flow should preserve the collection policy for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        std::collections::BTreeMap::from([(step_id("start"), 0)]),
+        "single-step demo flow should preserve the quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "single-step demo flow should not surface persisted failures while the tracked run is healthy"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "single-step demo flow should keep consecutive failure state cleared while no failures have occurred"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .all(|step| step == &step_id("start")),
+        "active tracked flow should only surface kernel-known step ids"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let settled = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if snapshot.kernel.flow_trackers.run_task_ids.is_empty()
+            && snapshot.kernel.flow_trackers.cancel_token_ids.is_empty()
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for live flow trackers to drain after terminal flow"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let settled_violations = crate::mob_machine::validate_mob_machine_snapshot(&settled);
+    assert!(
+        settled_violations.is_empty(),
+        "settled flow snapshot should satisfy flow-aware MobMachine invariants: {settled_violations:?}"
+    );
+    let settled_orchestrator = settled
+        .kernel
+        .orchestrator
+        .as_ref()
+        .expect("settled flow snapshot should include orchestrator");
+    assert_eq!(settled.kernel.lifecycle.active_run_count, 0);
+    assert_eq!(settled_orchestrator.active_flow_count, 0);
+    assert!(settled.kernel.flow_trackers.run_task_ids.is_empty());
+    assert!(settled.kernel.flow_trackers.cancel_token_ids.is_empty());
+    assert!(settled.kernel.flow_trackers.stream_ids.is_empty());
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_branch_flow()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("branching"),
+            serde_json::json!({ "severity": "critical" }),
+        )
+        .await
+        .expect("run branch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if let Some(crate::mob_machine::TrackedRunSnapshot::Present(tracked_run)) =
+            snapshot.tracked_runs.get(&run_id)
+            && !tracked_run.step_statuses.is_empty()
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked branch run to surface active step status in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "branch flow snapshot should satisfy tracked-run branch invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked branch flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked branch flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("branching"),
+        "branch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active branch flow should remain in Running while delayed branch work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active branch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active branch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only branch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only branch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only branch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![
+            step_id("start"),
+            step_id("fix_critical"),
+            step_id("fix_minor"),
+            step_id("summarize"),
+        ],
+        "branch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([
+            (step_id("start"), false),
+            (step_id("fix_critical"), true),
+            (step_id("fix_minor"), true),
+            (step_id("summarize"), false),
+        ]),
+        "branch flow should preserve condition presence for branch and non-branch steps"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([
+            (step_id("start"), None),
+            (
+                step_id("fix_critical"),
+                Some(crate::ids::BranchId::from("repair")),
+            ),
+            (
+                step_id("fix_minor"),
+                Some(crate::ids::BranchId::from("repair")),
+            ),
+            (step_id("summarize"), None),
+        ]),
+        "branch flow should preserve branch labels for the repair branch group"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([
+            (step_id("start"), Vec::new()),
+            (step_id("fix_critical"), vec![step_id("start")]),
+            (step_id("fix_minor"), vec![step_id("start")]),
+            (
+                step_id("summarize"),
+                vec![step_id("fix_critical"), step_id("fix_minor")],
+            ),
+        ]),
+        "branch flow should preserve matching dependency sets for the repair branch group"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([
+            (step_id("start"), DependencyMode::All),
+            (step_id("fix_critical"), DependencyMode::All),
+            (step_id("fix_minor"), DependencyMode::All),
+            (step_id("summarize"), DependencyMode::Any),
+        ]),
+        "branch flow should preserve the join step's any-dependency mode"
+    );
+    let summarize_dependencies = tracked_run
+        .step_dependencies
+        .get(&step_id("summarize"))
+        .expect("summarize should preserve a dependency projection");
+    assert!(
+        !summarize_dependencies.is_empty(),
+        "branch join step should keep at least one dependency in tracked-run state"
+    );
+    assert!(
+        summarize_dependencies.iter().all(|dependency_step_id| {
+            tracked_run
+                .step_branches
+                .get(dependency_step_id)
+                .is_some_and(Option::is_some)
+        }),
+        "depends_on_mode=any join step should preserve branch-backed dependencies in tracked-run state"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([
+            (step_id("start"), RunCollectionPolicyKind::All),
+            (step_id("fix_critical"), RunCollectionPolicyKind::All),
+            (step_id("fix_minor"), RunCollectionPolicyKind::All),
+            (step_id("summarize"), RunCollectionPolicyKind::All),
+        ]),
+        "branch flow should preserve default collection policy kind for each step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([
+            (step_id("start"), 0),
+            (step_id("fix_critical"), 0),
+            (step_id("fix_minor"), 0),
+            (step_id("summarize"), 0),
+        ]),
+        "branch flow should preserve zero quorum thresholds for non-quorum branch steps"
+    );
+    let repair_branch_members = tracked_run
+        .step_branches
+        .iter()
+        .filter_map(|(step_id, branch_id)| {
+            (branch_id == &Some(crate::ids::BranchId::from("repair"))).then_some(step_id.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repair_branch_members,
+        vec![step_id("fix_critical"), step_id("fix_minor")],
+        "branch flow should preserve the full repair branch membership set in tracked-run state"
+    );
+    let repair_dependency_sets = repair_branch_members
+        .iter()
+        .map(|step_id| {
+            tracked_run
+                .step_dependencies
+                .get(step_id)
+                .cloned()
+                .expect("repair branch member should keep a dependency projection")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repair_dependency_sets[0], repair_dependency_sets[1],
+        "repair branch members should preserve matching dependency sets in tracked-run state"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "active tracked branch flow should surface at least one materialized step status"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default branch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default branch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy active branch flow should preserve zero failure-count state in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy active branch flow should preserve zero consecutive-failure state in the joined MobMachine view"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "active tracked branch flow should only surface step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::Quorum { n: 2 },
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run collection flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked collection-policy run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "collection-policy flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked collection-policy flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked collection-policy flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("collect"),
+        "collection-policy flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active collection-policy flow should remain in Running while delayed targets are still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active collection-policy flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active collection-policy flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only collection flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only collection flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only collection flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("collect")],
+        "collection-policy flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("collect"), Vec::new())]),
+        "collection-policy flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("collect"), DependencyMode::All)]),
+        "collection-policy flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("collect"), false)]),
+        "collection-policy flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("collect"), None)]),
+        "collection-policy flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("collect"), RunCollectionPolicyKind::Quorum)]),
+        "collection-policy flow should preserve the tracked collection policy kind"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("collect"), 2)]),
+        "collection-policy flow should preserve the tracked quorum threshold"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy collection-policy tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy collection-policy tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default collection-policy flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default collection-policy flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy collection-policy tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "collection-policy tracked run should only surface step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::Any,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run collection flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked any-policy run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "any-policy flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked any-policy flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked any-policy flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("collect"),
+        "any-policy flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active any-policy flow should remain in Running while delayed targets are still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active any-policy flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active any-policy flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only any-policy flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only any-policy flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only any-policy flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("collect"), RunCollectionPolicyKind::Any)]),
+        "any-policy flow should preserve the tracked collection policy kind"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("collect")],
+        "any-policy flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("collect"), Vec::new())]),
+        "any-policy flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("collect"), DependencyMode::All)]),
+        "any-policy flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("collect"), false)]),
+        "any-policy flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("collect"), None)]),
+        "any-policy flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("collect"), 0)]),
+        "any-policy flow should preserve the zero quorum threshold"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy any-policy tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy any-policy tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default any-policy flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default any-policy flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy any-policy tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "any-policy tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run collection flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked all-policy run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "all-policy flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked all-policy flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked all-policy flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("collect"),
+        "all-policy flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active all-policy flow should remain in Running while delayed targets are still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active all-policy flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active all-policy flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only all-policy flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only all-policy flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only all-policy flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("collect"), RunCollectionPolicyKind::All)]),
+        "all-policy flow should preserve the tracked collection policy kind"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("collect")],
+        "all-policy flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("collect"), Vec::new())]),
+        "all-policy flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("collect"), DependencyMode::All)]),
+        "all-policy flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("collect"), false)]),
+        "all-policy flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("collect"), None)]),
+        "all-policy flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("collect"), 0)]),
+        "all-policy flow should preserve the zero quorum threshold"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy all-policy tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy all-policy tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default all-policy flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default all-policy flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy all-policy tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "all-policy tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_retry_limit_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_retry_flow(2)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run retry-limited flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked retry-limited run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "retry-limited flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked retry-limited flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked retry-limited flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("demo"),
+        "retry-limited flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active retry-limited flow should remain in Running while the delayed step is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active retry-limited flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active retry-limited flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only retry-limited flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only retry-limited flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only retry-limited flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start")],
+        "retry-limited flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("start"), Vec::new())]),
+        "retry-limited flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("start"), DependencyMode::All)]),
+        "retry-limited flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("start"), false)]),
+        "retry-limited flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("start"), None)]),
+        "retry-limited flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("start"), RunCollectionPolicyKind::All)]),
+        "retry-limited flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("start"), 0)]),
+        "retry-limited flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 2,
+        "retry-limited flow should preserve the configured max_step_retries budget"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy retry-limited tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy retry-limited tracked run should keep consecutive failure state cleared"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy retry-limited tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "retry-limited tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_supervisor_threshold_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_supervisor_threshold(3)).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run supervisor-threshold flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked supervisor-threshold run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "supervisor-threshold flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked supervisor-threshold flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked supervisor-threshold flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("demo"),
+        "supervisor-threshold flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active supervisor-threshold flow should remain in Running while the delayed step is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active supervisor-threshold flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active supervisor-threshold flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only supervisor-threshold flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only supervisor-threshold flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only supervisor-threshold flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start")],
+        "supervisor-threshold flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("start"), Vec::new())]),
+        "supervisor-threshold flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("start"), DependencyMode::All)]),
+        "supervisor-threshold flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("start"), false)]),
+        "supervisor-threshold flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("start"), None)]),
+        "supervisor-threshold flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("start"), RunCollectionPolicyKind::All)]),
+        "supervisor-threshold flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("start"), 0)]),
+        "supervisor-threshold flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 3,
+        "supervisor-threshold flow should preserve the configured escalation threshold"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy supervisor-threshold tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy supervisor-threshold tracked run should keep consecutive failure state cleared"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy supervisor-threshold tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "supervisor-threshold tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_root_frame_presence() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run root-frame flow");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let Some(crate::mob_machine::TrackedRunSnapshot::Present(tracked_run)) =
+            snapshot.tracked_runs.get(&run_id)
+        else {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for tracked root-frame run to appear in MobMachine snapshot"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        };
+        if tracked_run.frame_count > 0 {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked root-frame run to record frame state in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "root-frame flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked root-frame flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked root-frame flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        flow_id("demo"),
+        "root-frame flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active root-frame flow should remain in Running while the never-terminal root frame keeps the run live"
+    );
+    assert!(
+        tracked_run.frame_count > 0,
+        "root-frame flow should surface at least one persisted frame snapshot in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "root-frame tracked runs should surface the modern frame-aware schema version in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "root-frame flow should not expose persisted loop state when no loop nodes are present"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "root-frame flow should not expose loop-iteration ledger rows when no loop nodes are present"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start")],
+        "root-frame flow should preserve the kernel ordered-step sequence for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        std::collections::BTreeMap::from([(step_id("start"), Vec::new())]),
+        "root-frame flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        std::collections::BTreeMap::from([(step_id("start"), DependencyMode::All)]),
+        "root-frame flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        std::collections::BTreeMap::from([(step_id("start"), false)]),
+        "root-frame flow should preserve the condition-presence flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        std::collections::BTreeMap::from([(step_id("start"), None)]),
+        "root-frame flow should preserve the branch label map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        std::collections::BTreeMap::from([(step_id("start"), RunCollectionPolicyKind::All)]),
+        "root-frame flow should preserve the collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        std::collections::BTreeMap::from([(step_id("start"), 0)]),
+        "root-frame flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy active root-frame flow should preserve zero failure-count state in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy active root-frame flow should preserve zero consecutive-failure state in the joined MobMachine view"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active root-frame flow must not expose a terminal completion timestamp"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "root-frame flow should preserve the default zero retry budget when no retry limit is configured"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "root-frame flow should preserve the default zero escalation threshold when no supervisor policy is configured"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+            ),
+        "root-frame tracked run should only surface step-status entries for kernel-known ordered steps"
+    );
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel root-frame flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_single_step_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_single_step_flow(500, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked single-step run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "single-step flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked single-step flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked single-step flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("demo"),
+        "single-step flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active single-step flow should remain in Running while the delayed step is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active single-step flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active single-step flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only single-step flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only single-step flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only single-step flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start")],
+        "single-step flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("start"), Vec::new())]),
+        "single-step flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("start"), DependencyMode::All)]),
+        "single-step flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("start"), false)]),
+        "single-step flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("start"), None)]),
+        "single-step flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("start"), RunCollectionPolicyKind::All)]),
+        "single-step flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("start"), 0)]),
+        "single-step flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy single-step tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy single-step tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default single-step flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default single-step flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy single-step tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "single-step tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_one_to_one_dispatch_shape() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::OneToOne)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run one-to-one dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked one-to-one dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "one-to-one dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked one-to-one dispatch flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked one-to-one dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "one-to-one dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active one-to-one dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active one-to-one dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active one-to-one dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only one-to-one dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only one-to-one dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only one-to-one dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "one-to-one dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "one-to-one dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "one-to-one dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "one-to-one dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "one-to-one dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Any)]),
+        "one-to-one dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "one-to-one dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy one-to-one dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy one-to-one dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default one-to-one dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default one-to-one dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy one-to-one dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "one-to-one dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_in_dispatch_shape() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::FanIn)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-in dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-in dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-in dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked fan-in dispatch flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-in dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-in dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-in dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-in dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-in dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-in dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-in dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-in dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-in dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-in dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-in dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-in dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-in dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Any)]),
+        "fan-in dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "fan-in dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-in dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-in dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-in dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-in dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-in dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-in dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_out_dispatch_shape() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_dispatch_mode(DispatchMode::FanOut)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-out dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-out dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-out dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked fan-out dispatch flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-out dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-out dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-out dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-out dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-out dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-out dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-out dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-out dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-out dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-out dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-out dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-out dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-out dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Any)]),
+        "fan-out dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "fan-out dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-out dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-out dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-out dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-out dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-out dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-out dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_out_all_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::FanOut,
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-out all-policy dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-out all-policy dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-out all-policy dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked fan-out all-policy dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-out all-policy dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-out all-policy dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-out all-policy dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-out all-policy dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-out all-policy dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-out all-policy dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-out all-policy dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-out all-policy dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-out all-policy dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-out all-policy dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-out all-policy dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-out all-policy dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-out all-policy dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::All)]),
+        "fan-out all-policy dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "fan-out all-policy dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-out all-policy dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-out all-policy dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-out all-policy dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-out all-policy dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-out all-policy dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-out all-policy dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_one_to_one_all_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::OneToOne,
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run one-to-one all-policy dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked one-to-one all-policy dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "one-to-one all-policy dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked one-to-one all-policy dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked one-to-one all-policy dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "one-to-one all-policy dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active one-to-one all-policy dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active one-to-one all-policy dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active one-to-one all-policy dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only one-to-one all-policy dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only one-to-one all-policy dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only one-to-one all-policy dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "one-to-one all-policy dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "one-to-one all-policy dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "one-to-one all-policy dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "one-to-one all-policy dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "one-to-one all-policy dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::All)]),
+        "one-to-one all-policy dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "one-to-one all-policy dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy one-to-one all-policy dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy one-to-one all-policy dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default one-to-one all-policy dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default one-to-one all-policy dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy one-to-one all-policy dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "one-to-one all-policy dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_in_all_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::FanIn,
+        CollectionPolicy::All,
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-in all-policy dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-in all-policy dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-in all-policy dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked fan-in all-policy dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-in all-policy dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-in all-policy dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-in all-policy dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-in all-policy dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-in all-policy dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-in all-policy dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-in all-policy dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-in all-policy dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-in all-policy dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-in all-policy dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-in all-policy dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-in all-policy dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-in all-policy dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::All)]),
+        "fan-in all-policy dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 0)]),
+        "fan-in all-policy dispatch flow should preserve the zero quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-in all-policy dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-in all-policy dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-in all-policy dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-in all-policy dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-in all-policy dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-in all-policy dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_in_quorum_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::FanIn,
+        CollectionPolicy::Quorum { n: 2 },
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-in quorum dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-in quorum dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-in quorum dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked fan-in quorum dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-in quorum dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-in quorum dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-in quorum dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-in quorum dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-in quorum dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-in quorum dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-in quorum dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-in quorum dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-in quorum dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-in quorum dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-in quorum dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-in quorum dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-in quorum dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Quorum)]),
+        "fan-in quorum dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 2)]),
+        "fan-in quorum dispatch flow should preserve the quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-in quorum dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-in quorum dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-in quorum dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-in quorum dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-in quorum dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-in quorum dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_fan_out_quorum_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::FanOut,
+        CollectionPolicy::Quorum { n: 2 },
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run fan-out quorum dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked fan-out quorum dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "fan-out quorum dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked fan-out quorum dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked fan-out quorum dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "fan-out quorum dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active fan-out quorum dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active fan-out quorum dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active fan-out quorum dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only fan-out quorum dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only fan-out quorum dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only fan-out quorum dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "fan-out quorum dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "fan-out quorum dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "fan-out quorum dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "fan-out quorum dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "fan-out quorum dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Quorum)]),
+        "fan-out quorum dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 2)]),
+        "fan-out quorum dispatch flow should preserve the quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy fan-out quorum dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy fan-out quorum dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default fan-out quorum dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default fan-out quorum dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy fan-out quorum dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "fan-out quorum dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_one_to_one_quorum_dispatch_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_dispatch_mode_and_policy(
+        DispatchMode::OneToOne,
+        CollectionPolicy::Quorum { n: 2 },
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run one-to-one quorum dispatch flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked one-to-one quorum dispatch run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "one-to-one quorum dispatch flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot.tracked_runs.get(&run_id).expect(
+        "tracked one-to-one quorum dispatch flow must appear in the joined MobMachine snapshot",
+    );
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked one-to-one quorum dispatch flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("dispatch"),
+        "one-to-one quorum dispatch flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active one-to-one quorum dispatch flow should remain in Running while delayed target work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active one-to-one quorum dispatch flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active one-to-one quorum dispatch flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only one-to-one quorum dispatch flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only one-to-one quorum dispatch flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only one-to-one quorum dispatch flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("dispatch")],
+        "one-to-one quorum dispatch flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([(step_id("dispatch"), Vec::new())]),
+        "one-to-one quorum dispatch flow should preserve the empty dependency map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([(step_id("dispatch"), DependencyMode::All)]),
+        "one-to-one quorum dispatch flow should preserve the dependency mode for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("dispatch"), false)]),
+        "one-to-one quorum dispatch flow should preserve the condition flag for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("dispatch"), None)]),
+        "one-to-one quorum dispatch flow should preserve the branch map for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([(step_id("dispatch"), RunCollectionPolicyKind::Quorum)]),
+        "one-to-one quorum dispatch flow should preserve the tracked collection policy kind for its lone step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("dispatch"), 2)]),
+        "one-to-one quorum dispatch flow should preserve the quorum threshold for its lone step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy one-to-one quorum dispatch tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy one-to-one quorum dispatch tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default one-to-one quorum dispatch flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default one-to-one quorum dispatch flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy one-to-one quorum dispatch tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "one-to-one quorum dispatch tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_loop_presence() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
+    use crate::ids::{FlowNodeId, LoopId};
+
+    let mut definition = sample_definition();
+    let mut steps = IndexMap::new();
+    steps.insert(step_id("body"), flow_step("worker", "Loop body step"));
+
+    let body = FrameSpec {
+        nodes: IndexMap::from([(
+            FlowNodeId::from("body-step-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: step_id("body"),
+                depends_on: Vec::new(),
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        )]),
+    };
+
+    let root = FrameSpec {
+        nodes: IndexMap::from([(
+            FlowNodeId::from("loop-node"),
+            FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+                loop_id: LoopId::from("test-loop"),
+                depends_on: Vec::new(),
+                depends_on_mode: DependencyMode::All,
+                body,
+                until: ConditionExpr::Eq {
+                    path: "steps.body.done".to_string(),
+                    value: serde_json::json!(true),
+                },
+                max_iterations: 3,
+            }),
+        )]),
+    };
+
+    definition.flows = BTreeMap::from([(
+        flow_id("demo"),
+        FlowSpec {
+            description: Some("loop-presence tracked in MobMachine".to_string()),
+            steps,
+            root: Some(root),
+        },
+    )]);
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run loop flow");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let Some(crate::mob_machine::TrackedRunSnapshot::Present(tracked_run)) =
+            snapshot.tracked_runs.get(&run_id)
+        else {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for tracked loop run to appear in MobMachine snapshot"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        };
+        if tracked_run.loop_count > 0
+            && tracked_run.frame_count > 0
+            && tracked_run.loop_iteration_count > 0
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked loop run to record loop and iteration state in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "loop flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked loop flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked loop flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        flow_id("demo"),
+        "loop flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active loop flow should remain in Running while the never-terminal body keeps the run live"
+    );
+    assert!(
+        tracked_run.loop_count > 0,
+        "loop flow should surface at least one persisted loop snapshot in the joined MobMachine view"
+    );
+    assert!(
+        tracked_run.frame_count > 0,
+        "loop flow should keep frame structure visible alongside persisted loop state in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "loop-aware tracked runs should surface the modern frame-aware schema version in the joined MobMachine view"
+    );
+    assert!(
+        tracked_run.loop_iteration_count > 0,
+        "loop flow should surface at least one persisted loop-iteration ledger row in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("body")],
+        "loop flow should preserve the kernel ordered-step sequence for its loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        std::collections::BTreeMap::from([(step_id("body"), Vec::new())]),
+        "loop flow should preserve the empty dependency map for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        std::collections::BTreeMap::from([(step_id("body"), DependencyMode::All)]),
+        "loop flow should preserve the dependency mode for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        std::collections::BTreeMap::from([(step_id("body"), false)]),
+        "loop flow should preserve the condition-presence flag for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        std::collections::BTreeMap::from([(step_id("body"), None)]),
+        "loop flow should preserve the branch label map for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        std::collections::BTreeMap::from([(step_id("body"), RunCollectionPolicyKind::All)]),
+        "loop flow should preserve the collection policy kind for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        std::collections::BTreeMap::from([(step_id("body"), 0)]),
+        "loop flow should preserve the zero quorum threshold for its lone loop body step"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy active loop flow should preserve zero failure-count state in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy active loop flow should preserve zero consecutive-failure state in the joined MobMachine view"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active loop flow must not expose a terminal completion timestamp"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "loop flow should preserve the default zero retry budget when no retry limit is configured"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "loop flow should preserve the default zero escalation threshold when no supervisor policy is configured"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+            ),
+        "loop tracked run should only surface step-status entries for kernel-known ordered steps"
+    );
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel loop flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_two_step_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_two_step_flow(5_000)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("two_step"), serde_json::json!({}))
+        .await
+        .expect("run two-step flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked two-step run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "two-step flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked two-step flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked two-step flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("two_step"),
+        "two-step flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active two-step flow should remain in Running while delayed step work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active two-step flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active two-step flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only two-step flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only two-step flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only two-step flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("first"), step_id("second")],
+        "two-step flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([
+            (step_id("first"), Vec::new()),
+            (step_id("second"), vec![step_id("first")]),
+        ]),
+        "two-step flow should preserve the declared dependency map"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([
+            (step_id("first"), DependencyMode::All),
+            (step_id("second"), DependencyMode::All),
+        ]),
+        "two-step flow should preserve the dependency modes for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("first"), false), (step_id("second"), false)]),
+        "two-step flow should preserve the condition flags for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("first"), None), (step_id("second"), None)]),
+        "two-step flow should preserve the branch map for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([
+            (step_id("first"), RunCollectionPolicyKind::All),
+            (step_id("second"), RunCollectionPolicyKind::All),
+        ]),
+        "two-step flow should preserve the tracked collection policy kind for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("first"), 0), (step_id("second"), 0)]),
+        "two-step flow should preserve zero quorum thresholds for both steps"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy two-step tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy two-step tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default two-step flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default two-step flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy two-step tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "two-step tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_shared_path_shape() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_shared_path_resolution_flow()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("shared_paths"), serde_json::json!({}))
+        .await
+        .expect("run shared-path flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked shared-path run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "shared-path flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked shared-path flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!("tracked shared-path flow must resolve to a parsed run snapshot: {tracked_run:?}");
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("shared_paths"),
+        "shared-path flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active shared-path flow should remain in Running while the delayed first step is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active shared-path flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active shared-path flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only shared-path flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only shared-path flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only shared-path flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![step_id("start"), step_id("follow")],
+        "shared-path flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([
+            (step_id("start"), Vec::new()),
+            (step_id("follow"), vec![step_id("start")]),
+        ]),
+        "shared-path flow should preserve the declared dependency map"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([
+            (step_id("start"), DependencyMode::All),
+            (step_id("follow"), DependencyMode::All),
+        ]),
+        "shared-path flow should preserve the dependency modes for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([(step_id("start"), false), (step_id("follow"), true)]),
+        "shared-path flow should preserve the condition flags for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([(step_id("start"), None), (step_id("follow"), None)]),
+        "shared-path flow should preserve the branch map for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([
+            (step_id("start"), RunCollectionPolicyKind::Any),
+            (step_id("follow"), RunCollectionPolicyKind::All),
+        ]),
+        "shared-path flow should preserve the tracked collection policy kind for both steps"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([(step_id("start"), 0), (step_id("follow"), 0)]),
+        "shared-path flow should preserve zero quorum thresholds for both steps"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 0,
+        "healthy shared-path tracked run should not surface persisted failures"
+    );
+    assert_eq!(
+        tracked_run.consecutive_failure_count, 0,
+        "healthy shared-path tracked run should keep consecutive failure state cleared"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default shared-path flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default shared-path flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "healthy shared-path tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "shared-path tracked run should only expose step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_machine_snapshot_tracks_live_branch_fallback_shape() {
+    let (handle, service) = create_test_mob(sample_definition_with_branch_fallback_flow()).await;
+    let sid_fail = handle
+        .spawn(
+            ProfileName::from("worker_fail"),
+            MeerkatId::from("w-fail"),
+            None,
+        )
+        .await
+        .expect("spawn failing worker")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(
+            ProfileName::from("worker_ok"),
+            MeerkatId::from("w-ok"),
+            None,
+        )
+        .await
+        .expect("spawn healthy worker");
+    service
+        .set_flow_turn_fail_for_session(&sid_fail, true)
+        .await;
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("branch_fallback"),
+            serde_json::json!({"try_fallback": true}),
+        )
+        .await
+        .expect("run branch fallback flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let snapshot = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if let Some(crate::mob_machine::TrackedRunSnapshot::Present(tracked_run)) =
+            snapshot.tracked_runs.get(&run_id)
+            && tracked_run.status == MobRunStatus::Running
+            && tracked_run.failure_count > 0
+            && !tracked_run.step_statuses.is_empty()
+        {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked branch-fallback run to surface active step status in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let violations = crate::mob_machine::validate_mob_machine_snapshot(&snapshot);
+    assert!(
+        violations.is_empty(),
+        "branch-fallback flow snapshot should satisfy tracked-run invariants: {violations:?}"
+    );
+
+    let tracked_run = snapshot
+        .tracked_runs
+        .get(&run_id)
+        .expect("tracked branch-fallback flow must appear in the joined MobMachine snapshot");
+    let crate::mob_machine::TrackedRunSnapshot::Present(tracked_run) = tracked_run else {
+        panic!(
+            "tracked branch-fallback flow must resolve to a parsed run snapshot: {tracked_run:?}"
+        );
+    };
+
+    assert_eq!(
+        tracked_run.flow_id,
+        FlowId::from("branch_fallback"),
+        "branch-fallback flow should preserve the durable flow_id identity in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.status,
+        MobRunStatus::Running,
+        "active branch-fallback flow should remain in Running while delayed branch work is still in flight"
+    );
+    assert_eq!(
+        tracked_run.schema_version, 4,
+        "active branch-fallback flow should surface the modern durable schema version"
+    );
+    assert!(
+        !tracked_run.completed_at_present,
+        "active branch-fallback flow should remain non-terminal in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.frame_count, 0,
+        "step-only branch-fallback flow should not surface persisted frame structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_count, 0,
+        "step-only branch-fallback flow should not surface persisted loop structure in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.loop_iteration_count, 0,
+        "step-only branch-fallback flow should not surface persisted loop-iteration ledger rows in the joined MobMachine view"
+    );
+    assert_eq!(
+        tracked_run.ordered_steps,
+        vec![
+            step_id("start"),
+            step_id("candidate_first"),
+            step_id("candidate_second"),
+            step_id("join"),
+        ],
+        "branch-fallback flow should preserve the declared ordered step sequence"
+    );
+    assert_eq!(
+        tracked_run.step_dependencies,
+        BTreeMap::from([
+            (step_id("start"), Vec::new()),
+            (step_id("candidate_first"), vec![step_id("start")]),
+            (step_id("candidate_second"), vec![step_id("start")]),
+            (
+                step_id("join"),
+                vec![step_id("candidate_first"), step_id("candidate_second")],
+            ),
+        ]),
+        "branch-fallback flow should preserve the declared dependency map"
+    );
+    assert_eq!(
+        tracked_run.step_dependency_modes,
+        BTreeMap::from([
+            (step_id("start"), DependencyMode::All),
+            (step_id("candidate_first"), DependencyMode::All),
+            (step_id("candidate_second"), DependencyMode::All),
+            (step_id("join"), DependencyMode::Any),
+        ]),
+        "branch-fallback flow should preserve the join step's any-dependency mode"
+    );
+    assert_eq!(
+        tracked_run.step_has_conditions,
+        BTreeMap::from([
+            (step_id("start"), false),
+            (step_id("candidate_first"), true),
+            (step_id("candidate_second"), true),
+            (step_id("join"), false),
+        ]),
+        "branch-fallback flow should preserve the condition flags for branch and non-branch steps"
+    );
+    assert_eq!(
+        tracked_run.step_branches,
+        BTreeMap::from([
+            (step_id("start"), None),
+            (
+                step_id("candidate_first"),
+                Some(crate::ids::BranchId::from("repair")),
+            ),
+            (
+                step_id("candidate_second"),
+                Some(crate::ids::BranchId::from("repair")),
+            ),
+            (step_id("join"), None),
+        ]),
+        "branch-fallback flow should preserve branch labels for both repair candidates"
+    );
+    assert_eq!(
+        tracked_run.step_collection_policy_kinds,
+        BTreeMap::from([
+            (step_id("start"), RunCollectionPolicyKind::All),
+            (step_id("candidate_first"), RunCollectionPolicyKind::All),
+            (step_id("candidate_second"), RunCollectionPolicyKind::All),
+            (step_id("join"), RunCollectionPolicyKind::All),
+        ]),
+        "branch-fallback flow should preserve default collection policy kind for each step"
+    );
+    assert_eq!(
+        tracked_run.step_quorum_thresholds,
+        BTreeMap::from([
+            (step_id("start"), 0),
+            (step_id("candidate_first"), 0),
+            (step_id("candidate_second"), 0),
+            (step_id("join"), 0),
+        ]),
+        "branch-fallback flow should preserve zero quorum thresholds for non-quorum steps"
+    );
+    assert_eq!(
+        tracked_run.failure_count, 1,
+        "branch-fallback flow should preserve the failed first candidate in durable failure_count while the fallback path is still running"
+    );
+    assert_eq!(
+        tracked_run.max_step_retries, 0,
+        "default branch-fallback flow should preserve zero max-step-retries in the tracked run snapshot"
+    );
+    assert_eq!(
+        tracked_run.escalation_threshold, 0,
+        "default branch-fallback flow should preserve zero escalation threshold in the tracked run snapshot"
+    );
+    assert!(
+        !tracked_run.step_statuses.is_empty(),
+        "active branch-fallback tracked run should surface at least one materialized step status"
+    );
+    assert!(
+        tracked_run
+            .step_statuses
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_subset(
+                &tracked_run
+                    .ordered_steps
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            ),
+        "active branch-fallback tracked run should only surface step-status entries for kernel-known ordered steps"
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
 }
 
 // -----------------------------------------------------------------------

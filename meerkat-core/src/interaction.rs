@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::comms::TrustedPeerSpec;
 use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Unique identifier for an interaction.
@@ -146,6 +147,91 @@ pub struct PeerInputCandidate {
     pub class: PeerInputClass,
     /// For lifecycle events, the peer name that was added/retired.
     pub lifecycle_peer: Option<String>,
+}
+
+/// Coarse source kind for a queued peer-ingress item.
+///
+/// This is a diagnostic shape for MeerkatMachine mapping work. It records the
+/// kind that was admitted at ingress without exposing transport internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIngressKind {
+    Message,
+    Request,
+    Response,
+    Ack,
+    PlainEvent,
+}
+
+/// Snapshot of one queued peer-ingress item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressEntrySnapshot {
+    /// Stable ingress-time identity for this queued raw item.
+    pub raw_item_id: String,
+    /// Interaction/correlation identifier when one exists.
+    pub interaction_id: Option<InteractionId>,
+    /// Pre-computed ingress classification.
+    pub class: PeerInputClass,
+    /// Coarse admitted kind.
+    pub kind: PeerIngressKind,
+    /// Sender identity fixed at ingress time, if applicable.
+    pub from_peer: Option<String>,
+    /// Lifecycle peer identity for add/retire notices, if applicable.
+    pub lifecycle_peer: Option<String>,
+    /// Request envelope id or reply-to correlation when one exists.
+    pub request_id: Option<String>,
+    /// Whether this entry was trusted at ingress time, when peer authority
+    /// owns the entry. Plain external events leave this unset.
+    pub trusted_snapshot: Option<bool>,
+}
+
+/// Non-destructive snapshot of the queued peer-ingress surface.
+///
+/// This is intentionally queue-shaped rather than a full PeerComms model. It
+/// is the current honest owner-visible slice of peer ingress while the broader
+/// MeerkatMachine refactor proceeds.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PeerIngressQueueSnapshot {
+    pub total_count: usize,
+    pub actionable_count: usize,
+    pub response_count: usize,
+    pub lifecycle_count: usize,
+    pub silent_request_count: usize,
+    pub ack_count: usize,
+    pub plain_event_count: usize,
+    pub queued_entries: Vec<PeerIngressEntrySnapshot>,
+}
+
+/// Canonical phase of the peer-ingress authority.
+///
+/// This is distinct from the raw classified queue snapshot: plain external
+/// events can be queued while the peer authority itself remains `Absent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PeerIngressAuthorityPhase {
+    #[default]
+    Absent,
+    Received,
+    Dropped,
+    Delivered,
+}
+
+/// Runtime-owned peer snapshot for the current Meerkat session.
+///
+/// This wraps the queued ingress surface with the trust membership that governs
+/// which peer identities are admitted into that queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressRuntimeSnapshot {
+    /// This runtime's public peer identity.
+    pub self_peer_id: String,
+    /// Whether unauthenticated peer envelopes are rejected at ingress.
+    pub auth_required: bool,
+    /// Current phase of the peer-ingress authority.
+    pub authority_phase: PeerIngressAuthorityPhase,
+    /// Current trusted peer set visible to this runtime.
+    pub trusted_peers: Vec<TrustedPeerSpec>,
+    /// Current length of the authority-owned typed peer submission queue.
+    pub submission_queue_len: usize,
+    /// Non-destructive snapshot of the queued ingress surface.
+    pub queue: PeerIngressQueueSnapshot,
 }
 
 #[cfg(test)]

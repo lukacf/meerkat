@@ -514,6 +514,12 @@ impl AgentToolDispatcher for CompositeDispatcher {
         update
     }
 
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.external
+            .as_ref()
+            .and_then(|dispatcher| dispatcher.external_tool_surface_snapshot())
+    }
+
     fn capabilities(&self) -> DispatcherCapabilities {
         let mut ops_lifecycle = false;
         #[cfg(not(target_arch = "wasm32"))]

@@ -62,9 +62,9 @@ The target state is:
 | Async Ops | Peer-ready handoff truth | `OpsLifecycleMachine.peer_ready`; child-operation plumbing | Async Operations | `ops.peer_ready` | recovered ops snapshot or live op events | peer exposure notices only | ops/comms seam leak |
 | Async Ops | Watchers, progress, buffered terminals, completed order | `progress_count`; `watcher_count`; `terminal_outcome`; `terminal_buffered`; `completed_order`; `created_at_ms`; `completed_at_ms` | Async Operations | `ops.progress_count`, `ops.watcher_count`, `ops.terminal_outcome`, `ops.terminal_buffered`, `ops.completed_order`, `ops.created_at_ms`, `ops.completed_at_ms` | recovered ops snapshot | progress summaries, UI projections | progress/terminal drift |
 | Async Ops | Wait-all truth | `wait_active`; `wait_request_id`; `wait_operation_ids` | Async Operations | `ops.wait_active`, `ops.wait_request_id`, `ops.wait_operation_ids` | recovered ops snapshot | wait summaries | wait/drain race |
-| Peer Ingress | Trusted peer membership relevant to this runtime | `PeerCommsMachine.trusted_peers`; comms trust store | Peer Ingress | `peer.trusted_peers` | trust store recovery / attach-time snapshot | peer list views | comms/runtime seam leak |
-| Peer Ingress | Raw envelope lineage and normalized classification | `raw_item_peer`; `raw_item_kind`; `classified_as`; `text_projection`; `content_shape`; `request_id`; `reservation_key`; `trusted_snapshot` | Peer Ingress | `peer.raw_item_peer`, `peer.raw_item_kind`, `peer.classified_as`, `peer.text_projection`, `peer.content_shape`, `peer.request_id`, `peer.reservation_key`, `peer.trusted_snapshot` | inbox/reservation state | host/UI transcript projections | classification drift |
-| Peer Ingress | Typed peer submission queue | `PeerCommsMachine.submission_queue`; runtime comms bridge submission queue | Peer Ingress | `peer.submission_queue` | rebuild from undelivered classified peer items | debug queue views | parallel peer path bugs |
+| Peer Ingress | Local peer identity and trust admission policy | `CommsRuntime.public_key`; `CommsRuntime.require_peer_auth`; `PeerCommsMachine.trusted_peers`; comms trust store | Peer Ingress | `peer.self_peer_id`, `peer.auth_required`, `peer.trusted_peers` | trust store recovery / attach-time snapshot | peer list views | comms/runtime seam leak |
+| Peer Ingress | Authority phase and typed peer submission backlog | `PeerCommsMachine.phase`; `PeerCommsMachine.submission_queue`; runtime comms bridge submission queue | Peer Ingress | `peer.phase`, `peer.submission_queue` | rebuild from undelivered classified peer items plus authority state | debug queue views; runtime peer diagnostics | parallel peer path bugs; hidden dropped/delivered states |
+| Peer Ingress | Stable raw item identity, envelope lineage, and normalized classification | `raw_item_id`; `raw_item_peer`; `raw_item_kind`; `classified_as`; `text_projection`; `content_shape`; `request_id`; `reservation_key`; `lifecycle_peer`; `trusted_snapshot` | Peer Ingress | `peer.raw_item_peer`, `peer.raw_item_kind`, `peer.classified_as`, `peer.text_projection`, `peer.content_shape`, `peer.request_id`, `peer.reservation_key`, `peer.lifecycle_peer`, `peer.trusted_snapshot` | inbox/reservation state | host/UI transcript projections | classification drift |
 | Tool Surface | Known and visible external tool membership | `ExternalToolSurfaceMachine.known_surfaces`; `visible_surfaces`; `base_state`; router projection | External Tool Surface | `tools.known_surfaces`, `tools.visible_surfaces`, `tools.base_state` | surface authority plus router rebuild | visible tool list, adapter cache | snapshot/projection drift |
 | Tool Surface | Staged and pending mutation lineage | `pending_op`; `staged_op`; `staged_intent_sequence`; `pending_task_sequence`; `pending_lineage_sequence` | External Tool Surface | `tools.pending_op`, `tools.staged_op`, `tools.staged_intent_sequence`, `tools.next_staged_intent_sequence`, `tools.pending_task_sequence`, `tools.pending_lineage_sequence`, `tools.next_pending_task_sequence` | router pending obligations and staged payloads | surface notices and diagnostics | split-owner truth |
 | Tool Surface | Inflight-call and last-delta truth | `inflight_calls`; `last_delta_operation`; `last_delta_phase` | External Tool Surface | `tools.inflight_calls`, `tools.last_delta_operation`, `tools.last_delta_phase` | router base state + pending lineage | UI notices; debug traces | draining-removal bugs |
@@ -80,10 +80,12 @@ carriers whose publication must stay aligned with the semantic owner.
 | --- | --- | --- | --- |
 | Driver handle | `RuntimeSessionEntry.driver` | Control and Binding, Admission and Input Ledger | It is the concrete capability through which control, queueing, recovery, and lifecycle transitions happen. |
 | Attachment handle | `RuntimeSessionEntry.attachment` | Control and Binding | Published attachment truth must agree with runtime phase and liveness. |
-| Completion registry | `RuntimeSessionEntry.completions` | Admission and Input Ledger | Waiters must resolve from canonical input terminalization, exactly once. |
+| Completion registry | `RuntimeSessionEntry.completions`; `MeerkatCompletionWaitersSnapshot` | Admission and Input Ledger | Waiters must resolve from canonical input terminalization, exactly once. The snapshot is diagnostic only and must not become semantic truth. |
 | Ops lifecycle registry handle | `RuntimeSessionEntry.ops_lifecycle` | Async Operations | Turn and persistence must share one op registry, not reconstruct one ad hoc. |
 | Queue projections | `EphemeralRuntimeDriver.queue`, `EphemeralRuntimeDriver.steer_queue` | Admission and Input Ledger | They are useful execution caches, but must be rebuilt from canonical ingress truth. |
 | Router projection snapshot | `RouterProjectionSnapshot` | External Tool Surface | Public tool visibility depends on it, but it is derived from machine-owned surface state. |
+| Runtime trust registration seam | `CommsRuntime::register_trusted_peer(...)`; `CommsRuntime::unregister_trusted_peer(...)`; `CommsRuntime::unregister_trusted_pubkey(...)` | Peer Ingress | These are the named runtime mutation paths that keep router-visible trust and inbox-owned peer authority synchronized. |
+| Legacy trust helper | `CommsRuntime::upsert_trusted_peer(...)` | Peer Ingress | It updates router-visible trust only and must not be treated as canonical peer-ingress mutation once classified ingress depends on `PeerCommsAuthority`. |
 
 ## Facts That Must Not Escape The Meerkat Seam
 
@@ -102,6 +104,7 @@ These facts are important, but they should stay entirely inside
 - `turn.barrier_satisfied`
 - `ops.wait_request_id`
 - `peer.raw_item_*` classification lineage
+- `peer.lifecycle_peer`
 - `tools.pending_lineage_sequence`
 - `tools.snapshot_epoch`
 - `drain.phase` and `drain.mode`
@@ -130,6 +133,9 @@ must not become competing semantic owners.
   remain a supporting carrier refined entirely from input terminalization?
 - Should `Peer Ingress` keep raw envelope lineage after successful typed-input
   submission, or is post-admission reconstruction sufficient?
+- When should `CommsRuntime::upsert_trusted_peer(...)` be retired or
+  hard-deprecated now that canonical runtime trust mutation has named
+  `register_*` / `unregister_*` seams?
 - How much of the tool-surface router projection should be modeled directly in
   the future Meerkat kernel spec versus treated as a derived cache?
 - Does in-place runtime `reset()` preserve or rotate `binding.epoch_id`?

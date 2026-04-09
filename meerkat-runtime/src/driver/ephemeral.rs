@@ -565,6 +565,9 @@ impl EphemeralRuntimeDriver {
     pub fn ledger(&self) -> &InputLedger {
         &self.ledger
     }
+    pub fn runtime_id(&self) -> &LogicalRuntimeId {
+        &self.runtime_id
+    }
     pub(crate) fn ledger_mut(&mut self) -> &mut InputLedger {
         &mut self.ledger
     }

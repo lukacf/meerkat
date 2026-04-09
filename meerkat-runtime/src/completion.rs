@@ -33,6 +33,27 @@ pub enum CompletionOutcome {
     RuntimeTerminated(String),
 }
 
+/// Snapshot of one input's registered completion waiters.
+///
+/// This is a diagnostic/supporting-carrier view only. Waiter counts are never
+/// semantic runtime truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionWaiterEntrySnapshot {
+    pub input_id: InputId,
+    pub waiter_count: usize,
+}
+
+/// Diagnostic snapshot of the completion waiter registry.
+///
+/// This makes the carrier explicit for MeerkatMachine mapping work without
+/// promoting waiter plumbing into canonical runtime semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompletionRegistrySnapshot {
+    pub input_count: usize,
+    pub waiter_count: usize,
+    pub waiting_inputs: Vec<CompletionWaiterEntrySnapshot>,
+}
+
 /// Handle for awaiting the completion of an accepted input.
 pub struct CompletionHandle {
     rx: oneshot::Receiver<CompletionOutcome>,
@@ -163,6 +184,26 @@ impl CompletionRegistry {
             }
             false
         });
+    }
+
+    /// Snapshot the current waiter carrier without mutating it.
+    pub(crate) fn diagnostic_snapshot(&self) -> CompletionRegistrySnapshot {
+        let mut waiting_inputs: Vec<_> = self
+            .waiters
+            .iter()
+            .map(|(input_id, senders)| CompletionWaiterEntrySnapshot {
+                input_id: input_id.clone(),
+                waiter_count: senders.len(),
+            })
+            .collect();
+        waiting_inputs
+            .sort_by(|left, right| left.input_id.to_string().cmp(&right.input_id.to_string()));
+
+        CompletionRegistrySnapshot {
+            input_count: waiting_inputs.len(),
+            waiter_count: waiting_inputs.iter().map(|entry| entry.waiter_count).sum(),
+            waiting_inputs,
+        }
     }
 
     /// Check if there are any pending waiters.

@@ -43,6 +43,7 @@ pub mod event;
 mod generated;
 pub mod ids;
 pub mod launch;
+mod mob_machine;
 pub mod profile;
 pub mod roster;
 pub mod run;

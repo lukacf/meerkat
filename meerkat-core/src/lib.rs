@@ -64,20 +64,22 @@ pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod types;
+pub mod wait_interrupt;
 
 // Re-export main types at crate root
 pub use agent::{
-    Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
+    Agent, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient, AgentRunner, AgentSessionStore,
+    AgentToolDispatcher, BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities,
+    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
     should_compose_tool_catalog_control_plane,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
-    CommsCommand, EventStream, InputSource, PeerDirectoryEntry, PeerDirectorySource, PeerName,
-    PeerReachability, PeerReachabilityReason, SendError, SendReceipt, StreamError, StreamScope,
+    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
+    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
@@ -139,8 +141,9 @@ pub use image_content::{
     hydrate_content_blocks, hydrate_content_input, hydrate_messages_for_execution,
 };
 pub use interaction::{
-    InboxInteraction, InteractionContent, InteractionId, PeerInputCandidate, PeerInputClass,
-    ResponseStatus,
+    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
+    PeerIngressAuthorityPhase, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
+    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,
@@ -205,8 +208,11 @@ pub use tool_catalog::{
     select_catalog_mode_from_snapshot,
 };
 pub use tool_scope::{
-    ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,
-    ToolScopeRevision, ToolScopeStageError,
+    ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
+    ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
+    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, ToolFilter, ToolScope,
+    ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot, ToolScopeStageError,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{
@@ -221,4 +227,7 @@ pub use types::{
     SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolProvenance, ToolResult, ToolSourceKind, Usage, UserMessage, VideoData, has_images,
     has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
+};
+pub use wait_interrupt::{
+    WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver, WaitInterruptSender,
 };

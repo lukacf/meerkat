@@ -578,57 +578,58 @@ impl MobActor {
     }
 
     fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
+        let mut topology_advanced = false;
         if let Some(ref mut orch) = self.orchestrator {
             orch.apply(MobOrchestratorInput::StageSpawn)?;
+            topology_advanced = true;
+        }
+        if topology_advanced {
+            self.flow_engine.note_topology_spawn_boundary();
         }
         Ok(())
     }
 
     fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
-        if let Some(ref mut orch) = self.orchestrator
-            && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
-        {
-            if let Some(spawn_ticket) = spawn_ticket {
-                tracing::warn!(
-                    spawn_ticket,
-                    error = %error,
-                    context,
-                    "failed to reconcile orchestrator pending-spawn snapshot"
-                );
-            } else {
-                tracing::warn!(
-                    error = %error,
-                    context,
-                    "failed to reconcile orchestrator pending-spawn snapshot"
-                );
+        let mut topology_advanced = false;
+        if let Some(ref mut orch) = self.orchestrator {
+            match orch.apply(MobOrchestratorInput::CompleteSpawn) {
+                Ok(_) => {
+                    topology_advanced = true;
+                }
+                Err(error) => {
+                    if let Some(spawn_ticket) = spawn_ticket {
+                        tracing::warn!(
+                            spawn_ticket,
+                            error = %error,
+                            context,
+                            "failed to reconcile orchestrator pending-spawn snapshot"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = %error,
+                            context,
+                            "failed to reconcile orchestrator pending-spawn snapshot"
+                        );
+                    }
+                }
             }
+        }
+        if topology_advanced {
+            self.flow_engine.note_topology_spawn_boundary();
         }
     }
 
     async fn flow_tracker_alignment_violation(&self) -> Option<String> {
-        let run_task_ids = self
-            .run_tasks
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        let run_token_ids = self
-            .run_cancel_tokens
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
+        let snapshot = self.flow_tracker_snapshot().await;
+        let run_task_ids = snapshot.run_task_ids;
+        let run_token_ids = snapshot.cancel_token_ids;
         if run_task_ids != run_token_ids {
             return Some(format!(
                 "run task/token tracker mismatch: tasks={run_task_ids:?}, tokens={run_token_ids:?}"
             ));
         }
 
-        let stream_ids = self
-            .flow_streams
-            .lock()
-            .await
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
+        let stream_ids = snapshot.stream_ids;
         let unknown_streams = stream_ids
             .iter()
             .filter(|run_id| !run_task_ids.contains(*run_id))
@@ -641,6 +642,33 @@ impl MobActor {
         }
 
         None
+    }
+
+    async fn flow_tracker_snapshot(&self) -> super::MobFlowTrackerSnapshot {
+        super::MobFlowTrackerSnapshot {
+            run_task_ids: self
+                .run_tasks
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            cancel_token_ids: self
+                .run_cancel_tokens
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            stream_ids: self
+                .flow_streams
+                .lock()
+                .await
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            tracked_flows: self
+                .run_cancel_tokens
+                .iter()
+                .map(|(run_id, (_, flow_id))| (run_id.clone(), flow_id.clone()))
+                .collect(),
+        }
     }
 
     async fn ensure_flow_tracker_alignment(&self, context: &str) -> Result<(), MobError> {
@@ -1110,6 +1138,14 @@ impl MobActor {
             .collect()
     }
 
+    async fn kickoff_barrier_snapshot(&self) -> super::MobKickoffBarrierSnapshot {
+        let mut turns = self.autonomous_initial_turns.lock().await;
+        turns.retain(|_, entry| !entry.is_finished());
+        super::MobKickoffBarrierSnapshot {
+            pending_member_ids: turns.keys().cloned().collect(),
+        }
+    }
+
     /// Ensure all autonomous roster members have their runtime ready.
     ///
     /// Called on mob startup and resume. Does NOT fire synthetic kickoff turns —
@@ -1434,19 +1470,28 @@ impl MobActor {
                 }
                 #[cfg(test)]
                 MobCommand::FlowTrackerCounts { reply_tx } => {
-                    let tasks = self
-                        .orchestrator
-                        .as_ref()
-                        .map_or(0, |o| o.snapshot().active_flow_count as usize);
-                    let tokens = self.run_cancel_tokens.len();
+                    let snapshot = self.flow_tracker_snapshot().await;
+                    let tasks = snapshot.run_task_ids.len();
+                    let tokens = snapshot.cancel_token_ids.len();
                     let _ = reply_tx.send((tasks, tokens));
                 }
-                #[cfg(test)]
                 MobCommand::OrchestratorSnapshot { reply_tx } => {
                     let _ = reply_tx.send(self.orchestrator.as_ref().map_or_else(
                         MobOrchestratorSnapshot::default,
                         super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
                     ));
+                }
+                MobCommand::DiagnosticKernelSnapshot { reply_tx } => {
+                    let _ = reply_tx.send(super::MobKernelDiagnosticSnapshot {
+                        lifecycle: self.lifecycle_authority.snapshot(),
+                        orchestrator: self.orchestrator.as_ref().map(
+                            super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
+                        ),
+                        topology: self.flow_engine.topology_snapshot(),
+                        pending_spawns: self.pending_spawns.snapshot(),
+                        kickoff_barrier: self.kickoff_barrier_snapshot().await,
+                        flow_trackers: self.flow_tracker_snapshot().await,
+                    });
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
@@ -1487,13 +1532,21 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                if let Some(ref mut orch) = self.orchestrator
-                                    && let Err(error) =
-                                        orch.apply(MobOrchestratorInput::StopOrchestrator)
-                                {
-                                    stop_result = Err(MobError::Internal(format!(
-                                        "orchestrator StopOrchestrator transition failed during stop: {error}"
-                                    )));
+                                let mut topology_unbound = false;
+                                if let Some(ref mut orch) = self.orchestrator {
+                                    match orch.apply(MobOrchestratorInput::StopOrchestrator) {
+                                        Ok(_) => {
+                                            topology_unbound = true;
+                                        }
+                                        Err(error) => {
+                                            stop_result = Err(MobError::Internal(format!(
+                                                "orchestrator StopOrchestrator transition failed during stop: {error}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                if topology_unbound {
+                                    self.flow_engine.unbind_topology_coordinator();
                                 }
                                 if stop_result.is_ok()
                                     && let Err(error) =
@@ -1548,13 +1601,21 @@ impl MobActor {
                                 Err(error)
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
-                                if let Some(ref mut orch) = self.orchestrator
-                                    && let Err(error) =
-                                        orch.apply(MobOrchestratorInput::ResumeOrchestrator)
-                                {
-                                    resume_result = Err(MobError::Internal(format!(
-                                        "orchestrator ResumeOrchestrator transition failed during resume: {error}"
-                                    )));
+                                let mut topology_bound = false;
+                                if let Some(ref mut orch) = self.orchestrator {
+                                    match orch.apply(MobOrchestratorInput::ResumeOrchestrator) {
+                                        Ok(_) => {
+                                            topology_bound = true;
+                                        }
+                                        Err(error) => {
+                                            resume_result = Err(MobError::Internal(format!(
+                                                "orchestrator ResumeOrchestrator transition failed during resume: {error}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                if topology_bound {
+                                    self.flow_engine.bind_topology_coordinator();
                                 }
                                 if resume_result.is_ok()
                                     && let Err(error) =
@@ -4106,6 +4167,7 @@ impl MobActor {
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator then Destroy.
         if let Some(ref mut orch) = self.orchestrator {
+            let mut topology_unbound = false;
             if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
                 orch.apply(MobOrchestratorInput::StopOrchestrator)
                     .map_err(|error| {
@@ -4113,6 +4175,10 @@ impl MobActor {
                             "orchestrator StopOrchestrator transition failed during destroy: {error}"
                         ))
                     })?;
+                topology_unbound = true;
+            }
+            if topology_unbound {
+                self.flow_engine.unbind_topology_coordinator();
             }
             orch.apply(MobOrchestratorInput::DestroyOrchestrator)
                 .map_err(|error| {
@@ -4237,6 +4303,7 @@ impl MobActor {
         }
 
         if let Some(ref mut orch) = self.orchestrator {
+            let mut topology_unbound = false;
             if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
                 orch.apply(MobOrchestratorInput::StopOrchestrator)
                     .map_err(|error| {
@@ -4244,6 +4311,10 @@ impl MobActor {
                             "orchestrator StopOrchestrator transition failed during reset: {error}"
                         ))
                     })?;
+                topology_unbound = true;
+            }
+            if topology_unbound {
+                self.flow_engine.unbind_topology_coordinator();
             }
             orch.apply(MobOrchestratorInput::ResumeOrchestrator)
                 .map_err(|error| {
@@ -4251,6 +4322,7 @@ impl MobActor {
                         "orchestrator ResumeOrchestrator transition failed during reset: {error}"
                     ))
                 })?;
+            self.flow_engine.bind_topology_coordinator();
         }
         self.lifecycle_authority
             .apply(MobLifecycleInput::BeginCleanup)

@@ -115,13 +115,27 @@ pub(crate) struct MobOrchestratorTransition {
 ///
 /// Returned in every transition result for lock-free reads. The shell may
 /// expose this for diagnostics but must not use it to decide transitions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobOrchestratorSnapshot {
+    pub phase: MobState,
     pub coordinator_bound: bool,
     pub pending_spawn_count: u32,
     pub active_flow_count: u32,
     pub topology_revision: u32,
     pub supervisor_active: bool,
+}
+
+impl Default for MobOrchestratorSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Creating,
+            coordinator_bound: false,
+            pending_spawn_count: 0,
+            active_flow_count: 0,
+            topology_revision: 0,
+            supervisor_active: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +152,9 @@ struct MobOrchestratorFields {
 }
 
 impl MobOrchestratorFields {
-    fn to_snapshot(&self) -> MobOrchestratorSnapshot {
+    fn to_snapshot(&self, phase: MobState) -> MobOrchestratorSnapshot {
         MobOrchestratorSnapshot {
+            phase,
             coordinator_bound: self.coordinator_bound,
             pending_spawn_count: self.pending_spawn_count,
             active_flow_count: self.active_flow_count,
@@ -231,7 +246,7 @@ impl MobOrchestratorAuthority {
 
     /// Current snapshot of all fields.
     pub(crate) fn snapshot(&self) -> MobOrchestratorSnapshot {
-        self.fields.to_snapshot()
+        self.fields.to_snapshot(self.phase)
     }
 
     /// Check if a transition is legal without applying it.
@@ -498,7 +513,7 @@ impl MobOrchestratorMutator for MobOrchestratorAuthority {
 
         Ok(MobOrchestratorTransition {
             next_phase,
-            snapshot: self.fields.to_snapshot(),
+            snapshot: self.fields.to_snapshot(next_phase),
             effects,
         })
     }

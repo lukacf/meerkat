@@ -10,6 +10,7 @@ Current working direction:
 Likely artifacts to keep here:
 
 - machine-by-machine collapse matrix
+- implementation progress log
 - Meerkat kernel shape
 - Meerkat owned-facts ledger
 - Meerkat internal state machine sketch

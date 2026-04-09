@@ -1,4 +1,4 @@
-#[cfg(test)]
+use super::MobKernelDiagnosticSnapshot;
 use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
@@ -139,9 +139,11 @@ pub(super) enum MobCommand {
     FlowTrackerCounts {
         reply_tx: oneshot::Sender<(usize, usize)>,
     },
-    #[cfg(test)]
     OrchestratorSnapshot {
         reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
+    },
+    DiagnosticKernelSnapshot {
+        reply_tx: oneshot::Sender<MobKernelDiagnosticSnapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

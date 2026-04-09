@@ -521,6 +521,9 @@ mod tests {
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
+    use crate::lifecycle::RunId;
+    use crate::ops::{AsyncOpRef, OperationId};
+    use crate::turn_execution_authority::{ContentShape, TurnExecutionInput, TurnExecutionMutator};
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;
@@ -761,5 +764,90 @@ mod tests {
         let agent = AgentBuilder::new().build(client, tools, store).await;
 
         assert_eq!(agent.applied_cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn test_execution_snapshot_reflects_turn_authority() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut agent = AgentBuilder::new().build(client, tools, store).await;
+        let run_id = RunId::new();
+        let barrier_id = OperationId::new();
+        let detached_id = OperationId::new();
+
+        agent
+            .turn_authority
+            .apply(TurnExecutionInput::StartConversationRun {
+                run_id: run_id.clone(),
+            })
+            .expect("start run should succeed");
+        agent
+            .turn_authority
+            .apply(TurnExecutionInput::PrimitiveApplied {
+                run_id: run_id.clone(),
+                admitted_content_shape: ContentShape("prompt_text".into()),
+                vision_enabled: true,
+                image_tool_results_enabled: true,
+            })
+            .expect("primitive applied should succeed");
+        agent
+            .turn_authority
+            .apply(TurnExecutionInput::LlmReturnedToolCalls {
+                run_id: run_id.clone(),
+                tool_count: 2,
+            })
+            .expect("tool call transition should succeed");
+        agent
+            .turn_authority
+            .apply(TurnExecutionInput::RegisterPendingOps {
+                run_id: run_id.clone(),
+                op_refs: vec![
+                    AsyncOpRef::barrier(barrier_id.clone()),
+                    AsyncOpRef::detached(detached_id.clone()),
+                ],
+                barrier_operation_ids: vec![barrier_id.clone()],
+                has_barrier_ops: true,
+            })
+            .expect("pending ops should register");
+        agent.state = crate::state::LoopState::WaitingForOps;
+        agent.applied_cursor = 42;
+
+        let snapshot = agent.execution_snapshot();
+
+        assert_eq!(snapshot.loop_state, crate::state::LoopState::WaitingForOps);
+        assert_eq!(
+            snapshot.turn_phase,
+            crate::turn_execution_authority::TurnPhase::WaitingForOps
+        );
+        assert_eq!(snapshot.active_run_id, Some(run_id));
+        assert_eq!(
+            snapshot.primitive_kind,
+            crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn
+        );
+        assert_eq!(
+            snapshot.admitted_content_shape,
+            Some(ContentShape("prompt_text".into()))
+        );
+        assert!(snapshot.vision_enabled);
+        assert!(snapshot.image_tool_results_enabled);
+        assert_eq!(snapshot.tool_calls_pending, 2);
+        assert_eq!(
+            snapshot.pending_operation_ids,
+            Some(vec![barrier_id.clone(), detached_id])
+        );
+        assert_eq!(snapshot.barrier_operation_ids, vec![barrier_id]);
+        assert!(snapshot.has_barrier_ops);
+        assert!(!snapshot.barrier_satisfied);
+        assert_eq!(snapshot.boundary_count, 0);
+        assert!(!snapshot.cancel_after_boundary);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::turn_execution_authority::TurnTerminalOutcome::None
+        );
+        assert_eq!(snapshot.extraction_attempts, 0);
+        assert_eq!(snapshot.max_extraction_retries, 0);
+        assert_eq!(snapshot.applied_cursor, 42);
     }
 }

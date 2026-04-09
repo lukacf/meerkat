@@ -476,6 +476,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.export_session_with_labels(id).await
     }
 
+    pub async fn execution_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, SessionError> {
+        self.inner.execution_snapshot(id).await
+    }
+
+    pub async fn tool_scope_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+        self.inner.tool_scope_snapshot(id).await
+    }
+
+    pub async fn external_tool_surface_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::ExternalToolSurfaceSnapshot>, SessionError> {
+        self.inner.external_tool_surface_snapshot(id).await
+    }
+
     pub async fn live_session_llm_identity(
         &self,
         id: &SessionId,

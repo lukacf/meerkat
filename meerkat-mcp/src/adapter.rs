@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::{
-    ExternalToolDelta, ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry,
-    ToolDef, ToolResult, agent::AgentToolDispatcher,
+    ExternalToolDelta, ExternalToolSurfaceSnapshot, ExternalToolUpdate, ToolCallView,
+    ToolCatalogCapabilities, ToolCatalogEntry, ToolDef, ToolResult, agent::AgentToolDispatcher,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub struct McpRouterAdapter {
     tools_cache: StdRwLock<Arc<[Arc<ToolDef>]>>,
     catalog_cache: StdRwLock<Arc<[ToolCatalogEntry]>>,
     pending_sources_cache: StdRwLock<Arc<[String]>>,
+    surface_snapshot_cache: StdRwLock<Option<ExternalToolSurfaceSnapshot>>,
 }
 
 impl McpRouterAdapter {
@@ -35,12 +36,17 @@ impl McpRouterAdapter {
         let tools = AgentToolDispatcher::tools(&router);
         let catalog = AgentToolDispatcher::tool_catalog(&router);
         let pending_sources: Arc<[String]> = router.pending_sources_snapshot().into();
+        let surface_snapshot = McpRouter::external_tool_surface_snapshot(&router);
         Self {
             router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
             tools_cache: StdRwLock::new(tools),
             catalog_cache: StdRwLock::new(catalog),
             pending_sources_cache: StdRwLock::new(pending_sources),
+            surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
+            catalog_cache: StdRwLock::new(catalog),
+            pending_sources_cache: StdRwLock::new(pending_sources),
+            surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
         }
     }
 
@@ -71,6 +77,16 @@ impl McpRouterAdapter {
         }
     }
 
+    fn set_surface_snapshot_cache(&self, snapshot: Option<ExternalToolSurfaceSnapshot>) {
+        match self.surface_snapshot_cache.write() {
+            Ok(mut guard) => *guard = snapshot,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = snapshot;
+            }
+        }
+    }
+
     fn cached_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         match self.catalog_cache.read() {
             Ok(guard) => guard.clone(),
@@ -95,12 +111,20 @@ impl McpRouterAdapter {
         }
     }
 
+    fn cached_surface_snapshot(&self) -> Option<ExternalToolSurfaceSnapshot> {
+        match self.surface_snapshot_cache.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     fn sync_router_projection(&self, router: &McpRouter) {
         self.set_tools_cache(AgentToolDispatcher::tools(router));
         self.set_catalog_cache(AgentToolDispatcher::tool_catalog(router));
         self.set_pending_sources_cache(router.pending_sources_snapshot().into());
         self.has_pending
             .store(router.has_pending_or_notices(), Ordering::Release);
+        self.set_surface_snapshot_cache(Some(McpRouter::external_tool_surface_snapshot(router)));
     }
 
     /// Refresh projection state from the router.
@@ -124,6 +148,10 @@ impl McpRouterAdapter {
         self.has_pending.store(false, Ordering::Release);
         self.set_tools_cache(Arc::from([]));
         self.set_pending_sources_cache(Arc::from([]));
+        self.set_surface_snapshot_cache(None);
+        self.set_catalog_cache(Arc::from([]));
+        self.set_pending_sources_cache(Arc::from([]));
+        self.set_surface_snapshot_cache(None);
     }
 
     /// Stage an MCP server add operation.
@@ -250,6 +278,7 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         router.set_inflight_calls_for_testing(server_name, count);
+        self.sync_router_projection(router);
         Ok(())
     }
 
@@ -263,6 +292,7 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         router.set_removal_timeout(removal_timeout);
+        self.sync_router_projection(router);
         Ok(())
     }
 }
@@ -281,6 +311,20 @@ impl AgentToolDispatcher for McpRouterAdapter {
                 None => self.cached_tools(),
             },
             Err(_) => self.cached_tools(),
+        }
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<ExternalToolSurfaceSnapshot> {
+        match self.router.try_read() {
+            Ok(router) => match router.as_ref() {
+                Some(router) => {
+                    let snapshot = McpRouter::external_tool_surface_snapshot(router);
+                    self.set_surface_snapshot_cache(Some(snapshot.clone()));
+                    Some(snapshot)
+                }
+                None => self.cached_surface_snapshot(),
+            },
+            Err(_) => self.cached_surface_snapshot(),
         }
     }
 
@@ -496,5 +540,51 @@ mod tests {
         );
 
         adapter.shutdown().await;
+    }
+
+    async fn external_tool_surface_snapshot_reflects_staged_surface_state() {
+        let mut router = McpRouter::new();
+        router.stage_add(test_server_config("planner", Path::new("/bin/echo")));
+
+        let adapter = McpRouterAdapter::new(router);
+        let snapshot = adapter
+            .external_tool_surface_snapshot()
+            .expect("router-backed adapter should expose surface snapshot");
+
+        assert_eq!(
+            snapshot.phase,
+            meerkat_core::ExternalToolSurfaceGlobalPhase::Operating
+        );
+        assert_eq!(snapshot.snapshot_epoch, 0);
+        assert_eq!(snapshot.snapshot_aligned_epoch, 0);
+        assert_eq!(snapshot.entries.len(), 1);
+
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.surface_id, "planner");
+        assert!(!entry.visible);
+        assert_eq!(
+            entry.base_state,
+            meerkat_core::ExternalToolSurfaceBaseState::Absent
+        );
+        assert_eq!(
+            entry.pending_op,
+            meerkat_core::ExternalToolSurfacePendingOp::None
+        );
+        assert_eq!(
+            entry.staged_op,
+            meerkat_core::ExternalToolSurfaceStagedOp::Add
+        );
+        assert_eq!(entry.staged_intent_sequence, 1);
+        assert_eq!(entry.pending_task_sequence, 0);
+        assert_eq!(entry.pending_lineage_sequence, 0);
+        assert_eq!(entry.inflight_call_count, 0);
+        assert_eq!(
+            entry.last_delta_operation,
+            meerkat_core::ExternalToolSurfaceDeltaOperation::None
+        );
+        assert_eq!(
+            entry.last_delta_phase,
+            meerkat_core::ExternalToolSurfaceDeltaPhase::None
+        );
     }
 }

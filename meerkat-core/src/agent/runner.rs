@@ -223,6 +223,48 @@ where
         &self.state
     }
 
+    /// Snapshot the agent's live execution state for diagnostics and mapping.
+    pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
+        crate::AgentExecutionSnapshot {
+            loop_state: self.state.clone(),
+            turn_phase: self.turn_authority.phase(),
+            active_run_id: self.turn_authority.active_run().cloned(),
+            primitive_kind: self.turn_authority.primitive_kind(),
+            admitted_content_shape: self.turn_authority.admitted_content_shape().cloned(),
+            vision_enabled: self.turn_authority.vision_enabled(),
+            image_tool_results_enabled: self.turn_authority.image_tool_results_enabled(),
+            tool_calls_pending: self.turn_authority.tool_calls_pending(),
+            pending_operation_ids: self
+                .turn_authority
+                .pending_op_ids()
+                .map(|ids| ids.into_iter().cloned().collect()),
+            barrier_operation_ids: self
+                .turn_authority
+                .barrier_op_ids()
+                .into_iter()
+                .cloned()
+                .collect(),
+            has_barrier_ops: self.turn_authority.has_barrier_ops(),
+            barrier_satisfied: self.turn_authority.barrier_satisfied(),
+            boundary_count: self.turn_authority.boundary_count(),
+            cancel_after_boundary: self.turn_authority.cancel_after_boundary(),
+            terminal_outcome: self.turn_authority.terminal_outcome(),
+            extraction_attempts: self.turn_authority.extraction_attempts(),
+            max_extraction_retries: self.turn_authority.max_extraction_retries(),
+            applied_cursor: self.applied_cursor,
+        }
+    }
+
+    /// Snapshot the agent's live tool-scope state for diagnostics and mapping.
+    pub fn tool_scope_snapshot(&self) -> Option<crate::ToolScopeSnapshot> {
+        self.tool_scope.snapshot()
+    }
+
+    /// Snapshot the live external tool-surface state, if supported by the dispatcher chain.
+    pub fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        self.tools.external_tool_surface_snapshot()
+    }
+
     /// Get the retry policy
     pub fn retry_policy(&self) -> &RetryPolicy {
         &self.retry_policy

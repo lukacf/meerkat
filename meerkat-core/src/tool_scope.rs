@@ -44,6 +44,106 @@ pub const INHERITED_TOOL_FILTER_METADATA_KEY: &str = "tool_scope_inherited_filte
 #[repr(transparent)]
 pub struct ToolScopeRevision(pub u64);
 
+/// Diagnostic snapshot of the current live tool-scope state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolScopeSnapshot {
+    pub known_base_names: Vec<String>,
+    pub visible_names: Vec<String>,
+    pub base_filter: ToolFilter,
+    pub active_external_filter: ToolFilter,
+    pub active_turn_allow: Option<Vec<String>>,
+    pub active_turn_deny: Vec<String>,
+    pub active_revision: ToolScopeRevision,
+    pub staged_external_filter: ToolFilter,
+    pub staged_revision: ToolScopeRevision,
+}
+
+/// Global phase of the live external tool-surface machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfaceGlobalPhase {
+    Operating,
+    Shutdown,
+}
+
+/// Base lifecycle state for one external tool surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfaceBaseState {
+    Absent,
+    Active,
+    Removing,
+    Removed,
+}
+
+/// Pending async operation for one external tool surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfacePendingOp {
+    None,
+    Add,
+    Reload,
+}
+
+/// Staged-but-not-yet-applied operation for one external tool surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfaceStagedOp {
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+/// Last emitted lifecycle delta operation for one external tool surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfaceDeltaOperation {
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+/// Last emitted lifecycle delta phase for one external tool surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalToolSurfaceDeltaPhase {
+    None,
+    Pending,
+    Applied,
+    Draining,
+    Failed,
+    Forced,
+}
+
+/// Diagnostic snapshot of one external tool surface entry.
+///
+/// This is an observational surface over the canonical external-tool authority.
+/// It does not create a second semantic owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalToolSurfaceEntrySnapshot {
+    pub surface_id: String,
+    pub visible: bool,
+    pub base_state: ExternalToolSurfaceBaseState,
+    pub has_removal_timing: bool,
+    pub pending_op: ExternalToolSurfacePendingOp,
+    pub staged_op: ExternalToolSurfaceStagedOp,
+    pub staged_intent_sequence: u64,
+    pub pending_task_sequence: u64,
+    pub pending_lineage_sequence: u64,
+    pub inflight_call_count: u64,
+    pub last_delta_operation: ExternalToolSurfaceDeltaOperation,
+    pub last_delta_phase: ExternalToolSurfaceDeltaPhase,
+}
+
+/// Diagnostic snapshot of the live external tool-surface machine state.
+///
+/// This keeps external tool mutation lineage and publication alignment visible
+/// for MeerkatMachine mapping work without changing who owns the underlying
+/// lifecycle truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalToolSurfaceSnapshot {
+    pub phase: ExternalToolSurfaceGlobalPhase,
+    pub snapshot_epoch: u64,
+    pub snapshot_aligned_epoch: u64,
+    pub entries: Vec<ExternalToolSurfaceEntrySnapshot>,
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ToolScopeStageError {
     #[error("Unknown tool(s) in filter: {names:?}")]
@@ -196,6 +296,22 @@ impl ToolScope {
             state: Arc::clone(&self.state),
             next_revision: Arc::clone(&self.next_revision),
         }
+    }
+
+    /// Snapshot the current live scope state for diagnostics.
+    pub fn snapshot(&self) -> Option<ToolScopeSnapshot> {
+        let state = self.state.read().ok()?;
+        Some(ToolScopeSnapshot {
+            known_base_names: sorted_names(&state.known_base_names),
+            visible_names: Self::visible_names_for_state(&state),
+            base_filter: state.base_filter.clone(),
+            active_external_filter: state.active_external_filter.clone(),
+            active_turn_allow: state.active_turn_allow.as_ref().map(sorted_names),
+            active_turn_deny: sorted_names(&state.active_turn_deny),
+            active_revision: state.active_revision,
+            staged_external_filter: state.staged_external_filter.clone(),
+            staged_revision: state.staged_revision,
+        })
     }
 
     /// Atomically apply staged state at CallingLlm boundary.
@@ -742,11 +858,18 @@ fn record_filter_witnesses(state: &mut ToolScopeState, filter: &ToolFilter) {
     }
 }
 
+fn sorted_names(names: &HashSet<String>) -> Vec<String> {
+    let mut values = names.iter().cloned().collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{ToolFilter, ToolScope, ToolScopeStageError};
     use crate::types::{ToolDef, ToolProvenance, ToolSourceKind};
+    use super::ToolScopeRevision;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -894,6 +1017,40 @@ mod tests {
             applied.visible_names,
             vec!["visible".to_string()],
             "late deferred additions should stay hidden until explicitly requested"
+        );
+    }
+
+    #[test]
+    fn snapshot_reflects_active_and_staged_scope_state() {
+        let scope = ToolScope::new(tools(&["a", "b", "c"]));
+        let handle = scope.handle();
+
+        handle
+            .stage_external_filter(ToolFilter::Deny(set(&["a"])))
+            .unwrap();
+        handle
+            .set_turn_overlay(Some(set(&["b", "c"])), set(&["c"]))
+            .unwrap();
+
+        let snapshot = scope.snapshot().expect("snapshot should be available");
+
+        assert_eq!(
+            snapshot.known_base_names,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(snapshot.visible_names, vec!["b".to_string()]);
+        assert_eq!(snapshot.base_filter, ToolFilter::All);
+        assert_eq!(snapshot.active_external_filter, ToolFilter::All);
+        assert_eq!(
+            snapshot.active_turn_allow,
+            Some(vec!["b".to_string(), "c".to_string()])
+        );
+        assert_eq!(snapshot.active_turn_deny, vec!["c".to_string()]);
+        assert_eq!(snapshot.active_revision, ToolScopeRevision(0));
+        assert_eq!(snapshot.staged_revision, ToolScopeRevision(1));
+        assert_eq!(
+            snapshot.staged_external_filter,
+            ToolFilter::Deny(set(&["a"]))
         );
     }
 

@@ -187,6 +187,8 @@ pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_in;
 
+mod meerkat_machine;
+
 // Factory-backed SessionService wiring (substrate — testing/embedded use).
 // Production surfaces use runtime-backed paths (see meerkat-rpc, meerkat-rest).
 mod service_factory;

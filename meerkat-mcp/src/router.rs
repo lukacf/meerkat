@@ -286,6 +286,11 @@ impl McpRouter {
         }
     }
 
+    /// Snapshot the live external tool-surface state.
+    pub fn external_tool_surface_snapshot(&self) -> meerkat_core::ExternalToolSurfaceSnapshot {
+        self.auth().diagnostic_snapshot()
+    }
+
     /// Backward-compatible immediate add path.
     ///
     /// Prefer [`stage_add`](Self::stage_add) + [`apply_staged`](Self::apply_staged)
@@ -1291,6 +1296,10 @@ impl AgentToolDispatcher for McpRouter {
             })?;
 
         Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        Some(McpRouter::external_tool_surface_snapshot(self))
     }
 }
 

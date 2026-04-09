@@ -110,6 +110,10 @@ impl AgentToolDispatcher for ToolDispatcher {
             .await
             .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
     }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.router.external_tool_surface_snapshot()
+    }
 }
 
 /// A dispatcher wrapper that filters tools based on a ToolAccessPolicy.
@@ -183,6 +187,10 @@ impl AgentToolDispatcher for FilteredDispatcher {
             });
         }
         self.inner.dispatch(call).await
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.inner.external_tool_surface_snapshot()
     }
 }
 

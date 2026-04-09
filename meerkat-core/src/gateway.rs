@@ -506,6 +506,12 @@ impl AgentToolDispatcher for ToolGateway {
             .find_map(|e| e.dispatcher.completion_enrichment())
     }
 
+    fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        self.entries
+            .iter()
+            .find_map(|entry| entry.dispatcher.external_tool_surface_snapshot())
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`
@@ -713,6 +719,12 @@ impl AgentToolDispatcher for DynamicToolComposite {
             }
         }
         result.into()
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        self.dispatchers
+            .iter()
+            .find_map(|dispatcher| dispatcher.external_tool_surface_snapshot())
     }
 
     fn bind_ops_lifecycle(

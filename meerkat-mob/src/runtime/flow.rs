@@ -8,7 +8,7 @@ use super::handle::MobHandle;
 use super::path::resolve_context_path;
 use super::supervisor::Supervisor;
 use super::terminalization::TerminalizationOutcome;
-use super::topology::{MobTopologyService, PolicyDecision};
+use super::topology::{MobTopologyService, MobTopologySnapshot, PolicyDecision};
 use super::turn_executor::{FlowTurnExecutor, FlowTurnOutcome, TimeoutDisposition};
 use crate::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
@@ -61,6 +61,22 @@ impl FlowEngine {
             flow_kernel,
             topology,
         }
+    }
+
+    pub(crate) fn topology_snapshot(&self) -> MobTopologySnapshot {
+        self.topology.snapshot()
+    }
+
+    pub(crate) fn bind_topology_coordinator(&self) -> u32 {
+        self.topology.bind_coordinator()
+    }
+
+    pub(crate) fn unbind_topology_coordinator(&self) -> u32 {
+        self.topology.unbind_coordinator()
+    }
+
+    pub(crate) fn note_topology_spawn_boundary(&self) -> u32 {
+        self.topology.note_spawn_boundary()
     }
 
     pub async fn execute_flow(

@@ -530,6 +530,16 @@ pub struct RuntimeOpsLifecycleRegistry {
     state: RwLock<ShellState>,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct RuntimeOpsDiagnosticSnapshot {
+    pub operation_count: usize,
+    pub active_count: usize,
+    pub wait_request_id: Option<WaitRequestId>,
+    pub wait_operation_ids: Vec<OperationId>,
+    pub operations: Vec<OperationLifecycleSnapshot>,
+}
+
 impl Default for RuntimeOpsLifecycleRegistry {
     fn default() -> Self {
         Self {
@@ -682,6 +692,31 @@ impl RuntimeOpsLifecycleRegistry {
         Arc::new(RuntimeCompletionFeed {
             buffer: Arc::clone(&state.feed_buffer),
         })
+    }
+
+    /// Capture a stable diagnostic snapshot of the canonical ops lifecycle state.
+    ///
+    /// This is an internal refactor aid for the MeerkatMachine build-out. It is
+    /// intentionally additive and does not change lifecycle semantics.
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_snapshot(&self) -> RuntimeOpsDiagnosticSnapshot {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut operations = state
+            .authority
+            .operations()
+            .filter_map(|(id, _)| state.snapshot(id))
+            .collect::<Vec<_>>();
+        operations.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        RuntimeOpsDiagnosticSnapshot {
+            operation_count: state.authority.operation_count(),
+            active_count: state.authority.active_count(),
+            wait_request_id: state.authority.wait_request_id().cloned(),
+            wait_operation_ids: state.authority.wait_operation_ids().to_vec(),
+            operations,
+        }
     }
 
     fn read_state(&self) -> Result<RwLockReadGuard<'_, ShellState>, OpsLifecycleError> {

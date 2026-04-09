@@ -90,7 +90,10 @@ impl CommsBootstrap {
                     addr: parent.parent_addr,
                     meta: crate::PeerMeta::default(),
                 };
-                runtime.upsert_trusted_peer(parent_peer);
+                runtime
+                    .register_trusted_peer(parent_peer)
+                    .await
+                    .map_err(|err| CommsBootstrapError::RuntimeError(err.to_string()))?;
 
                 let advertise = CommsAdvertise {
                     name: self.config.name,

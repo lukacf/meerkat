@@ -7,7 +7,10 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::AgentExecutionSnapshot;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::lifecycle::RunId;
+use meerkat_core::ops::OperationId;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
@@ -46,6 +49,14 @@ struct RecordedTurnMetadata {
 struct RecordingTurnAgent {
     session_id: SessionId,
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+}
+
+struct SnapshotAgent {
+    session_id: SessionId,
+    execution_snapshot: AgentExecutionSnapshot,
+    tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
+    external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
 }
 
@@ -178,6 +189,97 @@ impl SessionAgent for MockAgent {
     }
 }
 
+#[async_trait]
+impl SessionAgent for SnapshotAgent {
+    async fn run_with_events(
+        &mut self,
+        _prompt: meerkat_core::types::ContentInput,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        Ok(RunResult {
+            text: "snapshot".to_string(),
+            session_id: self.session_id.clone(),
+            usage: Usage::default(),
+            turns: 0,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        })
+    }
+
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        _overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    fn cancel(&mut self) {}
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.session_id.clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
+            message_count: 0,
+            total_tokens: 0,
+            usage: Usage::default(),
+            last_assistant_text: None,
+        }
+    }
+
+    fn execution_snapshot(&self) -> Option<AgentExecutionSnapshot> {
+        Some(self.execution_snapshot.clone())
+    }
+
+    fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
+        Some(self.tool_scope_snapshot.clone())
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.external_tool_surface_snapshot.clone()
+    }
+
+    fn session_clone(&self) -> meerkat_core::Session {
+        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
+        session
+            .set_system_context_state(
+                self.system_context_state
+                    .lock()
+                    .expect("system-context lock poisoned")
+                    .clone(),
+            )
+            .expect("serialize system-context state");
+        session
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        _appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        Arc::clone(&self.system_context_state)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mock builders
 // ---------------------------------------------------------------------------
@@ -200,6 +302,31 @@ impl SessionAgentBuilder for MockAgentBuilder {
             should_fail: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        })
+    }
+}
+
+struct SnapshotAgentBuilder {
+    execution_snapshot: AgentExecutionSnapshot,
+    tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
+    external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for SnapshotAgentBuilder {
+    type Agent = SnapshotAgent;
+
+    async fn build_agent(
+        &self,
+        _req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<SnapshotAgent, SessionError> {
+        Ok(SnapshotAgent {
+            session_id: SessionId::new(),
+            execution_snapshot: self.execution_snapshot.clone(),
+            tool_scope_snapshot: self.tool_scope_snapshot.clone(),
+            external_tool_surface_snapshot: self.external_tool_surface_snapshot.clone(),
             system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
         })
     }
@@ -405,6 +532,21 @@ fn make_recording_service(
 ) -> Arc<EphemeralSessionService<RecordingTurnAgentBuilder>> {
     Arc::new(EphemeralSessionService::new(
         RecordingTurnAgentBuilder { recorded },
+        10,
+    ))
+}
+
+fn make_snapshot_service(
+    execution_snapshot: AgentExecutionSnapshot,
+    tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
+    external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
+) -> Arc<EphemeralSessionService<SnapshotAgentBuilder>> {
+    Arc::new(EphemeralSessionService::new(
+        SnapshotAgentBuilder {
+            execution_snapshot,
+            tool_scope_snapshot,
+            external_tool_surface_snapshot,
+        },
         10,
     ))
 }
@@ -1073,4 +1215,190 @@ async fn failed_turn_returns_agent_error() {
         "error code should be AGENT_ERROR, got: {}",
         err.code()
     );
+}
+
+#[tokio::test]
+async fn execution_snapshot_returns_live_agent_execution_state() {
+    let expected = AgentExecutionSnapshot {
+        loop_state: meerkat_core::state::LoopState::WaitingForOps,
+        turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
+        active_run_id: Some(RunId::new()),
+        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        admitted_content_shape: Some(meerkat_core::turn_execution_authority::ContentShape(
+            "prompt_text".to_string(),
+        )),
+        vision_enabled: true,
+        image_tool_results_enabled: false,
+        tool_calls_pending: 2,
+        pending_operation_ids: Some(vec![OperationId::new(), OperationId::new()]),
+        barrier_operation_ids: vec![OperationId::new()],
+        has_barrier_ops: true,
+        barrier_satisfied: false,
+        boundary_count: 1,
+        cancel_after_boundary: true,
+        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::Cancelled,
+        extraction_attempts: 1,
+        max_extraction_retries: 3,
+        applied_cursor: 17,
+    };
+    let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
+        known_base_names: vec!["alpha".to_string(), "beta".to_string()],
+        visible_names: vec!["beta".to_string()],
+        base_filter: meerkat_core::ToolFilter::All,
+        active_external_filter: meerkat_core::ToolFilter::Deny(
+            ["alpha".to_string()].into_iter().collect(),
+        ),
+        active_turn_allow: Some(vec!["beta".to_string()]),
+        active_turn_deny: Vec::new(),
+        active_revision: meerkat_core::ToolScopeRevision(3),
+        staged_external_filter: meerkat_core::ToolFilter::Deny(
+            ["alpha".to_string()].into_iter().collect(),
+        ),
+        staged_revision: meerkat_core::ToolScopeRevision(3),
+    };
+    let service = make_snapshot_service(expected.clone(), expected_tool_scope, None);
+
+    let created = service
+        .create_session(create_req_deferred("snapshot"))
+        .await
+        .expect("create snapshot-backed session");
+
+    let actual = service
+        .execution_snapshot(&created.session_id)
+        .await
+        .expect("execution snapshot query should succeed")
+        .expect("snapshot should be present");
+
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
+    let expected_execution = AgentExecutionSnapshot {
+        loop_state: meerkat_core::state::LoopState::CallingLlm,
+        turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        active_run_id: None,
+        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        admitted_content_shape: None,
+        vision_enabled: false,
+        image_tool_results_enabled: false,
+        tool_calls_pending: 0,
+        pending_operation_ids: None,
+        barrier_operation_ids: Vec::new(),
+        has_barrier_ops: false,
+        barrier_satisfied: true,
+        boundary_count: 0,
+        cancel_after_boundary: false,
+        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::None,
+        extraction_attempts: 0,
+        max_extraction_retries: 2,
+        applied_cursor: 0,
+    };
+    let expected = meerkat_core::ToolScopeSnapshot {
+        known_base_names: vec![
+            "read_file".to_string(),
+            "search".to_string(),
+            "write_file".to_string(),
+        ],
+        visible_names: vec!["read_file".to_string(), "search".to_string()],
+        base_filter: meerkat_core::ToolFilter::All,
+        active_external_filter: meerkat_core::ToolFilter::Deny(
+            ["write_file".to_string()].into_iter().collect(),
+        ),
+        active_turn_allow: None,
+        active_turn_deny: vec!["write_file".to_string()],
+        active_revision: meerkat_core::ToolScopeRevision(4),
+        staged_external_filter: meerkat_core::ToolFilter::Allow(
+            ["read_file".to_string(), "search".to_string()]
+                .into_iter()
+                .collect(),
+        ),
+        staged_revision: meerkat_core::ToolScopeRevision(5),
+    };
+    let service = make_snapshot_service(expected_execution, expected.clone(), None);
+
+    let created = service
+        .create_session(create_req_deferred("tool-scope snapshot"))
+        .await
+        .expect("create snapshot-backed session");
+
+    let actual = service
+        .tool_scope_snapshot(&created.session_id)
+        .await
+        .expect("tool-scope snapshot query should succeed")
+        .expect("tool-scope snapshot should be present");
+
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() {
+    let expected_execution = AgentExecutionSnapshot {
+        loop_state: meerkat_core::state::LoopState::CallingLlm,
+        turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
+        active_run_id: None,
+        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        admitted_content_shape: None,
+        vision_enabled: false,
+        image_tool_results_enabled: false,
+        tool_calls_pending: 0,
+        pending_operation_ids: None,
+        barrier_operation_ids: Vec::new(),
+        has_barrier_ops: false,
+        barrier_satisfied: true,
+        boundary_count: 0,
+        cancel_after_boundary: false,
+        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::None,
+        extraction_attempts: 0,
+        max_extraction_retries: 0,
+        applied_cursor: 0,
+    };
+    let expected_tool_scope = meerkat_core::ToolScopeSnapshot {
+        known_base_names: vec!["mcp__planner".to_string()],
+        visible_names: vec!["mcp__planner".to_string()],
+        base_filter: meerkat_core::ToolFilter::All,
+        active_external_filter: meerkat_core::ToolFilter::All,
+        active_turn_allow: None,
+        active_turn_deny: Vec::new(),
+        active_revision: meerkat_core::ToolScopeRevision(0),
+        staged_external_filter: meerkat_core::ToolFilter::All,
+        staged_revision: meerkat_core::ToolScopeRevision(0),
+    };
+    let expected_surface = meerkat_core::ExternalToolSurfaceSnapshot {
+        phase: meerkat_core::ExternalToolSurfaceGlobalPhase::Operating,
+        snapshot_epoch: 0,
+        snapshot_aligned_epoch: 0,
+        entries: vec![meerkat_core::ExternalToolSurfaceEntrySnapshot {
+            surface_id: "planner".to_string(),
+            visible: false,
+            base_state: meerkat_core::ExternalToolSurfaceBaseState::Absent,
+            has_removal_timing: false,
+            pending_op: meerkat_core::ExternalToolSurfacePendingOp::None,
+            staged_op: meerkat_core::ExternalToolSurfaceStagedOp::Add,
+            staged_intent_sequence: 1,
+            pending_task_sequence: 0,
+            pending_lineage_sequence: 0,
+            inflight_call_count: 0,
+            last_delta_operation: meerkat_core::ExternalToolSurfaceDeltaOperation::None,
+            last_delta_phase: meerkat_core::ExternalToolSurfaceDeltaPhase::None,
+        }],
+    };
+    let service = make_snapshot_service(
+        expected_execution,
+        expected_tool_scope,
+        Some(expected_surface.clone()),
+    );
+
+    let created = service
+        .create_session(create_req_deferred("tool-surface snapshot"))
+        .await
+        .expect("create snapshot-backed session");
+
+    let actual = service
+        .external_tool_surface_snapshot(&created.session_id)
+        .await
+        .expect("tool-surface snapshot query should succeed")
+        .expect("tool-surface snapshot should be present");
+
+    assert_eq!(actual, expected_surface);
 }

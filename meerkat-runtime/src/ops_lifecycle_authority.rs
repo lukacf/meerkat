@@ -392,53 +392,21 @@ impl OpsLifecycleAuthority {
     }
 
     /// Number of tracked operations (including terminal).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "authority helper retained for schema-aligned registry inspection"
-        )
-    )]
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn operation_count(&self) -> usize {
         self.state.operations.len()
     }
 
     /// Number of non-terminal operations.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "authority helper retained for schema-aligned registry inspection"
-        )
-    )]
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn active_count(&self) -> usize {
         self.state.active_count
     }
 
     /// Currently active barrier wait request, if any.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "authority helper retained for schema-aligned registry inspection"
-        )
-    )]
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn wait_request_id(&self) -> Option<&WaitRequestId> {
         self.state.wait_request_id.as_ref()
     }
 
     /// Operation IDs tracked by the currently active barrier wait.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "authority helper retained for schema-aligned registry inspection"
-        )
-    )]
-    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn wait_operation_ids(&self) -> &[OperationId] {
         &self.state.wait_operation_ids
     }

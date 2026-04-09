@@ -78,6 +78,95 @@ impl MobRun {
     pub fn flow_state(&self) -> &KernelState {
         &self.flow_state
     }
+
+    /// Typed view of the kernel-owned ordered step sequence.
+    pub fn ordered_steps(&self) -> Result<Vec<StepId>, MobError> {
+        let seq = match self.flow_state.fields.get("ordered_steps") {
+            Some(KernelValue::Seq(seq)) => seq,
+            other => {
+                return Err(MobError::Internal(format!(
+                    "flow_run ordered_steps missing or invalid for {}: {other:?}",
+                    self.run_id
+                )));
+            }
+        };
+        seq.iter()
+            .map(|value| match value {
+                KernelValue::String(step_id) => Ok(StepId::from(step_id.clone())),
+                other => Err(MobError::Internal(format!(
+                    "flow_run ordered_steps entry invalid for {}: {other:?}",
+                    self.run_id
+                ))),
+            })
+            .collect()
+    }
+
+    /// Typed view of the kernel-owned step status map, excluding `None` entries.
+    pub fn step_status_snapshot(&self) -> Result<BTreeMap<StepId, StepRunStatus>, MobError> {
+        let map = match self.flow_state.fields.get("step_status") {
+            Some(KernelValue::Map(map)) => map,
+            other => {
+                return Err(MobError::Internal(format!(
+                    "flow_run step_status map missing or invalid for {}: {other:?}",
+                    self.run_id
+                )));
+            }
+        };
+
+        let mut statuses = BTreeMap::new();
+        for (step_key, value) in map {
+            let step_id = match step_key {
+                KernelValue::String(step_id) => StepId::from(step_id.clone()),
+                other => {
+                    return Err(MobError::Internal(format!(
+                        "flow_run step_status key invalid for {}: {other:?}",
+                        self.run_id
+                    )));
+                }
+            };
+            if matches!(value, KernelValue::None) {
+                continue;
+            }
+            statuses.insert(
+                step_id,
+                StepRunStatus::from_flow_run_kernel_value(value, &self.run_id)?,
+            );
+        }
+
+        Ok(statuses)
+    }
+
+    /// Typed view of the kernel-owned cumulative failure counter.
+    pub fn failure_count(&self) -> Result<u32, MobError> {
+        match self.flow_state.fields.get("failure_count") {
+            Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
+                MobError::Internal(format!(
+                    "flow_run failure_count out of range for {}",
+                    self.run_id
+                ))
+            }),
+            other => Err(MobError::Internal(format!(
+                "flow_run failure_count missing or invalid for {}: {other:?}",
+                self.run_id
+            ))),
+        }
+    }
+
+    /// Typed view of the kernel-owned consecutive-failure counter.
+    pub fn consecutive_failure_count(&self) -> Result<u32, MobError> {
+        match self.flow_state.fields.get("consecutive_failure_count") {
+            Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
+                MobError::Internal(format!(
+                    "flow_run consecutive_failure_count out of range for {}",
+                    self.run_id
+                ))
+            }),
+            other => Err(MobError::Internal(format!(
+                "flow_run consecutive_failure_count missing or invalid for {}: {other:?}",
+                self.run_id
+            ))),
+        }
+    }
 }
 
 impl MobRun {
@@ -438,6 +527,27 @@ pub enum StepRunStatus {
     Canceled,
 }
 
+impl StepRunStatus {
+    pub(crate) fn from_flow_run_kernel_value(
+        value: &KernelValue,
+        run_id: &RunId,
+    ) -> Result<Self, MobError> {
+        match value.as_named_variant("StepRunStatus") {
+            Ok("Dispatched") => Ok(Self::Dispatched),
+            Ok("Completed") => Ok(Self::Completed),
+            Ok("Failed") => Ok(Self::Failed),
+            Ok("Skipped") => Ok(Self::Skipped),
+            Ok("Canceled") => Ok(Self::Canceled),
+            Ok(variant) => Err(MobError::Internal(format!(
+                "unknown StepRunStatus variant `{variant}` for {run_id}"
+            ))),
+            Err(reason) => Err(MobError::Internal(format!(
+                "flow_run step_status entry invalid for {run_id}: {reason}"
+            ))),
+        }
+    }
+}
+
 /// Flow-level failure log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureLedgerEntry {
@@ -671,6 +781,72 @@ mod tests {
         assert!(MobRunStatus::Canceled.is_terminal());
         assert!(!MobRunStatus::Pending.is_terminal());
         assert!(!MobRunStatus::Running.is_terminal());
+    }
+
+    #[test]
+    fn test_mob_run_kernel_readers_surface_ordered_steps_and_status_snapshot() {
+        let mut run = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            MobRun::flow_state_for_steps([StepId::from("step-a"), StepId::from("step-b")]).unwrap(),
+            serde_json::json!({}),
+        );
+        run.flow_state.fields.insert(
+            "step_status".to_string(),
+            KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("step-a".to_string()),
+                    KernelValue::NamedVariant {
+                        enum_name: "StepRunStatus".to_string(),
+                        variant: "Completed".to_string(),
+                    },
+                ),
+                (KernelValue::String("step-b".to_string()), KernelValue::None),
+            ])),
+        );
+        run.flow_state
+            .fields
+            .insert("failure_count".to_string(), KernelValue::U64(3));
+        run.flow_state
+            .fields
+            .insert("consecutive_failure_count".to_string(), KernelValue::U64(2));
+
+        assert_eq!(
+            run.ordered_steps().unwrap(),
+            vec![StepId::from("step-a"), StepId::from("step-b")]
+        );
+        assert_eq!(
+            run.step_status_snapshot().unwrap(),
+            BTreeMap::from([(StepId::from("step-a"), StepRunStatus::Completed)])
+        );
+        assert_eq!(run.failure_count().unwrap(), 3);
+        assert_eq!(run.consecutive_failure_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_mob_run_step_status_snapshot_rejects_unknown_variant() {
+        let mut run = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
+            serde_json::json!({}),
+        );
+        run.flow_state.fields.insert(
+            "step_status".to_string(),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("step-a".to_string()),
+                KernelValue::NamedVariant {
+                    enum_name: "StepRunStatus".to_string(),
+                    variant: "Broken".to_string(),
+                },
+            )])),
+        );
+
+        let error = run.step_status_snapshot().unwrap_err();
+        assert!(
+            matches!(error, MobError::Internal(ref message) if message.contains("unknown StepRunStatus variant `Broken`")),
+            "expected explicit step status parse failure, got {error:?}"
+        );
     }
 
     #[test]

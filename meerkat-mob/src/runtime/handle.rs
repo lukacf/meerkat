@@ -1417,8 +1417,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))
     }
 
-    #[cfg(test)]
-    pub async fn debug_orchestrator_snapshot(
+    pub(crate) async fn debug_orchestrator_snapshot(
         &self,
     ) -> Result<super::MobOrchestratorSnapshot, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1429,6 +1428,30 @@ impl MobHandle {
         reply_rx
             .await
             .map_err(|_| MobError::Internal("actor reply dropped".into()))
+    }
+
+    pub(crate) async fn diagnostic_kernel_snapshot(
+        &self,
+    ) -> Result<super::MobKernelDiagnosticSnapshot, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::DiagnosticKernelSnapshot { reply_tx })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))
+    }
+
+    pub(crate) async fn diagnostic_restore_failures_snapshot(
+        &self,
+    ) -> BTreeMap<MeerkatId, RestoreFailureDiagnostic> {
+        self.restore_diagnostics
+            .read()
+            .await
+            .iter()
+            .map(|(meerkat_id, diagnostic)| (meerkat_id.clone(), diagnostic.clone()))
+            .collect()
     }
 
     /// Set or clear the spawn policy for automatic member provisioning.

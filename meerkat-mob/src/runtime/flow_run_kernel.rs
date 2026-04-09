@@ -1035,19 +1035,7 @@ fn parse_step_run_status(
     value: &KernelValue,
     run_id: &RunId,
 ) -> Result<crate::run::StepRunStatus, MobError> {
-    match value.as_named_variant("StepRunStatus") {
-        Ok("Dispatched") => Ok(crate::run::StepRunStatus::Dispatched),
-        Ok("Completed") => Ok(crate::run::StepRunStatus::Completed),
-        Ok("Failed") => Ok(crate::run::StepRunStatus::Failed),
-        Ok("Skipped") => Ok(crate::run::StepRunStatus::Skipped),
-        Ok("Canceled") => Ok(crate::run::StepRunStatus::Canceled),
-        Ok(variant) => Err(MobError::Internal(format!(
-            "unknown StepRunStatus variant `{variant}` for {run_id}"
-        ))),
-        Err(reason) => Err(MobError::Internal(format!(
-            "flow_run step_status entry invalid for {run_id}: {reason}"
-        ))),
-    }
+    crate::run::StepRunStatus::from_flow_run_kernel_value(value, run_id)
 }
 
 fn has_step_effect(

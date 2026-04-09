@@ -459,6 +459,21 @@ impl RuntimeIngressAuthority {
         self.fields.policy_snapshot.get(work_id)
     }
 
+    /// Content shape for a specific work ID.
+    pub fn content_shape(&self, work_id: &InputId) -> Option<ContentShape> {
+        self.fields.content_shape.get(work_id).cloned()
+    }
+
+    /// Request ID for a specific work ID.
+    pub fn request_id(&self, work_id: &InputId) -> Option<RequestId> {
+        self.fields.request_id.get(work_id).cloned().flatten()
+    }
+
+    /// Reservation key for a specific work ID.
+    pub fn reservation_key(&self, work_id: &InputId) -> Option<ReservationKey> {
+        self.fields.reservation_key.get(work_id).cloned().flatten()
+    }
+
     /// Whether a wake was requested.
     pub fn wake_requested(&self) -> bool {
         self.fields.wake_requested

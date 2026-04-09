@@ -165,6 +165,9 @@ them.
 
 ```text
 peer = {
+  phase: Absent | Received | Dropped | Delivered,
+  self_peer_id: PeerId,
+  auth_required: Bool,
   trusted_peers: Set<PeerId>,
   raw_item_peer: Map<RawItemId, PeerId>,
   raw_item_kind: Map<RawItemId, RawPeerKind>,
@@ -173,13 +176,16 @@ peer = {
   content_shape: Map<RawItemId, ContentShape>,
   request_id: Map<RawItemId, Option<RequestId>>,
   reservation_key: Map<RawItemId, Option<ReservationKey>>,
+  lifecycle_peer: Map<RawItemId, Option<String>>,
   trusted_snapshot: Map<RawItemId, Bool>,
   submission_queue: Seq<RawItemId>
 }
 ```
 
 This group keeps peer normalization inside Meerkat and lowers valid peer work
-into ordinary admission.
+into ordinary admission. `RawItemId` is the stable ingress identity for queued
+peer work; snapshots may project it directly, but the semantic owner remains
+the peer region itself.
 
 ### `tools`
 
@@ -425,7 +431,8 @@ is a whole-machine reconstruction problem.
 ## Candidate Global Invariants
 
 - `binding.driver_present = FALSE => control.phase \in {Initializing, Destroyed}`
-- `control.phase = Running <=> control.current_run_id # None`
+- `control.phase = Running => control.current_run_id # None`
+- `control.current_run_id # None => control.phase \in {Running, Retired}`
 - `control.current_run_id = inputs.current_run_id` whenever either is non-`None`
 - `turn.active_run_id = control.current_run_id` whenever `turn.phase \notin {Ready, Completed, Failed, Cancelled}`
 - `inputs.queue` and `inputs.steer_queue` contain only inputs whose lifecycle is `Queued`
@@ -433,10 +440,48 @@ is a whole-machine reconstruction problem.
 - terminal inputs never reappear in `inputs.queue` or `inputs.steer_queue`
 - `turn.phase = WaitingForOps => turn.pending_op_refs # None`
 - `turn.barrier_satisfied => AllTerminal(turn.barrier_operation_ids, ops.operation_status)`
+- `peer.trusted_peers` changes only through one runtime trust-registration
+  transition, not raw router mutation
+- `peer.phase \in {Absent, Dropped, Delivered} => Len(peer.submission_queue) = 0`
+- `peer.phase = Received => Len(peer.submission_queue) > 0`
 - every `peer.submission_queue` item is trusted, classified, and correlation-preserving
 - `SubsetEq(tools.visible_surfaces, tools.known_surfaces)`
 - removing or removed tool surfaces are not visible
+- tool-surface pending ops are compatible with base state
+- inflight tool-surface calls only exist for `Active | Removing`
+- forced tool-surface delta phase implies remove delta operation
+- staged tool-surface sequences exist iff staged op is not `None`
+- pending tool-surface task/lineage sequences exist iff pending op is not `None`
+- tool-surface removal timing exists iff base state is `Removing`
 - `drain.phase \in {Starting, Running, ExitedRespawnable} => drain.mode # None`
+
+The current executable validator in `meerkat/src/meerkat_machine.rs` checks a
+conservative subset of these invariants against the live joined snapshot:
+
+- `control.phase = Running => control.current_run_id # None`
+- `control.current_run_id # None => control.phase \in {Running, Retired}`
+- `control.current_run_id = inputs.current_run_id`
+- `inputs.current_run_id = None <=> inputs.current_run_contributors = << >>`
+- queued and steer-queued inputs must exist in the admitted ledger with
+  lifecycle `Queued`
+- current run contributors must exist in the admitted ledger with lifecycle in
+  `{Staged, Applied, AppliedPendingConsumption}`
+- terminal admitted inputs must carry terminal outcomes, and non-terminal
+  admitted inputs must not
+- `turn.active_run_id = control.current_run_id` for non-ready, non-terminal
+  turn phases
+- `turn.phase = WaitingForOps => turn.pending_op_refs # None`
+- peer authority phase and submission queue coherence
+- `ops.active_count <= operation_count`
+- completion-waiter carrier counts are internally consistent and every waiting
+  input still exists in the admitted ledger
+- tool-surface visibility matches `Active` base membership
+- tool-surface pending op/base-state compatibility
+- tool-surface inflight/base-state compatibility
+- forced tool-surface delta phase implies remove delta operation
+- staged tool-surface sequence coherence
+- pending tool-surface task/lineage sequence coherence
+- tool-surface removal-timing membership coherence
 
 ## What Still Needs Formalization
 

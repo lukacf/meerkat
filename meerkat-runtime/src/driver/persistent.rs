@@ -61,6 +61,11 @@ impl PersistentRuntimeDriver {
         &self.inner
     }
 
+    /// Get the logical runtime ID for this driver.
+    pub fn runtime_id(&self) -> &LogicalRuntimeId {
+        &self.runtime_id
+    }
+
     /// Set the list of comms intents that should be silently accepted (delegates to inner).
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
         self.inner.set_silent_comms_intents(intents);

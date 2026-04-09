@@ -21,6 +21,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use meerkat_core::{
+    ExternalToolSurfaceBaseState as CoreExternalToolSurfaceBaseState,
+    ExternalToolSurfaceDeltaOperation as CoreExternalToolSurfaceDeltaOperation,
+    ExternalToolSurfaceDeltaPhase as CoreExternalToolSurfaceDeltaPhase,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase,
+    ExternalToolSurfacePendingOp as CoreExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
+    ExternalToolSurfaceStagedOp as CoreExternalToolSurfaceStagedOp,
+};
+
 // ---------------------------------------------------------------------------
 // SurfaceId newtype
 // ---------------------------------------------------------------------------
@@ -592,6 +601,56 @@ impl ExternalToolSurfaceAuthority {
     /// Current published snapshot epoch requested by the authority.
     pub fn snapshot_epoch(&self) -> u64 {
         self.fields.snapshot_epoch
+    }
+
+    /// Current snapshot epoch confirmed by the published projection.
+    pub fn snapshot_aligned_epoch(&self) -> u64 {
+        self.fields.snapshot_aligned_epoch
+    }
+
+    /// Snapshot the canonical external-tool surface state for diagnostics.
+    pub fn diagnostic_snapshot(&self) -> ExternalToolSurfaceSnapshot {
+        let entries = self
+            .fields
+            .known_surfaces
+            .iter()
+            .map(|surface_id| ExternalToolSurfaceEntrySnapshot {
+                surface_id: surface_id.0.clone(),
+                visible: self.fields.is_visible(surface_id),
+                base_state: map_base_state(self.fields.surface_base(surface_id)),
+                has_removal_timing: self.fields.removal_timing.contains_key(surface_id),
+                pending_op: map_pending_op(self.fields.pending_op(surface_id)),
+                staged_op: map_staged_op(self.fields.staged_op(surface_id)),
+                staged_intent_sequence: self.fields.staged_intent_sequence(surface_id),
+                pending_task_sequence: self.fields.pending_task_sequence(surface_id),
+                pending_lineage_sequence: self.fields.pending_lineage_sequence(surface_id),
+                inflight_call_count: self.fields.inflight_call_count(surface_id),
+                last_delta_operation: map_delta_operation(
+                    self.fields
+                        .last_delta_operation
+                        .get(surface_id)
+                        .copied()
+                        .unwrap_or(SurfaceDeltaOperation::None),
+                ),
+                last_delta_phase: map_delta_phase(
+                    self.fields
+                        .last_delta_phase
+                        .get(surface_id)
+                        .copied()
+                        .unwrap_or(SurfaceDeltaPhase::None),
+                ),
+            })
+            .collect();
+
+        ExternalToolSurfaceSnapshot {
+            phase: match self.phase {
+                ExternalToolSurfacePhase::Operating => ExternalToolSurfaceGlobalPhase::Operating,
+                ExternalToolSurfacePhase::Shutdown => ExternalToolSurfaceGlobalPhase::Shutdown,
+            },
+            snapshot_epoch: self.fields.snapshot_epoch,
+            snapshot_aligned_epoch: self.fields.snapshot_aligned_epoch,
+            entries,
+        }
     }
 
     fn advance_snapshot_epoch(fields: &mut ExternalToolSurfaceFields) -> u64 {
@@ -1680,6 +1739,52 @@ impl ExternalToolSurfaceAuthority {
                 );
             }
         }
+    }
+}
+
+fn map_base_state(state: SurfaceBaseState) -> CoreExternalToolSurfaceBaseState {
+    match state {
+        SurfaceBaseState::Absent => CoreExternalToolSurfaceBaseState::Absent,
+        SurfaceBaseState::Active => CoreExternalToolSurfaceBaseState::Active,
+        SurfaceBaseState::Removing => CoreExternalToolSurfaceBaseState::Removing,
+        SurfaceBaseState::Removed => CoreExternalToolSurfaceBaseState::Removed,
+    }
+}
+
+fn map_pending_op(op: PendingSurfaceOp) -> CoreExternalToolSurfacePendingOp {
+    match op {
+        PendingSurfaceOp::None => CoreExternalToolSurfacePendingOp::None,
+        PendingSurfaceOp::Add => CoreExternalToolSurfacePendingOp::Add,
+        PendingSurfaceOp::Reload => CoreExternalToolSurfacePendingOp::Reload,
+    }
+}
+
+fn map_staged_op(op: StagedSurfaceOp) -> CoreExternalToolSurfaceStagedOp {
+    match op {
+        StagedSurfaceOp::None => CoreExternalToolSurfaceStagedOp::None,
+        StagedSurfaceOp::Add => CoreExternalToolSurfaceStagedOp::Add,
+        StagedSurfaceOp::Remove => CoreExternalToolSurfaceStagedOp::Remove,
+        StagedSurfaceOp::Reload => CoreExternalToolSurfaceStagedOp::Reload,
+    }
+}
+
+fn map_delta_operation(op: SurfaceDeltaOperation) -> CoreExternalToolSurfaceDeltaOperation {
+    match op {
+        SurfaceDeltaOperation::None => CoreExternalToolSurfaceDeltaOperation::None,
+        SurfaceDeltaOperation::Add => CoreExternalToolSurfaceDeltaOperation::Add,
+        SurfaceDeltaOperation::Remove => CoreExternalToolSurfaceDeltaOperation::Remove,
+        SurfaceDeltaOperation::Reload => CoreExternalToolSurfaceDeltaOperation::Reload,
+    }
+}
+
+fn map_delta_phase(phase: SurfaceDeltaPhase) -> CoreExternalToolSurfaceDeltaPhase {
+    match phase {
+        SurfaceDeltaPhase::None => CoreExternalToolSurfaceDeltaPhase::None,
+        SurfaceDeltaPhase::Pending => CoreExternalToolSurfaceDeltaPhase::Pending,
+        SurfaceDeltaPhase::Applied => CoreExternalToolSurfaceDeltaPhase::Applied,
+        SurfaceDeltaPhase::Draining => CoreExternalToolSurfaceDeltaPhase::Draining,
+        SurfaceDeltaPhase::Failed => CoreExternalToolSurfaceDeltaPhase::Failed,
+        SurfaceDeltaPhase::Forced => CoreExternalToolSurfaceDeltaPhase::Forced,
     }
 }
 

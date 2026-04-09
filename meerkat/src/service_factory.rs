@@ -256,6 +256,18 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
+    fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
+        Some(self.agent.execution_snapshot())
+    }
+
+    fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
+        self.agent.tool_scope_snapshot()
+    }
+
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.agent.external_tool_surface_snapshot()
+    }
+
     fn session_clone(&self) -> Session {
         self.agent.session_with_system_context_state()
     }
@@ -893,6 +905,130 @@ mod tests {
                 .iter()
                 .any(|name| name == "meerkat_schedule_list")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_agent_execution_snapshot_forwards_core_state() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+
+        let snapshot = SessionAgent::execution_snapshot(&agent)
+            .ok_or_else(|| "factory agent should expose execution snapshot".to_string())?;
+
+        assert_eq!(
+            snapshot.loop_state,
+            meerkat_core::state::LoopState::CallingLlm
+        );
+        assert_eq!(
+            snapshot.turn_phase,
+            meerkat_core::turn_execution_authority::TurnPhase::Ready
+        );
+        assert_eq!(snapshot.active_run_id, None);
+        assert_eq!(snapshot.applied_cursor, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_agent_tool_scope_snapshot_forwards_core_state() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+
+        let snapshot = SessionAgent::tool_scope_snapshot(&agent)
+            .ok_or_else(|| "factory agent should expose tool-scope snapshot".to_string())?;
+
+        assert_eq!(snapshot.base_filter, meerkat_core::ToolFilter::All);
+        assert_eq!(
+            snapshot.active_external_filter,
+            meerkat_core::ToolFilter::All
+        );
+        assert_eq!(
+            snapshot.staged_external_filter,
+            meerkat_core::ToolFilter::All
+        );
+        assert_eq!(snapshot.active_revision, meerkat_core::ToolScopeRevision(0));
+        assert_eq!(snapshot.staged_revision, meerkat_core::ToolScopeRevision(0));
+        assert_eq!(snapshot.known_base_names, snapshot.visible_names);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn factory_agent_external_tool_surface_snapshot_forwards_core_state() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let mut router = meerkat_mcp::McpRouter::new();
+        router.stage_add(meerkat_core::McpServerConfig::stdio(
+            "planner",
+            "/bin/echo",
+            Vec::<String>::new(),
+            std::collections::HashMap::new(),
+        ));
+        let dispatcher = Arc::new(meerkat_mcp::McpRouterAdapter::new(router))
+            as Arc<dyn meerkat_core::AgentToolDispatcher>;
+        let agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                tool_dispatcher_override: Some(dispatcher),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+
+        let snapshot = SessionAgent::external_tool_surface_snapshot(&agent).ok_or_else(|| {
+            "factory agent should expose external-tool surface snapshot".to_string()
+        })?;
+
+        assert_eq!(
+            snapshot.phase,
+            meerkat_core::ExternalToolSurfaceGlobalPhase::Operating
+        );
+        assert_eq!(snapshot.snapshot_epoch, 0);
+        assert_eq!(snapshot.snapshot_aligned_epoch, 0);
+        assert_eq!(snapshot.entries.len(), 1);
+
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.surface_id, "planner");
+        assert!(!entry.visible);
+        assert_eq!(
+            entry.base_state,
+            meerkat_core::ExternalToolSurfaceBaseState::Absent
+        );
+        assert_eq!(
+            entry.pending_op,
+            meerkat_core::ExternalToolSurfacePendingOp::None
+        );
+        assert_eq!(
+            entry.staged_op,
+            meerkat_core::ExternalToolSurfaceStagedOp::Add
+        );
+        assert_eq!(entry.staged_intent_sequence, 1);
+        assert_eq!(entry.pending_task_sequence, 0);
+        assert_eq!(entry.pending_lineage_sequence, 0);
+        assert_eq!(entry.inflight_call_count, 0);
+        assert_eq!(
+            entry.last_delta_operation,
+            meerkat_core::ExternalToolSurfaceDeltaOperation::None
+        );
+        assert_eq!(
+            entry.last_delta_phase,
+            meerkat_core::ExternalToolSurfaceDeltaPhase::None
+        );
+
         Ok(())
     }
 

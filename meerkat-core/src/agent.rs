@@ -13,14 +13,17 @@ mod state;
 
 use crate::budget::Budget;
 use crate::comms::{
-    CommsCommand, EventStream, PeerDirectoryEntry, SendError, SendReceipt, StreamError,
-    StreamScope, TrustedPeerSpec,
+    CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope, TrustedPeerSpec,
 };
 use crate::compact::SessionCompactionCadence;
+use crate::completion_feed::CompletionSeq;
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::event::ExternalToolDelta;
 use crate::hooks::HookEngine;
+use crate::lifecycle::RunId;
+use crate::ops::OperationId;
 use crate::ops_lifecycle::{OperationKind, OperationStatus, OperationTerminalOutcome};
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
@@ -33,6 +36,9 @@ use crate::tool_catalog::{
     select_catalog_mode_from_snapshot,
 };
 use crate::tool_scope::ToolScope;
+use crate::turn_execution_authority::{
+    ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+};
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
     ToolDef, Usage,
@@ -132,6 +138,34 @@ impl LlmStreamResult {
     }
 }
 
+/// Diagnostic snapshot of the core agent's live execution state.
+///
+/// This is an observational surface over the existing agent loop and
+/// `TurnExecutionAuthority`. It does not create new semantic ownership; it
+/// exposes the current canonical turn-execution truth for MeerkatMachine
+/// mapping work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExecutionSnapshot {
+    pub loop_state: LoopState,
+    pub turn_phase: TurnPhase,
+    pub active_run_id: Option<RunId>,
+    pub primitive_kind: TurnPrimitiveKind,
+    pub admitted_content_shape: Option<ContentShape>,
+    pub vision_enabled: bool,
+    pub image_tool_results_enabled: bool,
+    pub tool_calls_pending: u32,
+    pub pending_operation_ids: Option<Vec<OperationId>>,
+    pub barrier_operation_ids: Vec<OperationId>,
+    pub has_barrier_ops: bool,
+    pub barrier_satisfied: bool,
+    pub boundary_count: u32,
+    pub cancel_after_boundary: bool,
+    pub terminal_outcome: TurnTerminalOutcome,
+    pub extraction_attempts: u32,
+    pub max_extraction_retries: u32,
+    pub applied_cursor: CompletionSeq,
+}
+
 /// Result of polling for external tool updates.
 ///
 /// Returned by [`AgentToolDispatcher::poll_external_updates`].
@@ -175,8 +209,12 @@ pub struct DetachedOpCompletion {
 /// `supports_*` boolean methods with a single structured query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DispatcherCapabilities {
+    /// Whether `bind_wait_interrupt` is implemented.
+    pub wait_interrupt: bool,
     /// Whether `bind_ops_lifecycle` is implemented.
     pub ops_lifecycle: bool,
+    /// Whether `bind_completion_feed` is implemented.
+    pub completion_feed: bool,
 }
 
 /// Result of a dispatcher binding operation.
@@ -267,9 +305,35 @@ pub trait AgentToolDispatcher: Send + Sync {
         ExternalToolUpdate::default()
     }
 
+    /// Snapshot the live external tool-surface machine state, if supported.
+    ///
+    /// This is a hidden diagnostic surface for MeerkatMachine mapping work.
+    /// Dispatchers that do not own dynamic external tool mutation should
+    /// return `None`.
+    fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        None
+    }
+
     /// Query which optional bindings this dispatcher supports.
     fn capabilities(&self) -> DispatcherCapabilities {
         DispatcherCapabilities::default()
+    }
+
+    /// Bind a wait-interrupt receiver into this dispatcher, returning a rebound dispatcher.
+    ///
+    /// The consuming `Arc<Self>` receiver is required because some dispatchers
+    /// (e.g. `CompositeDispatcher`) hold non-Clone state. The factory calls
+    /// this once after final composition, transferring ownership.
+    ///
+    /// Default returns `Err(Unsupported)`. Dispatchers that contain a `WaitTool`
+    /// (e.g. `CompositeDispatcher`) override this to swap in an interrupt-aware
+    /// instance. `ToolGateway` and `FilteredToolDispatcher` forward to their
+    /// inner dispatchers.
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        _rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 
     /// Bind a session-canonical ops registry into this dispatcher.
@@ -292,6 +356,19 @@ pub trait AgentToolDispatcher: Send + Sync {
         &self,
     ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
         None
+    }
+
+    /// Bind a completion feed into this dispatcher's WaitTool (feed-only, no comms).
+    ///
+    /// Called by the factory when no comms runtime is available but a completion
+    /// feed exists. The WaitTool will race sleep against feed advance without
+    /// a comms interrupt channel. Default returns `Err(Unsupported)`.
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        _feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        _baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 }
 
@@ -398,8 +475,45 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.poll_external_updates().await
     }
 
+    fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        self.inner.external_tool_surface_snapshot()
+    }
+
     fn capabilities(&self) -> DispatcherCapabilities {
         self.inner.capabilities()
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_wait_interrupt(rx)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            // Can't use outcome after into_dispatcher, reconstruct:
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
     fn bind_ops_lifecycle(
@@ -410,6 +524,39 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
         if Arc::strong_count(&owned.inner) == 1 {
             let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
+    }
+
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_completion_feed(feed, baseline)?;
             let bound = outcome.was_bound();
             let d = outcome.into_dispatcher();
             Ok(if bound {
@@ -528,6 +675,7 @@ pub trait CommsRuntime: Send + Sync {
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {
             StreamScope::Session(session_id) => format!("session {session_id}"),
+            StreamScope::Interaction(interaction_id) => format!("interaction {}", interaction_id.0),
         };
         Err(StreamError::NotFound(scope_desc))
     }
@@ -542,6 +690,20 @@ pub trait CommsRuntime: Send + Sync {
     /// Implementations can override this to avoid materializing a full peer list.
     async fn peer_count(&self) -> usize {
         self.peers().await.len()
+    }
+
+    #[doc(hidden)]
+    async fn send_and_stream(
+        &self,
+        cmd: CommsCommand,
+    ) -> Result<(SendReceipt, EventStream), SendAndStreamError> {
+        let receipt = self.send(cmd).await?;
+        Err(SendAndStreamError::StreamAttach {
+            receipt,
+            error: StreamError::Internal(
+                "send_and_stream is not implemented for this runtime".to_string(),
+            ),
+        })
     }
 
     /// Drain comms inbox and return messages formatted for the LLM
@@ -616,10 +778,54 @@ pub trait CommsRuntime: Send + Sync {
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 
-    /// Drain machine-authored peer/event ingress candidates.
+    /// Drain classified inbox interactions.
     ///
-    /// Runtime-backed peer ingress must route through this canonical seam.
-    async fn drain_peer_input_candidates(&self) -> Vec<crate::interaction::PeerInputCandidate>;
+    /// Returns interactions with pre-computed classification from ingress.
+    /// The host loop routes on the stored `PeerInputClass` instead of
+    /// re-classifying after drain.
+    ///
+    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
+    async fn drain_classified_inbox_interactions(
+        &self,
+    ) -> Result<Vec<crate::interaction::ClassifiedInboxInteraction>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "drain_classified_inbox_interactions".to_string(),
+        ))
+    }
+
+    /// Snapshot the currently queued peer-ingress surface without draining it.
+    ///
+    /// This is a hidden diagnostic capability used while mapping the internal
+    /// MeerkatMachine boundary onto existing comms ownership.
+    async fn peer_ingress_queue_snapshot(
+        &self,
+    ) -> Result<crate::interaction::PeerIngressQueueSnapshot, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "peer_ingress_queue_snapshot".to_string(),
+        ))
+    }
+
+    /// Snapshot the current peer runtime surface for MeerkatMachine mapping.
+    ///
+    /// This extends the queued ingress snapshot with the local trust membership
+    /// that governs peer admission.
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+    ) -> Result<crate::interaction::PeerIngressRuntimeSnapshot, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "peer_ingress_runtime_snapshot".to_string(),
+        ))
+    }
+
+    /// Get a notification that fires only for actionable peer input.
+    ///
+    /// Default returns `Unsupported`. Comms-enabled runtimes must override.
+    /// Used by the factory to bridge into `WaitTool` interrupt.
+    fn actionable_input_notify(&self) -> Result<Arc<tokio::sync::Notify>, CommsCapabilityError> {
+        Err(CommsCapabilityError::Unsupported(
+            "actionable_input_notify".to_string(),
+        ))
+    }
 }
 
 /// The main Agent struct
@@ -663,6 +869,12 @@ where
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
+    /// Out-of-band sender for cooperative wait/yield interrupts.
+    ///
+    /// This is a transport handle, not semantic authority. The live session
+    /// handle owns when to signal it; the wait tool owns how the signal is
+    /// observed within a running turn.
+    pub(crate) wait_interrupt_sender: Option<crate::wait_interrupt::WaitInterruptSender>,
     /// Optional session checkpointer for host-mode persistence.
     #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
@@ -691,6 +903,9 @@ where
     pub(crate) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     /// Local cursor into the completion feed — only the agent boundary advances this.
     pub(crate) applied_cursor: crate::completion_feed::CompletionSeq,
+    /// Shared baseline for the wait tool's interrupt check.
+    /// Stamped to `applied_cursor` before each tool dispatch.
+    pub(crate) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Optional enrichment provider for completion display details.
     pub(crate) completion_enrichment:
         Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
@@ -745,10 +960,6 @@ mod tests {
         fn inbox_notify(&self) -> std::sync::Arc<Notify> {
             self.notify.clone()
         }
-
-        async fn drain_peer_input_candidates(&self) -> Vec<crate::interaction::PeerInputCandidate> {
-            Vec::new()
-        }
     }
 
     #[tokio::test]
@@ -800,6 +1011,91 @@ mod tests {
             InlinePeerNotificationPolicy::try_from_raw(Some(-42)),
             Err(-42)
         );
+    }
+
+    #[test]
+    fn test_filtered_dispatcher_bind_wait_interrupt_forwards() {
+        use super::{AgentToolDispatcher, FilteredToolDispatcher};
+        use crate::error::ToolError;
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
+        use serde_json::json;
+
+        struct MockTool;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for MockTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![Arc::new(ToolDef {
+                    name: "test".to_string(),
+                    description: "test tool".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
+                })]
+                .into()
+            }
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
+                Err(ToolError::not_found("test"))
+            }
+        }
+
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(MockTool);
+        let filtered = Arc::new(FilteredToolDispatcher::new(inner, vec!["test".to_string()]));
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+
+        // MockTool returns Unsupported (default); FilteredToolDispatcher
+        // forwards to inner which also returns Unsupported.
+        let result = filtered.bind_wait_interrupt(rx);
+        assert!(matches!(
+            result,
+            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn test_filtered_dispatcher_bind_wait_interrupt_shared_ownership() {
+        use super::{AgentToolDispatcher, FilteredToolDispatcher};
+        use crate::error::ToolError;
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
+        use serde_json::json;
+
+        struct MockTool;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentToolDispatcher for MockTool {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![Arc::new(ToolDef {
+                    name: "test".to_string(),
+                    description: "test tool".to_string(),
+                    input_schema: json!({"type": "object", "properties": {}, "required": []}),
+                })]
+                .into()
+            }
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
+                Err(ToolError::not_found("test"))
+            }
+        }
+
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(MockTool);
+        let filtered = Arc::new(FilteredToolDispatcher::new(inner, vec!["test".to_string()]));
+        let _clone = Arc::clone(&filtered);
+
+        let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
+        match filtered.bind_wait_interrupt(rx) {
+            Err(crate::wait_interrupt::WaitInterruptBindError::SharedOwnership) => {}
+            Ok(_) => panic!("expected SharedOwnership error, got Ok"),
+            Err(e) => panic!("expected SharedOwnership, got {e:?}"),
+        }
     }
 
     /// UNIT-001: OperationStatus::is_terminal() returns true for all terminal

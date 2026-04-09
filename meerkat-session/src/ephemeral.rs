@@ -115,6 +115,15 @@ enum SessionCommand {
     ExportSession {
         reply_tx: oneshot::Sender<meerkat_core::Session>,
     },
+    ExecutionSnapshot {
+        reply_tx: oneshot::Sender<Option<meerkat_core::AgentExecutionSnapshot>>,
+    },
+    ToolScopeSnapshot {
+        reply_tx: oneshot::Sender<Option<meerkat_core::ToolScopeSnapshot>>,
+    },
+    ExternalToolSurfaceSnapshot {
+        reply_tx: oneshot::Sender<Option<meerkat_core::ExternalToolSurfaceSnapshot>>,
+    },
     ApplyRuntimeSystemContext {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
@@ -318,6 +327,21 @@ pub trait SessionAgent: Send {
 
     /// Take a snapshot of the current session state.
     fn snapshot(&self) -> SessionSnapshot;
+
+    /// Take a diagnostic snapshot of the live execution state, if supported.
+    fn execution_snapshot(&self) -> Option<meerkat_core::AgentExecutionSnapshot> {
+        None
+    }
+
+    /// Take a diagnostic snapshot of the live tool-scope state, if supported.
+    fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
+        None
+    }
+
+    /// Take a diagnostic snapshot of the live external tool-surface state, if supported.
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        None
+    }
 
     /// Clone the full session (messages + metadata) for persistence.
     ///
@@ -658,10 +682,100 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task dropped reply channel".to_string(),
+                    "Session task dropped the reply channel".to_string(),
                 ))
             })?
             .map_err(SessionError::Agent)
+    }
+
+    /// Get a diagnostic snapshot of the live execution state for a session.
+    pub async fn execution_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle.command_tx.clone()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ExecutionSnapshot { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Get a diagnostic snapshot of the live tool-scope state for a session.
+    pub async fn tool_scope_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle.command_tx.clone()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ToolScopeSnapshot { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Get a diagnostic snapshot of the live external tool-surface state for a session.
+    pub async fn external_tool_surface_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::ExternalToolSurfaceSnapshot>, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle.command_tx.clone()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ExternalToolSurfaceSnapshot { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
     }
 
     /// Get shared deferred-turn control state for a session, if available.
@@ -2203,6 +2317,15 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ExecutionSnapshot { reply_tx } => {
+                let _ = reply_tx.send(agent.execution_snapshot());
+            }
+            SessionCommand::ToolScopeSnapshot { reply_tx } => {
+                let _ = reply_tx.send(agent.tool_scope_snapshot());
+            }
+            SessionCommand::ExternalToolSurfaceSnapshot { reply_tx } => {
+                let _ = reply_tx.send(agent.external_tool_surface_snapshot());
             }
             SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
                 agent.apply_runtime_system_context(&appends);

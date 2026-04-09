@@ -2404,6 +2404,7 @@ impl AgentFactory {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use meerkat_core::{

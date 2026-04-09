@@ -264,19 +264,6 @@ impl McpRuntimeIngressContext {
         }
     }
 
-    pub(crate) async fn materialize_session_with_result(
-        &self,
-        session: Session,
-        request: CreateSessionRequest,
-        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
-    ) -> Result<RunResult, SessionError> {
-        let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
-        let state = Arc::new(McpRuntimeSessionState::default());
-        state.set_callback_tools(callback_tools).await;
-        self.materialize_with_state(session, request, keep_alive, state)
-            .await
-    }
-
     async fn rematerialize_persisted_session(
         &self,
         session_id: &SessionId,

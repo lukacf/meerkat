@@ -256,8 +256,14 @@ mod tests {
     #[test]
     fn merges_self_hosted_models_into_registry() {
         let config = config_with_self_hosted();
-        let registry = ModelRegistry::from_config(&config).expect("registry");
-        let entry = registry.entry("gemma-4-31b").expect("self-hosted entry");
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        let entry = match registry.entry("gemma-4-31b") {
+            Some(entry) => entry,
+            None => panic!("missing self-hosted entry for gemma-4-31b"),
+        };
         assert_eq!(entry.provider, Provider::SelfHosted);
         assert_eq!(entry.display_name, "Gemma 4 31B");
         assert_eq!(
@@ -309,7 +315,10 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        let err = ModelRegistry::from_config(&config).expect_err("unknown server should fail");
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("unknown server should fail"),
+            Err(err) => err,
+        };
         assert!(err.to_string().contains("references unknown server"));
     }
 
@@ -345,16 +354,23 @@ mod tests {
                 call_timeout_secs: None,
             },
         );
-        let err = ModelRegistry::from_config(&config).expect_err("duplicate model id should fail");
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("duplicate model id should fail"),
+            Err(err) => err,
+        };
         assert!(err.to_string().contains("model id must be unique"));
     }
 
     #[test]
     fn falls_back_to_inferred_builtin_profiles_for_non_catalog_models() {
-        let registry = ModelRegistry::from_config(&Config::default()).expect("registry");
-        let profile = registry
-            .profile_for("gpt-5.2")
-            .expect("gpt-5.2 should resolve via built-in provider inference");
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+        let profile = match registry.profile_for("gpt-5.2") {
+            Some(profile) => profile,
+            None => panic!("gpt-5.2 should resolve via built-in provider inference"),
+        };
         assert_eq!(profile.provider, "openai");
         assert!(profile.vision);
         assert!(!profile.image_tool_results);

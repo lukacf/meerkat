@@ -403,10 +403,17 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             Ok(mut tools) => {
                 let count = params.tools.len();
                 for new_tool in params.tools {
-                    if let Some(existing) = tools.iter_mut().find(|t| t.name == new_tool.name) {
-                        *existing = new_tool;
+                    let stamped = meerkat_core::ToolDef {
+                        provenance: Some(meerkat_core::types::ToolProvenance {
+                            kind: meerkat_core::types::ToolSourceKind::Callback,
+                            source_id: "callback".into(),
+                        }),
+                        ..new_tool
+                    };
+                    if let Some(existing) = tools.iter_mut().find(|t| t.name == stamped.name) {
+                        *existing = stamped;
                     } else {
-                        tools.push(new_tool);
+                        tools.push(stamped);
                     }
                 }
                 RpcResponse::success(id, serde_json::json!({ "registered": count }))

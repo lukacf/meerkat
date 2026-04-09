@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -96,7 +97,10 @@ impl BuiltinTool for TaskUpdateTool {
             name: "task_update".into(),
             description: "Update an existing task".into(),
             input_schema: crate::schema::schema_for::<TaskUpdateParams>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "builtin".into(),
+            }),
         }
     }
 

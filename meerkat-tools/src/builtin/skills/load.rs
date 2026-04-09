@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::skills::{SkillId, SkillRuntime};
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -41,7 +42,10 @@ impl BuiltinTool for LoadSkillTool {
             name: "load_skill".into(),
             description: "Load a skill's full instructions into the conversation.".into(),
             input_schema: crate::schema::schema_for::<LoadSkillArgs>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "skills".into(),
+            }),
         }
     }
 

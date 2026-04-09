@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use meerkat_core::ToolDef;
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
 use rmcp::{
     model::{CallToolRequestParams, Content, RawContent},
     service::{RoleClient, RunningService},
@@ -27,7 +27,7 @@ impl McpProtocol {
         self.service.peer_info()
     }
 
-    pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+    pub async fn list_tools(&self, server_name: &str) -> Result<Vec<ToolDef>, McpError> {
         let response =
             self.service
                 .list_tools(None)
@@ -48,7 +48,10 @@ impl McpProtocol {
                     name: tool.name.to_string(),
                     description: tool.description.unwrap_or_default().to_string(),
                     input_schema: schema,
-                    provenance: None,
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Mcp,
+                        source_id: server_name.to_string(),
+                    }),
                 }
             })
             .collect();

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -106,7 +107,10 @@ impl BuiltinTool for TaskCreateTool {
             name: "task_create".into(),
             description: "Create a new task in the project task list".into(),
             input_schema: crate::schema::schema_for::<TaskCreateParams>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "builtin".into(),
+            }),
         }
     }
 

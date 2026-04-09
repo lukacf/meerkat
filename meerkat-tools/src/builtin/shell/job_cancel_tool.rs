@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -49,7 +50,10 @@ impl BuiltinTool for ShellJobCancelTool {
             name: "shell_job_cancel".into(),
             description: "Cancel a running background shell job".into(),
             input_schema: crate::schema::schema_for::<JobCancelInput>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Shell,
+                source_id: "shell".into(),
+            }),
         }
     }
 

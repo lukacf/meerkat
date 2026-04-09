@@ -35,7 +35,7 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef,
-    ToolResult, Usage,
+    ToolProvenance, ToolResult, ToolSourceKind, Usage,
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
@@ -1694,7 +1694,10 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
         name: name.to_string(),
         description: description.to_string(),
         input_schema,
-        provenance: None,
+        provenance: Some(ToolProvenance {
+            kind: ToolSourceKind::Mob,
+            source_id: "mob".into(),
+        }),
     })
 }
 

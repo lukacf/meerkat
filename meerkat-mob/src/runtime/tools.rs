@@ -4,6 +4,7 @@ use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindE
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::MobToolAuthorityContext;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -200,6 +201,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["profile", "meerkat_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_SPAWN_MANY_MEERKATS,
@@ -225,6 +227,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["specs"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_RETIRE_MEERKAT,
@@ -234,6 +237,7 @@ impl MobOperatorToolDispatcher {
                     "properties": {"meerkat_id": {"type": "string"}},
                     "required": ["meerkat_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_WIRE_PEERS,
@@ -243,6 +247,7 @@ impl MobOperatorToolDispatcher {
                     "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
                     "required": ["a", "b"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_UNWIRE_PEERS,
@@ -252,6 +257,7 @@ impl MobOperatorToolDispatcher {
                     "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
                     "required": ["a", "b"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_LIST_MEERKATS,
@@ -260,6 +266,7 @@ impl MobOperatorToolDispatcher {
                     "type": "object",
                     "properties": {}
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_MOB_LIST_FLOWS,
@@ -268,6 +275,7 @@ impl MobOperatorToolDispatcher {
                     "type": "object",
                     "properties": {}
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_MOB_RUN_FLOW,
@@ -280,6 +288,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["flow_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_MOB_FLOW_STATUS,
@@ -291,6 +300,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["run_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_MOB_CANCEL_FLOW,
@@ -302,6 +312,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["run_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_FORCE_CANCEL_MEERKAT,
@@ -313,6 +324,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["meerkat_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
                 TOOL_MEERKAT_STATUS,
@@ -324,6 +336,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["meerkat_id"]
                 }),
+                ToolSourceKind::Mob,
             ));
         }
         if enable_mob_tasks {
@@ -339,6 +352,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["subject", "description"]
                 }),
+                ToolSourceKind::MobTasks,
             ));
             defs.push(tool_def(
                 TOOL_MOB_TASK_LIST,
@@ -347,6 +361,7 @@ impl MobOperatorToolDispatcher {
                     "type": "object",
                     "properties": {}
                 }),
+                ToolSourceKind::MobTasks,
             ));
             defs.push(tool_def(
                 TOOL_MOB_TASK_UPDATE,
@@ -363,6 +378,7 @@ impl MobOperatorToolDispatcher {
                     },
                     "required": ["task_id", "status"]
                 }),
+                ToolSourceKind::MobTasks,
             ));
             defs.push(tool_def(
                 TOOL_MOB_TASK_GET,
@@ -372,6 +388,7 @@ impl MobOperatorToolDispatcher {
                     "properties": {"task_id": {"type": "string"}},
                     "required": ["task_id"]
                 }),
+                ToolSourceKind::MobTasks,
             ));
         }
 
@@ -433,12 +450,20 @@ impl MobOperatorToolDispatcher {
     }
 }
 
-fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<ToolDef> {
+fn tool_def(
+    name: &str,
+    description: &str,
+    input_schema: serde_json::Value,
+    kind: ToolSourceKind,
+) -> Arc<ToolDef> {
     Arc::new(ToolDef {
         name: name.to_string(),
         description: description.to_string(),
         input_schema,
-        provenance: None,
+        provenance: Some(ToolProvenance {
+            kind,
+            source_id: "mob".into(),
+        }),
     })
 }
 

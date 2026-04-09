@@ -857,6 +857,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
             effective_authority: None,
             comms_name: None,
             comms_runtime: None,
+            snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
         })
         .await
         .expect("build_mob_tools with model B");

@@ -6,6 +6,7 @@
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -39,7 +40,10 @@ impl BuiltinTool for ShellJobsListTool {
             name: "shell_jobs".into(),
             description: "List all background shell jobs".into(),
             input_schema: empty_object_schema(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Shell,
+                source_id: "shell".into(),
+            }),
         }
     }
 

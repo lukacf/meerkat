@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::memory::MemoryStore;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -65,7 +65,10 @@ impl MemorySearchDispatcher {
                 information from earlier in the conversation or from previous sessions."
                 .to_string(),
             input_schema: input_schema(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Memory,
+                source_id: "memory".into(),
+            }),
         });
 
         Self {
@@ -365,5 +368,19 @@ mod tests {
         let instructions = MemorySearchDispatcher::usage_instructions();
         assert!(!instructions.is_empty());
         assert!(instructions.contains("memory_search"));
+    }
+
+    #[test]
+    fn memory_tools_have_memory_provenance() {
+        let store: Arc<dyn MemoryStore> = Arc::new(crate::simple::SimpleMemoryStore::new());
+        let dispatcher = MemorySearchDispatcher::new(store);
+        let tools = dispatcher.tools();
+        assert_eq!(tools.len(), 1);
+        let prov = tools[0]
+            .provenance
+            .as_ref()
+            .expect("memory tool should have provenance");
+        assert_eq!(prov.kind, meerkat_core::types::ToolSourceKind::Memory);
+        assert_eq!(prov.source_id, "memory");
     }
 }

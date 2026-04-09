@@ -2515,6 +2515,7 @@ async fn create_test_mob_with_run_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: run_store,
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        realm_profiles: None,
     };
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -3509,6 +3510,7 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        realm_profiles: storage.realm_profiles.clone(),
     };
 
     let _handle = MobBuilder::new(definition.clone(), storage)
@@ -13292,6 +13294,7 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        realm_profiles: storage.realm_profiles.clone(),
     };
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();

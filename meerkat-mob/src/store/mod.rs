@@ -1,12 +1,19 @@
 //! Mob store traits and implementations.
 
 mod in_memory;
+mod realm_profile;
 #[cfg(not(target_arch = "wasm32"))]
 mod sqlite;
 
-pub use in_memory::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
+pub use in_memory::{
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+};
+pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 #[cfg(not(target_arch = "wasm32"))]
-pub use sqlite::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};
+pub use sqlite::{
+    SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores,
+    SqliteRealmProfileStore,
+};
 
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};

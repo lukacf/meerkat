@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use serde_json::Value;
 
 use crate::{ScheduleService, handle_schedule_tools_call, schedule_tools_list};
@@ -64,7 +64,10 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
                 name: tool["name"].as_str().unwrap_or_default().to_string(),
                 description: tool["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: tool["inputSchema"].clone(),
-                provenance: None,
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Schedule,
+                    source_id: "schedule".into(),
+                }),
             })
         })
         .collect::<Vec<_>>()

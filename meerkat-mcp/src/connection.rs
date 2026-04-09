@@ -8,7 +8,7 @@ use crate::transport::{
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
@@ -110,10 +110,11 @@ impl McpConnection {
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs as u64);
 
+        let server_name = config.name.clone();
         tokio::time::timeout(timeout, async {
             let conn = Self::connect(config).await?;
             let tools = conn
-                .list_tools()
+                .list_tools(&server_name)
                 .await?
                 .into_iter()
                 .map(Arc::new)
@@ -140,7 +141,7 @@ impl McpConnection {
     }
 
     /// List available tools
-    pub async fn list_tools(&self) -> Result<Vec<ToolDef>, McpError> {
+    pub async fn list_tools(&self, server_name: &str) -> Result<Vec<ToolDef>, McpError> {
         let response =
             self.service
                 .list_tools(None)
@@ -162,7 +163,10 @@ impl McpConnection {
                     name: t.name.to_string(),
                     description: t.description.unwrap_or_default().to_string(),
                     input_schema: schema,
-                    provenance: None,
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Mcp,
+                        source_id: server_name.to_string(),
+                    }),
                 }
             })
             .collect();
@@ -438,7 +442,10 @@ pub mod tests {
             .expect("Failed to connect");
 
         // List tools
-        let tools = conn.list_tools().await.expect("Failed to list tools");
+        let tools = conn
+            .list_tools("test-server")
+            .await
+            .expect("Failed to list tools");
 
         // Verify we got the expected tools
         assert!(!tools.is_empty(), "Should have at least one tool");

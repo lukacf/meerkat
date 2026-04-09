@@ -5,8 +5,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::SqliteMobStores;
 use crate::store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore,
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    MobEventStore, MobRunStore, MobSpecStore, RealmProfileStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -23,6 +23,8 @@ pub struct MobStorage {
     pub runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
     pub specs: Arc<dyn MobSpecStore>,
+    /// Realm-scoped reusable profile store.
+    pub realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
 
 impl MobStorage {
@@ -33,6 +35,7 @@ impl MobStorage {
             events: Arc::new(InMemoryMobEventStore::new()),
             runs,
             specs,
+            realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
 
@@ -51,6 +54,7 @@ impl MobStorage {
             events,
             runs,
             specs,
+            realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
 
@@ -64,6 +68,7 @@ impl MobStorage {
             events,
             runs,
             specs,
+            realm_profiles: None,
         }
     }
 
@@ -78,6 +83,7 @@ impl MobStorage {
             events: Arc::new(stores.event_store()),
             runs: Arc::new(stores.run_store()),
             specs: Arc::new(stores.spec_store()),
+            realm_profiles: Some(Arc::new(stores.realm_profile_store())),
         })
     }
 }
@@ -88,6 +94,13 @@ impl std::fmt::Debug for MobStorage {
             .field("events", &"<dyn MobEventStore>")
             .field("runs", &"<dyn MobRunStore>")
             .field("specs", &"<dyn MobSpecStore>")
+            .field(
+                "realm_profiles",
+                &self
+                    .realm_profiles
+                    .as_ref()
+                    .map(|_| "<dyn RealmProfileStore>"),
+            )
             .finish()
     }
 }

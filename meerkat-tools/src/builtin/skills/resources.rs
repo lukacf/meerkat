@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::skills::{SkillId, SkillRuntime};
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -64,7 +65,10 @@ impl BuiltinTool for SkillListResourcesTool {
             name: "skill_list_resources".into(),
             description: "List resources/artifacts exposed by a skill.".into(),
             input_schema: crate::schema::schema_for::<SkillListResourcesArgs>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "skills".into(),
+            }),
         }
     }
 
@@ -104,7 +108,10 @@ impl BuiltinTool for SkillReadResourceTool {
             name: "skill_read_resource".into(),
             description: "Read a resource/artifact exposed by a skill.".into(),
             input_schema: crate::schema::schema_for::<SkillReadResourceArgs>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "skills".into(),
+            }),
         }
     }
 

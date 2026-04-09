@@ -311,7 +311,18 @@ pub async fn handle_create(
     // (from params.external_tools) are held separately inside the dispatcher
     // and take precedence on name collision with globals.
     {
-        let inline_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+        let inline_tools: Vec<meerkat_core::ToolDef> = params
+            .external_tools
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| meerkat_core::ToolDef {
+                provenance: Some(meerkat_core::types::ToolProvenance {
+                    kind: meerkat_core::types::ToolSourceKind::Callback,
+                    source_id: "callback".into(),
+                }),
+                ..t
+            })
+            .collect();
         if let Some(tx) = runtime.callback_request_tx() {
             let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(

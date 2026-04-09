@@ -930,7 +930,10 @@ mod mcp_protocol {
             .expect("Should connect to test server");
 
         // List tools
-        let tools = connection.list_tools().await.expect("Should list tools");
+        let tools = connection
+            .list_tools("test-server")
+            .await
+            .expect("Should list tools");
         assert!(!tools.is_empty(), "Test server should have tools");
 
         // Find echo tool

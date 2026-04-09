@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -116,7 +116,10 @@ impl ScheduleToolDispatcher {
                     name: tool["name"].as_str().unwrap_or_default().to_string(),
                     description: tool["description"].as_str().unwrap_or_default().to_string(),
                     input_schema: tool["inputSchema"].clone(),
-                    provenance: None,
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Schedule,
+                        source_id: "schedule".into(),
+                    }),
                 })
             })
             .collect::<Vec<_>>()
@@ -934,5 +937,29 @@ mod tests {
             .expect_err("unsupported backend should fail");
 
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn schedule_tools_have_schedule_provenance() {
+        let service = ScheduleService::new(Arc::new(crate::DisabledScheduleStore));
+        let dispatcher = ScheduleToolDispatcher::new(service);
+        let tools = dispatcher.tools();
+        assert!(
+            !tools.is_empty(),
+            "schedule should expose at least one tool"
+        );
+        for tool in tools.iter() {
+            let prov = tool
+                .provenance
+                .as_ref()
+                .unwrap_or_else(|| panic!("schedule tool '{}' is missing provenance", tool.name));
+            assert_eq!(
+                prov.kind,
+                meerkat_core::types::ToolSourceKind::Schedule,
+                "schedule tool '{}' should have Schedule provenance",
+                tool.name
+            );
+            assert_eq!(prov.source_id, "schedule");
+        }
     }
 }

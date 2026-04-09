@@ -856,7 +856,10 @@ pub fn register_tool_callback(
             name,
             description,
             input_schema: schema,
-            provenance: None,
+            provenance: Some(meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Callback,
+                source_id: "wasm".into(),
+            }),
         });
 
         with_runtime_state_mut(|state| {
@@ -915,7 +918,10 @@ pub fn register_js_tool(
             name,
             description,
             input_schema: schema,
-            provenance: None,
+            provenance: Some(meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Callback,
+                source_id: "wasm".into(),
+            }),
         });
 
         with_runtime_state_mut(|state| {

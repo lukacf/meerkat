@@ -3,6 +3,7 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
@@ -103,7 +104,7 @@ impl BuiltinTool for ApplyPatchTool {
             name: self.name().into(),
             description: "Apply a structured patch to files inside the project root. The patch string must use the exact apply_patch grammar and supports Add File, Delete File, Update File, Move to, and End of File markers.".into(),
             input_schema: crate::schema::schema_for::<ApplyPatchArgs>(),
-            provenance: None,
+            provenance: Some(ToolProvenance { kind: ToolSourceKind::Builtin, source_id: "builtin".into() }),
         }
     }
 

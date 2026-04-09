@@ -624,6 +624,20 @@ pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
 }
 
+/// Snapshot provider that captures visible tools from a composed tool dispatcher.
+///
+/// Used to pass the parent agent's visible tool set into mob child sessions
+/// for inherited tool filtering.
+struct DispatcherSnapshotProvider {
+    dispatcher: Arc<dyn AgentToolDispatcher>,
+}
+
+impl meerkat_core::service::VisibleToolSnapshotProvider for DispatcherSnapshotProvider {
+    fn snapshot_visible_tools(&self) -> Vec<Arc<meerkat_core::types::ToolDef>> {
+        self.dispatcher.tools().to_vec()
+    }
+}
+
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
@@ -1665,6 +1679,10 @@ impl AgentFactory {
                 .map(|ctx| Arc::new(std::sync::RwLock::new(ctx.clone())));
             hoisted_mob_authority_handle = mob_authority_handle.clone();
 
+            let snapshot_provider: Arc<dyn meerkat_core::service::VisibleToolSnapshotProvider> =
+                Arc::new(DispatcherSnapshotProvider {
+                    dispatcher: Arc::clone(&tools),
+                });
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
@@ -1672,6 +1690,9 @@ impl AgentFactory {
                 effective_authority: mob_authority_handle.clone(),
                 comms_name: build_config.comms_name.clone(),
                 comms_runtime: mob_comms,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::ParentOwned(
+                    snapshot_provider,
+                ),
             };
             let mob_dispatcher = mob_factory
                 .build_mob_tools(mob_args)

@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError, SessionService};
-use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{
+    ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
+};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
     SpawnMemberSpec,
@@ -767,7 +769,10 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
         name: name.to_string(),
         description: description.to_string(),
         input_schema,
-        provenance: None,
+        provenance: Some(ToolProvenance {
+            kind: ToolSourceKind::Mob,
+            source_id: "mob".into(),
+        }),
     })
 }
 
@@ -1521,6 +1526,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_mob_tools_have_mob_provenance() {
+        let defs = build_tool_defs();
+        for def in defs.iter() {
+            let prov = def
+                .provenance
+                .as_ref()
+                .unwrap_or_else(|| panic!("agent mob tool '{}' is missing provenance", def.name));
+            assert_eq!(
+                prov.kind,
+                meerkat_core::types::ToolSourceKind::Mob,
+                "agent mob tool '{}' should have Mob provenance",
+                def.name
+            );
+            assert_eq!(prov.source_id, "mob");
+        }
+    }
+
+    #[test]
     fn test_delegate_requires_task() {
         let defs = build_tool_defs();
         let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
@@ -1564,6 +1587,7 @@ mod tests {
                 effective_authority: None,
                 comms_name: None,
                 comms_runtime: None,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
             })
             .await
             .expect("build_mob_tools");
@@ -1594,6 +1618,7 @@ mod tests {
                 effective_authority: None,
                 comms_name: None,
                 comms_runtime: None,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
             })
             .await
             .expect("build_mob_tools");
@@ -1648,6 +1673,7 @@ mod tests {
                 effective_authority: None,
                 comms_name: None,
                 comms_runtime: None,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::Standalone,
             })
             .await
             .expect("build_mob_tools");

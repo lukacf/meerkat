@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -48,7 +49,10 @@ impl BuiltinTool for TaskGetTool {
             name: "task_get".into(),
             description: "Get a task by its ID".into(),
             input_schema: crate::schema::schema_for::<TaskGetParams>(),
-            provenance: None,
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "builtin".into(),
+            }),
         }
     }
 

@@ -125,7 +125,7 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
     }))?;
 
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "Tell me about Tokyo".into(),
         system_prompt: None,
         max_tokens: None,
@@ -225,7 +225,7 @@ When validation fails, the agent retries the extraction turn with error feedback
   <Tab title="Rust">
     ```rust
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "Extract entities".into(),
         system_prompt: None,
         max_tokens: None,

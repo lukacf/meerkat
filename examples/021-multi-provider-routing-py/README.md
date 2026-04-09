@@ -12,7 +12,7 @@ and Gemini responses. Use provider-specific parameters.
 ## Supported Providers
 | Provider | Models | Env Var |
 |----------|--------|---------|
-| Anthropic | `claude-opus-4-6`, `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
+| Anthropic | `claude-opus-4-6`, `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | OpenAI | `gpt-5.2` | `OPENAI_API_KEY` |
 | Gemini | `gemini-3-flash-preview`, `gemini-3-pro-preview` | `GEMINI_API_KEY` |
 

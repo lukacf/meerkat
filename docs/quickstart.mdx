@@ -47,12 +47,12 @@ meerkat = "0.5"
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
     let store = Arc::new(StoreAdapter::new(Arc::new(JsonlStore::new(store_dir))));
     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher);
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .system_prompt("You are a helpful assistant.")
         .max_tokens_per_turn(1024)
         .build(Arc::new(llm), tools, store)
@@ -101,7 +101,7 @@ To share state across processes/surfaces, pass the same explicit realm (`--realm
 Same code, different model. The provider is inferred from the model name:
 
 ```bash
-rkat run --model claude-sonnet-4-5 "Explain monads"
+rkat run --model claude-sonnet-4-6 "Explain monads"
 rkat run --model gpt-5.2 "Explain monads"
 rkat run --model gemini-3-flash-preview "Explain monads"
 ```

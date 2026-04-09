@@ -156,7 +156,7 @@ Config envelope shape (`GET/PUT/PATCH /config`):
 
 ```json
 {
-  "config": {"agent": {"model": "claude-sonnet-4-5"}},
+  "config": {"agent": {"model": "claude-sonnet-4-6"}},
   "generation": 4,
   "realm_id": "team-alpha",
   "instance_id": "rest-1",
@@ -424,7 +424,7 @@ let factory = AgentFactory::new(realm.root.clone())
     .shell(true)
     .mob(true);  // opt-in mob orchestration tools
 
-let build = AgentBuildConfig::new("claude-sonnet-4-5");
+let build = AgentBuildConfig::new("claude-sonnet-4-6");
 let mut agent = factory.build_agent(build, &config).await?;
 ```
 

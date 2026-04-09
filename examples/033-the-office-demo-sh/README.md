@@ -5,7 +5,7 @@
 ## What it demonstrates
 
 - **10 autonomous agents** in a single mob, each with distinct personality and responsibilities
-- **Comms-based coordination** — agents call each other via the `send` tool, visualized as glowing phone arcs
+- **Comms-based coordination** — agents call each other via the `send_message` tool, visualized as glowing phone arcs
 - **Event-driven architecture** — external events flow through triage, fan out to specialists, accumulate knowledge
 - **Human-in-the-loop** — the Gate agent routes high-risk actions to a human approval popup
 - **Knowledge base** — the Archivist stores facts, viewable as an interactive force-directed graph

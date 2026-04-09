@@ -62,8 +62,8 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
       errors.push(`${sub.meerkatId}: ${event.error}`);
     }
 
-    // Comms: agent used "send" tool → route raw message to DM channel
-    if (event.type === "tool_call_requested" && event.name === "send") {
+    // Comms: agent used send_message/send tool → route raw message to DM channel
+    if (event.type === "tool_call_requested" && (event.name === "send_message" || event.name === "send")) {
       const callId = event.id;
       if (callId && session.seenToolCallIds.has(callId)) continue;
       if (callId) session.seenToolCallIds.add(callId);

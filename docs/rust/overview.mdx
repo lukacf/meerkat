@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = build_persistent_service(factory, config, 64, persistence);
 
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "What is the capital of France?".into(),
         render_metadata: None,
         system_prompt: Some("You are a helpful assistant.".into()),
@@ -145,7 +145,7 @@ use meerkat_core::service::{InitialTurnPolicy, HandlingMode};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
-    model: "claude-sonnet-4-5".into(),
+    model: "claude-sonnet-4-6".into(),
     prompt: "My name is Alice.".into(),
     render_metadata: None,
     system_prompt: Some("You are a helpful assistant with memory.".into()),
@@ -186,7 +186,7 @@ use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
 use meerkat_core::service::{HandlingMode, InitialTurnPolicy};
 
 let created = service.create_session(CreateSessionRequest {
-    model: "claude-sonnet-4-5".into(),
+    model: "claude-sonnet-4-6".into(),
     prompt: "Let's wait before we run.".into(),
     render_metadata: None,
     system_prompt: Some("You are the original prompt.".into()),

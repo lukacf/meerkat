@@ -156,14 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .system_prompt(
             "You are a travel assistant. Use the get_weather and convert_units tools \
              to help the user plan trips. Always check weather and convert units when relevant.",

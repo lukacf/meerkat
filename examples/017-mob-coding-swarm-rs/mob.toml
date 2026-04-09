@@ -21,7 +21,7 @@ mob = true
 mob_tasks = true
 
 [profiles.worker]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["worker"]
 peer_description = "Worker — implements assigned coding tasks"
 external_addressable = false
@@ -47,7 +47,7 @@ Use mob tools (mob.spawn, mob.retire, mob.wire, mob.status) to manage the team.
 Use task tools (task_create, task_update, task_list) for shared work tracking.
 
 ## Communication
-Use peers() for discovery and send() for directed messages.
+Use peers() for discovery and send_message() for directed messages.
 Handle mob.peer_added and mob.peer_retired events.
 
 ## Coordination Pattern

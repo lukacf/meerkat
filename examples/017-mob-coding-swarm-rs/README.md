@@ -24,7 +24,7 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
               ┌────────┼────────┐
               ↓        ↓        ↓
          ┌────────┐ ┌────────┐ ┌────────┐
-         │Worker 1│ │Worker 2│ │Worker 3│ (claude-sonnet-4-5)
+         │Worker 1│ │Worker 2│ │Worker 3│ (claude-sonnet-4-6)
          │  shell │ │  shell │ │  shell │
          │  comms │ │  comms │ │  comms │
          └────────┘ └────────┘ └────────┘

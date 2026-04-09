@@ -139,7 +139,7 @@ mob = true
 mob_tasks = true
 
 [profiles.frontend]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["react-specialist"]
 peer_description = "React/TypeScript frontend developer"
 
@@ -150,7 +150,7 @@ comms = true
 mob_tasks = true
 
 [profiles.backend]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["rust-specialist"]
 peer_description = "Rust backend developer"
 

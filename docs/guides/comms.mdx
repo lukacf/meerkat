@@ -14,7 +14,7 @@ Comms requires the `comms` Cargo feature to be compiled in.
 
 The comms system provides:
 
-- **Two LLM-facing tools**: `send` (with `kind` parameter for message/request/response), `peers`
+- **Four LLM-facing tools**: `send_message`, `send_request`, `send_response`, and `peers`
 - **Three transport layers**: Unix Domain Sockets (UDS), TCP, and in-process (`inproc`)
 - **Ed25519 cryptographic identity**: Every agent has a keypair; all messages are signed
 - **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
@@ -249,17 +249,13 @@ Standard strings are parsed into their enum variants; unknown strings become `Cu
 
 ## LLM-facing tools
 
-Two tools are exposed to the LLM when comms is enabled.
+Four tools are exposed to the LLM when comms is enabled.
 
-<Accordion title="send (kind=peer_message)">
-Send the normal collaboration message to a peer.
+<Accordion title="send_message">
+Send a collaboration message to a peer.
 
 <ParamField path="to" type="string" required>
   Peer name to send message to.
-</ParamField>
-
-<ParamField path="kind" type="string" required>
-  Must be `"peer_message"`.
 </ParamField>
 
 <ParamField path="body" type="string" required>
@@ -273,15 +269,11 @@ Send the normal collaboration message to a peer.
 **Response**: `{"status": "sent"}`
 </Accordion>
 
-<Accordion title="send (kind=peer_request)">
-Send a structured ask to a peer when you want explicit `intent + params` and a correlated `peer_response`.
+<Accordion title="send_request">
+Send a structured ask to a peer when you want explicit `intent + params` and a correlated response via `send_response`.
 
 <ParamField path="to" type="string" required>
   Peer name to send request to.
-</ParamField>
-
-<ParamField path="kind" type="string" required>
-  Must be `"peer_request"`.
 </ParamField>
 
 <ParamField path="intent" type="string" required>
@@ -299,19 +291,15 @@ Send a structured ask to a peer when you want explicit `intent + params` and a c
 **Response**: `{"status": "sent"}`
 
 <Note>
-Use `peer_message` by default for ordinary collaboration. `peer_request` is for structured ask/reply semantics only. It is not task tracking, a stronger delivery mode, or a reserved response channel.
+Use `send_message` by default for ordinary collaboration. `send_request` is for structured ask/reply semantics only. It is not task tracking, a stronger delivery mode, or a reserved response channel.
 </Note>
 </Accordion>
 
-<Accordion title="send (kind=peer_response)">
+<Accordion title="send_response">
 Send a response to a previously received request.
 
 <ParamField path="to" type="string" required>
   Peer name to send response to.
-</ParamField>
-
-<ParamField path="kind" type="string" required>
-  Must be `"peer_response"`.
 </ParamField>
 
 <ParamField path="in_reply_to" type="string" required>
@@ -456,7 +444,7 @@ let build_config = AgentBuildConfig {
     peer_meta: Some(PeerMeta::default()
         .with_description("Reviews pull requests for style issues")
         .with_label("lang", "rust")),
-    ..AgentBuildConfig::new("claude-sonnet-4-5")
+    ..AgentBuildConfig::new("claude-sonnet-4-6")
 };
 ```
 
@@ -524,7 +512,7 @@ let (tools_with_comms, usage_instructions) =
     compose_tools_with_comms(base_tools, tool_usage_instructions, &runtime)?;
 ```
 
-This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send` and `peers`.
+This wraps the base tool dispatcher with comms tools via `ToolGateway`, registering `send_message`, `send_request`, `send_response`, and `peers`.
 </Accordion>
 
 <Accordion title="Using AgentFactory">
@@ -534,12 +522,12 @@ let factory = AgentFactory::new(store_path)
     .comms(true);
 
 let build_config = AgentBuildConfig {
-    model: "claude-sonnet-4-5".to_string(),
+    model: "claude-sonnet-4-6".to_string(),
     keep_alive: true,
     comms_name: Some("my-agent".to_string()),
     peer_meta: Some(PeerMeta::default()
         .with_description("Coordinates peer agents")),
-    ..AgentBuildConfig::new("claude-sonnet-4-5")
+    ..AgentBuildConfig::new("claude-sonnet-4-6")
 };
 
 let agent = factory.build_agent(build_config, &config).await?;
@@ -560,7 +548,7 @@ let config = CommsManagerConfig::with_keypair(keypair)
 let comms_manager = CommsManager::new(config)?;
 
 let agent = AgentBuilder::new()
-    .model("claude-sonnet-4-5")
+    .model("claude-sonnet-4-6")
     .build(llm_client, tools, store)
     .await;
 
@@ -568,7 +556,7 @@ let mut comms_agent = CommsAgent::new(agent, comms_manager);
 
 // Run with comms inbox draining
 let result = comms_agent
-    .run("Use send with kind=peer_message and handling_mode=queue to greet agent-b".to_string())
+    .run("Use send_message with handling_mode=queue to greet agent-b".to_string())
     .await?;
 
 // Or run in stay-alive mode
@@ -617,7 +605,7 @@ Historically this was sometimes described as "turn-boundary inbox draining." Tha
 Incoming messages are formatted as text for the LLM:
 
 - **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
-- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send with kind=peer_response, peer="<peer>", request_id="<uuid>"`
+- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send_response with peer="<peer>", request_id="<uuid>"`
 - **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
 
 ## Typed peer lifecycle notices

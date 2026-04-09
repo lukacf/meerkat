@@ -9,7 +9,7 @@ UDS, and in-process transports.
 - `TrustedPeers` — allowlist of known peer public keys
 - Transport modes: `inproc`, `tcp`, `uds`
 - Keep-alive sessions — runtime-backed sessions stay alive to process incoming messages
-- Comms tools: `send()`, `peers()`, `request()`
+- Comms tools: `send_message()`, `send_request()`, `send_response()`, `peers()`
 
 ## Security Model
 ```

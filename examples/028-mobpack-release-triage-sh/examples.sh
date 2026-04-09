@@ -21,13 +21,13 @@ description = "Portable multi-role mobpack for release regression triage and rol
 capabilities = ["comms"]
 
 [models]
-default = "claude-sonnet-4-5"
+default = "claude-sonnet-4-6"
 lead = "claude-opus-4-6"
 TOML
 
 cat > "$MOB_DIR/config/defaults.toml" <<'TOML'
 [agent]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 structured_output_retries = 2
 
 [budget]
@@ -53,7 +53,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "signal-analyst": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "skills": ["signal-analysis"],
       "peer_description": "Observability analyst who correlates error spikes, deploy windows, and blast radius",
       "external_addressable": false,
@@ -64,7 +64,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "customer-ops": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "skills": ["customer-impact"],
       "peer_description": "Support liaison who summarizes customer impact, revenue exposure, and communication needs",
       "external_addressable": false,
@@ -75,7 +75,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       }
     },
     "rollback-chief": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "skills": ["rollback-planning"],
       "peer_description": "Deployment specialist who prepares rollback, mitigation, and verification plans",
       "external_addressable": false,

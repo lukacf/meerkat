@@ -100,7 +100,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
 
     let result = service
         .create_session(CreateSessionRequest {
-            model: "claude-sonnet-4-5".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             prompt: "An alert just fired: 'CPU usage on prod-web-03 exceeded 95% for \
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."

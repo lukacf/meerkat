@@ -65,8 +65,11 @@ meerkat = { version = "0.5", default-features = false, features = ["anthropic", 
 # Add compaction
 meerkat = { version = "0.5", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
+# Add scheduling
+meerkat = { version = "0.5", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+
 # Kitchen sink
-meerkat = { version = "0.5", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp"] }
+meerkat = { version = "0.5", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp", "schedule"] }
 ```
 
 ## Model capabilities

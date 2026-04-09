@@ -36,7 +36,7 @@ cat > "$MOB_RUNTIME/definition.json" <<JSON
   "id": "diplomacy-runtime",
   "profiles": {
     "default": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "peer_description": "default"
     }
   }

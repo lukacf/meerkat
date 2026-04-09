@@ -15,7 +15,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run --model claude-sonnet-4-5 "What is the capital of France?"
+    rkat run --model claude-sonnet-4-6 "What is the capital of France?"
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -25,7 +25,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
       "method": "session/create",
       "params": {
         "prompt": "What is the capital of France?",
-        "model": "claude-sonnet-4-5"
+        "model": "claude-sonnet-4-6"
       }
     }
     ```
@@ -34,14 +34,14 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
     ```bash
     curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt": "What is the capital of France?", "model": "claude-sonnet-4-5"}'
+      -d '{"prompt": "What is the capital of France?", "model": "claude-sonnet-4-6"}'
     ```
   </Tab>
   <Tab title="MCP">
     ```json
     {
       "prompt": "What is the capital of France?",
-      "model": "claude-sonnet-4-5"
+      "model": "claude-sonnet-4-6"
     }
     ```
     Called via the `meerkat_run` tool.
@@ -51,7 +51,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
     async with MeerkatClient() as client:
         session = await client.create_session(
             "What is the capital of France?",
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
         )
         print(session.text)
     ```
@@ -62,7 +62,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
     await client.connect();
 
     const session = await client.createSession("What is the capital of France?", {
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
     });
     console.log(session.text);
     ```
@@ -70,7 +70,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
   <Tab title="Rust">
     ```rust
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "What is the capital of France?".into(),
         system_prompt: None,
         max_tokens: None,

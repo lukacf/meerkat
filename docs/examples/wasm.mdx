@@ -37,7 +37,7 @@ init_runtime(
   mobpackBytes,
   JSON.stringify({
     api_key: "sk-ant-...",
-    model: "claude-sonnet-4-5",
+    model: "claude-sonnet-4-6",
   })
 );
 ```
@@ -47,7 +47,7 @@ init_runtime(
 ```javascript
 const handle = create_session(mobpackBytes, JSON.stringify({
   api_key: "sk-ant-...",
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-4-6",
 }));
 
 const result = JSON.parse(await start_turn(handle, "Hello", "{}"));
@@ -73,7 +73,7 @@ for (const event of events) {
 const mobId = await mob_create(JSON.stringify({
   id: "research-team",
   orchestrator: "lead",
-  profiles: { lead: { model: "claude-sonnet-4-5" } },
+  profiles: { lead: { model: "claude-sonnet-4-6" } },
 }));
 
 // Spawn members
@@ -125,7 +125,7 @@ await mob_member_send(
 ```
 
 <Note>
-Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through member-directed turn submission and the comms tools available to agents during their turns (the `send` and `peers` tools).
+Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through member-directed turn submission and the comms tools available to agents during their turns (the `send_message`, `send_request`, `send_response`, and `peers` tools).
 </Note>
 
 ## What is available on wasm32

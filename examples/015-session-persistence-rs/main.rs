@@ -38,10 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key.clone())?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .system_prompt("You are a persistent assistant. You remember across restarts.")
         .max_tokens_per_turn(512)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), adapted_store)

@@ -438,7 +438,7 @@ async def main():
     async with MeerkatClient() as client:
         session = await client.create_session(
             "You are a helpful math tutor. What is 12 * 15?",
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
         )
         print(f"Turn 1: {session.text}")
 
@@ -460,7 +460,7 @@ async def main():
     async with MeerkatClient() as client:
         session = await client.create_session(
             "List three interesting facts about penguins.",
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
         )
         print(f"First turn: {session.text}\n")
 
@@ -545,7 +545,7 @@ async def main():
                 {"type": "text", "text": "What do you see in this image?"},
                 {"type": "image", "media_type": "image/png", "data": image_data},
             ],
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
         )
         print(session.text)
         await session.archive()
@@ -588,7 +588,7 @@ async def main():
     async with MeerkatClient() as client:
         session = await client.create_session(
             "I need help reviewing code.",
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
         )
 
         key = SkillKey(source_uuid="abc123", skill_name="code-review")

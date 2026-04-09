@@ -638,7 +638,7 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
-**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and runtime admission are separate concerns: transport queues work first, then runtime-backed ingress decides when those messages become session input.
+**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send_message`, `send_request`, `send_response`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and runtime admission are separate concerns: transport queues work first, then runtime-backed ingress decides when those messages become session input.
 
 ### Data flow through the agent loop
 

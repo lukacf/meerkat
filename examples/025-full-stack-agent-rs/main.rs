@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -175,7 +175,7 @@ Professional, concise, action-oriented. Always provide next steps.
     );
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .system_prompt(&system_prompt)
         .max_tokens_per_turn(2048)
         .budget(budget)
@@ -223,7 +223,7 @@ Professional, concise, action-oriented. Always provide next steps.
 ┌────────────────────────────────────────────────────────────┐
 │                    FULL-STACK AGENT                          │
 │                                                            │
-│  Model:     claude-sonnet-4-5                              │
+│  Model:     claude-sonnet-4-6                              │
 │  Skills:    support-agent (inline)                         │
 │  Budget:    50K tokens / 50 tool calls                      │
 │                                                            │

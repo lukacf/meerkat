@@ -84,7 +84,7 @@ The system is formally modeled as canonical machines plus closed-world compositi
 
 **Design rule:** centralized `meerkat-machine-kernels` is the enforced layout. Owner crates do NOT have `machines/mod.rs` re-export modules. The xtask verification explicitly rejects parallel owner modules.
 
-**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, MobLifecycleMachine, FlowRunMachine, FlowFrameMachine, LoopIterationMachine, MobOrchestratorMachine, ScheduleLifecycleMachine, OccurrenceLifecycleMachine, plus seam-focused machines such as CommsDrainLifecycleMachine where an async boundary has its own lifecycle truth.
+**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, SessionTurnAdmissionMachine, MobLifecycleMachine, MobMemberBootstrapMachine, MobMemberLifecycleMachine, MobRuntimeBridgeMachine, MobWiringMachine, MobOrchestratorMachine, FlowRunMachine, FlowFrameMachine, LoopIterationMachine, ScheduleLifecycleMachine, OccurrenceLifecycleMachine, PeerDirectoryReachabilityMachine, plus seam-focused machines such as CommsDrainLifecycleMachine where an async boundary has its own lifecycle truth.
 
 **Verification:** `cargo xtask machine-codegen --all` (regenerate), `cargo xtask machine-check-drift --all` (detect stale artifacts), `cargo xtask machine-verify --all` (TLC model checking + owner tests).
 

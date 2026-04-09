@@ -25,7 +25,7 @@ Each faction (North, South, East) is a mob with 3 `autonomous_host` agents:
 | **Operator** | Combat math, challenges plans, produces final orders | Planner |
 | **Ambassador** | Diplomatic deception, negotiates with foreign ambassadors | Planner, Foreign Ambassadors |
 
-Agents converse freely via comms tools (`send`, `peers`). No flows — conversations emerge organically.
+Agents converse freely via comms tools (`send_message`, `peers`). No flows — conversations emerge organically.
 
 ### 1 Narrator Mob (turn-driven flow)
 
@@ -105,7 +105,7 @@ direct `wasm-pack` recipe.
 ## Usage
 
 1. Open settings (gear icon), enter your Anthropic API key
-2. Select a model (default: `claude-sonnet-4-5`)
+2. Select a model (default: `claude-sonnet-4-6`)
 3. Click **Start Campaign**
 4. Watch agents deliberate in DM channels — click channels in the sidebar to follow conversations
 5. Territories change color on the map as combat resolves

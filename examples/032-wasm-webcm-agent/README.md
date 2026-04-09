@@ -8,7 +8,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 - **TUI-style UI**: Claude Code-inspired layout with main agent stream + three specialist panels
 - **Multi-provider mob**: Anthropic (orchestrator), OpenAI (planner + coder), Gemini (reviewer)
-- **Comms-driven orchestration**: Agents communicate via `send`/`peers` tools — no polling, no custom delegation
+- **Comms-driven orchestration**: Agents communicate via `send_message`/`peers` tools — no polling, no custom delegation
 - **Real-time streaming**: Reasoning traces, tool calls, and text stream incrementally in all panels
 - **100% browser-native**: LLM calls via fetch, VM via RISC-V WASM emulator, agent loop in Rust WASM
 
@@ -46,7 +46,7 @@ Browser Tab
 ├── meerkat-web-runtime (Rust WASM)
 │   ├── EphemeralSessionService + AgentFactory
 │   ├── JsToolDispatcher → WebCM tool callbacks
-│   ├── Comms (send/peers) for inter-agent messaging
+│   ├── Comms (send_message/peers) for inter-agent messaging
 │   └── Event streaming via broadcast channels
 ├── WebCM (Cartesi Machine, RISC-V Alpine Linux)
 │   └── xterm-pty bridge for serialized command I/O

@@ -20,7 +20,9 @@ icon: "wrench"
 | `datetime` | Utility | Yes | -- | Get current date/time |
 | `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
 | `view_image` | Utility | Yes | vision | Read an image file and return base64 content |
-| `send` | Comms | Yes | `comms` | Send message/request/response to a peer |
+| `send_message` | Comms | Yes | `comms` | Send a collaboration message to a peer |
+| `send_request` | Comms | Yes | `comms` | Send a structured request to a peer |
+| `send_response` | Comms | Yes | `comms` | Send a response to a peer request |
 | `peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
 | `schedule_create` | Schedule | Yes | `schedule` | Create a new schedule |
 | `schedule_list` | Schedule | Yes | `schedule` | List schedules with optional filters |
@@ -543,8 +545,8 @@ Comms tools are only shown to the agent when at least one peer is discoverable
 
 Tool definitions (name, description, input schema) are dynamically loaded from `meerkat_comms::tools_list()`.
 
-<Accordion title="send">
-Send a message, request, or response to a trusted peer. The `kind` parameter determines the message type.
+<Accordion title="send_message">
+Send a collaboration message to a trusted peer.
 
 **Default enabled:** Yes (when comms is active)
 
@@ -552,50 +554,79 @@ Send a message, request, or response to a trusted peer. The `kind` parameter det
   Peer name to send to.
 </ParamField>
 
-<ParamField body="kind" type="String" required>
-  Message kind: `"peer_message"`, `"peer_request"`, or `"peer_response"`.
+<ParamField body="body" type="String" required>
+  Message content.
 </ParamField>
 
-<ParamField body="body" type="String">
-  Message content (required when `kind="peer_message"`).
-</ParamField>
-
-<ParamField body="intent" type="String">
-  Request intent/action identifier (required when `kind="peer_request"`).
-</ParamField>
-
-<ParamField body="params" type="any" default="null">
-  Request parameters (for `kind="peer_request"`).
-</ParamField>
-
-<ParamField body="handling_mode" type="String">
-  Required for `kind="peer_message"` and `kind="peer_request"`. Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
-</ParamField>
-
-<Note>
-Use `peer_message` for normal agent collaboration. Use `peer_request` only when you want an explicit structured ask and later `peer_response` correlated by `in_reply_to`.
-</Note>
-
-<ParamField body="in_reply_to" type="String (UUID)">
-  ID of the request being responded to (required when `kind="peer_response"`).
-</ParamField>
-
-<ParamField body="status" type="String">
-  Response status: `"accepted"`, `"completed"`, or `"failed"` (required when `kind="peer_response"`).
-</ParamField>
-
-<ParamField body="result" type="any" default="null">
-  Response result data (for `kind="peer_response"`).
+<ParamField body="handling_mode" type="String" required>
+  Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
 </ParamField>
 
 ```json
-{
-  "status": "sent",
-  "kind": "peer_message"
-}
+{ "status": "sent" }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `SendInput`
+**Source:** `meerkat-comms/src/mcp/tools.rs`
+</Accordion>
+
+<Accordion title="send_request">
+Send a structured request to a trusted peer. Use when you want explicit `intent + params` and a correlated response via `send_response`.
+
+**Default enabled:** Yes (when comms is active)
+
+<ParamField body="to" type="String" required>
+  Peer name to send to.
+</ParamField>
+
+<ParamField body="intent" type="String" required>
+  Request intent/action identifier (e.g., `"review"`, `"delegate"`).
+</ParamField>
+
+<ParamField body="params" type="any" default="null">
+  Request parameters.
+</ParamField>
+
+<ParamField body="handling_mode" type="String" required>
+  Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
+</ParamField>
+
+<Note>
+Use `send_message` for normal agent collaboration. Use `send_request` only when you want an explicit structured ask and later `send_response` correlated by `in_reply_to`.
+</Note>
+
+```json
+{ "status": "sent" }
+```
+
+**Source:** `meerkat-comms/src/mcp/tools.rs`
+</Accordion>
+
+<Accordion title="send_response">
+Send a response to a previously received request from a trusted peer.
+
+**Default enabled:** Yes (when comms is active)
+
+<ParamField body="to" type="String" required>
+  Peer name to send to.
+</ParamField>
+
+<ParamField body="in_reply_to" type="String (UUID)" required>
+  ID of the request being responded to.
+</ParamField>
+
+<ParamField body="status" type="String" required>
+  Response status: `"accepted"`, `"completed"`, or `"failed"`.
+</ParamField>
+
+<ParamField body="result" type="any" default="null">
+  Response result data.
+</ParamField>
+
+```json
+{ "status": "sent" }
+```
+
+**Source:** `meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="peers">
@@ -628,7 +659,7 @@ Tool availability depends on compile-time features in the `meerkat-tools` crate:
 
 | Feature | Default | Dependencies | Tools unlocked |
 |---------|---------|-------------|----------------|
-| `comms` | Yes | `dep:meerkat-comms` | `send`, `peers` |
+| `comms` | Yes | `dep:meerkat-comms` | `send_message`, `send_request`, `send_response`, `peers` |
 | `mcp` | Yes | `dep:meerkat-mcp` | External MCP tool routing (not builtin tools) |
 
 The `memory_search` tool is gated by the `memory-store-session` feature on the `meerkat` facade crate (not `meerkat-tools`), since `MemorySearchDispatcher` lives in `meerkat-memory`.

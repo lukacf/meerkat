@@ -46,7 +46,7 @@ If you are embedding Meerkat into an application, start with `SessionService`. R
 use meerkat::AgentBuilder;
 
 let agent = AgentBuilder::new()
-    .model("claude-sonnet-4-5")
+    .model("claude-sonnet-4-6")
     .system_prompt("You are a helpful assistant.")
     .max_tokens_per_turn(4096)
     .temperature(0.7)
@@ -112,7 +112,7 @@ Pass provider-specific options via `AgentBuildConfig`:
 <Tabs>
   <Tab title="Anthropic">
     ```rust
-    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".into());
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
     build_config.provider_params = Some(json!({"thinking_budget": 10000}));
     ```
   </Tab>
@@ -178,7 +178,7 @@ let budget = BudgetLimits::default()
     .with_max_duration(Duration::from_secs(300))
     .with_max_tool_calls(50);
 
-let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".into());
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6".into());
 build_config.budget = Some(budget);
 ```
 
@@ -307,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = build_ephemeral_service(factory, config, 64); // embedded/testing substrate only
 
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "What is 25 * 17?".into(),
         render_metadata: None,
         system_prompt: Some("You are a helpful math assistant.".into()),

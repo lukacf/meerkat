@@ -168,7 +168,7 @@ Creates a new session, runs the first turn with `prompt`, and returns a `Session
 
 ```typescript
 const session = await client.createSession("Summarise this project", {
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-4-6",
   systemPrompt: "You are a senior engineer.",
   maxTokens: 4096,
 });
@@ -448,7 +448,7 @@ const client = new MeerkatClient();
 await client.connect();
 
 const session = await client.createSession("My name is Alice.", {
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-4-6",
 });
 
 const result = await session.turn("What is my name?");

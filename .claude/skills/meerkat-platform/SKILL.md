@@ -258,7 +258,7 @@ Each schedule produces `Occurrence` instances (individual fires) projected withi
 | `schedule_pause` / `schedule_resume` | Pause/resume a schedule |
 | `schedule_delete` | Delete a schedule |
 
-Tools are available across all surfaces (CLI, REST, RPC, MCP). WASM uses `DisabledScheduleStore`.
+Tools are available across all surfaces (CLI, REST, RPC, MCP) via `ScheduleToolDispatcher` (implements `AgentToolDispatcher`), wired as a first-class surface capability. WASM uses `DisabledScheduleStore`.
 
 ### Architecture
 
@@ -291,7 +291,7 @@ let schedule = service.create(CreateScheduleRequest {
         every: Duration::from_secs(3600),
     }),
     target: TargetBinding::Session(SessionTargetBinding {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: ContentInput::Text("Generate hourly report".into()),
         ..Default::default()
     }),
@@ -370,7 +370,7 @@ let factory = AgentFactory::new(realms_root.clone())
     .shell(true);
 let service = build_persistent_service(factory, config, 64, persistence);
 let result = service.create_session(CreateSessionRequest {
-    model: "claude-sonnet-4-5".into(),
+    model: "claude-sonnet-4-6".into(),
     prompt: "What is Rust?".into(),
     system_prompt: None,
     max_tokens: None,
@@ -419,7 +419,7 @@ meerkat = { version = "0.5", features = [
 ] }
 ```
 
-Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`.
+Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`.
 
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include everything. Custom binary builds:
 
@@ -534,16 +534,16 @@ Comms supports `inproc`, TCP, and UDS. Inproc registry is namespace-segmented; M
 
 **Peer lifecycle typing**: mob lifecycle notices are typed at peer ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle context; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not rely on mob defaults in `silent_comms_intents` for canonical behavior.
 
-**Comms choice**: use `peer_message` for ordinary collaboration. Use `peer_request` only for structured ask/reply semantics (`intent + params` plus later `peer_response`). Peer-side reservation streams were removed.
+**Comms choice**: use `send_message` for ordinary collaboration. Use `send_request` only for structured ask/reply semantics (`intent + params` plus later `send_response`). Peer-side reservation streams were removed.
 
 #### Structured output with comms (autonomous agents)
 
-In `autonomous_host` mode, agents run a continuous loop: wake on inbox → process (LLM calls + tool calls including `send`) → produce final text output → sleep. Key architectural points:
+In `autonomous_host` mode, agents run a continuous loop: wake on inbox → process (LLM calls + tool calls including `send_message`/`send_request`/`send_response`) → produce final text output → sleep. Key architectural points:
 
 - **`output_schema` constrains the agent's final text output**, not tool call arguments. It triggers an extraction turn after the agentic loop completes, calling the LLM with no tools and API-enforced structured output.
-- **Comms `send` tool body is free-text** (`Option<String>`). There is no schema enforcement on comms message content — agents communicate naturally.
+- **Comms `send_message` tool body is free-text** (`Option<String>`). There is no schema enforcement on comms message content — agents communicate naturally.
 - **The extraction turn fires after each keep-alive processing cycle.** Each time the runtime comms drain consumes inbox work, the agent processes it, sends replies, and then produces a structured JSON summary of what it did. This summary is API-enforced via `output_schema` on the profile.
-- **Use case**: Set `output_schema` on autonomous agent profiles to get structured turn summaries (e.g. `{headline: string, details: string}`) while letting agents communicate freely via `send`. The summaries power compact UI displays; the raw comms messages are available for detailed views.
+- **Use case**: Set `output_schema` on autonomous agent profiles to get structured turn summaries (e.g. `{headline: string, details: string}`) while letting agents communicate freely via `send_message`. The summaries power compact UI displays; the raw comms messages are available for detailed views.
 - **Event stream**: The structured output appears in `RunCompleted` events as a JSON string in the `result` field. Parse it to extract the schema-validated fields.
 
 ### Tool scoping

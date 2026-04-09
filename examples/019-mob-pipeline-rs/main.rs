@@ -164,7 +164,7 @@ mob = true
 mob_tasks = true
 
 [profiles.linter]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["lint-stage"]
 peer_description = "Stage 1: Code linting and style checks"
 
@@ -174,7 +174,7 @@ comms = true
 mob_tasks = true
 
 [profiles.tester]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["test-stage"]
 peer_description = "Stage 2: Test execution and coverage analysis"
 
@@ -184,7 +184,7 @@ comms = true
 mob_tasks = true
 
 [profiles.deployer]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["deploy-stage"]
 peer_description = "Stage 3: Deployment and smoke testing"
 

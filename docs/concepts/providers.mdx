@@ -17,7 +17,7 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
     | Model | Context | Max output | Best for |
     |-------|---------|------------|----------|
     | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
-    | `claude-sonnet-4-5` | 200K / 1M (beta) | 64K | Balanced performance and cost |
+    | `claude-sonnet-4-6` | 200K / 1M (beta) | 64K | Balanced performance and cost |
     | `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
     | `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
 
@@ -108,7 +108,7 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
     | `top_k` | Top-k sampling parameter (integer) |
 
     ```bash
-    rkat run --model claude-sonnet-4-5 --param thinking_budget=10000 "Solve this problem"
+    rkat run --model claude-sonnet-4-6 --param thinking_budget=10000 "Solve this problem"
     ```
   </Tab>
   <Tab title="OpenAI">

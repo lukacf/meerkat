@@ -134,7 +134,7 @@ mob = true
 mob_tasks = true
 
 [profiles.market-researcher]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["market-analysis"]
 peer_description = "Market researcher -- competitive analysis, market sizing"
 
@@ -144,7 +144,7 @@ comms = true
 mob_tasks = true
 
 [profiles.tech-researcher]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 skills = ["tech-analysis"]
 peer_description = "Technology researcher -- technical feasibility, architecture"
 

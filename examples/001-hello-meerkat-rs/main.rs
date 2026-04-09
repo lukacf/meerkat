@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = service
         .create_session(CreateSessionRequest {
-            model: "claude-sonnet-4-5".into(),
+            model: "claude-sonnet-4-6".into(),
             prompt: "What makes Rust's ownership model unique? Answer in two sentences.".into(),
             render_metadata: None,
             system_prompt: Some("You are a helpful assistant. Be concise.".into()),

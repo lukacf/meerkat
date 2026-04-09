@@ -62,17 +62,17 @@ export function resolveModels(keys: ApiKeys): ModelAssignments {
 
   // Planner: prefer OpenAI gpt-5.2
   const planner = hasOpenAI ? "gpt-5.2"
-    : hasAnthropic ? "claude-sonnet-4-5"
+    : hasAnthropic ? "claude-sonnet-4-6"
     : "gemini-3.1-pro-preview";
 
   // Coder: prefer OpenAI gpt-5.3-codex
   const coder = hasOpenAI ? "gpt-5.3-codex"
-    : hasAnthropic ? "claude-sonnet-4-5"
+    : hasAnthropic ? "claude-sonnet-4-6"
     : "gemini-3.1-pro-preview";
 
   // Reviewer: prefer Gemini (schema issues fixed in PR #93)
   const reviewer = hasGemini ? "gemini-3-flash-preview"
-    : hasAnthropic ? "claude-sonnet-4-5"
+    : hasAnthropic ? "claude-sonnet-4-6"
     : "gpt-5.2";
 
   return { main, mainKey, planner, coder, reviewer };
@@ -144,21 +144,21 @@ Your peers:
 ON STARTUP (no messages): Say "Alpha Meerkat ready." — no tool calls, end your turn.
 
 WHEN YOU RECEIVE A USER TASK (external message):
-- Send the task to the planner via send(to: "dev-team/planner/planner", kind: "peer_message", handling_mode: "queue", body: "<detailed task description including language/runtime constraints from the environment spec>")
+- Send the task to the planner via send_message(to: "dev-team/planner/planner", handling_mode: "queue", body: "<detailed task description including language/runtime constraints from the environment spec>")
 - Then END YOUR TURN. Do NOT wait or poll. The system wakes you when a reply arrives.
 
 WHEN YOU RECEIVE A REPLY FROM THE PLANNER:
 - Read the plan if needed (read_file /workspace/plan.md)
-- Send instructions to the coder via send(to: "dev-team/coder/coder", kind: "peer_message", handling_mode: "queue", body: "<implementation instructions referencing the plan>")
+- Send instructions to the coder via send_message(to: "dev-team/coder/coder", handling_mode: "queue", body: "<implementation instructions referencing the plan>")
 - Then END YOUR TURN.
 
 WHEN YOU RECEIVE A REPLY FROM THE CODER:
-- Send a review request to the reviewer via send(to: "dev-team/reviewer/reviewer", kind: "peer_message", handling_mode: "queue", body: "<review request>")
+- Send a review request to the reviewer via send_message(to: "dev-team/reviewer/reviewer", handling_mode: "queue", body: "<review request>")
 - Then END YOUR TURN.
 
 WHEN YOU RECEIVE A REPLY FROM THE REVIEWER:
 - Read /workspace/review.md if needed
-- If the reviewer found issues to fix: send the feedback to the coder via send(to: "dev-team/coder/coder", kind: "peer_message", handling_mode: "queue", body: "<fix instructions based on review>"). Then END YOUR TURN. When the coder replies, send it back to the reviewer for re-review.
+- If the reviewer found issues to fix: send the feedback to the coder via send_message(to: "dev-team/coder/coder", handling_mode: "queue", body: "<fix instructions based on review>"). Then END YOUR TURN. When the coder replies, send it back to the reviewer for re-review.
 - If the review is clean (no issues): summarize the final results for the user and END YOUR TURN.
 
 CRITICAL RULES:
@@ -178,9 +178,9 @@ WHEN YOU RECEIVE A TASK via message:
 1. Analyze requirements — consider the VM environment constraints above
 2. Break into ordered steps with file paths, function signatures, and test commands
 3. Write the plan to /workspace/plan.md using write_file
-4. Send the plan summary back to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", handling_mode: "queue", body: "Plan written to /workspace/plan.md. <brief summary>")
+4. Send the plan summary back to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Plan written to /workspace/plan.md. <brief summary>")
 
-Tools: shell, write_file, read_file, send.`,
+Tools: shell, write_file, read_file, send_message.`,
       },
       "coder-role": {
         source: "inline",
@@ -194,9 +194,9 @@ WHEN YOU RECEIVE INSTRUCTIONS via message:
 1. Read /workspace/plan.md if referenced
 2. Implement the code in /workspace/src/ using write_file
 3. Test with shell — run the code, fix errors until it works
-4. Send completion notice to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", handling_mode: "queue", body: "Implementation complete. <summary of what was built and test results>")
+4. Send completion notice to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Implementation complete. <summary of what was built and test results>")
 
-Tools: shell, write_file, read_file, send.`,
+Tools: shell, write_file, read_file, send_message.`,
       },
       "reviewer-role": {
         source: "inline",
@@ -210,9 +210,9 @@ WHEN YOU RECEIVE A REVIEW REQUEST via message:
 1. Read source files in /workspace/src/
 2. Run the code with shell to verify correctness
 3. Write review to /workspace/review.md using write_file
-4. Send review results to the Alpha Meerkat: send(to: "dev-team/orchestrator/orchestrator", kind: "peer_message", handling_mode: "queue", body: "Review complete. <summary of findings>")
+4. Send review results to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Review complete. <summary of findings>")
 
-Tools: shell, write_file, read_file, send.`,
+Tools: shell, write_file, read_file, send_message.`,
       },
     },
     backend: { default: "session" },

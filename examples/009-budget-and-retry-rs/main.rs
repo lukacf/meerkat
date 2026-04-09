@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-5").await;
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
     store.init().await?;
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_tool_calls(10); // Max tool invocations
 
     let mut agent = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .system_prompt("You are a concise assistant. Keep responses under 100 words.")
         .max_tokens_per_turn(512)
         .budget(budget)
@@ -84,14 +84,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let factory2 = AgentFactory::new(store2_dir.clone());
     let client2 = Arc::new(AnthropicClient::new(std::env::var("ANTHROPIC_API_KEY")?)?);
     let llm2 = factory2
-        .build_llm_adapter(client2, "claude-sonnet-4-5")
+        .build_llm_adapter(client2, "claude-sonnet-4-6")
         .await;
     let store2 = Arc::new(JsonlStore::new(store2_dir));
     store2.init().await?;
     let store2 = Arc::new(StoreAdapter::new(store2));
 
     let mut agent2 = AgentBuilder::new()
-        .model("claude-sonnet-4-5")
+        .model("claude-sonnet-4-6")
         .max_tokens_per_turn(50)
         .budget(tight_budget)
         .build(Arc::new(llm2), Arc::new(EmptyToolDispatcher), store2)

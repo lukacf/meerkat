@@ -26,6 +26,7 @@ meerkat (facade)          (AgentFactory, wiring, re-exports)
   ├── meerkat-mob          (multi-agent: MobBuilder, MobActor, FlowEngine, FlowFrameEngine, member provisioning)
   ├── meerkat-mob-pack     (mobpack archive: signing, trust, validation)
   ├── meerkat-mob-mcp      (mob tools as MCP dispatcher + agent delegation surface)
+  ├── meerkat-schedule     (scheduler: cron/interval triggers, occurrence lifecycle, delivery, schedule tools)
   └── meerkat-web-runtime  (WASM embedded runtime)
 
 Surface binaries:

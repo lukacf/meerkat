@@ -95,8 +95,8 @@ export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: 
 
           const toolName = payload.name;
 
-          // ── Comms: agent used "send" ──
-          if (toolName === "send") {
+          // ── Comms: agent used "send_message" (or legacy "send") ──
+          if (toolName === "send_message" || toolName === "send") {
             try {
               const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
               const toAddr = args.to || "";

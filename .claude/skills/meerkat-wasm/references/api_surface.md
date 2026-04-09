@@ -69,7 +69,7 @@
   "anthropic_api_key": "sk-...",
   "openai_api_key": "sk-...",
   "gemini_api_key": "sk-...",
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "max_sessions": 64,
   "base_url": "https://fallback-proxy.example.com",
   "anthropic_base_url": "https://proxy.example.com/anthropic",
@@ -126,13 +126,13 @@ surface semantics like `keep_alive` still belong to the hosting runtime layer.
   "id": "my-mob",
   "profiles": {
     "planner": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "tools": { "comms": true },
       "peer_description": "Plans tasks",
       "skills": ["research"]
     },
     "operator": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "tools": { "comms": true, "mob_tasks": true },
       "peer_description": "Executes tasks"
     }

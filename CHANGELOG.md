@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### Scheduler as first-class surface capability
+- `ScheduleToolDispatcher` implements `AgentToolDispatcher`, wired natively into CLI, REST, RPC, and MCP surfaces.
+- Schedule tools added to MDM target and hive configurations.
+
+#### Test lane reorganization
+- Unified e2e test lanes under cargo aliases: `e2e-fast` (deterministic), `e2e-system` (real local-resource), `e2e-live` (targeted live-provider), and `e2e-smoke` (kitchen-sink live smoke).
+- Legacy aliases `int-real` (→ `e2e-system`) and `e2e` (→ `e2e-live` + `e2e-smoke`) retained for compatibility.
+
+### Changed
+
+#### Comms tool split (breaking)
+- Agent-facing `send` tool split into three purpose-specific tools: `send_message`, `send_request`, and `send_response`.
+- `handling_mode` (steer/queue) is now a required field on `send_message` and `send_request`.
+
+#### Peer ingress machine-owned
+- Peer ingress handling is now machine-owned via `PeerIngressMachine` with full handling-mode rollout.
+- `wait` removed from peer ingress; peer reservations removed.
+
+#### Communication-first delegate
+- Delegate flow redesigned to be communication-first; peer reservations removed from the delegate path.
+
+#### Mob lifecycle seams promoted to canonical machines
+- `MobMemberBootstrapMachine`, session turn admission, and peer ingress owners promoted from ad-hoc seams to canonical machine authority.
+
+#### Surface recipes replace RuntimeSessionHost
+- `RuntimeSessionHost` extracted and then replaced with free recipe functions at proper crate boundaries: `wire_runtime_bindings`, `materialize_session`, `configure_peer_ingress`, `default_persistent_executor`.
+
+### Removed
+- **Redb persistence**: All `RedbSessionIndex`, `RedbSessionStore`, and redb-backed storage removed. All persistence is now SQLite (WAL mode) via `SqliteSessionIndex`.
+- Unused MCP runtime ingress helper removed.
+- Peer reservations removed from comms and delegate paths.
+
+### Fixed
+- Post-merge test regressions: send tool rename assertions and redb rejection paths updated.
+- Mob peer auto-wiring semantics corrected.
+- Mob authority via typed tool effects (no re-entrant deadlock).
+- `InterruptYielding` wired to cooperative wait interrupts and emits `WakeRuntime` for queued inputs.
+- Comms drain notification race fixed.
+- Auto-derive `comms_name` for CLI keep-alive sessions.
+- Mob member list projection made non-blocking; `list_members` stall during concurrent spawn fixed.
+- Mob state restored across REST with callback peer smoke coverage.
+- Terminal peer responses correctly produce single-event runtime work.
+- Centralized `extract_prompt` and context-only dispatch on `RunPrimitive`.
+- Typed `PostAdmissionSignal` with batch-safe `execution_kind`.
+- Canonical `StartTurnDisposition` for turn admissibility.
+- `ResumePending` boundary check counts staged tool results; mixed-batch assert removed.
+- `execution_kind` forwarded in `MobRpcRuntimeExecutor`.
+- Shared `JsonlStore` instance in example 035 target.
+- Scheduler schema and CLI first-turn tools fixed.
+- WASM `async_trait` on schedule dispatcher fixed.
+- TUX scheduler delivery and tool guidance fixed.
+- CI prereqs for wasm and shared-realm e2e lanes fixed.
+
 ## [0.5.1] - 2026-04-06
 
 Meerkat 0.5.1 is a feature release adding the scheduler subsystem, flow-frame loops, background job completion notifications, and the runtime epoch model — plus broad correctness fixes across mob orchestration, session recovery, and tool visibility.

@@ -76,7 +76,7 @@ const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}' controlled by a human operator via TUX.
 Execute user requests using your available tools. Respond conversationally.
 Your current session_id is '{session_id}'. If you schedule follow-up work for this same running agent session, use that exact session_id.
-Your responses stream directly to the controller — do not use the 'send' comms tool to reply.";
+Your responses stream directly to the controller — do not use the 'send_message' comms tool to reply.";
 
 struct TargetRuntimeSurface {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,

@@ -52,7 +52,7 @@ async def main():
         models = []
 
         if os.environ.get("ANTHROPIC_API_KEY"):
-            models.append("claude-sonnet-4-5")
+            models.append("claude-sonnet-4-6")
         if os.environ.get("OPENAI_API_KEY"):
             models.append("gpt-5.2")
         if os.environ.get("GEMINI_API_KEY"):
@@ -82,7 +82,7 @@ async def main():
             print("--- Anthropic with extended thinking ---")
             session = await client.create_session(
                 prompt="What is the optimal data structure for a LRU cache? Think step by step.",
-                model="claude-sonnet-4-5",
+                model="claude-sonnet-4-6",
                 provider_params={
                     "anthropic": {
                         "thinking": {"budget_tokens": 5000}
@@ -114,11 +114,11 @@ async def main():
 Model selection strategies:
 
 1. COST OPTIMIZATION
-   - Simple tasks → claude-sonnet-4-5 or gemini-3-flash-preview
+   - Simple tasks → claude-sonnet-4-6 or gemini-3-flash-preview
    - Complex tasks → claude-opus-4-6 or gpt-5.2
 
 2. CAPABILITY-BASED
-   - Code generation → claude-sonnet-4-5 (strong at code)
+   - Code generation → claude-sonnet-4-6 (strong at code)
    - Reasoning → claude-opus-4-6 with thinking, or gpt-5.2 high effort
    - Speed → gemini-3-flash-preview
 
@@ -129,7 +129,7 @@ Model selection strategies:
 
 4. PER-AGENT ROUTING (in mobs)
    - Orchestrator: claude-opus-4-6 (complex planning)
-   - Workers: claude-sonnet-4-5 (execution)
+   - Workers: claude-sonnet-4-6 (execution)
    - Validators: gemini-3-flash-preview (fast checks)
 """)
 

@@ -96,6 +96,16 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
+| `schedule/create` | Schedule | Create a new schedule (schedule feature) |
+| `schedule/get` | Schedule | Get a schedule by ID (schedule feature) |
+| `schedule/list` | Schedule | List schedules (schedule feature) |
+| `schedule/update` | Schedule | Update a schedule (schedule feature) |
+| `schedule/pause` | Schedule | Pause a schedule (schedule feature) |
+| `schedule/resume` | Schedule | Resume a paused schedule (schedule feature) |
+| `schedule/delete` | Schedule | Delete a schedule (schedule feature) |
+| `schedule/occurrences` | Schedule | List occurrences for a schedule (schedule feature) |
+| `schedule/tools` | Schedule | List schedule tools (schedule feature) |
+| `schedule/call` | Schedule | Call a schedule tool directly (schedule feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
@@ -238,7 +248,7 @@ Create a new session and run the first turn.
   "method": "session/create",
   "params": {
     "prompt": "What is Rust?",
-    "model": "claude-sonnet-4-5",
+    "model": "claude-sonnet-4-6",
     "provider": "anthropic",
     "max_tokens": 4096,
     "system_prompt": "You are a helpful assistant.",
@@ -308,7 +318,7 @@ Only `prompt` is required. All other fields are optional and fall back to config
   The user prompt to send to the agent.
 </ParamField>
 
-<ParamField body="model" type="string | null" default="claude-sonnet-4-5">
+<ParamField body="model" type="string | null" default="claude-sonnet-4-6">
   Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
 </ParamField>
 
@@ -885,10 +895,10 @@ Return the curated model catalog with provider profiles, capability metadata, an
     "providers": [
       {
         "provider": "anthropic",
-        "default_model_id": "claude-sonnet-4-5",
+        "default_model_id": "claude-sonnet-4-6",
         "models": [
           {
-            "id": "claude-sonnet-4-5",
+            "id": "claude-sonnet-4-6",
             "display_name": "Claude Sonnet 4.5",
             "tier": "standard",
             "context_window": 200000,
@@ -1014,7 +1024,7 @@ Read current realm config envelope.
   "result": {
     "config": {
       "agent": {
-        "model": "claude-sonnet-4-5",
+        "model": "claude-sonnet-4-6",
         "max_tokens_per_turn": 8192
       }
     },

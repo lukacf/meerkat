@@ -265,8 +265,8 @@ mdm-agent ALL=(ALL) NOPASSWD: ALL
 - Registration is unauthenticated (plain TCP on PORT+1) — any client that connects to
   the registration port is trusted. Run on a private network or VPN.
 - API keys live only on the machine that uses them.
-- Keypairs are persisted in `/tmp/mdm-*`. For production, use a locked-down directory
-  with `chmod 700`.
+- Keypairs are persisted in `~/.rkat/mdm/` (`tux/identity/`, `targets/<name>/identity/`, `kennel/identity/`).
+  For production, lock down the directory with `chmod 700`.
 - There is no transport encryption beyond signatures — use a VPN or private LAN.
 
 ---

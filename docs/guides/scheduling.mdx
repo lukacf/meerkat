@@ -1,6 +1,7 @@
 ---
 title: Scheduling
 description: Automate agent tasks with cron and interval triggers
+icon: "clock"
 ---
 
 # Scheduling
@@ -47,7 +48,7 @@ Schedule (trigger + target + policies)
             every: Duration::hours(1).to_std().unwrap(),
         }),
         target: TargetBinding::Session(SessionTargetBinding {
-            model: "claude-sonnet-4-5".into(),
+            model: "claude-sonnet-4-6".into(),
             prompt: "Check system health and report anomalies".into(),
             ..Default::default()
         }),
@@ -69,7 +70,7 @@ Schedule (trigger + target + policies)
           },
           "target": {
             "type": "session",
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "prompt": "Check system health and report anomalies"
           }
         }
@@ -120,7 +121,7 @@ Creates a new agent session for each occurrence:
 ```json
 {
   "type": "session",
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "prompt": "Generate the daily report",
   "system_prompt": "You are a reporting agent.",
   "provider": "anthropic"

@@ -72,7 +72,7 @@ credentials = ["anthropic_api_key"]       # declared, never stored
 capabilities = ["comms", "shell"]         # what the mob needs from the runtime
 
 [models]
-default = "claude-sonnet-4-5"
+default = "claude-sonnet-4-6"
 min_context_window = 128000               # reject models that can't fit the workload
 
 [profiles.lead]
@@ -414,7 +414,7 @@ topology = "auto"               # single | coordinator_pool | per_agent
 max_workers = 4
 
 [models]
-default = "claude-sonnet-4-5"
+default = "claude-sonnet-4-6"
 provider = "anthropic"
 
 [policies]

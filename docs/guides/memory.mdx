@@ -37,7 +37,7 @@ let factory = AgentFactory::new(store_path)
     .memory(true);  // enable semantic memory + compaction
 
 // Per-request override:
-let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6");
 build_config.override_memory = Some(true);
 ```
 
@@ -236,7 +236,7 @@ When the `memory-store-session` feature is compiled in and memory is enabled:
         .builtins(true)
         .memory(true);
 
-    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6");
     // Memory + compaction are wired automatically when:
     //   1. The factory has memory(true)
     //   2. The binary is compiled with session-compaction + memory-store-session features

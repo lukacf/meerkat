@@ -22,7 +22,7 @@ A mob definition declares profiles (agent templates), wiring rules, and flows. D
       "runtime_mode": "autonomous_host"
     },
     "analyst": {
-      "model": "claude-sonnet-4-5",
+      "model": "claude-sonnet-4-6",
       "peer_description": "Investigates assigned issues",
       "tools": { "builtins": true, "shell": true, "comms": true },
       "runtime_mode": "autonomous_host"
@@ -591,7 +591,7 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
         .mob(true);
     let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-5".into(),
+        model: "claude-sonnet-4-6".into(),
         prompt: "Create a research team and run the synthesis flow".into(),
         system_prompt: None,
         max_tokens: None,
@@ -614,7 +614,7 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
 
 Set per-profile in the definition:
 ```json
-{"model": "claude-sonnet-4-5", "runtime_mode": "turn_driven", "tools": {"comms": true}}
+{"model": "claude-sonnet-4-6", "runtime_mode": "turn_driven", "tools": {"comms": true}}
 ```
 
 Or per-spawn:

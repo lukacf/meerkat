@@ -119,9 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // ── 6. Create comms tool dispatchers ────────────────────────────────────
-    // CommsToolDispatcher gives the agent two tools:
-    //   - `peers` — list trusted peers
-    //   - `send`  — send a signed message to a peer
+    // CommsToolDispatcher gives the agent these tools:
+    //   - `peers`         — list trusted peers
+    //   - `send_message`  — send a signed message to a peer
+    //   - `send_request`  — send a request expecting a response
+    //   - `send_response` — reply to a received request
 
     let tools_a = Arc::new(CommsToolDispatcher::new(
         comms_a.router().clone(),
@@ -145,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let factory = AgentFactory::new(store_dir.clone());
     let model =
-        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string());
+        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
 
     let client_a = Arc::new(AnthropicClient::new(api_key.clone())?);
     let llm_a = factory.build_llm_adapter(client_a, &model).await;
@@ -187,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent_b = CommsAgent::new(agent_b_inner, comms_b);
 
     // ── 8. Agent A sends a message to Agent B ───────────────────────────────
-    // The LLM will call `peers` to discover agent-b, then call `send` to
+    // The LLM will call `peers` to discover agent-b, then call `send_message` to
     // deliver a signed message over TCP.
 
     println!("\n--- Phase 1: Agent A sends a message ---\n");
@@ -283,12 +285,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 │              │    signed envelopes     │              │
 │ Keypair A    │                        │ Keypair B    │
 │ Tools:       │                        │ Tools:       │
-│  - send()    │                        │  - send()    │
+│  - send_*()  │                        │  - send_*()  │
 │  - peers()   │                        │  - peers()   │
 └─────────────┘                        └─────────────┘
 
 Message flow:
-1. Agent A calls send(target="agent-b", message="Hello")
+1. Agent A calls send_message(target="agent-b", message="Hello", handling_mode="steer")
 2. Message is Ed25519-signed with Agent A's private key
 3. Envelope is transmitted over TCP/UDS/inproc
 4. Agent B verifies signature using Agent A's trusted public key

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -106,6 +106,10 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
                 name: t["name"].as_str().unwrap_or_default().to_string(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Comms,
+                    source_id: "comms".into(),
+                }),
             })
         })
         .collect()
@@ -218,4 +222,28 @@ pub fn wrap_with_comms(
         runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
         tools,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comms_tool_defs_have_comms_provenance() {
+        let defs = comms_tool_defs();
+        assert!(!defs.is_empty(), "comms should expose at least one tool");
+        for def in &defs {
+            let prov = def
+                .provenance
+                .as_ref()
+                .unwrap_or_else(|| panic!("comms tool '{}' is missing provenance", def.name));
+            assert_eq!(
+                prov.kind,
+                ToolSourceKind::Comms,
+                "comms tool '{}' should have Comms provenance",
+                def.name
+            );
+            assert_eq!(prov.source_id, "comms");
+        }
+    }
 }

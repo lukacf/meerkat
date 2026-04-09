@@ -261,6 +261,7 @@ mod tests {
             name: name.to_string(),
             description: format!("Test tool {name}"),
             input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
         }
     }
 

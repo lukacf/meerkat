@@ -31,6 +31,9 @@ pub struct ToolConfig {
     /// Enable shared task list tools (create, list, update, get).
     #[serde(default)]
     pub mob_tasks: bool,
+    /// Enable schedule tools (create, list, update, pause, resume, delete).
+    #[serde(default)]
+    pub schedule: bool,
     /// MCP server names this profile connects to.
     #[serde(default)]
     pub mcp: Vec<String>,
@@ -41,6 +44,94 @@ pub struct ToolConfig {
     /// re-registered on resume.
     #[serde(default)]
     pub rust_bundles: Vec<String>,
+}
+
+/// Binding for a profile in a mob definition.
+///
+/// Profiles can be defined inline (the existing behavior) or reference
+/// a reusable realm-scoped profile by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProfileBinding {
+    /// Reference to a realm-scoped profile by name.
+    /// Must be listed before `Inline` for correct untagged deserialization
+    /// (a `{"realm_profile":"x"}` object must not be consumed as an `Inline` variant).
+    RealmRef {
+        /// Name of the realm profile to reference.
+        realm_profile: String,
+    },
+    /// Inline profile definition (original behavior).
+    Inline(Profile),
+}
+
+impl ProfileBinding {
+    /// Returns the inline profile if this is an `Inline` binding.
+    pub fn as_inline(&self) -> Option<&Profile> {
+        match self {
+            Self::Inline(p) => Some(p),
+            Self::RealmRef { .. } => None,
+        }
+    }
+
+    /// Returns a mutable reference to the inline profile.
+    pub fn as_inline_mut(&mut self) -> Option<&mut Profile> {
+        match self {
+            Self::Inline(p) => Some(p),
+            Self::RealmRef { .. } => None,
+        }
+    }
+
+    /// Returns the realm profile name if this is a `RealmRef` binding.
+    pub fn realm_ref_name(&self) -> Option<&str> {
+        match self {
+            Self::RealmRef { realm_profile } => Some(realm_profile),
+            Self::Inline(_) => None,
+        }
+    }
+}
+
+/// Agent-owned spawn tooling mode for child meerkats.
+///
+/// Controls how the child's tool surface is determined at spawn time.
+/// External/public spawn remains role-based; this enum is for agent-owned spawns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SpawnTooling {
+    /// Inherit the parent's currently visible tools (ToolScope snapshot).
+    InheritParent {
+        /// Optional allow-list overlay: narrows the inherited set to only these tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_overlay: Option<Vec<String>>,
+        /// Optional deny-list overlay: removes these tools from the inherited set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deny_overlay: Option<Vec<String>>,
+    },
+    /// Minimal: only comms tools (send_message, send_request, send_response, peers).
+    Minimal,
+    /// Use a specific profile for model/tool resolution.
+    Profile {
+        /// Source of the profile.
+        source: Box<ProfileSource>,
+        /// Optional allow-list overlay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_overlay: Option<Vec<String>>,
+        /// Optional deny-list overlay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deny_overlay: Option<Vec<String>>,
+    },
+}
+
+/// Source of a profile for spawn tooling resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProfileSource {
+    /// Reference a realm-scoped reusable profile by name.
+    RealmProfile {
+        /// Name of the realm profile.
+        name: String,
+    },
+    /// Inline profile definition.
+    Inline(Profile),
 }
 
 /// Profile template for spawning meerkats.
@@ -117,6 +208,7 @@ mod tests {
             memory: false,
             mob: true,
             mob_tasks: true,
+            schedule: true,
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
             rust_bundles: vec!["custom-tools".to_string()],
         };
@@ -134,6 +226,7 @@ mod tests {
             memory: false,
             mob: false,
             mob_tasks: false,
+            schedule: false,
             mcp: vec!["mcp-server".to_string()],
             rust_bundles: Vec::new(),
         };
@@ -154,6 +247,7 @@ mod tests {
                 memory: false,
                 mob: true,
                 mob_tasks: true,
+                schedule: false,
                 mcp: vec![],
                 rust_bundles: vec![],
             },
@@ -182,6 +276,7 @@ mod tests {
                 memory: false,
                 mob: false,
                 mob_tasks: true,
+                schedule: false,
                 mcp: vec!["code-server".to_string()],
                 rust_bundles: vec!["custom".to_string()],
             },
@@ -207,6 +302,7 @@ mod tests {
         assert!(!config.memory);
         assert!(!config.mob);
         assert!(!config.mob_tasks);
+        assert!(!config.schedule);
         assert!(config.mcp.is_empty());
         assert!(config.rust_bundles.is_empty());
     }
@@ -259,5 +355,123 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
             profile.provider_params,
             Some(serde_json::json!({"thinking_budget": 8192, "top_k": 20}))
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ProfileBinding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn profile_binding_inline_roundtrip() {
+        let profile = Profile {
+            model: "claude-opus-4-6".to_string(),
+            ..Profile {
+                model: String::new(),
+                skills: vec![],
+                tools: ToolConfig::default(),
+                peer_description: String::new(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }
+        };
+        let binding = ProfileBinding::Inline(profile.clone());
+        let json = serde_json::to_string(&binding).unwrap();
+        let parsed: ProfileBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_inline().unwrap().model, "claude-opus-4-6");
+    }
+
+    #[test]
+    fn profile_binding_realm_ref_roundtrip() {
+        let binding = ProfileBinding::RealmRef {
+            realm_profile: "worker-v2".to_string(),
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert!(json.contains("realm_profile"));
+        let parsed: ProfileBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.realm_ref_name(), Some("worker-v2"));
+        assert!(parsed.as_inline().is_none());
+    }
+
+    #[test]
+    fn profile_binding_backward_compat_raw_profile_deserializes_as_inline() {
+        // A raw Profile JSON (no realm_profile key) should deserialize as Inline
+        let profile_json = r#"{"model":"claude-sonnet-4-5"}"#;
+        let binding: ProfileBinding = serde_json::from_str(profile_json).unwrap();
+        assert!(binding.as_inline().is_some());
+        assert_eq!(binding.as_inline().unwrap().model, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn profile_binding_realm_ref_not_confused_with_inline() {
+        // A realm_profile-only object should NOT be consumed as Inline
+        let ref_json = r#"{"realm_profile":"my-profile"}"#;
+        let binding: ProfileBinding = serde_json::from_str(ref_json).unwrap();
+        assert!(binding.realm_ref_name().is_some());
+        assert!(binding.as_inline().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // SpawnTooling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_tooling_inherit_parent_roundtrip() {
+        let tooling = SpawnTooling::InheritParent {
+            allow_overlay: Some(vec!["shell".into()]),
+            deny_overlay: Some(vec!["memory_search".into()]),
+        };
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: SpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn spawn_tooling_minimal_roundtrip() {
+        let tooling = SpawnTooling::Minimal;
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: SpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn spawn_tooling_profile_realm_roundtrip() {
+        let tooling = SpawnTooling::Profile {
+            source: Box::new(ProfileSource::RealmProfile {
+                name: "worker-v2".into(),
+            }),
+            allow_overlay: None,
+            deny_overlay: Some(vec!["dangerous_tool".into()]),
+        };
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: SpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
+    }
+
+    #[test]
+    fn spawn_tooling_profile_inline_roundtrip() {
+        let profile = Profile {
+            model: "claude-sonnet-4-5".into(),
+            skills: vec![],
+            tools: ToolConfig::default(),
+            peer_description: String::new(),
+            external_addressable: false,
+            backend: None,
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: None,
+        };
+        let tooling = SpawnTooling::Profile {
+            source: Box::new(ProfileSource::Inline(profile)),
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let json = serde_json::to_string(&tooling).unwrap();
+        let parsed: SpawnTooling = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, tooling);
     }
 }

@@ -27,7 +27,7 @@ use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
     MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
-    MobStorage, Profile, ProfileName, ToolConfig,
+    MobStorage, Profile, ProfileBinding, ProfileName, ToolConfig,
     definition::{RoleWiringRule, WiringRules},
 };
 use meerkat_session::PersistentSessionService;
@@ -113,22 +113,31 @@ fn pictionary_definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("artist"),
-        comms_profile("claude-sonnet-4-5", "Artist — validates guesses"),
+        ProfileBinding::Inline(comms_profile(
+            "claude-sonnet-4-5",
+            "Artist — validates guesses",
+        )),
     );
     profiles.insert(
         ProfileName::from("guesser-a"),
-        comms_profile("claude-opus-4-6", "guesser-a (Opus) — lead, literal/shapes"),
+        ProfileBinding::Inline(comms_profile(
+            "claude-opus-4-6",
+            "guesser-a (Opus) — lead, literal/shapes",
+        )),
     );
     profiles.insert(
         ProfileName::from("guesser-b"),
-        comms_profile(
+        ProfileBinding::Inline(comms_profile(
             "gemini-3.1-pro-preview",
             "guesser-b (Gemini) — emotions/mood",
-        ),
+        )),
     );
     profiles.insert(
         ProfileName::from("guesser-c"),
-        comms_profile("gpt-5.4", "guesser-c (GPT) — context/narrative"),
+        ProfileBinding::Inline(comms_profile(
+            "gpt-5.4",
+            "guesser-c (GPT) — context/narrative",
+        )),
     );
 
     MobDefinition {

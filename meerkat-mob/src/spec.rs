@@ -483,7 +483,7 @@ mod tests {
         WiringRules,
     };
     use crate::ids::{FlowId, MobId, ProfileName, StepId};
-    use crate::profile::{Profile, ToolConfig};
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use indexmap::IndexMap;
     use meerkat_core::types::ContentInput;
 
@@ -504,8 +504,11 @@ mod tests {
 
     fn base_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("lead"), profile());
-        profiles.insert(ProfileName::from("worker"), profile());
+        profiles.insert(ProfileName::from("lead"), ProfileBinding::Inline(profile()));
+        profiles.insert(
+            ProfileName::from("worker"),
+            ProfileBinding::Inline(profile()),
+        );
 
         MobDefinition {
             id: MobId::from("mob"),

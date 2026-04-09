@@ -246,6 +246,7 @@ impl MockToolDispatcher {
             name: name.to_string(),
             description: description.to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
+            provenance: None,
         }));
         self.results.insert(name.to_string(), result.to_string());
         self
@@ -1010,16 +1011,19 @@ mod parallel_tools {
                         name: "get_weather".to_string(),
                         description: "Get current weather for a city".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetWeatherArgs>(),
+                        provenance: None,
                     }),
                     Arc::new(ToolDef {
                         name: "get_time".to_string(),
                         description: "Get current time for a timezone".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetTimeArgs>(),
+                        provenance: None,
                     }),
                     Arc::new(ToolDef {
                         name: "get_stock".to_string(),
                         description: "Get stock price for a symbol".to_string(),
                         input_schema: meerkat_tools::schema_for::<GetStockArgs>(),
+                        provenance: None,
                     }),
                 ]
                 .into(),
@@ -1250,16 +1254,19 @@ mod parallel_tools {
                         name: "working_tool".to_string(),
                         description: "A tool that works correctly".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
+                        provenance: None,
                     }),
                     Arc::new(ToolDef {
                         name: "broken_tool".to_string(),
                         description: "A tool that always fails".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
+                        provenance: None,
                     }),
                     Arc::new(ToolDef {
                         name: "another_working_tool".to_string(),
                         description: "Another tool that works correctly".to_string(),
                         input_schema: meerkat_tools::empty_object_schema(),
+                        provenance: None,
                     }),
                 ]
                 .into()

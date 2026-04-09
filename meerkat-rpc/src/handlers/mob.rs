@@ -744,8 +744,8 @@ pub struct MobSpawnHelperParams {
     pub prompt: String,
     #[serde(default)]
     pub meerkat_id: Option<String>,
-    #[serde(default)]
-    pub profile_name: Option<String>,
+    #[serde(default, alias = "profile_name")]
+    pub role_name: Option<String>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -771,8 +771,8 @@ pub async fn handle_spawn_helper(
             .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
     );
     let mut options = meerkat_mob::HelperOptions::default();
-    if let Some(profile) = params.profile_name {
-        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    if let Some(role) = params.role_name {
+        options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
@@ -803,8 +803,8 @@ pub struct MobForkHelperParams {
     pub prompt: String,
     #[serde(default)]
     pub meerkat_id: Option<String>,
-    #[serde(default)]
-    pub profile_name: Option<String>,
+    #[serde(default, alias = "profile_name")]
+    pub role_name: Option<String>,
     #[serde(default)]
     pub fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -836,8 +836,8 @@ pub async fn handle_fork_helper(
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
     let mut options = meerkat_mob::HelperOptions::default();
-    if let Some(profile) = params.profile_name {
-        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    if let Some(role) = params.role_name {
+        options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
@@ -958,6 +958,117 @@ pub async fn handle_wait_kickoff(
     }
 }
 
+// ---------------------------------------------------------------------------
+// mob/profile/* — realm profile CRUD
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ProfileCreateParams {
+    name: String,
+    profile: meerkat_mob::Profile,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileNameParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileUpdateParams {
+    name: String,
+    profile: meerkat_mob::Profile,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileDeleteParams {
+    name: String,
+    expected_revision: u64,
+}
+
+pub async fn handle_profile_create(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: ProfileCreateParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    match state
+        .realm_profile_create(&params.name, &params.profile)
+        .await
+    {
+        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_profile_get(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: ProfileNameParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    match state.realm_profile_get(&params.name).await {
+        Ok(Some(stored)) => RpcResponse::success(id, serde_json::json!(stored)),
+        Ok(None) => RpcResponse::success(
+            id,
+            serde_json::json!({"not_found": true, "name": params.name}),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_profile_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
+    match state.realm_profile_list().await {
+        Ok(profiles) => RpcResponse::success(id, serde_json::json!({"profiles": profiles})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_profile_update(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: ProfileUpdateParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    match state
+        .realm_profile_update(&params.name, &params.profile, params.expected_revision)
+        .await
+    {
+        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_profile_delete(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: ProfileDeleteParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    match state
+        .realm_profile_delete(&params.name, params.expected_revision)
+        .await
+    {
+        Ok(deleted) => RpcResponse::success(
+            id,
+            serde_json::json!({"name": deleted.name, "deleted_revision": deleted.revision}),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1072,7 +1183,11 @@ mod tests {
         });
         let err = serde_json::from_value::<MobCreateParams>(value)
             .expect_err("internal rust bundle fields must be rejected");
-        assert!(err.to_string().contains("unknown field `rust_bundles`"));
+        assert!(
+            err.to_string().contains("did not match any variant")
+                || err.to_string().contains("unknown field `rust_bundles`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

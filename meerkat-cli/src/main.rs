@@ -5994,7 +5994,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             }));
             let mut options = meerkat_mob::HelperOptions::default();
             if let Some(p) = profile {
-                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+                options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
             let result = state
                 .mob_spawn_helper(
@@ -6050,7 +6050,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             };
             let mut options = meerkat_mob::HelperOptions::default();
             if let Some(p) = profile {
-                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+                options.role_name = Some(meerkat_mob::ProfileName::from(p));
             }
             let result = state
                 .mob_fork_helper(
@@ -7443,6 +7443,7 @@ mod tests {
                     "properties": {},
                     "required": []
                 }),
+                provenance: None,
             });
             Self {
                 tools: Arc::from([tool]),
@@ -7476,6 +7477,7 @@ mod tests {
                     "properties": {},
                     "required": []
                 }),
+                provenance: None,
             });
             Self {
                 tools: Arc::from([tool]),

@@ -67,24 +67,28 @@ impl AgentToolDispatcher for MultiToolDispatcher {
                 description: "Perform arithmetic calculations. Supports +, -, *, / operations."
                     .to_string(),
                 input_schema: meerkat_tools::schema_for::<CalculateArgs>(),
+                provenance: None,
             }),
             // Note-taking tool
             Arc::new(ToolDef {
                 name: "save_note".to_string(),
                 description: "Save a note for later reference".to_string(),
                 input_schema: meerkat_tools::schema_for::<SaveNoteArgs>(),
+                provenance: None,
             }),
             // Note retrieval tool
             Arc::new(ToolDef {
                 name: "get_notes".to_string(),
                 description: "Retrieve all saved notes".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
+                provenance: None,
             }),
             // History tool
             Arc::new(ToolDef {
                 name: "get_calculation_history".to_string(),
                 description: "Get the history of all calculations performed".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
+                provenance: None,
             }),
         ]
         .into()

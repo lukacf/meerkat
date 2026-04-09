@@ -1,9 +1,11 @@
 //! In-memory store implementations.
 
+use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
@@ -629,13 +631,107 @@ impl MobSpecStore for InMemoryMobSpecStore {
     }
 }
 
+/// In-memory realm profile store with CAS semantics.
+#[derive(Debug, Default)]
+pub struct InMemoryRealmProfileStore {
+    profiles: Arc<RwLock<BTreeMap<String, StoredRealmProfile>>>,
+}
+
+impl InMemoryRealmProfileStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl RealmProfileStore for InMemoryRealmProfileStore {
+    async fn create(
+        &self,
+        name: &str,
+        profile: &Profile,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let mut profiles = self.profiles.write().await;
+        if profiles.contains_key(name) {
+            return Err(MobStoreError::CasConflict(format!(
+                "realm profile already exists: {name}"
+            )));
+        }
+        let now = Utc::now();
+        let stored = StoredRealmProfile {
+            name: name.to_string(),
+            profile: profile.clone(),
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        profiles.insert(name.to_string(), stored.clone());
+        Ok(stored)
+    }
+
+    async fn get(&self, name: &str) -> Result<Option<StoredRealmProfile>, MobStoreError> {
+        Ok(self.profiles.read().await.get(name).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<StoredRealmProfile>, MobStoreError> {
+        Ok(self.profiles.read().await.values().cloned().collect())
+    }
+
+    async fn update(
+        &self,
+        name: &str,
+        profile: &Profile,
+        expected_revision: u64,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let mut profiles = self.profiles.write().await;
+        let existing = profiles
+            .get(name)
+            .ok_or_else(|| MobStoreError::NotFound(format!("realm profile not found: {name}")))?;
+        if existing.revision != expected_revision {
+            return Err(MobStoreError::CasConflict(format!(
+                "realm profile '{name}' revision conflict: expected {expected_revision}, actual {}",
+                existing.revision
+            )));
+        }
+        let updated = StoredRealmProfile {
+            name: name.to_string(),
+            profile: profile.clone(),
+            revision: expected_revision + 1,
+            created_at: existing.created_at,
+            updated_at: Utc::now(),
+        };
+        profiles.insert(name.to_string(), updated.clone());
+        Ok(updated)
+    }
+
+    async fn delete(
+        &self,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let mut profiles = self.profiles.write().await;
+        let existing = profiles
+            .get(name)
+            .ok_or_else(|| MobStoreError::NotFound(format!("realm profile not found: {name}")))?;
+        if existing.revision != expected_revision {
+            return Err(MobStoreError::CasConflict(format!(
+                "realm profile '{name}' revision conflict: expected {expected_revision}, actual {}",
+                existing.revision
+            )));
+        }
+        let removed = existing.clone();
+        profiles.remove(name);
+        Ok(removed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, WiringRules};
     use crate::event::MobEventKind;
     use crate::ids::{MeerkatId, ProfileName};
-    use crate::profile::{Profile, ToolConfig};
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
     use futures::future::join_all;
     use std::collections::BTreeMap;
@@ -644,7 +740,7 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("worker"),
-            Profile {
+            ProfileBinding::Inline(Profile {
                 model: "model".to_string(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
@@ -655,7 +751,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            },
+            }),
         );
         MobDefinition {
             id: MobId::from("mob"),
@@ -841,5 +937,77 @@ mod tests {
 
         assert!(!store.delete_spec(&mob_id, Some(1)).await.unwrap());
         assert!(store.delete_spec(&mob_id, Some(2)).await.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // RealmProfileStore contract tests
+    // -----------------------------------------------------------------------
+
+    use crate::store::realm_profile::contract_tests;
+
+    #[tokio::test]
+    async fn realm_profile_create_and_get() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_create_and_get(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_get_nonexistent() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_get_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_create_duplicate_fails() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_create_duplicate_fails(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_correct_revision() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_update_with_correct_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_wrong_revision() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_update_with_wrong_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_nonexistent() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_update_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_correct_revision() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_delete_with_correct_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_wrong_revision() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_delete_with_wrong_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_nonexistent() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_delete_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_list() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_list(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_list_empty() {
+        let store = InMemoryRealmProfileStore::new();
+        contract_tests::test_list_empty(&store).await;
     }
 }

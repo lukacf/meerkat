@@ -101,11 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Mob ID: {}", definition.id);
     println!("Profiles:");
-    for (name, profile) in &definition.profiles {
-        println!(
-            "  {} -- model: {}, skills: {:?}",
-            name, profile.model, profile.skills,
-        );
+    for (name, binding) in &definition.profiles {
+        if let Some(profile) = binding.as_inline() {
+            println!(
+                "  {} -- model: {}, skills: {:?}",
+                name, profile.model, profile.skills,
+            );
+        } else {
+            println!("  {name} -- realm ref");
+        }
     }
 
     if let Some(ref orchestrator) = definition.orchestrator {

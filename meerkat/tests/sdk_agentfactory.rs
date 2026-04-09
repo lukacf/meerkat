@@ -89,6 +89,7 @@ impl AgentToolDispatcher for RecordingDispatcher {
             name: "echo".into(),
             description: "Echo tool".into(),
             input_schema: schema_for::<EchoInput>(),
+            provenance: None,
         })]
         .into()
     }

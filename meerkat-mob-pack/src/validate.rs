@@ -32,6 +32,8 @@ pub enum PackValidationError {
     Io(String),
     #[error("signing key is invalid: {0}")]
     InvalidSigningKey(String),
+    #[error("profile `{profile_name}` uses a realm reference, which is forbidden in packs")]
+    RealmRefForbidden { profile_name: String },
 }
 
 impl From<std::io::Error> for PackValidationError {
@@ -65,8 +67,11 @@ mod tests {
             PackValidationError::Archive("bad tar".to_string()),
             PackValidationError::Io("disk full".to_string()),
             PackValidationError::InvalidSigningKey("bad key".to_string()),
+            PackValidationError::RealmRefForbidden {
+                profile_name: "worker".to_string(),
+            },
         ];
 
-        assert_eq!(errors.len(), 15);
+        assert_eq!(errors.len(), 16);
     }
 }

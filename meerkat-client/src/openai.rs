@@ -1022,6 +1022,7 @@ mod tests {
                     "location": {"type": "string"}
                 }
             }),
+            provenance: None,
         })]);
 
         let body = client.build_request_body(&request).expect("build request");

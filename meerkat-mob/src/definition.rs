@@ -6,7 +6,7 @@
 
 use crate::MobBackendKind;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
-use crate::profile::Profile;
+use crate::profile::{Profile, ProfileBinding};
 use indexmap::IndexMap;
 use meerkat_core::types::ContentInput;
 use serde::{Deserialize, Serialize};
@@ -348,8 +348,11 @@ pub struct MobDefinition {
     #[serde(default)]
     pub orchestrator: Option<OrchestratorConfig>,
     /// Named profiles for spawning meerkats.
+    ///
+    /// Each profile can be an inline definition or a reference to a
+    /// realm-scoped reusable profile.
     #[serde(default)]
-    pub profiles: BTreeMap<ProfileName, Profile>,
+    pub profiles: BTreeMap<ProfileName, ProfileBinding>,
     /// Named MCP server configurations.
     #[serde(default)]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
@@ -414,7 +417,7 @@ enum TomlOrchestrator {
 struct TomlDefinition {
     mob: TomlMob,
     #[serde(default)]
-    profiles: BTreeMap<ProfileName, Profile>,
+    profiles: BTreeMap<ProfileName, ProfileBinding>,
     #[serde(default)]
     mcp: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
@@ -449,7 +452,7 @@ impl MobDefinition {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
-            Profile {
+            ProfileBinding::Inline(Profile {
                 model: model.to_string(),
                 skills: Vec::new(),
                 tools: crate::profile::ToolConfig {
@@ -463,7 +466,7 @@ impl MobDefinition {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            },
+            }),
         );
         let mut definition = Self {
             id: mob_id,
@@ -536,6 +539,45 @@ impl MobDefinition {
     pub fn clear_internal_lifecycle_flags(&mut self) {
         self.is_implicit = false;
         self.session_cleanup_policy = SessionCleanupPolicy::Manual;
+    }
+
+    /// Resolve an inline profile by name.
+    ///
+    /// Returns `Some(&Profile)` for `Inline` bindings, `None` for `RealmRef`
+    /// bindings (which require async store lookup) or missing names.
+    pub fn resolve_inline_profile(&self, name: &crate::ids::ProfileName) -> Option<&Profile> {
+        self.profiles.get(name)?.as_inline()
+    }
+
+    /// Resolve a profile by name, supporting both inline and realm-ref bindings.
+    ///
+    /// For `Inline` bindings, returns the profile directly. For `RealmRef` bindings,
+    /// looks up the profile from the provided realm profile store. Returns
+    /// `MobError::ProfileNotFound` if the profile name is missing or the realm
+    /// profile doesn't exist in the store, and `MobError::Internal` if a realm
+    /// store is required but not available.
+    pub async fn resolve_profile(
+        &self,
+        name: &crate::ids::ProfileName,
+        realm_profile_store: Option<&std::sync::Arc<dyn crate::store::RealmProfileStore>>,
+    ) -> Result<Profile, crate::error::MobError> {
+        match self.profiles.get(name) {
+            Some(ProfileBinding::Inline(p)) => Ok(p.clone()),
+            Some(ProfileBinding::RealmRef { realm_profile }) => {
+                let store = realm_profile_store.ok_or_else(|| {
+                    crate::error::MobError::Internal(
+                        "realm profile store not available for RealmRef resolution".into(),
+                    )
+                })?;
+                store
+                    .get(realm_profile)
+                    .await
+                    .map_err(crate::error::MobError::from)?
+                    .ok_or_else(|| crate::error::MobError::ProfileNotFound(name.clone()))
+                    .map(|stored| stored.profile)
+            }
+            None => Err(crate::error::MobError::ProfileNotFound(name.clone())),
+        }
     }
 }
 
@@ -612,14 +654,18 @@ path = "skills/reviewer.md"
         assert!(def.profiles.contains_key(&ProfileName::from("lead")));
         assert!(def.profiles.contains_key(&ProfileName::from("reviewer")));
 
-        let lead = &def.profiles[&ProfileName::from("lead")];
+        let lead = def.profiles[&ProfileName::from("lead")]
+            .as_inline()
+            .unwrap();
         assert_eq!(lead.model, "claude-opus-4-6");
         assert!(lead.tools.mob);
         assert!(lead.tools.mob_tasks);
         assert!(lead.tools.comms);
         assert!(lead.external_addressable);
 
-        let reviewer = &def.profiles[&ProfileName::from("reviewer")];
+        let reviewer = def.profiles[&ProfileName::from("reviewer")]
+            .as_inline()
+            .unwrap();
         assert_eq!(reviewer.model, "claude-sonnet-4-5");
         assert!(reviewer.tools.shell);
         assert_eq!(reviewer.tools.mcp, vec!["code-server"]);
@@ -681,7 +727,7 @@ path = "skills/reviewer.md"
                 let mut m = BTreeMap::new();
                 m.insert(
                     ProfileName::from("lead"),
-                    Profile {
+                    ProfileBinding::Inline(Profile {
                         model: "claude-opus-4-6".to_string(),
                         skills: vec!["skill-a".to_string()],
                         tools: ToolConfig::default(),
@@ -692,7 +738,7 @@ path = "skills/reviewer.md"
                         max_inline_peer_notifications: None,
                         output_schema: None,
                         provider_params: None,
-                    },
+                    }),
                 );
                 m
             },

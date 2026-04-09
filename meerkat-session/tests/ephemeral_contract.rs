@@ -296,6 +296,7 @@ impl StaticToolDispatcher {
                         "type": "object",
                         "properties": {},
                     }),
+                    provenance: None,
                 })
             })
             .collect();

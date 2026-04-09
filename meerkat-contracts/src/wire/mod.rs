@@ -23,12 +23,12 @@ pub use mob::{
     MobEventRouterConfigInput, MobExternalBackendConfigInput, MobFlowNodeInput, MobFlowSpecInput,
     MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobLimitsSpecInput,
     MobMcpServerConfigInput, MobMemberSendParams, MobMemberSendResult, MobOrchestratorInput,
-    MobPeerTarget, MobPolicyModeInput, MobProfileInput, MobRepeatUntilInput,
-    MobRoleWiringRuleInput, MobSkillSourceInput, MobSpawnPolicyInput, MobStepOutputFormatInput,
-    MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput,
-    MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult, MobWiringRulesInput,
-    WireHandlingMode, WireMobBackendKind, WireMobRuntimeMode, WireRenderClass, WireRenderMetadata,
-    WireRenderSalience, WireTrustedPeerSpec,
+    MobPeerTarget, MobPolicyModeInput, MobProfileBindingInput, MobProfileInput,
+    MobRepeatUntilInput, MobRoleWiringRuleInput, MobSkillSourceInput, MobSpawnPolicyInput,
+    MobStepOutputFormatInput, MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput,
+    MobTopologySpecInput, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
+    MobWiringRulesInput, WireHandlingMode, WireMobBackendKind, WireMobRuntimeMode, WireRenderClass,
+    WireRenderMetadata, WireRenderSalience, WireTrustedPeerSpec,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,

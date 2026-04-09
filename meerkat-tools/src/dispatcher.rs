@@ -221,6 +221,7 @@ mod tests {
                         name: (*name).to_string(),
                         description: format!("{name} tool"),
                         input_schema: json!({"type": "object"}),
+                        provenance: None,
                     })
                 })
                 .collect::<Vec<_>>()

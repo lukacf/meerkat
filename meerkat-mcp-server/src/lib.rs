@@ -1136,6 +1136,10 @@ fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: tool.input_schema.clone(),
+            provenance: Some(meerkat_core::types::ToolProvenance {
+                kind: meerkat_core::types::ToolSourceKind::Builtin,
+                source_id: "mcp-server".into(),
+            }),
         })
         .collect()
 }
@@ -3032,6 +3036,10 @@ impl MpcToolDispatcher {
                     name: t.name.clone(),
                     description: t.description.clone(),
                     input_schema: t.input_schema.clone(),
+                    provenance: Some(meerkat_core::types::ToolProvenance {
+                        kind: meerkat_core::types::ToolSourceKind::Builtin,
+                        source_id: "mcp-server".into(),
+                    }),
                 })
             })
             .collect::<Vec<_>>()

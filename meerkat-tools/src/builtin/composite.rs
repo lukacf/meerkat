@@ -562,6 +562,7 @@ mod tests {
                     "properties": {},
                     "required": []
                 }),
+                provenance: None,
             })]);
             Self { tools }
         }
@@ -865,6 +866,53 @@ mod tests {
                 tool_names.contains(&"view_image".to_string()),
                 "view_image should always be in base tool set (image_tool_results={image_tool_results}), but found: {tool_names:?}"
             );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn builtin_tools_have_correct_provenance() {
+        use meerkat_core::types::ToolSourceKind;
+
+        let store: Arc<dyn crate::builtin::TaskStore> = Arc::new(MemoryTaskStore::new());
+
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let tools = dispatcher.tools();
+        assert!(!tools.is_empty(), "should have at least one builtin tool");
+        for tool in tools.iter() {
+            let prov = tool
+                .provenance
+                .as_ref()
+                .unwrap_or_else(|| panic!("tool '{}' is missing provenance", tool.name));
+
+            match tool.name.as_str() {
+                "shell" | "shell_job_status" | "shell_job_cancel" | "shell_jobs" => {
+                    assert_eq!(
+                        prov.kind,
+                        ToolSourceKind::Shell,
+                        "tool '{}' should have Shell provenance",
+                        tool.name
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        prov.kind,
+                        ToolSourceKind::Builtin,
+                        "tool '{}' should have Builtin provenance",
+                        tool.name
+                    );
+                }
+            }
         }
     }
 }

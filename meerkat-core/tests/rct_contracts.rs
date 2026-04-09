@@ -515,6 +515,7 @@ impl MockDispatcher {
                     name: name.to_string(),
                     description: format!("Mock tool {name}"),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 })
             })
             .collect();

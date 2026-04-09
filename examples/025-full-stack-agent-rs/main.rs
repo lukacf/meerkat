@@ -66,11 +66,13 @@ impl AgentToolDispatcher for DomainTools {
                 name: "search_docs".to_string(),
                 description: "Search internal documentation".to_string(),
                 input_schema: meerkat_tools::schema_for::<SearchDocsArgs>(),
+                provenance: None,
             }),
             Arc::new(ToolDef {
                 name: "create_ticket".to_string(),
                 description: "Create a support ticket in the issue tracker".to_string(),
                 input_schema: meerkat_tools::schema_for::<CreateTicketArgs>(),
+                provenance: None,
             }),
         ]
         .into()

@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -49,6 +50,10 @@ impl BuiltinTool for ShellJobStatusTool {
             name: "shell_job_status".into(),
             description: "Check status of a background shell job".into(),
             input_schema: crate::schema::schema_for::<JobStatusInput>(),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Shell,
+                source_id: "shell".into(),
+            }),
         }
     }
 

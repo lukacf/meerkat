@@ -42,11 +42,13 @@ impl AgentToolDispatcher for MathToolDispatcher {
                 name: "add".to_string(),
                 description: "Add two numbers together".to_string(),
                 input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),
+                provenance: None,
             }),
             Arc::new(ToolDef {
                 name: "multiply".to_string(),
                 description: "Multiply two numbers".to_string(),
                 input_schema: meerkat_tools::schema_for::<BinaryMathArgs>(),
+                provenance: None,
             }),
         ]
         .into()

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::skills::{SkillId, SkillRuntime};
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -50,6 +51,10 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             name: "skill_invoke_function".into(),
             description: "Invoke a function exposed by a skill.".into(),
             input_schema: crate::schema::schema_for::<SkillInvokeFunctionArgs>(),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "skills".into(),
+            }),
         }
     }
 

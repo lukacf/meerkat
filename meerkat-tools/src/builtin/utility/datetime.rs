@@ -4,6 +4,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde_json::{Value, json};
 
 /// Tool for getting the current date and time
@@ -37,6 +38,7 @@ impl BuiltinTool for DateTimeTool {
             name: "datetime".into(),
             description: "Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.".into(),
             input_schema: empty_object_schema(),
+            provenance: Some(ToolProvenance { kind: ToolSourceKind::Builtin, source_id: "builtin".into() }),
         }
     }
 

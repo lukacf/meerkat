@@ -15,7 +15,7 @@ use meerkat_mob::definition::{OrchestratorConfig, WiringRules};
 use meerkat_mob::runtime::MobMemberListEntry;
 use meerkat_mob::{
     MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
-    MobSessionService, MobStorage, Profile, ProfileName, ToolConfig,
+    MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -125,7 +125,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        Profile {
+        ProfileBinding::Inline(Profile {
             model: model.clone(),
             skills: vec![],
             tools: ToolConfig {
@@ -139,11 +139,11 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        },
+        }),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        Profile {
+        ProfileBinding::Inline(Profile {
             model,
             skills: vec![],
             tools: ToolConfig {
@@ -157,7 +157,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        },
+        }),
     );
 
     MobDefinition {

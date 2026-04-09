@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -392,6 +393,7 @@ impl BuiltinTool for ShellTool {
                 "Execute a shell command (POSIX-style parsing for policy checks; runs via Nushell or fallback shell)"
                     .into(),
             input_schema: crate::schema::schema_for::<ShellInput>(),
+            provenance: Some(ToolProvenance { kind: ToolSourceKind::Shell, source_id: "shell".into() }),
         }
     }
 

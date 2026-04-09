@@ -332,7 +332,7 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, WiringRules};
     use crate::ids::MobId;
-    use crate::profile::{Profile, ToolConfig};
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::tasks::TaskStatus;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -346,7 +346,7 @@ mod tests {
                 let mut m = BTreeMap::new();
                 m.insert(
                     ProfileName::from("worker"),
-                    Profile {
+                    ProfileBinding::Inline(Profile {
                         model: "claude-sonnet-4-5".to_string(),
                         skills: vec![],
                         tools: ToolConfig::default(),
@@ -357,7 +357,7 @@ mod tests {
                         max_inline_peer_notifications: None,
                         output_schema: None,
                         provider_params: None,
-                    },
+                    }),
                 );
                 m
             },

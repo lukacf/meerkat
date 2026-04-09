@@ -88,7 +88,8 @@ pub fn validate_archive_bytes(bytes: &[u8]) -> Result<(), PackValidationError> {
     validate_required_files(&files)?;
     ensure_no_trust_section(&files)?;
     parse_manifest(&files)?;
-    parse_definition(&files)?;
+    let definition = parse_definition(&files)?;
+    reject_realm_refs(&definition)?;
     Ok(())
 }
 
@@ -116,6 +117,17 @@ fn parse_definition(
         .get("definition.json")
         .ok_or(PackValidationError::MissingDefinition)?;
     serde_json::from_slice(bytes).map_err(|err| PackValidationError::BadDefinition(err.to_string()))
+}
+
+fn reject_realm_refs(definition: &MobDefinition) -> Result<(), PackValidationError> {
+    for (name, binding) in &definition.profiles {
+        if binding.realm_ref_name().is_some() {
+            return Err(PackValidationError::RealmRefForbidden {
+                profile_name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_required_files(files: &BTreeMap<String, Vec<u8>>) -> Result<(), PackValidationError> {
@@ -370,6 +382,54 @@ mod tests {
         let archive = create_targz(&files).unwrap();
         let err = validate_archive_bytes(&archive).unwrap_err();
         assert!(matches!(err, PackValidationError::TrustSectionForbidden));
+    }
+
+    #[test]
+    fn test_validate_rejects_realm_ref_in_profile() {
+        let definition_json = r#"{
+            "id": "mob",
+            "profiles": {
+                "worker": {"realm_profile": "shared-worker"}
+            }
+        }"#;
+        let mut files = BTreeMap::new();
+        files.insert(
+            "manifest.toml".to_string(),
+            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n".to_vec(),
+        );
+        files.insert(
+            "definition.json".to_string(),
+            definition_json.as_bytes().to_vec(),
+        );
+        let archive = create_targz(&files).unwrap();
+        let err = validate_archive_bytes(&archive).unwrap_err();
+        match err {
+            PackValidationError::RealmRefForbidden { profile_name } => {
+                assert_eq!(profile_name, "worker");
+            }
+            other => panic!("expected RealmRefForbidden, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_inline_profiles_only() {
+        let definition_json = r#"{
+            "id": "mob",
+            "profiles": {
+                "coder": {"model": "claude-sonnet-4-5"}
+            }
+        }"#;
+        let mut files = BTreeMap::new();
+        files.insert(
+            "manifest.toml".to_string(),
+            b"[mobpack]\nname = \"x\"\nversion = \"1\"\n".to_vec(),
+        );
+        files.insert(
+            "definition.json".to_string(),
+            definition_json.as_bytes().to_vec(),
+        );
+        let archive = create_targz(&files).unwrap();
+        validate_archive_bytes(&archive).expect("inline-only profiles should pass validation");
     }
 
     fn fixture_mob_dir() -> TempDir {

@@ -137,7 +137,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     }
 
     // Check profile names are valid identifiers and cross-references
-    for (name, profile) in &def.profiles {
+    for (name, binding) in &def.profiles {
         // Validate profile name
         if !is_valid_identifier(name.as_str()) {
             diagnostics.push(Diagnostic {
@@ -162,6 +162,11 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
                 severity: DiagnosticSeverity::Error,
             });
         }
+
+        // RealmRef bindings are validated at resolution time; skip inner checks
+        let Some(profile) = binding.as_inline() else {
+            continue;
+        };
 
         // Check skill references
         for (i, skill_ref) in profile.skills.iter().enumerate() {
@@ -235,8 +240,9 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     let definition_uses_external_default = def.backend.default == MobBackendKind::External;
     let profile_uses_external = def
         .profiles
-        .iter()
-        .any(|(_, profile)| profile.backend == Some(MobBackendKind::External));
+        .values()
+        .filter_map(|b| b.as_inline())
+        .any(|profile| profile.backend == Some(MobBackendKind::External));
     if definition_uses_external_default || profile_uses_external {
         match &def.backend.external {
             None => diagnostics.push(Diagnostic {
@@ -293,7 +299,7 @@ mod tests {
         SkillSource, WiringRules,
     };
     use crate::ids::{MobId, ProfileName};
-    use crate::profile::{Profile, ToolConfig};
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use std::collections::BTreeMap;
 
     fn base_profile() -> Profile {
@@ -313,13 +319,19 @@ mod tests {
 
     fn valid_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("lead"), {
-            let mut p = base_profile();
-            p.skills = vec!["skill-a".to_string()];
-            p.tools.mcp = vec!["server-a".to_string()];
-            p
-        });
-        profiles.insert(ProfileName::from("worker"), base_profile());
+        profiles.insert(
+            ProfileName::from("lead"),
+            ProfileBinding::Inline({
+                let mut p = base_profile();
+                p.skills = vec!["skill-a".to_string()];
+                p.tools.mcp = vec!["server-a".to_string()];
+                p
+            }),
+        );
+        profiles.insert(
+            ProfileName::from("worker"),
+            ProfileBinding::Inline(base_profile()),
+        );
 
         let mut skills = BTreeMap::new();
         skills.insert(
@@ -392,6 +404,8 @@ mod tests {
         def.profiles
             .get_mut(&ProfileName::from("lead"))
             .unwrap()
+            .as_inline_mut()
+            .unwrap()
             .skills
             .push("nonexistent-skill".to_string());
 
@@ -407,6 +421,8 @@ mod tests {
         let mut def = valid_definition();
         def.profiles
             .get_mut(&ProfileName::from("lead"))
+            .unwrap()
+            .as_inline_mut()
             .unwrap()
             .tools
             .mcp
@@ -437,8 +453,10 @@ mod tests {
     #[test]
     fn test_invalid_profile_name() {
         let mut def = valid_definition();
-        def.profiles
-            .insert(ProfileName::from("123-invalid"), base_profile());
+        def.profiles.insert(
+            ProfileName::from("123-invalid"),
+            ProfileBinding::Inline(base_profile()),
+        );
 
         let diagnostics = validate_definition(&def);
         assert!(
@@ -453,7 +471,7 @@ mod tests {
         let mut def = valid_definition();
         def.profiles.insert(
             crate::runtime::flow_system_member_id().as_str().into(),
-            base_profile(),
+            ProfileBinding::Inline(base_profile()),
         );
 
         let diagnostics = validate_definition(&def);
@@ -488,10 +506,14 @@ mod tests {
         def.profiles
             .get_mut(&ProfileName::from("lead"))
             .unwrap()
+            .as_inline_mut()
+            .unwrap()
             .skills
             .push("bad-skill".to_string());
         def.profiles
             .get_mut(&ProfileName::from("lead"))
+            .unwrap()
+            .as_inline_mut()
             .unwrap()
             .tools
             .mcp
@@ -519,6 +541,8 @@ mod tests {
         def.profiles
             .get_mut(&ProfileName::from("worker"))
             .expect("worker profile exists")
+            .as_inline_mut()
+            .unwrap()
             .backend = Some(MobBackendKind::External);
         def.backend.external = Some(crate::definition::ExternalBackendConfig {
             address_base: "   ".to_string(),
@@ -558,6 +582,8 @@ model = "claude-sonnet-4-5"
         def.profiles
             .get_mut(&ProfileName::from("lead"))
             .expect("lead profile")
+            .as_inline_mut()
+            .unwrap()
             .max_inline_peer_notifications = Some(-2);
 
         let diagnostics = validate_definition(&def);

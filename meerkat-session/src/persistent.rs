@@ -3275,6 +3275,7 @@ mod tests {
                     name: "persisted_tool".to_string(),
                     description: "persisted callback tool".to_string(),
                     input_schema: serde_json::json!({"type":"object"}),
+                    provenance: None,
                 }],
                 silent_comms_intents: vec!["peer-b".to_string()],
                 max_inline_peer_notifications: Some(2),

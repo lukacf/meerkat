@@ -3,11 +3,13 @@
 //! SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
+use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
@@ -38,6 +40,13 @@ CREATE TABLE IF NOT EXISTS mob_runs (
 CREATE TABLE IF NOT EXISTS mob_specs (
     mob_id TEXT PRIMARY KEY,
     spec_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS realm_profiles (
+    name TEXT PRIMARY KEY,
+    profile_json BLOB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 )";
 
 fn se(error: impl std::fmt::Display) -> MobStoreError {
@@ -156,6 +165,12 @@ impl SqliteMobStores {
 
     pub fn spec_store(&self) -> SqliteMobSpecStore {
         SqliteMobSpecStore {
+            path: self.path.clone(),
+        }
+    }
+
+    pub fn realm_profile_store(&self) -> SqliteRealmProfileStore {
+        SqliteRealmProfileStore {
             path: self.path.clone(),
         }
     }
@@ -1317,6 +1332,270 @@ impl MobSpecStore for SqliteMobSpecStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SqliteRealmProfileStore
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SqliteRealmProfileStore {
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for SqliteRealmProfileStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteRealmProfileStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl RealmProfileStore for SqliteRealmProfileStore {
+    async fn create(
+        &self,
+        name: &str,
+        profile: &Profile,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let path = self.path.clone();
+        let name = name.to_string();
+        let profile = profile.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+
+            let exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM realm_profiles WHERE name = ?1",
+                    params![name],
+                    |_| Ok(true),
+                )
+                .optional()
+                .map_err(se)?
+                .unwrap_or(false);
+
+            if exists {
+                return Err(MobStoreError::CasConflict(format!(
+                    "realm profile already exists: {name}"
+                )));
+            }
+
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let profile_json = encode_json(&profile)?;
+
+            tx.execute(
+                "INSERT INTO realm_profiles (name, profile_json, revision, created_at, updated_at) VALUES (?1, ?2, 1, ?3, ?4)",
+                params![name, profile_json, now_str, now_str],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+
+            Ok(StoredRealmProfile {
+                name,
+                profile,
+                revision: 1,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    async fn get(&self, name: &str) -> Result<Option<StoredRealmProfile>, MobStoreError> {
+        let path = self.path.clone();
+        let name = name.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<(Vec<u8>, i64, String, String)> = conn
+                .query_row(
+                    "SELECT profile_json, revision, created_at, updated_at FROM realm_profiles WHERE name = ?1",
+                    params![name],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(se)?;
+
+            match row {
+                Some((bytes, revision, created_at_str, updated_at_str)) => {
+                    let profile: Profile = decode_json(&bytes)?;
+                    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                        .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                        .with_timezone(&Utc);
+                    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                        .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                        .with_timezone(&Utc);
+                    Ok(Some(StoredRealmProfile {
+                        name,
+                        profile,
+                        revision: revision as u64,
+                        created_at,
+                        updated_at,
+                    }))
+                }
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn list(&self) -> Result<Vec<StoredRealmProfile>, MobStoreError> {
+        let path = self.path.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare("SELECT name, profile_json, revision, created_at, updated_at FROM realm_profiles ORDER BY name")
+                .map_err(se)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(se)?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                let (name, bytes, revision, created_at_str, updated_at_str) = row.map_err(se)?;
+                let profile: Profile = decode_json(&bytes)?;
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                    .with_timezone(&Utc);
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                    .with_timezone(&Utc);
+                result.push(StoredRealmProfile {
+                    name,
+                    profile,
+                    revision: revision as u64,
+                    created_at,
+                    updated_at,
+                });
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn update(
+        &self,
+        name: &str,
+        profile: &Profile,
+        expected_revision: u64,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let path = self.path.clone();
+        let name = name.to_string();
+        let profile = profile.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+
+            let row: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT revision, created_at FROM realm_profiles WHERE name = ?1",
+                    params![name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(se)?;
+
+            let (current_revision, created_at_str) = row.ok_or_else(|| {
+                MobStoreError::NotFound(format!("realm profile not found: {name}"))
+            })?;
+
+            if current_revision as u64 != expected_revision {
+                return Err(MobStoreError::CasConflict(format!(
+                    "realm profile '{name}' revision conflict: expected {expected_revision}, actual {current_revision}"
+                )));
+            }
+
+            let next_revision = expected_revision + 1;
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let profile_json = encode_json(&profile)?;
+
+            tx.execute(
+                "UPDATE realm_profiles SET profile_json = ?1, revision = ?2, updated_at = ?3 WHERE name = ?4",
+                params![profile_json, next_revision as i64, now_str, name],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                .with_timezone(&Utc);
+
+            Ok(StoredRealmProfile {
+                name,
+                profile,
+                revision: next_revision,
+                created_at,
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
+    async fn delete(
+        &self,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<StoredRealmProfile, MobStoreError> {
+        let path = self.path.clone();
+        let name = name.to_string();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+
+            let row: Option<(Vec<u8>, i64, String, String)> = tx
+                .query_row(
+                    "SELECT profile_json, revision, created_at, updated_at FROM realm_profiles WHERE name = ?1",
+                    params![name],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(se)?;
+
+            let (bytes, current_revision, created_at_str, updated_at_str) = row.ok_or_else(|| {
+                MobStoreError::NotFound(format!("realm profile not found: {name}"))
+            })?;
+
+            if current_revision as u64 != expected_revision {
+                return Err(MobStoreError::CasConflict(format!(
+                    "realm profile '{name}' revision conflict: expected {expected_revision}, actual {current_revision}"
+                )));
+            }
+
+            let profile: Profile = decode_json(&bytes)?;
+            tx.execute(
+                "DELETE FROM realm_profiles WHERE name = ?1",
+                params![name],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                .with_timezone(&Utc);
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?
+                .with_timezone(&Utc);
+
+            Ok(StoredRealmProfile {
+                name,
+                profile,
+                revision: expected_revision,
+                created_at,
+                updated_at,
+            })
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1324,7 +1603,7 @@ mod tests {
     use crate::definition::{BackendConfig, FlowSpec, WiringRules};
     use crate::event::MobEventKind;
     use crate::ids::{MeerkatId, ProfileName};
-    use crate::profile::{Profile, ToolConfig};
+    use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
     use futures::future::join_all;
     use indexmap::IndexMap;
@@ -1339,7 +1618,7 @@ mod tests {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             ProfileName::from("worker"),
-            Profile {
+            ProfileBinding::Inline(Profile {
                 model: "model".to_string(),
                 skills: Vec::new(),
                 tools: ToolConfig::default(),
@@ -1350,7 +1629,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            },
+            }),
         );
         MobDefinition {
             id: MobId::from("mob"),
@@ -1614,5 +1893,83 @@ mod tests {
             let all = events.replay_all().await.unwrap();
             assert_eq!(all.len(), 1, "data from first open must survive reopen");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // RealmProfileStore contract tests (SQLite)
+    // -----------------------------------------------------------------------
+
+    use crate::store::realm_profile::contract_tests;
+
+    fn sqlite_realm_profile_store() -> (tempfile::TempDir, SqliteRealmProfileStore) {
+        let (dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        (dir, stores.realm_profile_store())
+    }
+
+    #[tokio::test]
+    async fn realm_profile_create_and_get() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_create_and_get(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_get_nonexistent() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_get_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_create_duplicate_fails() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_create_duplicate_fails(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_correct_revision() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_update_with_correct_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_wrong_revision() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_update_with_wrong_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_update_nonexistent() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_update_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_correct_revision() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_delete_with_correct_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_wrong_revision() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_delete_with_wrong_revision(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_delete_nonexistent() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_delete_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_list() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_list(&store).await;
+    }
+
+    #[tokio::test]
+    async fn realm_profile_list_empty() {
+        let (_dir, store) = sqlite_realm_profile_store();
+        contract_tests::test_list_empty(&store).await;
     }
 }

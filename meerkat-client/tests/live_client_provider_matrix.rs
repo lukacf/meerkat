@@ -170,6 +170,7 @@ async fn e2e_anthropic_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
+        provenance: None,
     })]);
 
     let mut stream = client.stream(&request);
@@ -464,6 +465,7 @@ async fn e2e_openai_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
+        provenance: None,
     })]);
 
     let mut stream = client.stream(&request);
@@ -543,6 +545,7 @@ async fn e2e_gemini_tool_use() -> Result<(), Box<dyn std::error::Error>> {
         name: "get_weather".to_string(),
         description: "Get weather for a city".to_string(),
         input_schema: schema_for::<WeatherArgs>(),
+        provenance: None,
     })]);
 
     let mut stream = client.stream(&request);

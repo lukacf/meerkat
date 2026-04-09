@@ -11,8 +11,8 @@ use meerkat_mob::definition::{
 use meerkat_mob::runtime::{FlowRunKernel, FlowRunMutator};
 use meerkat_mob::{
     FlowId, FlowRunConfig, InMemoryMobEventStore, InMemoryMobRunStore, MobDefinition, MobEventKind,
-    MobEventStore, MobId, MobRunStatus, MobRunStore, MobRuntimeMode, Profile, ProfileName,
-    ToolConfig,
+    MobEventStore, MobId, MobRunStatus, MobRunStore, MobRuntimeMode, Profile, ProfileBinding,
+    ProfileName, ToolConfig,
 };
 use std::collections::BTreeMap;
 
@@ -50,7 +50,7 @@ fn owner_test_config() -> FlowRunConfig {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        Profile {
+        ProfileBinding::Inline(Profile {
             model: "model".into(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
@@ -61,11 +61,11 @@ fn owner_test_config() -> FlowRunConfig {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        },
+        }),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        Profile {
+        ProfileBinding::Inline(Profile {
             model: "model".into(),
             skills: Vec::new(),
             tools: ToolConfig::default(),
@@ -76,7 +76,7 @@ fn owner_test_config() -> FlowRunConfig {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
-        },
+        }),
     );
 
     let definition = MobDefinition {

@@ -117,6 +117,7 @@ impl AgentToolDispatcher for RecordingToolDispatcher {
             name: "echo".to_string(),
             description: "echo".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
         })])
     }
 

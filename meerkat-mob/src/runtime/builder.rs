@@ -216,6 +216,7 @@ impl MobBuilder {
         let has_autonomous = definition
             .profiles
             .values()
+            .filter_map(|b| b.as_inline())
             .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
         if has_autonomous && runtime_adapter.is_none() {
             return Err(MobError::Internal(
@@ -257,6 +258,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            storage.realm_profiles.clone(),
         ))
     }
 
@@ -316,6 +318,7 @@ impl MobBuilder {
         let has_autonomous = definition
             .profiles
             .values()
+            .filter_map(|b| b.as_inline())
             .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
         if has_autonomous && runtime_adapter.is_none() {
             return Err(MobError::Internal(
@@ -426,6 +429,7 @@ impl MobBuilder {
                 &tool_bundles,
                 &preview_handle,
                 &default_external_tools_provider,
+                storage.realm_profiles.clone(),
             )
             .await?;
         }
@@ -443,6 +447,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            storage.realm_profiles.clone(),
         ))
     }
 
@@ -475,6 +480,7 @@ impl MobBuilder {
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
         default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
+        realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> Result<(), MobError> {
         tool_handle.restore_diagnostics.write().await.clear();
         let provisioner = MultiBackendProvisioner::new(
@@ -545,10 +551,15 @@ impl MobBuilder {
                     .await;
                     continue;
                 };
-                let profile = definition
-                    .profiles
-                    .get(&entry.profile)
-                    .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                // Prefer roster's effective_profile_override on restore for lifecycle safety.
+                let profile = if let Some(ref p) = entry.effective_profile_override {
+                    p.clone()
+                } else {
+                    definition
+                        .resolve_profile(&entry.profile, realm_profile_store.as_ref())
+                        .await?
+                };
+                let profile = &profile;
                 let default_ext = default_external_tools_provider.as_ref().and_then(|p| p());
                 let resumed_config =
                     build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
@@ -570,6 +581,7 @@ impl MobBuilder {
                             additional_instructions: None,
                             shell_env: None,
                             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                            inherited_tool_filter: None,
                         },
                         expected_session_id: &session_id,
                         resumed_session: stored_session,
@@ -613,18 +625,17 @@ impl MobBuilder {
                 // Ephemeral services can still fall back to fresh-create.
             }
             let profile = definition
-                .profiles
-                .get(&entry.profile)
-                .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                .resolve_profile(&entry.profile, realm_profile_store.as_ref())
+                .await?;
             let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
                 profile_name: &entry.profile,
                 meerkat_id: &entry.meerkat_id,
-                profile,
+                profile: &profile,
                 definition,
                 external_tools: compose_external_tools_for_profile(
-                    profile,
+                    &profile,
                     tool_bundles,
                     tool_handle.clone(),
                     default_ext_fresh,
@@ -635,6 +646,7 @@ impl MobBuilder {
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter: None,
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -832,6 +844,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
@@ -874,6 +887,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            realm_profile_store,
         )
     }
 
@@ -888,6 +902,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+        realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
@@ -1021,6 +1036,7 @@ impl MobBuilder {
             spawn_policy,
             lifecycle_authority,
             default_external_tools_provider,
+            realm_profile_store,
         };
         tokio::spawn(actor.run(command_rx));
 

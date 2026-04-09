@@ -12,7 +12,7 @@ use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::types::{
-    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, Usage,
+    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage,
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
@@ -478,6 +478,27 @@ pub fn resolve_mob_operator_access(
     (override_mob, authority_context)
 }
 
+/// Provider of a snapshot of currently visible tools.
+///
+/// Implemented by the agent's `ToolScope` holder to capture tool visibility
+/// at spawn time for inheritance by mob children.
+pub trait VisibleToolSnapshotProvider: Send + Sync {
+    /// Returns the tool definitions currently visible to the parent agent.
+    fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>>;
+}
+
+/// Context for capturing a parent agent's tool scope snapshot.
+///
+/// `ParentOwned` carries a provider that can snapshot the parent's visible
+/// tools at child spawn time. `Standalone` means no parent scope is available
+/// (e.g. top-level agents, tests).
+pub enum MobToolSnapshotContext {
+    /// Parent agent owns a tool scope; snapshot available on demand.
+    ParentOwned(Arc<dyn VisibleToolSnapshotProvider>),
+    /// No parent scope available.
+    Standalone,
+}
+
 /// Session-scoped arguments passed to [`MobToolsFactory::build_mob_tools`].
 pub struct MobToolsBuildArgs {
     /// Session ID of the agent being built.
@@ -501,6 +522,8 @@ pub struct MobToolsBuildArgs {
     pub comms_name: Option<String>,
     /// Optional comms runtime for auto-wiring spawned members.
     pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,
+    /// Context for capturing a snapshot of the parent agent's visible tools.
+    pub snapshot_context: MobToolSnapshotContext,
 }
 
 /// Factory trait for late-binding mob tool construction.
@@ -1160,5 +1183,41 @@ mod tests {
         assert!(ctx.managed_mob_scope.contains("mob-1"));
         assert!(ctx.managed_mob_scope.contains("mob-2"));
         assert_eq!(ctx.managed_mob_scope.len(), 2);
+    }
+
+    struct MockSnapshotProvider {
+        tools: Vec<Arc<ToolDef>>,
+    }
+
+    impl VisibleToolSnapshotProvider for MockSnapshotProvider {
+        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+            self.tools.clone()
+        }
+    }
+
+    #[test]
+    fn mob_tool_snapshot_context_standalone() {
+        let ctx = MobToolSnapshotContext::Standalone;
+        assert!(matches!(ctx, MobToolSnapshotContext::Standalone));
+    }
+
+    #[test]
+    fn mob_tool_snapshot_context_parent_owned_returns_tools() {
+        let tools = vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "a test".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
+        })];
+        let provider = Arc::new(MockSnapshotProvider { tools });
+        let ctx = MobToolSnapshotContext::ParentOwned(provider);
+        match ctx {
+            MobToolSnapshotContext::ParentOwned(p) => {
+                let snapshot = p.snapshot_visible_tools();
+                assert_eq!(snapshot.len(), 1);
+                assert_eq!(snapshot[0].name, "test_tool");
+            }
+            MobToolSnapshotContext::Standalone => panic!("expected ParentOwned"),
+        }
     }
 }

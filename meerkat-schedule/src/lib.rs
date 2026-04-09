@@ -44,8 +44,9 @@ pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, Schedule, ScheduleId, SchedulePhase,
-    ScheduleRevision, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
-    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TriggerSpec, UpdateScheduleRequest,
+    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule, ScheduleId,
+    SchedulePhase, ScheduleRevision, ScheduleSpawnTooling, ScheduledMobAction,
+    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
+    UpdateScheduleRequest,
 };

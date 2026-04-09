@@ -228,6 +228,7 @@ mod tests {
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
                 kickoff: None,
+                effective_profile_override: None,
             },
             retiring_comms: None,
             retiring_key: None,

@@ -305,6 +305,7 @@ fn test_tool_def_serialization() {
         name: "test_tool".to_string(),
         description: "A test tool".to_string(),
         input_schema: schema_for::<TestToolDefInput>(),
+        provenance: None,
     };
 
     let json = serde_json::to_string(&tool_def).unwrap();
@@ -325,6 +326,7 @@ fn test_tool_def_empty_schema_serialization() {
         name: "empty_tool".to_string(),
         description: "An empty tool".to_string(),
         input_schema: schema_for::<EmptyObject>(),
+        provenance: None,
     };
 
     let json = serde_json::to_string(&tool_def).unwrap();
@@ -1570,5 +1572,78 @@ mod content_block_tests {
             },
         };
         assert_eq!(format!("{block}"), "[video: video/mp4]");
+    }
+
+    // -----------------------------------------------------------------------
+    // ToolProvenance / ToolDef provenance
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_provenance_roundtrip_all_kinds() {
+        use super::{ToolProvenance, ToolSourceKind};
+
+        let kinds = [
+            ToolSourceKind::Builtin,
+            ToolSourceKind::Shell,
+            ToolSourceKind::Comms,
+            ToolSourceKind::Memory,
+            ToolSourceKind::Schedule,
+            ToolSourceKind::Mob,
+            ToolSourceKind::MobTasks,
+            ToolSourceKind::Callback,
+            ToolSourceKind::Mcp,
+            ToolSourceKind::RustBundle,
+        ];
+        for kind in kinds {
+            let prov = ToolProvenance {
+                kind: kind.clone(),
+                source_id: "test-source".into(),
+            };
+            let json = serde_json::to_string(&prov).unwrap();
+            let parsed: ToolProvenance = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, prov);
+        }
+    }
+
+    #[test]
+    fn tool_def_without_provenance_backward_compat() {
+        // Existing JSON without provenance field should deserialize fine
+        let json = r#"{"name":"test","description":"a tool","input_schema":{"type":"object"}}"#;
+        let def: ToolDef = serde_json::from_str(json).unwrap();
+        assert_eq!(def.name, "test");
+        assert!(def.provenance.is_none());
+    }
+
+    #[test]
+    fn tool_def_with_provenance_roundtrip() {
+        use super::{ToolProvenance, ToolSourceKind};
+
+        let def = ToolDef::new("my_tool", "does things", json!({"type": "object"}))
+            .with_provenance(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: "code-server".into(),
+            });
+
+        let json = serde_json::to_string(&def).unwrap();
+        let parsed: ToolDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "my_tool");
+        let prov = parsed.provenance.unwrap();
+        assert_eq!(prov.kind, ToolSourceKind::Mcp);
+        assert_eq!(prov.source_id, "code-server");
+    }
+
+    #[test]
+    fn tool_def_without_provenance_skips_serialization() {
+        let def = ToolDef::new("t", "d", json!({}));
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(!json.contains("provenance"));
+    }
+
+    #[test]
+    fn tool_def_new_constructor() {
+        let def = ToolDef::new("name", "desc", json!({"type": "object"}));
+        assert_eq!(def.name, "name");
+        assert_eq!(def.description, "desc");
+        assert!(def.provenance.is_none());
     }
 }

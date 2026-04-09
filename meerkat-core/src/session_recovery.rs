@@ -338,6 +338,7 @@ mod tests {
                     name: "inline_tool".to_string(),
                     description: "recoverable inline tool".to_string(),
                     input_schema: json!({"type":"object"}),
+                    provenance: None,
                 }],
                 silent_comms_intents: vec!["peer-b".to_string()],
                 max_inline_peer_notifications: Some(4),
@@ -472,6 +473,7 @@ mod tests {
             name: "fresh_tool".to_string(),
             description: "fresh".to_string(),
             input_schema: json!({"type":"object"}),
+            provenance: None,
         }];
         let recovered = build_recovered_session(
             sample_session(),

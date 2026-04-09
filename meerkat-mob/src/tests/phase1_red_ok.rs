@@ -286,5 +286,5 @@ fn ops_registry_integration_red_ok_existing_session_attach_reuses_spawn_control_
         .with_resume_session_id(session_id.clone());
 
     assert_eq!(spec.resume_session_id(), Some(&session_id));
-    assert_eq!(spec.profile_name.as_str(), "orchestrator");
+    assert_eq!(spec.role_name.as_str(), "orchestrator");
 }

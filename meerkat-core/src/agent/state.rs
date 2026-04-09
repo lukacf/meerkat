@@ -1655,7 +1655,9 @@ mod tests {
         SkillKey, SkillName, SourceUuid,
     };
     use crate::state::LoopState;
-    use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter};
+    use crate::tool_scope::{
+        EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter,
+    };
     use crate::types::{
         AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCallView, ToolDef,
         ToolResult, Usage, UserMessage,
@@ -2155,6 +2157,7 @@ mod tests {
                         name: (*name).to_string(),
                         description: format!("{name} tool"),
                         input_schema: serde_json::json!({ "type": "object" }),
+                        provenance: None,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -3025,6 +3028,34 @@ mod tests {
         let seen = client.seen_tools();
         assert_eq!(
             seen,
+            vec![vec!["visible".to_string()], vec!["visible".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_restores_inherited_filter_from_session_metadata() {
+        let client = Arc::new(VisibilityRecordingLlmClient::new());
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut session = crate::Session::new();
+        session.set_metadata(
+            INHERITED_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(ToolFilter::Allow(
+                ["visible".to_string()].into_iter().collect(),
+            ))
+            .unwrap(),
+        );
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        // The inherited base filter restricts to only "visible"
+        assert_eq!(
+            client.seen_tools(),
             vec![vec!["visible".to_string()], vec!["visible".to_string()]]
         );
     }

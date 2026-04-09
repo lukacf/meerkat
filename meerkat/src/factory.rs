@@ -317,6 +317,12 @@ pub struct AgentBuildConfig {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed. See [`RuntimeBuildMode`] for details.
     pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
+    /// Pre-resolved metadata entries to inject into the session before agent build.
+    ///
+    /// These are set on the session's internal metadata map before `AgentBuilder::build()`
+    /// runs, so they are available for early-stage recovery (e.g. inherited tool filter).
+    /// Entries here take precedence over any resumed session metadata for the same key.
+    pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -435,6 +441,7 @@ impl AgentBuildConfig {
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
+            initial_metadata_entries: std::collections::BTreeMap::new(),
         }
     }
 
@@ -622,6 +629,47 @@ impl meerkat_core::ModelOperationalDefaultsResolver for ProfileBasedDefaultsReso
 /// Return the canonical string key for a provider.
 pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
+}
+
+/// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
+///
+/// Created before mob tool composition (so it can be passed into `MobToolsBuildArgs`),
+/// then updated with the final composed dispatcher after mob tools are added.
+/// This ensures the snapshot includes mob/profile tools the parent currently has.
+///
+/// Uses a `Weak` reference to avoid inflating the `Arc` strong count on the dispatcher,
+/// which would cause `bind_ops_lifecycle` to reject rebinding due to shared ownership.
+struct DeferredSnapshotProvider {
+    dispatcher: std::sync::RwLock<Option<std::sync::Weak<dyn AgentToolDispatcher>>>,
+}
+
+impl DeferredSnapshotProvider {
+    fn new() -> Self {
+        Self {
+            dispatcher: std::sync::RwLock::new(None),
+        }
+    }
+
+    fn set_dispatcher(&self, dispatcher: &Arc<dyn AgentToolDispatcher>) {
+        let mut guard = self
+            .dispatcher
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(Arc::downgrade(dispatcher));
+    }
+}
+
+impl meerkat_core::service::VisibleToolSnapshotProvider for DeferredSnapshotProvider {
+    fn snapshot_visible_tools(&self) -> Vec<Arc<meerkat_core::types::ToolDef>> {
+        let guard = self
+            .dispatcher
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_ref().and_then(std::sync::Weak::upgrade) {
+            Some(d) => d.tools().to_vec(),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Factory for creating agents with standard configuration.
@@ -1401,7 +1449,12 @@ impl AgentFactory {
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
-        let session = build_config.resume_session.clone().unwrap_or_default();
+        let mut session = build_config.resume_session.clone().unwrap_or_default();
+        // Inject pre-resolved metadata entries (e.g. inherited tool filter from
+        // spawn tooling) before the builder reads metadata for early-stage recovery.
+        for (key, value) in &build_config.initial_metadata_entries {
+            session.set_metadata(key, value.clone());
+        }
         let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
         // If the factory has a pre-built runtime (surface with stable identity),
@@ -1648,6 +1701,8 @@ impl AgentFactory {
         let mut hoisted_mob_authority_handle: Option<
             Arc<std::sync::RwLock<meerkat_core::service::MobToolAuthorityContext>>,
         > = None;
+        // Hoisted so we can re-point the Weak reference after bind_ops_lifecycle.
+        let mut hoisted_deferred_provider: Option<Arc<DeferredSnapshotProvider>> = None;
         if effective_mob && let Some(mob_factory) = mob_factory {
             // Build comms runtime arg: clone from the comms phase if available.
             #[cfg(feature = "comms")]
@@ -1665,6 +1720,14 @@ impl AgentFactory {
                 .map(|ctx| Arc::new(std::sync::RwLock::new(ctx.clone())));
             hoisted_mob_authority_handle = mob_authority_handle.clone();
 
+            // Use a deferred snapshot provider: created before mob composition
+            // so it can be passed into MobToolsBuildArgs, then updated with the
+            // final composed dispatcher after mob tools are added. This ensures
+            // InheritParent snapshots include mob/profile tools.
+            let deferred_provider = Arc::new(DeferredSnapshotProvider::new());
+            let snapshot_provider: Arc<dyn meerkat_core::service::VisibleToolSnapshotProvider> =
+                Arc::clone(&deferred_provider)
+                    as Arc<dyn meerkat_core::service::VisibleToolSnapshotProvider>;
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
@@ -1672,6 +1735,9 @@ impl AgentFactory {
                 effective_authority: mob_authority_handle.clone(),
                 comms_name: build_config.comms_name.clone(),
                 comms_runtime: mob_comms,
+                snapshot_context: meerkat_core::service::MobToolSnapshotContext::ParentOwned(
+                    snapshot_provider,
+                ),
             };
             let mob_dispatcher = mob_factory
                 .build_mob_tools(mob_args)
@@ -1684,6 +1750,10 @@ impl AgentFactory {
                 tools,
                 mob_dispatcher,
             ]));
+            // Set the final composed dispatcher on the deferred provider so
+            // snapshots captured later include mob tools.
+            deferred_provider.set_dispatcher(&tools);
+            hoisted_deferred_provider = Some(deferred_provider);
             if !mob_usage.is_empty() {
                 if !tool_usage_instructions.is_empty() {
                     tool_usage_instructions.push_str("\n\n");
@@ -1705,6 +1775,11 @@ impl AgentFactory {
                     BuildAgentError::Config(format!("Ops lifecycle binding failed: {e}"))
                 })?;
             tools = outcome.into_dispatcher();
+        }
+        // Re-point the deferred snapshot provider after binding may have replaced
+        // the dispatcher Arc (bind_ops_lifecycle can return a new Arc).
+        if let Some(ref provider) = hoisted_deferred_provider {
+            provider.set_dispatcher(&tools);
         }
 
         tracing::debug!(

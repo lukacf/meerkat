@@ -229,9 +229,11 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     let definition = MobDefinition::from_toml(pipeline_toml)?;
     println!("Pipeline: {}", definition.id);
     println!("Stages:");
-    for (name, profile) in &definition.profiles {
-        if name.as_str() != "coordinator" {
-            println!("  {} -- {}", name, profile.peer_description);
+    for (name, binding) in &definition.profiles {
+        if let Some(profile) = binding.as_inline()
+            && name.as_str() != "coordinator"
+        {
+            println!("  {name} -- {}", profile.peer_description);
         }
     }
 

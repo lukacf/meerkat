@@ -150,6 +150,9 @@ pub(super) struct PendingSpawn {
     pub(super) auto_wire_parent: bool,
     /// Peer wiring to restore after respawn completes.
     pub(super) restore_wiring: Option<RestoreWiringPlan>,
+    /// Effective profile override from `SpawnTooling::Profile` resolution.
+    /// Persisted in the roster so respawn/restore can use it.
+    pub(super) effective_profile_override: Option<crate::profile::Profile>,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
@@ -172,6 +175,9 @@ struct RespawnSnapshot {
     labels: std::collections::BTreeMap<String, String>,
     old_session_id: meerkat_core::types::SessionId,
     restore_wiring: RestoreWiringPlan,
+    /// Effective profile override persisted in the roster.
+    /// Used on respawn to avoid re-resolving from the definition.
+    effective_profile_override: Option<crate::profile::Profile>,
 }
 
 struct FinalizeSpawnOutcome {
@@ -221,6 +227,7 @@ pub(super) struct MobActor {
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
 }
 
 impl MobActor {
@@ -1848,7 +1855,7 @@ impl MobActor {
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
         let super::handle::SpawnMemberSpec {
-            profile_name,
+            role_name: profile_name,
             meerkat_id,
             initial_message,
             runtime_mode,
@@ -1861,6 +1868,8 @@ impl MobActor {
             auto_wire_parent,
             additional_instructions,
             shell_env,
+            inherited_tool_filter,
+            override_profile,
         } = spec;
         // Normalize launch-mode resume/fork details for the provisioning path.
         let (resume_session_id, fork_spec) = match launch_mode {
@@ -1906,11 +1915,24 @@ impl MobActor {
                 }
             }
 
-            let profile = self
-                .definition
-                .profiles
-                .get(&profile_name)
-                .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
+            // Always validate role_name exists in definition for roster consistency,
+            // even when an override profile is provided.
+            if !self.definition.profiles.contains_key(&profile_name) {
+                return Err(MobError::ProfileNotFound(profile_name.clone()));
+            }
+
+            // Capture the override for roster persistence before consuming it.
+            let effective_profile_override = override_profile.clone();
+
+            // Use override_profile if provided (from SpawnTooling::Profile resolution),
+            // otherwise resolve from the mob definition.
+            let profile = if let Some(p) = override_profile {
+                p
+            } else {
+                self.definition
+                    .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
+                    .await?
+            };
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
 
@@ -1970,6 +1992,7 @@ impl MobActor {
                         None,
                         owner_session_id.clone(),
                         auto_wire_parent,
+                        effective_profile_override.clone(),
                     ));
                 }
 
@@ -1985,14 +2008,14 @@ impl MobActor {
                             ))
                         })?;
 
-                    let external_tools = self.external_tools_for_profile(profile)?;
+                    let external_tools = self.external_tools_for_profile(&profile)?;
                     let mut config = build::build_resumed_agent_config(
                         build::BuildResumedAgentConfigParams {
                             base: build::BuildAgentConfigParams {
                                 mob_id: &self.definition.id,
                                 profile_name: &profile_name,
                                 meerkat_id: &meerkat_id,
-                                profile,
+                                profile: &profile,
                                 definition: &self.definition,
                                 external_tools,
                                 context,
@@ -2000,6 +2023,7 @@ impl MobActor {
                                 additional_instructions,
                                 shell_env,
                                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                                inherited_tool_filter: inherited_tool_filter.clone(),
                             },
                             expected_session_id: &resume_id,
                             resumed_session: stored_session,
@@ -2038,6 +2062,7 @@ impl MobActor {
                         Some(provision_request),
                         owner_session_id.clone(),
                         auto_wire_parent,
+                        effective_profile_override.clone(),
                     ));
                 }
 
@@ -2109,12 +2134,12 @@ impl MobActor {
                 None
             };
 
-            let external_tools = self.external_tools_for_profile(profile)?;
+            let external_tools = self.external_tools_for_profile(&profile)?;
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &self.definition.id,
                 profile_name: &profile_name,
                 meerkat_id: &meerkat_id,
-                profile,
+                profile: &profile,
                 definition: &self.definition,
                 external_tools,
                 context,
@@ -2122,6 +2147,7 @@ impl MobActor {
                 additional_instructions,
                 shell_env,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
+                inherited_tool_filter,
             })
             .await?;
             config.keep_alive =
@@ -2165,6 +2191,7 @@ impl MobActor {
                 Some(provision_request),
                 owner_session_id.clone(),
                 auto_wire_parent,
+                effective_profile_override,
             ))
         }
         .await;
@@ -2179,6 +2206,7 @@ impl MobActor {
             maybe_provision_request,
             spawn_owner_session_id,
             auto_wire_parent,
+            effective_profile_override,
         ) = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -2230,6 +2258,7 @@ impl MobActor {
                     spawn_owner_session_id,
                     auto_wire_parent,
                     None,
+                    effective_profile_override,
                 )
                 .await
                 .map(|outcome| outcome.receipt);
@@ -2266,6 +2295,7 @@ impl MobActor {
             owner_session_id: spawn_owner_session_id,
             auto_wire_parent,
             restore_wiring: None,
+            effective_profile_override,
             progress: pending_progress.clone(),
             reply_tx,
         };
@@ -2413,6 +2443,7 @@ impl MobActor {
                 owner_session_id,
                 auto_wire_parent,
                 restore_wiring,
+                effective_profile_override,
                 progress: _,
                 reply_tx,
             } = pending;
@@ -2446,6 +2477,7 @@ impl MobActor {
                                 owner_session_id,
                                 auto_wire_parent,
                                 restore_wiring,
+                                effective_profile_override,
                             )
                             .await
                             .map(|outcome| outcome.receipt)
@@ -2508,17 +2540,16 @@ impl MobActor {
         let profile_name = spawn_spec.profile;
         let profile = self
             .definition
-            .profiles
-            .get(&profile_name)
-            .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
+            .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
+            .await?;
         let runtime_mode = spawn_spec.runtime_mode.unwrap_or(profile.runtime_mode);
-        let external_tools = self.external_tools_for_profile(profile)?;
+        let external_tools = self.external_tools_for_profile(&profile)?;
         let labels = std::collections::BTreeMap::new();
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
             meerkat_id,
-            profile,
+            profile: &profile,
             definition: &self.definition,
             external_tools,
             context: None,
@@ -2526,6 +2557,7 @@ impl MobActor {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await?;
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -2558,6 +2590,7 @@ impl MobActor {
             owner_session_id: None,
             auto_wire_parent: false,
             restore_wiring: None,
+            effective_profile_override: None,
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: pending_reply_tx,
         };
@@ -2626,6 +2659,7 @@ impl MobActor {
                 None,
                 false,
                 None,
+                None, // policy spawns use definition profiles, no override
             )
             .await
             .map(|outcome| outcome.receipt)
@@ -2668,6 +2702,7 @@ impl MobActor {
         owner_session_id: Option<SessionId>,
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
+        effective_profile_override: Option<crate::profile::Profile>,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
         if let Err(append_error) = self
             .events
@@ -2710,6 +2745,7 @@ impl MobActor {
                 member_ref: member_ref.clone(),
                 peer_id,
                 labels,
+                effective_profile_override,
             });
             debug_assert!(
                 inserted,
@@ -3083,6 +3119,7 @@ impl MobActor {
                         .collect(),
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
+                effective_profile_override: entry.effective_profile_override,
             }
         };
 
@@ -3093,17 +3130,20 @@ impl MobActor {
         let prompt = initial_message.unwrap_or_else(|| {
             ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &meerkat_id))
         });
-        let profile = self
-            .definition
-            .profiles
-            .get(&snapshot.profile_name)
-            .ok_or_else(|| MobError::ProfileNotFound(snapshot.profile_name.clone()))?;
-        let external_tools = self.external_tools_for_profile(profile)?;
+        // Prefer roster's effective_profile_override on respawn for lifecycle safety.
+        let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
+            p
+        } else {
+            self.definition
+                .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
+                .await?
+        };
+        let external_tools = self.external_tools_for_profile(&profile)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &snapshot.profile_name,
             meerkat_id: &meerkat_id,
-            profile,
+            profile: &profile,
             definition: &self.definition,
             external_tools,
             context: None,
@@ -3111,6 +3151,7 @@ impl MobActor {
             additional_instructions: None,
             shell_env: None,
             mob_tool_access_context: crate::build::MobToolAccessContext::None,
+            inherited_tool_filter: None,
         })
         .await?;
         config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
@@ -3150,6 +3191,7 @@ impl MobActor {
             restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
+            effective_profile_override: snapshot.effective_profile_override.clone(),
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: respawn_inline_reply_tx,
         };
@@ -3257,6 +3299,7 @@ impl MobActor {
                 (!snapshot.restore_wiring.local_peers.is_empty()
                     || !snapshot.restore_wiring.external_peers.is_empty())
                 .then_some(snapshot.restore_wiring.clone()),
+                snapshot.effective_profile_override.clone(),
             )
             .await
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
@@ -4331,9 +4374,8 @@ impl MobActor {
         // Check external_addressable
         let profile = self
             .definition
-            .profiles
-            .get(&entry.profile)
-            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+            .resolve_profile(&entry.profile, self.realm_profile_store.as_ref())
+            .await?;
 
         if !profile.external_addressable {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
@@ -5010,6 +5052,7 @@ impl MobActor {
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
                 kickoff: None,
+                effective_profile_override: None,
             }),
             retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
@@ -5340,9 +5383,10 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let peer_description = self
             .definition
-            .profiles
-            .get(&new_peer_entry.profile)
-            .map_or("", |p| p.peer_description.as_str());
+            .resolve_profile(&new_peer_entry.profile, self.realm_profile_store.as_ref())
+            .await
+            .map(|p| p.peer_description)
+            .unwrap_or_default();
 
         let peer_name = PeerName::new(recipient_comms_name).map_err(|error| {
             MobError::WiringError(format!(

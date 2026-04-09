@@ -5,6 +5,7 @@ use crate::schema::empty_object_schema;
 use async_trait::async_trait;
 use meerkat_comms::{Router, ToolContext, TrustedPeers, handle_tools_call, tools_list};
 use meerkat_core::ToolDef;
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,6 +28,13 @@ impl CommsToolState {
     }
 }
 
+fn comms_provenance() -> Option<ToolProvenance> {
+    Some(ToolProvenance {
+        kind: ToolSourceKind::Comms,
+        source_id: "comms".into(),
+    })
+}
+
 fn get_tool_def(name: &str) -> ToolDef {
     tools_list()
         .into_iter()
@@ -36,11 +44,13 @@ fn get_tool_def(name: &str) -> ToolDef {
                 name: name.to_string(),
                 description: String::new(),
                 input_schema: empty_object_schema(),
+                provenance: comms_provenance(),
             },
             |t| ToolDef {
                 name: t["name"].as_str().unwrap_or_default().to_string(),
                 description: t["description"].as_str().unwrap_or_default().to_string(),
                 input_schema: t["inputSchema"].clone(),
+                provenance: comms_provenance(),
             },
         )
 }

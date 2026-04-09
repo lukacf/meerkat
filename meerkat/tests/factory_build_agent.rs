@@ -130,6 +130,7 @@ impl NamedDispatcher {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                provenance: None,
             })]),
         }
     }

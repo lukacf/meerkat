@@ -101,11 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Mob ID: {}", prefab_def.id);
     println!("Profiles:");
-    for (name, profile) in &prefab_def.profiles {
-        println!(
-            "  {} -- model: {}, peer_description: {}",
-            name, profile.model, profile.peer_description,
-        );
+    for (name, binding) in &prefab_def.profiles {
+        if let Some(profile) = binding.as_inline() {
+            println!(
+                "  {} -- model: {}, peer_description: {}",
+                name, profile.model, profile.peer_description,
+            );
+        } else {
+            println!("  {name} -- realm ref");
+        }
     }
     println!(
         "Auto-wire orchestrator: {}",
@@ -185,8 +189,10 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     let custom_def = MobDefinition::from_toml(custom)?;
     println!("Mob: {}", custom_def.id);
     println!("Profiles ({}):", custom_def.profiles.len());
-    for (name, profile) in &custom_def.profiles {
-        println!("  {} -- {}", name, profile.peer_description);
+    for (name, binding) in &custom_def.profiles {
+        if let Some(profile) = binding.as_inline() {
+            println!("  {} -- {}", name, profile.peer_description);
+        }
     }
 
     let diagnostics = validate_definition(&custom_def);

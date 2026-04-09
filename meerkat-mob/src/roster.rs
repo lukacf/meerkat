@@ -83,6 +83,14 @@ pub struct RosterEntry {
     /// Projected kickoff state for autonomous initial turn resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    /// Effective profile override from `SpawnTooling::Profile` resolution.
+    ///
+    /// When a member is spawned with an explicit tooling profile (inline or realm),
+    /// the resolved profile is stored here so respawn/restore can use it instead
+    /// of re-resolving from the definition. `None` means the definition profile
+    /// (keyed by `self.profile`) is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_profile_override: Option<crate::profile::Profile>,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -105,6 +113,8 @@ pub struct RosterAddEntry {
     pub member_ref: MemberRef,
     pub peer_id: Option<String>,
     pub labels: BTreeMap<String, String>,
+    /// Effective profile override from `SpawnTooling::Profile` resolution.
+    pub effective_profile_override: Option<crate::profile::Profile>,
 }
 
 /// Tracks active meerkats and their wiring in a mob.
@@ -148,6 +158,7 @@ impl Roster {
                     member_ref: member_ref.clone(),
                     peer_id: None,
                     labels: labels.clone(),
+                    effective_profile_override: None,
                 });
             }
             MobEventKind::MeerkatRetired { meerkat_id, .. } => {
@@ -196,6 +207,7 @@ impl Roster {
                     external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
                     kickoff: None,
+                    effective_profile_override: entry.effective_profile_override,
                 },
             )
             .is_none()
@@ -500,6 +512,7 @@ mod tests {
             member_ref,
             peer_id: None,
             labels: BTreeMap::new(),
+            effective_profile_override: None,
         })
     }
 
@@ -876,6 +889,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
@@ -1046,6 +1060,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
@@ -1168,6 +1183,7 @@ mod tests {
                 m.insert("faction".to_string(), "north".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         roster.add(RosterAddEntry {
             meerkat_id: MeerkatId::from("b"),
@@ -1180,6 +1196,7 @@ mod tests {
                 m.insert("faction".to_string(), "south".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         let found = roster.find_by_label("faction", "north");
         assert!(found.is_some());
@@ -1200,6 +1217,7 @@ mod tests {
                 m.insert("tier".to_string(), "1".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         roster.add(RosterAddEntry {
             meerkat_id: MeerkatId::from("b"),
@@ -1212,6 +1230,7 @@ mod tests {
                 m.insert("tier".to_string(), "1".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         roster.add(RosterAddEntry {
             meerkat_id: MeerkatId::from("c"),
@@ -1224,6 +1243,7 @@ mod tests {
                 m.insert("tier".to_string(), "2".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         let found: Vec<_> = roster.find_all_by_label("tier", "1").collect();
         assert_eq!(found.len(), 2);
@@ -1243,6 +1263,7 @@ mod tests {
                 m.insert("faction".to_string(), "north".to_string());
                 m
             },
+            effective_profile_override: None,
         });
         roster.mark_retiring(&MeerkatId::from("a"));
         assert!(roster.find_by_label("faction", "north").is_none());

@@ -48,6 +48,7 @@ pub mod roster;
 pub mod run;
 pub mod runtime;
 pub mod runtime_mode;
+pub mod snapshot;
 pub mod spec;
 pub mod storage;
 pub mod store;
@@ -64,7 +65,7 @@ pub use ids::{
     RunId, StepId, TaskId,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
-pub use profile::{Profile, ToolConfig};
+pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{
     MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, Roster, RosterAddEntry,
     RosterEntry,
@@ -85,14 +86,18 @@ pub use runtime::{
 };
 pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;
+pub use snapshot::ParentToolScopeSnapshot;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore, MobStoreError,
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    MobEventStore, MobRunStore, MobSpecStore, MobStoreError, RealmProfileStore, StoredRealmProfile,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use store::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};
+pub use store::{
+    SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores,
+    SqliteRealmProfileStore,
+};
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,

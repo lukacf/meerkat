@@ -80,6 +80,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
             input_schema: empty_object_schema(),
+            provenance: None,
         };
 
         registry.register(def.clone());
@@ -107,6 +108,7 @@ mod tests {
                 },
                 "required": ["count"]
             }),
+            provenance: None,
         };
 
         registry.register(def);

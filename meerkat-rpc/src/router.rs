@@ -783,6 +783,24 @@ impl MethodRouter {
                 handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/profile/create" => {
+                handlers::mob::handle_profile_create(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/profile/get" => {
+                handlers::mob::handle_profile_get(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/profile/list" => handlers::mob::handle_profile_list(id, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/profile/update" => {
+                handlers::mob::handle_profile_update(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/profile/delete" => {
+                handlers::mob::handle_profile_delete(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,

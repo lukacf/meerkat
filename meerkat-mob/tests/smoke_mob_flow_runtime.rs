@@ -19,7 +19,8 @@ use meerkat_mob::definition::{
 };
 use meerkat_mob::{
     FlowId, LoopId, MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobRun, MobRunStatus,
-    MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileName, StepId, ToolConfig,
+    MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, StepId,
+    ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
@@ -366,19 +367,19 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("lead"),
-        flow_profile(&models.lead, "Lead flow responder"),
+        ProfileBinding::Inline(flow_profile(&models.lead, "Lead flow responder")),
     );
     profiles.insert(
         ProfileName::from("worker"),
-        flow_profile(&models.worker, "Worker flow responder"),
+        ProfileBinding::Inline(flow_profile(&models.worker, "Worker flow responder")),
     );
     profiles.insert(
         ProfileName::from("reviewer"),
-        flow_profile(&models.reviewer, "Reviewer flow responder"),
+        ProfileBinding::Inline(flow_profile(&models.reviewer, "Reviewer flow responder")),
     );
     profiles.insert(
         ProfileName::from("analyst"),
-        flow_profile(&models.analyst, "Analyst flow responder"),
+        ProfileBinding::Inline(flow_profile(&models.analyst, "Analyst flow responder")),
     );
 
     let mut flows = BTreeMap::new();

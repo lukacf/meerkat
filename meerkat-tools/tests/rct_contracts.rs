@@ -400,6 +400,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
                 name: "hang".to_string(),
                 description: "Hangs forever".to_string(),
                 input_schema: empty_object_schema(),
+                provenance: None,
             })])
         }
 
@@ -416,6 +417,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
         name: "hang".to_string(),
         description: "Hangs forever".to_string(),
         input_schema: empty_object_schema(),
+        provenance: None,
     });
 
     // Very short timeout
@@ -483,12 +485,14 @@ async fn test_regression_composite_deduplicates_external_tools()
                     name: "task_list".to_string(),
                     description: "External task_list (should be shadowed)".to_string(),
                     input_schema: json!({"type": "object", "properties": {"external": {"type": "boolean"}}}),
+                    provenance: None,
                 }),
                 // Unique external tool
                 Arc::new(ToolDef {
                     name: "external_only".to_string(),
                     description: "External-only tool".to_string(),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 }),
             ])
         }
@@ -554,21 +558,25 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
                     name: "shell".to_string(),
                     description: "Execute shell commands (security sensitive)".to_string(),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 }),
                 Arc::new(ToolDef {
                     name: "shell_job_cancel".to_string(),
                     description: "Cancel background shell jobs (privileged)".to_string(),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 }),
                 Arc::new(ToolDef {
                     name: "task_list".to_string(),
                     description: "List tasks (safe)".to_string(),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 }),
                 Arc::new(ToolDef {
                     name: "datetime".to_string(),
                     description: "Get current date and time (safe)".to_string(),
                     input_schema: json!({"type": "object"}),
+                    provenance: None,
                 }),
             ])
         }
@@ -678,6 +686,7 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
                 name: "shell".to_string(),
                 description: "Shell".to_string(),
                 input_schema: json!({"type": "object"}),
+                provenance: None,
             })])
         }
 

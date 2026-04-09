@@ -3,14 +3,14 @@ use meerkat_contracts::wire::{
     MobBackendConfigInput, MobCollectionPolicyInput, MobConditionExprInput, MobDefinitionInput,
     MobDependencyModeInput, MobDispatchModeInput, MobEventRouterConfigInput, MobFlowNodeInput,
     MobFlowSpecInput, MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobLimitsSpecInput,
-    MobPolicyModeInput, MobProfileInput, MobRepeatUntilInput, MobSkillSourceInput,
-    MobSpawnPolicyInput, MobStepOutputFormatInput, MobTopologySpecInput, WireMobBackendKind,
-    WireMobRuntimeMode,
+    MobPolicyModeInput, MobProfileBindingInput, MobProfileInput, MobRepeatUntilInput,
+    MobSkillSourceInput, MobSpawnPolicyInput, MobStepOutputFormatInput, MobTopologySpecInput,
+    WireMobBackendKind, WireMobRuntimeMode,
 };
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
     BranchId, FlowId, FlowNodeId, LoopId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode,
-    Profile, ProfileName, StepId, ToolConfig,
+    Profile, ProfileBinding, ProfileName, StepId, ToolConfig,
     definition::{
         BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode,
         EventRouterConfig, ExternalBackendConfig, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
@@ -34,7 +34,7 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
         profiles: input
             .profiles
             .into_iter()
-            .map(|(profile_name, profile)| decode_profile(profile_name, profile))
+            .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
             .collect::<Result<_, _>>()?,
         mcp_servers: input
             .mcp_servers
@@ -87,37 +87,51 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
     })
 }
 
-fn decode_profile(
+fn decode_profile_binding(
     profile_name: String,
-    input: MobProfileInput,
-) -> Result<(ProfileName, Profile), String> {
-    Ok((
-        ProfileName::from(profile_name),
-        Profile {
-            model: input.model,
-            skills: input.skills,
-            tools: ToolConfig {
-                builtins: input.tools.builtins,
-                shell: input.tools.shell,
-                comms: input.tools.comms,
-                memory: input.tools.memory,
-                mob: input.tools.mob,
-                mob_tasks: input.tools.mob_tasks,
-                mcp: input.tools.mcp,
-                rust_bundles: Vec::new(),
-            },
-            peer_description: input.peer_description,
-            external_addressable: input.external_addressable,
-            backend: input.backend.map(decode_backend_kind),
-            runtime_mode: decode_runtime_mode(input.runtime_mode),
-            max_inline_peer_notifications: input.max_inline_peer_notifications,
-            output_schema: input
-                .output_schema
-                .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
-                .transpose()?,
-            provider_params: input.provider_params,
+    input: MobProfileBindingInput,
+) -> Result<(ProfileName, ProfileBinding), String> {
+    match input {
+        MobProfileBindingInput::RealmRef { realm_profile } => Ok((
+            ProfileName::from(profile_name),
+            ProfileBinding::RealmRef { realm_profile },
+        )),
+        MobProfileBindingInput::Inline(profile_input) => {
+            let profile = decode_profile(profile_input)?;
+            Ok((
+                ProfileName::from(profile_name),
+                ProfileBinding::Inline(profile),
+            ))
+        }
+    }
+}
+
+fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
+    Ok(Profile {
+        model: input.model,
+        skills: input.skills,
+        tools: ToolConfig {
+            builtins: input.tools.builtins,
+            shell: input.tools.shell,
+            comms: input.tools.comms,
+            memory: input.tools.memory,
+            mob: input.tools.mob,
+            mob_tasks: input.tools.mob_tasks,
+            schedule: input.tools.schedule,
+            mcp: input.tools.mcp,
+            rust_bundles: Vec::new(),
         },
-    ))
+        peer_description: input.peer_description,
+        external_addressable: input.external_addressable,
+        backend: input.backend.map(decode_backend_kind),
+        runtime_mode: decode_runtime_mode(input.runtime_mode),
+        max_inline_peer_notifications: input.max_inline_peer_notifications,
+        output_schema: input
+            .output_schema
+            .map(|schema| serde_json::to_value(schema).map_err(|error| error.to_string()))
+            .transpose()?,
+        provider_params: input.provider_params,
+    })
 }
 
 fn decode_skill_source(input: MobSkillSourceInput) -> SkillSource {
@@ -350,8 +364,8 @@ mod tests {
         WireContentInput,
         wire::{
             MobConditionExprInput, MobDispatchModeInput, MobFlowNodeInput, MobFlowSpecInput,
-            MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobProfileInput,
-            MobRepeatUntilInput, MobToolConfigInput,
+            MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobProfileBindingInput,
+            MobProfileInput, MobRepeatUntilInput, MobToolConfigInput,
         },
     };
     use std::collections::BTreeMap;
@@ -361,7 +375,7 @@ mod tests {
         let mut profiles = BTreeMap::new();
         profiles.insert(
             "lead".to_string(),
-            MobProfileInput {
+            MobProfileBindingInput::Inline(MobProfileInput {
                 model: "gpt-5.4".to_string(),
                 skills: vec!["triage".to_string()],
                 tools: MobToolConfigInput {
@@ -379,7 +393,7 @@ mod tests {
                         .expect("valid output schema"),
                 ),
                 provider_params: Some(serde_json::json!({"reasoning_effort":"medium"})),
-            },
+            }),
         );
 
         let mut steps = BTreeMap::new();
@@ -464,7 +478,9 @@ mod tests {
         let lead = definition
             .profiles
             .get(&ProfileName::from("lead"))
-            .expect("lead profile");
+            .expect("lead profile")
+            .as_inline()
+            .expect("lead profile should be inline");
         assert_eq!(lead.backend, Some(MobBackendKind::External));
         assert_eq!(lead.runtime_mode, MobRuntimeMode::TurnDriven);
         assert_eq!(lead.tools.rust_bundles, Vec::<String>::new());

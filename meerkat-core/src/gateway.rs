@@ -647,6 +647,7 @@ mod tests {
                         name: name.to_string(),
                         description: format!("{prefix} tool: {name}"),
                         input_schema: empty_object_schema(),
+                        provenance: None,
                     })
                 })
                 .collect::<Vec<_>>()

@@ -1235,6 +1235,32 @@ impl Usage {
     }
 }
 
+/// Source kind for tool provenance tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSourceKind {
+    Builtin,
+    Shell,
+    Comms,
+    Memory,
+    Schedule,
+    Mob,
+    MobTasks,
+    Callback,
+    Mcp,
+    RustBundle,
+}
+
+/// Provenance metadata for a tool definition.
+///
+/// Tracks which subsystem materialized this tool and the specific source
+/// instance (e.g., MCP server name, bundle name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolProvenance {
+    pub kind: ToolSourceKind,
+    pub source_id: String,
+}
+
 /// Tool definition for the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1242,6 +1268,31 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Optional provenance metadata tracking which subsystem materialized this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ToolProvenance>,
+}
+
+impl ToolDef {
+    /// Create a new ToolDef without provenance.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            provenance: None,
+        }
+    }
+
+    /// Set provenance on this ToolDef (chainable builder).
+    pub fn with_provenance(mut self, provenance: ToolProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
 }
 
 /// Result of a successful agent run

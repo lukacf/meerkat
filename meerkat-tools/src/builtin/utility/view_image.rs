@@ -3,7 +3,7 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use base64::Engine;
-use meerkat_core::types::{ContentBlock, ToolDef};
+use meerkat_core::types::{ContentBlock, ToolDef, ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -106,6 +106,7 @@ impl BuiltinTool for ViewImageTool {
             name: self.name().into(),
             description: "Read an image file from the project and return its contents. Supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB.".into(),
             input_schema: crate::schema::schema_for::<ViewImageArgs>(),
+            provenance: Some(ToolProvenance { kind: ToolSourceKind::Builtin, source_id: "builtin".into() }),
         }
     }
 

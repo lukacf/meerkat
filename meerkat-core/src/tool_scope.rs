@@ -36,6 +36,13 @@ impl ToolFilter {
 /// Session metadata key storing the persisted external tool filter.
 pub const EXTERNAL_TOOL_FILTER_METADATA_KEY: &str = "tool_scope_external_filter";
 
+/// Session metadata key storing the inherited tool filter from a parent agent.
+///
+/// When a child session is created from a parent mob, the parent's visible tool
+/// set is captured as a base filter. On session rebuild, this key is recovered
+/// and applied as the `ToolScope` base filter.
+pub const INHERITED_TOOL_FILTER_METADATA_KEY: &str = "tool_scope_inherited_filter";
+
 /// Monotonic revision for staged external visibility updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -310,6 +317,21 @@ impl ToolScope {
         Self::compose(&filters)
     }
 
+    /// Set the base filter for this scope.
+    ///
+    /// The base filter is the most fundamental restriction layer — it is
+    /// composed with external and turn-level filters using most-restrictive
+    /// semantics. This is used for inherited tool visibility from a parent
+    /// agent's scope.
+    pub fn set_base_filter(&self, filter: ToolFilter) -> Result<(), ToolScopeApplyError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        state.base_filter = filter;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_boundary_failure_once_for_test(&self) {
         self.fail_next_boundary_apply.store(true, Ordering::SeqCst);
@@ -427,6 +449,7 @@ mod tests {
                     name: (*name).to_string(),
                     description: format!("{name} tool"),
                     input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
                 })
             })
             .collect::<Vec<_>>()
@@ -617,6 +640,70 @@ mod tests {
                 .map(|t| t.name.clone())
                 .collect::<Vec<_>>(),
             vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_base_filter_restricts_visible_tools() {
+        let scope = ToolScope::new(tools(&["a", "b", "c"]));
+
+        // All visible initially
+        assert_eq!(
+            scope
+                .visible_tools()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+
+        // Set base filter to allow only a and b
+        scope
+            .set_base_filter(ToolFilter::Allow(set(&["a", "b"])))
+            .unwrap();
+
+        assert_eq!(
+            scope
+                .visible_tools()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_base_filter_composes_with_external_filter() {
+        let scope = ToolScope::new(tools(&["a", "b", "c"]));
+        let handle = scope.handle();
+
+        // Base restricts to a and b
+        scope
+            .set_base_filter(ToolFilter::Allow(set(&["a", "b"])))
+            .unwrap();
+
+        // External further restricts to b and c
+        handle
+            .stage_external_filter(ToolFilter::Allow(set(&["b", "c"])))
+            .unwrap();
+        scope.apply_staged(tools(&["a", "b", "c"])).unwrap();
+
+        // Most-restrictive: intersection = b only
+        assert_eq!(
+            scope
+                .visible_tools()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn inherited_metadata_key_is_distinct_from_external() {
+        assert_ne!(
+            super::INHERITED_TOOL_FILTER_METADATA_KEY,
+            super::EXTERNAL_TOOL_FILTER_METADATA_KEY
         );
     }
 }

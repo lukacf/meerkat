@@ -89,8 +89,24 @@ pub struct MobToolConfigInput {
     pub mob: bool,
     #[serde(default)]
     pub mob_tasks: bool,
+    #[serde(default)]
+    pub schedule: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<String>,
+}
+
+/// Profile binding input: either an inline profile or a realm profile reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum MobProfileBindingInput {
+    /// Reference to a realm-scoped profile.
+    RealmRef {
+        /// Name of the realm profile.
+        realm_profile: String,
+    },
+    /// Inline profile definition.
+    Inline(MobProfileInput),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,7 +381,7 @@ pub struct MobDefinitionInput {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<MobOrchestratorInput>,
-    pub profiles: BTreeMap<String, MobProfileInput>,
+    pub profiles: BTreeMap<String, MobProfileBindingInput>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, MobMcpServerConfigInput>,
     #[serde(default)]
@@ -679,8 +695,11 @@ mod tests {
         }))
         .expect_err("internal rust tool bundles must be rejected");
 
+        // With untagged MobProfileBindingInput, the error message is about
+        // no variant matching rather than the specific unknown field.
         assert!(
-            err.to_string().contains("unknown field `rust_bundles`"),
+            err.to_string().contains("did not match any variant")
+                || err.to_string().contains("unknown field `rust_bundles`"),
             "unexpected error: {err}"
         );
     }

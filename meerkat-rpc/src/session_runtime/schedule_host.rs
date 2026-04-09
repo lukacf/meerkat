@@ -742,7 +742,7 @@ fn helper_options_from_spec(
     spec: &HelperOptionsSpec,
 ) -> Result<HelperOptions, ScheduleDomainError> {
     let mut options = HelperOptions::default();
-    options.profile_name = spec.profile_name.clone().map(Into::into);
+    options.role_name = spec.role_name.clone().map(Into::into);
     options.runtime_mode = spec.runtime_mode.map(|mode| match mode {
         ScheduledMobRuntimeMode::AutonomousHost => meerkat_mob::MobRuntimeMode::AutonomousHost,
         ScheduledMobRuntimeMode::TurnDriven => meerkat_mob::MobRuntimeMode::TurnDriven,

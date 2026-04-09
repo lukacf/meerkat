@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
 use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillFilter, SkillId, SkillRuntime};
+use meerkat_core::types::{ToolProvenance, ToolSourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -108,6 +109,10 @@ impl BuiltinTool for BrowseSkillsTool {
             name: "browse_skills".into(),
             description: "Browse available skill collections or search for skills.".into(),
             input_schema: crate::schema::schema_for::<BrowseSkillsArgs>(),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "skills".into(),
+            }),
         }
     }
 

@@ -839,6 +839,28 @@
         ],
         "type": "string"
       },
+      "MobProfileBindingInput": {
+        "anyOf": [
+          {
+            "description": "Reference to a realm-scoped profile.",
+            "properties": {
+              "realm_profile": {
+                "description": "Name of the realm profile.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "realm_profile"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/MobProfileInput",
+            "description": "Inline profile definition."
+          }
+        ],
+        "description": "Profile binding input: either an inline profile or a realm profile reference."
+      },
       "MobProfileInput": {
         "additionalProperties": false,
         "properties": {
@@ -898,6 +920,7 @@
               "memory": false,
               "mob": false,
               "mob_tasks": false,
+              "schedule": false,
               "shell": false
             }
           }
@@ -1045,6 +1068,10 @@
             "type": "boolean"
           },
           "mob_tasks": {
+            "default": false,
+            "type": "boolean"
+          },
+          "schedule": {
             "default": false,
             "type": "boolean"
           },
@@ -1370,7 +1397,7 @@
       },
       "profiles": {
         "additionalProperties": {
-          "$ref": "#/$defs/MobProfileInput"
+          "$ref": "#/$defs/MobProfileBindingInput"
         },
         "type": "object"
       },

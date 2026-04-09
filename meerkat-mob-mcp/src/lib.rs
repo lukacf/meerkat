@@ -35,7 +35,7 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::{Instant, SystemTime};
 use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef,
-    ToolResult, Usage,
+    ToolProvenance, ToolResult, ToolSourceKind, Usage,
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
@@ -104,6 +104,8 @@ pub struct MobMcpState {
     /// Per-session locks for single-flight implicit mob creation.
     implicit_mob_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     restore_lock: Mutex<bool>,
+    /// Shared realm-scoped profile store for cross-mob profile CRUD.
+    realm_profile_store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
 }
 
 impl MobMcpState {
@@ -126,7 +128,22 @@ impl MobMcpState {
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
+            realm_profile_store: None,
         }
+    }
+
+    /// Set the shared realm profile store for cross-mob profile CRUD.
+    pub fn with_realm_profile_store(
+        mut self,
+        store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    ) -> Self {
+        self.realm_profile_store = store;
+        self
+    }
+
+    /// Returns a reference to the realm profile store, if configured.
+    pub fn realm_profile_store(&self) -> Option<&Arc<dyn meerkat_mob::RealmProfileStore>> {
+        self.realm_profile_store.as_ref()
     }
 
     pub fn with_persistent_storage_root(mut self, runtime_root: Option<PathBuf>) -> Self {
@@ -918,8 +935,7 @@ impl MobMcpState {
             definition.is_implicit
                 && definition.is_owned_by_session(session_id)
                 && definition
-                    .profiles
-                    .get(&delegate_profile)
+                    .resolve_inline_profile(&delegate_profile)
                     .is_some_and(|profile| profile.model == model)
         })
     }
@@ -1095,12 +1111,89 @@ impl MobMcpState {
             .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))
     }
 
+    // ─── Realm profile CRUD ──────────────────────────────────────────
+
+    fn require_realm_profile_store(
+        &self,
+    ) -> Result<&Arc<dyn meerkat_mob::RealmProfileStore>, meerkat_mob::MobError> {
+        self.realm_profile_store.as_ref().ok_or_else(|| {
+            meerkat_mob::MobError::Internal("realm profile store not configured".to_string())
+        })
+    }
+
+    /// Create a new realm profile.
+    pub async fn realm_profile_create(
+        &self,
+        name: &str,
+        profile: &meerkat_mob::Profile,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .create(name, profile)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Get a realm profile by name.
+    pub async fn realm_profile_get(
+        &self,
+        name: &str,
+    ) -> Result<Option<meerkat_mob::StoredRealmProfile>, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .get(name)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// List all realm profiles.
+    pub async fn realm_profile_list(
+        &self,
+    ) -> Result<Vec<meerkat_mob::StoredRealmProfile>, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .list()
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Update a realm profile with CAS revision.
+    pub async fn realm_profile_update(
+        &self,
+        name: &str,
+        profile: &meerkat_mob::Profile,
+        expected_revision: u64,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .update(name, profile, expected_revision)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
+    /// Delete a realm profile with CAS revision.
+    pub async fn realm_profile_delete(
+        &self,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<meerkat_mob::StoredRealmProfile, meerkat_mob::MobError> {
+        let store = self.require_realm_profile_store()?;
+        store
+            .delete(name, expected_revision)
+            .await
+            .map_err(|e| meerkat_mob::MobError::Internal(e.to_string()))
+    }
+
     /// Create MCP state backed by an in-memory local session service.
     pub fn new_in_memory() -> Arc<Self> {
-        Arc::new(Self::new_with_runtime_adapter(
+        let state = Self::new_with_runtime_adapter(
             Arc::new(LocalSessionService::new()),
             Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
-        ))
+        )
+        .with_realm_profile_store(Some(Arc::new(
+            meerkat_mob::InMemoryRealmProfileStore::new(),
+        )));
+        Arc::new(state)
     }
 }
 
@@ -1695,6 +1788,10 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
         name: name.to_string(),
         description: description.to_string(),
         input_schema,
+        provenance: Some(ToolProvenance {
+            kind: ToolSourceKind::Mob,
+            source_id: "mob".into(),
+        }),
     })
 }
 
@@ -3947,6 +4044,8 @@ mod tests {
                 .profiles
                 .get(&ProfileName::from("delegate"))
                 .expect("delegate profile")
+                .as_inline()
+                .unwrap()
                 .model,
             "claude-sonnet-4-5"
         );
@@ -3976,6 +4075,8 @@ mod tests {
                 .profiles
                 .get(&ProfileName::from("delegate"))
                 .expect("delegate profile")
+                .as_inline()
+                .unwrap()
                 .model,
             "gpt-5.4"
         );
@@ -4007,7 +4108,7 @@ mod tests {
         let mut explicit_profiles = BTreeMap::new();
         explicit_profiles.insert(
             ProfileName::from("worker"),
-            meerkat_mob::profile::Profile {
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
                 model: "claude-sonnet-4-5".to_string(),
                 skills: Vec::new(),
                 tools: meerkat_mob::profile::ToolConfig {
@@ -4021,7 +4122,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
-            },
+            }),
         );
         MobDefinition {
             id: MobId::from(mob_id),

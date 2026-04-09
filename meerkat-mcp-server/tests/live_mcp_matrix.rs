@@ -461,7 +461,7 @@ async fn e2e_scenario_31_mcp_stdio_run_resume_lifecycle() {
         .expect("stdio mcp connection should initialize");
 
     let tools = connection
-        .list_tools()
+        .list_tools("test-server")
         .await
         .expect("tools/list should work");
     assert!(tools.iter().any(|tool| tool.name == "meerkat_run"));

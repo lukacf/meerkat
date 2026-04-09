@@ -1723,6 +1723,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
         let body = client.build_request_body(&request)?;
         let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
@@ -1809,6 +1810,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
         let body = client.build_request_body(&request)?;
         let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
@@ -1880,6 +1882,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
         let body = client.build_request_body(&request)?;
         let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
@@ -1963,6 +1966,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
 
         let body = client.build_request_body(&request)?;
@@ -2011,6 +2015,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
 
         let err = client
@@ -2056,6 +2061,7 @@ mod tests {
             name: "upsert_record".to_string(),
             description: "test".to_string(),
             input_schema: schema,
+            provenance: None,
         })]);
         let body = client.build_request_body(&request)?;
         let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];

@@ -1429,6 +1429,25 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        56 => Some(&Spec {
+            id: Some(56),
+            lane: Lane::System,
+            title: "RPC+REST explicit mob registry restores",
+            timeout_secs: 300,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "rpc_rest_explicit_mob_registry_restores_without_live_api",
+                features: &[],
+                all_features: false,
+            },
+        }),
         _ => None,
     }
 }

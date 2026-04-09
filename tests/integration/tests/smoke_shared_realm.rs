@@ -62,7 +62,7 @@ fn openai_api_key() -> Option<String> {
 }
 
 fn smoke_model() -> String {
-    std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+    std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string())
 }
 
 fn openai_smoke_model() -> String {
@@ -2258,6 +2258,10 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     {
         return Ok(());
     }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
     let rkat_rpc = rkat_rpc.unwrap();
     let rkat_rest = rkat_rest.unwrap();
 
@@ -2282,7 +2286,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
             "--context-root",
             project_dir.to_str().unwrap(),
         ],
-        None,
+        Some(&api_key),
     )
     .await?;
     let mut pump = RpcEventPump::default();
@@ -2360,6 +2364,8 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     rest.current_dir(&project_dir)
         .env("HOME", &project_dir)
         .env("XDG_DATA_HOME", project_dir.join("data"))
+        .env("ANTHROPIC_API_KEY", &api_key)
+        .env("RKAT_ANTHROPIC_API_KEY", &api_key)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

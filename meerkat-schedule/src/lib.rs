@@ -11,6 +11,7 @@ mod driver;
 mod error;
 mod service;
 mod store;
+mod surface;
 mod tool_surface;
 mod tools;
 mod trigger;
@@ -31,6 +32,7 @@ pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
     PendingSupersession, ScheduleFilter, ScheduleStore, ScheduleStoreKind,
 };
+pub use surface::wire_schedule_tools;
 pub use tool_surface::ScheduleToolSurface;
 pub use tools::{
     CAPABILITY_UNAVAILABLE as SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE,

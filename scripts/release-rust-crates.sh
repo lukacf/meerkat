@@ -15,7 +15,6 @@ meerkat-tools
 meerkat-runtime
 meerkat-session
 meerkat-memory
-meerkat-surface-runtime
 meerkat-mcp
 meerkat-mcp-server
 meerkat-hooks

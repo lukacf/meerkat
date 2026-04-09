@@ -1,6 +1,7 @@
 mod agent_tools;
 mod public_definition;
 mod public_mcp;
+mod surface;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
@@ -8,6 +9,7 @@ pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list, wrap_public_tool_payload,
 };
+pub use surface::wire_mob_tools;
 
 #[cfg(target_arch = "wasm32")]
 mod tokio {

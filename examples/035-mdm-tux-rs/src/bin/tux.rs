@@ -27,8 +27,8 @@ use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
 use meerkat::{
-    AgentEvent, LlmClient, ScheduleService, ScheduleToolSurface, SessionError, SessionService,
-    ToolGatewayBuilder, encode_llm_client_override_for_service,
+    AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, PersistentSessionService,
+    SessionError, SessionService, ToolGatewayBuilder,
 };
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
@@ -39,7 +39,12 @@ use meerkat_core::service::{
     StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_surface_runtime::{RuntimeSessionHost, spawn_runtime_schedule_host};
+use meerkat_schedule::{ScheduleService, ScheduleToolSurface};
+use meerkat::surface::{
+    default_persistent_executor, materialize_session, spawn_runtime_backed_schedule_host,
+    wire_runtime_bindings,
+};
+use meerkat_store::StoreAdapter;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,15 +73,14 @@ use tokio::net::TcpStream;
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct HiveAgentState {
-    host: Arc<RuntimeSessionHost>,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     session_id: SessionId,
     _schedule_host: Option<meerkat::surface::ScheduleHostHandle>,
 }
 
 impl HiveAgentState {
     async fn run(&self, prompt: String) -> Result<meerkat::RunResult, SessionError> {
-        self.host
-            .service()
+        self.service
             .start_turn(
                 &self.session_id,
                 StartTurnRequest {
@@ -855,16 +859,25 @@ async fn build_hive_with_llm_override(
     llm_client_override: Option<Arc<dyn LlmClient>>,
 ) -> anyhow::Result<HiveAgentState> {
     let persistence = open_example_runtime_persistence(session_dir).await?;
-    let host = Arc::new(
-        RuntimeSessionHost::builder(session_dir.to_path_buf())
-            .persistence(persistence)
-            .mob(true)
-            .config(meerkat_core::Config::default())
-            .max_sessions(4)
-            .build()
-            .await?,
+    let config = meerkat_core::Config::default();
+    let session_store = persistence.session_store();
+    let schedule_service = ScheduleService::new(persistence.schedule_store());
+    let runtime_adapter = persistence.runtime_adapter();
+    let mut builder = FactoryAgentBuilder::new(
+        AgentFactory::new(session_dir.to_path_buf())
+            .session_store(Arc::clone(&session_store))
+            .mob(true),
+        config.clone(),
     );
-    let schedule_service = ScheduleService::new(host.persistence().schedule_store());
+    builder.default_llm_client = llm_client_override;
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(Arc::clone(
+        &session_store,
+    ))));
+    let (store, runtime_store, blob_store) = persistence.into_parts();
+    let mut service =
+        PersistentSessionService::new(builder, 4, store, runtime_store, blob_store);
+    wire_runtime_bindings(&mut service, &runtime_adapter);
+    let service = Arc::new(service);
     let schedule_tools: Arc<dyn AgentToolDispatcher> =
         Arc::new(ScheduleToolSurface::new(schedule_service.clone()));
     let tools: Arc<dyn AgentToolDispatcher> = Arc::new(
@@ -874,43 +887,51 @@ async fn build_hive_with_llm_override(
             .build()?,
     );
     let build_template = hive_session_build_template(Arc::clone(&tools));
-    let schedule_host = spawn_runtime_schedule_host(
-        Arc::clone(&host),
+    let schedule_host = spawn_runtime_backed_schedule_host(
+        Arc::clone(&service),
+        Arc::clone(&runtime_adapter),
+        config,
         schedule_service,
         build_template.clone(),
         format!("mdm-tux:hive:{}", session_dir.display()),
     );
-    let session_id = host
-        .create_or_resume_session(
-            None,
-            CreateSessionRequest {
-                model: model.to_string(),
-                prompt: ContentInput::Text(String::new()),
-                render_metadata: None,
-                system_prompt: Some(
-                    "You are a hive orchestrator for a fleet of remote machines. \
-                     Use the 'peers' tool to discover targets, then 'send' to dispatch \
-                     commands. Target replies appear in the TUX output panel; the user \
-                     will relay results if needed. Keep dispatches concise."
-                        .to_string(),
-                ),
-                max_tokens: None,
-                event_tx: None,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    provider: Some(meerkat_core::Provider::from_name(&provider.to_string())),
-                    llm_client_override: llm_client_override
-                        .map(encode_llm_client_override_for_service),
-                    ..build_template
-                }),
-                labels: None,
-            },
-        )
-        .await?;
+    let session_id = materialize_session(
+        &service,
+        &runtime_adapter,
+        meerkat::Session::new(),
+        CreateSessionRequest {
+            model: model.to_string(),
+            prompt: ContentInput::Text(String::new()),
+            render_metadata: None,
+            system_prompt: Some(
+                "You are a hive orchestrator for a fleet of remote machines. \
+                 Use the 'peers' tool to discover targets, then 'send' to dispatch \
+                 commands. Target replies appear in the TUX output panel; the user \
+                 will relay results if needed. Keep dispatches concise."
+                    .to_string(),
+            ),
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                provider: Some(meerkat_core::Provider::from_name(&provider.to_string())),
+                llm_client_override: None,
+                ..build_template
+            }),
+            labels: None,
+        },
+        {
+            let service = Arc::clone(&service);
+            let runtime_adapter = Arc::clone(&runtime_adapter);
+            move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+        },
+    )
+    .await?
+    .session_id;
     Ok(HiveAgentState {
-        host,
+        service,
         session_id,
         _schedule_host: schedule_host,
     })

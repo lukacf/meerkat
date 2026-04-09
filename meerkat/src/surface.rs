@@ -3,6 +3,10 @@
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
 mod request_execution;
+#[cfg(feature = "session-store")]
+mod runtime_backed;
+#[cfg(feature = "session-store")]
+mod runtime_schedule_host;
 mod schedule_host;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
@@ -18,6 +22,15 @@ pub use request_execution::{
     RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
     request_action,
 };
+#[cfg(all(feature = "session-store", feature = "comms"))]
+pub use runtime_backed::configure_peer_ingress;
+#[cfg(feature = "session-store")]
+pub use runtime_backed::{
+    PersistentRuntimeExecutor, SurfaceRuntimeMaterializeError, default_persistent_executor,
+    materialize_session, wire_runtime_bindings,
+};
+#[cfg(feature = "session-store")]
+pub use runtime_schedule_host::spawn_runtime_backed_schedule_host;
 pub use schedule_host::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduleHostHandle, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,

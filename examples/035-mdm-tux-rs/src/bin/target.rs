@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use futures::StreamExt;
-use meerkat::{FactoryAgentBuilder, PersistentSessionService, ScheduleService, ScheduleToolSurface};
+use meerkat::{AgentFactory, FactoryAgentBuilder, PersistentSessionService};
 use meerkat_comms::MessageKind;
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::agent::CommsRuntime as _;
@@ -36,10 +36,18 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_core::{AgentEvent, AgentToolDispatcher, Config};
+use meerkat_mob_mcp::wire_mob_tools;
 use meerkat_mob_mcp::MobMcpState;
+use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
+use meerkat_runtime::identifiers::LogicalRuntimeId;
+use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_runtime::RuntimeSessionAdapter;
-use meerkat_surface_runtime::{RuntimeSessionHost, spawn_runtime_schedule_host};
-use meerkat_store::{MemoryBlobStore, SessionFilter};
+use meerkat_schedule::{ScheduleService, ScheduleToolSurface};
+use meerkat_store::{MemoryBlobStore, SessionFilter, StoreAdapter};
+use meerkat::surface::{
+    default_persistent_executor, materialize_session, spawn_runtime_backed_schedule_host,
+    wire_runtime_bindings,
+};
 
 use mdm_tux::{
     DirectControlPayload, KennelPayload, ProviderKind, RegResponse, auto_detect,
@@ -60,10 +68,11 @@ Execute user requests using your available tools. Respond conversationally.
 Your responses stream directly to the controller — do not use the 'send' comms tool to reply.";
 
 struct TargetRuntimeSurface {
-    host: Arc<RuntimeSessionHost>,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
     comms_runtime: Arc<CommsRuntime>,
+    #[allow(dead_code)]
+    schedule_service: ScheduleService,
     schedule_tools: Arc<dyn AgentToolDispatcher>,
     session_store: Arc<dyn meerkat::SessionStore>,
     mob_state: Arc<MobMcpState>,
@@ -87,37 +96,47 @@ async fn build_target_runtime_surface(
     comms_runtime: Arc<CommsRuntime>,
 ) -> anyhow::Result<TargetRuntimeSurface> {
     let persistence = open_example_runtime_persistence(session_dir).await?;
-    let host = Arc::new(
-        RuntimeSessionHost::builder(session_dir.to_path_buf())
-            .persistence(persistence)
+    let config = Config::default();
+    let session_store = persistence.session_store();
+    let schedule_service = ScheduleService::new(persistence.schedule_store());
+    let runtime_adapter = persistence.runtime_adapter();
+    let mut builder = FactoryAgentBuilder::new(
+        AgentFactory::new(session_dir.to_path_buf())
+            .session_store(Arc::clone(&session_store))
+            .with_comms_runtime(Arc::clone(&comms_runtime))
             .shell(true)
             .builtins(true)
-            .mob(true)
-            .comms_runtime(Arc::clone(&comms_runtime))
-            .config(Config::default())
-            .max_sessions(10)
-            .build()
-            .await?,
+            .mob(true),
+        config.clone(),
     );
-    let service = host.service();
-    let runtime_adapter = host.runtime_adapter();
-    let schedule_service = ScheduleService::new(host.persistence().schedule_store());
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(Arc::clone(&session_store))));
+    let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let (store, runtime_store, blob_store) = persistence.into_parts();
+    let mut service = PersistentSessionService::new(builder, 10, store, runtime_store, blob_store);
+    wire_runtime_bindings(&mut service, &runtime_adapter);
+    let service = Arc::new(service);
     let schedule_tools: Arc<dyn AgentToolDispatcher> =
         Arc::new(ScheduleToolSurface::new(schedule_service.clone()));
-    let schedule_host = spawn_runtime_schedule_host(
-        Arc::clone(&host),
+    let schedule_host = spawn_runtime_backed_schedule_host(
+        Arc::clone(&service),
+        Arc::clone(&runtime_adapter),
+        config,
         schedule_service.clone(),
         target_session_build_template(Arc::clone(&schedule_tools)),
         format!("mdm-target:{}", session_dir.display()),
     );
-    let session_store = host.session_store();
-    let mob_state = host.mob_state();
+    let mob_state = wire_mob_tools(
+        &builder_mob_tools_slot,
+        service.clone(),
+        Some(runtime_adapter.clone()),
+        None,
+    );
 
     Ok(TargetRuntimeSurface {
-        host,
         service,
         runtime_adapter,
         comms_runtime,
+        schedule_service,
         schedule_tools,
         session_store,
         mob_state,
@@ -196,6 +215,20 @@ async fn sync_session_trusted_peers_from_surface(
     }
 
     Ok(())
+}
+
+async fn inject_peer_input_candidate(
+    surface: &TargetRuntimeSurface,
+    session_id: &SessionId,
+    candidate: &PeerInputCandidate,
+) -> anyhow::Result<meerkat_runtime::AcceptOutcome> {
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let input = peer_input_candidate_to_runtime_input(candidate, &runtime_id);
+    surface
+        .runtime_adapter
+        .accept_input(session_id, input)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 /// Build a `ResolvedCommsConfig` for the target's stable identity.
@@ -801,13 +834,12 @@ async fn handle_target_message(
         }
         InteractionContent::Message { .. }
         | InteractionContent::Request { .. }
-        | InteractionContent::Response { .. } => match surface
-            .host
-            .inject_peer_input_candidate(
-                active_session_id(session_binding_state),
-                candidate,
-            )
-            .await
+        | InteractionContent::Response { .. } => match inject_peer_input_candidate(
+            surface,
+            active_session_id(session_binding_state),
+            candidate,
+        )
+        .await
         {
             Ok(outcome) => {
                 tracing::debug!(?outcome, "classified input accepted");
@@ -1259,11 +1291,37 @@ async fn setup_session(
         labels: None,
     };
 
-    let session_id = surface
-        .host
-        .create_or_resume_session(resume_id, req)
-        .await
-        .map_err(|error| anyhow::anyhow!("create session: {error}"))?;
+    let session = match resume_id {
+        Some(session_id) => surface
+            .service
+            .load_persisted(&session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("load session {session_id}: {error}"))?
+            .ok_or_else(|| anyhow::anyhow!("persisted session not found: {session_id}"))?,
+        None => meerkat::Session::new(),
+    };
+    let keep_alive = req.build.as_ref().is_some_and(|build| build.keep_alive);
+    let result = materialize_session(
+        &surface.service,
+        &surface.runtime_adapter,
+        session,
+        req,
+        {
+            let service = Arc::clone(&surface.service);
+            let runtime_adapter = Arc::clone(&surface.runtime_adapter);
+            move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("create session: {error}"))?;
+    meerkat::surface::configure_peer_ingress(
+        &surface.runtime_adapter,
+        &surface.service,
+        &result.session_id,
+        keep_alive,
+    )
+    .await;
+    let session_id = result.session_id;
     sync_session_trusted_peers_from_surface(surface, &session_id, &surface.comms_runtime).await?;
     eprintln!("[target] session ready: {session_id}");
 
@@ -2040,13 +2098,12 @@ mod tests {
     use anyhow::Context as _;
     use mdm_tux::{ProviderKind, open_example_runtime_persistence};
     use meerkat::{
-        AgentFactory, CreateScheduleRequest, FactoryAgentBuilder, LlmClient, MisfirePolicy,
-        MissingTargetPolicy, OverlapPolicy, ScheduleService, ScheduleToolSurface,
-        ScheduledSessionAction, SessionAgentBuilder, SessionService, SessionTargetBinding,
-        TargetBinding, TriggerSpec, encode_llm_client_override_for_service,
+        AgentFactory, FactoryAgentBuilder, LlmClient, SessionAgentBuilder, SessionService,
+        encode_llm_client_override_for_service,
     };
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, TestClient};
+    use meerkat::{PersistentSessionService};
     use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
     use meerkat_core::Config;
     use meerkat_core::ops_lifecycle::OperationKind;
@@ -2054,8 +2111,14 @@ mod tests {
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
     use meerkat_core::types::{ContentInput, HandlingMode};
-    use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
-    use meerkat_surface_runtime::{RuntimeSessionHost, spawn_runtime_schedule_host};
+    use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState, wire_mob_tools};
+    use meerkat_schedule::{
+        CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, OverlapPolicy,
+        ScheduleService, ScheduleToolSurface, ScheduledSessionAction, SessionTargetBinding,
+        TargetBinding, TriggerSpec,
+    };
+    use meerkat::surface::{spawn_runtime_backed_schedule_host, wire_runtime_bindings};
+    use meerkat_store::StoreAdapter;
     use std::collections::{HashSet, VecDeque};
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -2109,38 +2172,51 @@ mod tests {
         llm_client: Arc<dyn LlmClient>,
     ) -> anyhow::Result<TargetRuntimeSurface> {
         let persistence = open_example_runtime_persistence(session_dir).await?;
-        let host = Arc::new(
-            RuntimeSessionHost::builder(session_dir.to_path_buf())
-                .persistence(persistence)
+        let config = Config::default();
+        let session_store = persistence.session_store();
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let runtime_adapter = persistence.runtime_adapter();
+        let mut builder = FactoryAgentBuilder::new(
+            AgentFactory::new(session_dir.to_path_buf())
+                .session_store(Arc::clone(&session_store))
+                .with_comms_runtime(Arc::clone(&comms_runtime))
                 .shell(true)
                 .builtins(true)
-                .mob(true)
-                .comms_runtime(Arc::clone(&comms_runtime))
-                .default_llm_client(llm_client)
-                .config(Config::default())
-                .max_sessions(10)
-                .build()
-                .await?,
+                .mob(true),
+            config.clone(),
         );
-        let service = host.service();
-        let runtime_adapter = host.runtime_adapter();
-        let schedule_service = ScheduleService::new(host.persistence().schedule_store());
+        builder.default_llm_client = Some(llm_client);
+        builder.default_session_store = Some(Arc::new(StoreAdapter::new(Arc::clone(
+            &session_store,
+        ))));
+        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let (store, runtime_store, blob_store) = persistence.into_parts();
+        let mut service =
+            PersistentSessionService::new(builder, 10, store, runtime_store, blob_store);
+        wire_runtime_bindings(&mut service, &runtime_adapter);
+        let service = Arc::new(service);
         let schedule_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
             Arc::new(ScheduleToolSurface::new(schedule_service.clone()));
-        let schedule_host = spawn_runtime_schedule_host(
-            Arc::clone(&host),
+        let schedule_host = spawn_runtime_backed_schedule_host(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            config,
             schedule_service.clone(),
             target_session_build_template(Arc::clone(&schedule_tools)),
             format!("mdm-target:test:{}", session_dir.display()),
         );
-        let session_store = host.session_store();
-        let mob_state = host.mob_state();
+        let mob_state = wire_mob_tools(
+            &builder_mob_tools_slot,
+            service.clone(),
+            Some(runtime_adapter.clone()),
+            None,
+        );
 
         Ok(TargetRuntimeSurface {
-            host,
             service,
             runtime_adapter,
             comms_runtime,
+            schedule_service,
             schedule_tools,
             session_store,
             mob_state,
@@ -2299,8 +2375,8 @@ mod tests {
             .await
             .unwrap();
 
-        let schedule_service = ScheduleService::new(surface.host.persistence().schedule_store());
-        let schedule = schedule_service
+        let schedule = surface
+            .schedule_service
             .create(CreateScheduleRequest {
                 name: Some("scheduled-target-prompt".into()),
                 description: None,
@@ -2342,7 +2418,8 @@ mod tests {
         .await
         .expect("scheduled prompt should reach the target session");
 
-        let occurrences = schedule_service
+        let occurrences = surface
+            .schedule_service
             .list_occurrences(&schedule.schedule_id)
             .await
             .unwrap();

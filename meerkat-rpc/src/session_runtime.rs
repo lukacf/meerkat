@@ -23,6 +23,7 @@ use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
     PersistentSessionService, ScheduleService, encode_llm_client_override_for_service,
+    surface::wire_runtime_bindings,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -53,7 +54,6 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
-use crate::runtime_session_host::RuntimeSessionHost;
 #[cfg(feature = "mcp")]
 use meerkat::{
     McpLifecycleAction, McpLifecyclePhase, McpReloadTarget, McpRouter, McpRouterAdapter,
@@ -61,6 +61,9 @@ use meerkat::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
+#[cfg(feature = "mob")]
+use meerkat_mob_mcp::wire_mob_tools;
+use meerkat_store::StoreAdapter;
 
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
@@ -105,6 +108,14 @@ struct SessionMcpState {
     lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
     lifecycle_rx: mpsc::UnboundedReceiver<McpLifecycleAction>,
     drain_task_running: Arc<AtomicBool>,
+}
+
+struct RuntimeBackedServiceComponents {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    builder_mob_tools_slot: Arc<StdRwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>,
+    #[cfg(feature = "mob")]
+    mob_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +265,40 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
 }
 
 impl SessionRuntime {
+    fn compose_runtime_backed_service(
+        mut builder: FactoryAgentBuilder,
+        max_sessions: usize,
+        persistence: PersistenceBundle,
+    ) -> RuntimeBackedServiceComponents {
+        let runtime_adapter = persistence.runtime_adapter();
+        if builder.default_session_store.is_none() {
+            builder.default_session_store =
+                Some(Arc::new(StoreAdapter::new(persistence.session_store())));
+        }
+        let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let (store, runtime_store, blob_store) = persistence.into_parts();
+        let mut service =
+            PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
+        wire_runtime_bindings(&mut service, &runtime_adapter);
+        let service = Arc::new(service);
+
+        #[cfg(feature = "mob")]
+        let mob_state = Some(wire_mob_tools(
+            &builder_mob_tools_slot,
+            service.clone(),
+            Some(runtime_adapter.clone()),
+            None,
+        ));
+
+        RuntimeBackedServiceComponents {
+            service,
+            runtime_adapter,
+            builder_mob_tools_slot,
+            #[cfg(feature = "mob")]
+            mob_state,
+        }
+    }
+
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let live = match self.service.export_live_session(session_id).await {
             Ok(session) => session,
@@ -278,14 +323,17 @@ impl SessionRuntime {
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let factory_clone = factory.clone();
-        let host = RuntimeSessionHost::from_builder(
+        let RuntimeBackedServiceComponents {
+            service,
+            runtime_adapter,
+            builder_mob_tools_slot,
+            #[cfg(feature = "mob")]
+            mob_state,
+        } = Self::compose_runtime_backed_service(
             FactoryAgentBuilder::new(factory, config),
             max_sessions,
             persistence,
         );
-        let service = host.service();
-        let runtime_adapter = host.runtime_adapter();
-        let builder_mob_tools_slot = host.builder_mob_tools_slot();
 
         Self {
             service,
@@ -306,7 +354,7 @@ impl SessionRuntime {
                 registry: SourceIdentityRegistry::default(),
             })),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(Some(host.mob_state())),
+            mob_state: StdRwLock::new(mob_state),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -329,14 +377,17 @@ impl SessionRuntime {
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let factory_clone = factory.clone();
-        let host = RuntimeSessionHost::from_builder(
+        let RuntimeBackedServiceComponents {
+            service,
+            runtime_adapter,
+            builder_mob_tools_slot,
+            #[cfg(feature = "mob")]
+            mob_state,
+        } = Self::compose_runtime_backed_service(
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store),
             max_sessions,
             persistence,
         );
-        let service = host.service();
-        let runtime_adapter = host.runtime_adapter();
-        let builder_mob_tools_slot = host.builder_mob_tools_slot();
 
         Self {
             service,
@@ -357,7 +408,7 @@ impl SessionRuntime {
                 registry: SourceIdentityRegistry::default(),
             })),
             #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(Some(host.mob_state())),
+            mob_state: StdRwLock::new(mob_state),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),

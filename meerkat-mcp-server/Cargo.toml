@@ -27,7 +27,6 @@ meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
-meerkat-surface-runtime = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
 meerkat-tools = { workspace = true }
@@ -47,8 +46,8 @@ chrono = { workspace = true }
 
 [features]
 default = ["comms"]
-comms = ["meerkat/comms", "dep:meerkat-comms", "meerkat-surface-runtime/comms"]
-mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp", "meerkat-surface-runtime/mob"]
+comms = ["meerkat/comms", "dep:meerkat-comms"]
+mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 
 [package.metadata.cargo-machete]
 ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional

@@ -25,7 +25,6 @@ ENTRIES=(
   "meerkat-runtime=${ROOT}/meerkat-runtime"
   "meerkat-session=${ROOT}/meerkat-session"
   "meerkat-memory=${ROOT}/meerkat-memory"
-  "meerkat-surface-runtime=${ROOT}/meerkat-surface-runtime"
   "meerkat-mcp=${ROOT}/meerkat-mcp"
   "meerkat-mcp-server=${ROOT}/meerkat-mcp-server"
   "meerkat-hooks=${ROOT}/meerkat-hooks"

@@ -24,7 +24,6 @@ members = [
     "meerkat-web-runtime",
     "meerkat-mob-mcp",
     "meerkat-runtime",
-    "meerkat-surface-runtime",
     "test-fixtures/mcp-test-server",
     "tests/integration",
     "meerkat-machine-schema",
@@ -137,7 +136,6 @@ meerkat-skills = { version = "0.5.1", path = "meerkat-skills" }
 meerkat-mob = { version = "0.5.1", path = "meerkat-mob" }
 meerkat-mob-pack = { version = "0.5.1", path = "meerkat-mob-pack" }
 meerkat-mob-mcp = { version = "0.5.1", path = "meerkat-mob-mcp" }
-meerkat-surface-runtime = { version = "0.5.1", path = "meerkat-surface-runtime" }
 meerkat-machine-schema = { version = "0.5.1", path = "meerkat-machine-schema" }
 meerkat-machine-codegen = { version = "0.5.1", path = "meerkat-machine-codegen" }
 meerkat-machine-kernels = { version = "0.5.1", path = "meerkat-machine-kernels" }

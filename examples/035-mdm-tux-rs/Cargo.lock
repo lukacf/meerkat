@@ -2430,7 +2430,6 @@ dependencies = [
  "meerkat-runtime",
  "meerkat-schedule",
  "meerkat-store",
- "meerkat-surface-runtime",
  "parking_lot",
  "ratatui",
  "serde",
@@ -2762,23 +2761,6 @@ dependencies = [
  "tokio_with_wasm",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "meerkat-surface-runtime"
-version = "0.5.1"
-dependencies = [
- "async-trait",
- "chrono",
- "meerkat",
- "meerkat-contracts",
- "meerkat-core",
- "meerkat-mob-mcp",
- "meerkat-runtime",
- "meerkat-store",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

@@ -2,45 +2,44 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use meerkat::surface::{
+
+#[cfg(feature = "comms")]
+use super::configure_peer_ingress;
+use super::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
     SurfaceScheduleSessionHost, accepted_scheduled_input_from_runtime_outcome,
-    build_dispatch_from_accepted, immediate_delivery_failure, schedule_attempt_idempotency_key,
-    schedule_host_supported, spawn_schedule_host,
+    build_dispatch_from_accepted, default_persistent_executor, immediate_delivery_failure,
+    materialize_session, schedule_attempt_idempotency_key, schedule_host_supported,
+    spawn_schedule_host,
 };
-use meerkat::{
-    DeliveryDispatch, Occurrence, OccurrenceFailureClass, ScheduleDomainError, ScheduleService,
-    Session, SessionMaterializationSpec, SessionService, SessionTargetBinding, TargetProbeOutcome,
+use crate::{
+    Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
+    ScheduleDomainError, ScheduleService, Session, SessionMaterializationSpec, SessionService,
+    SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_contracts::SkillsParams;
-use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
-};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::{
     CorrelationId, IdempotencyKey, Input, InputDurability, InputHeader, InputOrigin,
-    InputVisibility, PromptInput,
+    InputVisibility, PromptInput, RuntimeSessionAdapter,
 };
 
-use crate::{RuntimeSessionHost, RuntimeSessionHostError};
-
-/// Spawn the shared schedule driver loop for a runtime-backed session host.
-///
-/// This helper covers session-target schedules. Mob-target schedules are
-/// intentionally left unsupported here and should be provided by the owning
-/// surface when needed.
-pub fn spawn_runtime_schedule_host(
-    host: Arc<RuntimeSessionHost>,
+pub fn spawn_runtime_backed_schedule_host(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    config: Config,
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
     owner_id: impl Into<String>,
-) -> Option<meerkat::surface::ScheduleHostHandle> {
+) -> Option<super::ScheduleHostHandle> {
     if !schedule_host_supported(schedule_service.store().kind()) {
         return None;
     }
 
-    let session_host: Arc<dyn SurfaceScheduleSessionHost> =
-        Arc::new(RuntimeScheduleSessionHost::new(host, build_template));
+    let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(
+        RuntimeBackedScheduleSessionHost::new(service, runtime_adapter, config, build_template),
+    );
     let mob_host = Arc::new(NoopScheduleMobHost::new(
         "scheduled mob targets are not supported by this runtime host",
     ));
@@ -52,15 +51,24 @@ pub fn spawn_runtime_schedule_host(
     Some(spawn_schedule_host(schedule_service, adapter, owner_id))
 }
 
-struct RuntimeScheduleSessionHost {
-    host: Arc<RuntimeSessionHost>,
+struct RuntimeBackedScheduleSessionHost {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    config: Config,
     build_template: SessionBuildOptions,
 }
 
-impl RuntimeScheduleSessionHost {
-    fn new(host: Arc<RuntimeSessionHost>, build_template: SessionBuildOptions) -> Self {
+impl RuntimeBackedScheduleSessionHost {
+    fn new(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        runtime_adapter: Arc<RuntimeSessionAdapter>,
+        config: Config,
+        build_template: SessionBuildOptions,
+    ) -> Self {
         Self {
-            host,
+            service,
+            runtime_adapter,
+            config,
             build_template,
         }
     }
@@ -70,7 +78,7 @@ impl RuntimeScheduleSessionHost {
         session_id: &SessionId,
     ) -> Result<(), ScheduleDomainError> {
         let persisted = self
-            .host
+            .service
             .load_persisted(session_id)
             .await
             .map_err(schedule_internal)?;
@@ -86,7 +94,7 @@ impl RuntimeScheduleSessionHost {
         let session_exists = if persisted.is_some() {
             true
         } else {
-            self.host.service().read(session_id).await.is_ok()
+            self.service.read(session_id).await.is_ok()
         };
         if !session_exists {
             return Err(ScheduleDomainError::InvalidSchedule(format!(
@@ -94,30 +102,40 @@ impl RuntimeScheduleSessionHost {
             )));
         }
 
-        self.host
-            .ensure_default_runtime_executor(session_id)
-            .await
-            .map_err(schedule_internal)?;
+        self.runtime_adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                default_persistent_executor(
+                    Arc::clone(&self.service),
+                    Arc::clone(&self.runtime_adapter),
+                    session_id.clone(),
+                ),
+            )
+            .await;
         self.update_peer_ingress_context(session_id).await;
         Ok(())
     }
 
     async fn update_peer_ingress_context(&self, session_id: &SessionId) {
-        let keep_alive = self
-            .host
-            .load_persisted(session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|session| {
-                session
-                    .session_metadata()
-                    .map(|metadata| metadata.keep_alive)
-            })
-            .unwrap_or(false);
-        self.host
-            .configure_peer_ingress(session_id, keep_alive)
-            .await;
+        #[cfg(feature = "comms")]
+        {
+            let keep_alive = self
+                .service
+                .load_persisted(session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|session| {
+                    session
+                        .session_metadata()
+                        .map(|metadata| metadata.keep_alive)
+                })
+                .unwrap_or(false);
+            configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
+                .await;
+        }
+        #[cfg(not(feature = "comms"))]
+        let _ = session_id;
     }
 
     fn build_materialized_request(
@@ -176,8 +194,7 @@ impl RuntimeScheduleSessionHost {
         }
 
         let registry = self
-            .host
-            .config()
+            .config
             .skills
             .build_source_identity_registry()
             .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
@@ -194,12 +211,12 @@ impl RuntimeScheduleSessionHost {
     async fn accept_scheduled_prompt_with_completion(
         &self,
         session_id: &SessionId,
-        occurrence: &Occurrence,
+        occurrence: &crate::Occurrence,
         prompt: ContentInput,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         skill_references: Vec<String>,
         additional_instructions: Vec<String>,
-    ) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<super::AcceptedScheduledInput, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
         let skill_keys = self.canonical_skill_keys(skill_references)?;
 
@@ -227,8 +244,7 @@ impl RuntimeScheduleSessionHost {
             Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
 
         let (outcome, handle) = self
-            .host
-            .runtime_adapter()
+            .runtime_adapter
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
@@ -240,11 +256,11 @@ impl RuntimeScheduleSessionHost {
     async fn accept_scheduled_event_with_completion(
         &self,
         session_id: &SessionId,
-        occurrence: &Occurrence,
+        occurrence: &crate::Occurrence,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+    ) -> Result<super::AcceptedScheduledInput, ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
         let input = Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
@@ -270,8 +286,7 @@ impl RuntimeScheduleSessionHost {
         });
 
         let (outcome, handle) = self
-            .host
-            .runtime_adapter()
+            .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
@@ -282,7 +297,7 @@ impl RuntimeScheduleSessionHost {
 }
 
 #[async_trait]
-impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
+impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
     async fn probe_session_target(
         &self,
         binding: &SessionTargetBinding,
@@ -291,7 +306,7 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
             return Ok(TargetProbeOutcome::Ready);
         };
 
-        if let Ok(view) = self.host.service().read(session_id).await {
+        if let Ok(view) = self.service.read(session_id).await {
             return Ok(if view.state.is_active {
                 TargetProbeOutcome::Busy {
                     detail: Some(format!("session still running: {session_id}")),
@@ -302,7 +317,7 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
         }
 
         let persisted = self
-            .host
+            .service
             .load_persisted(session_id)
             .await
             .map_err(schedule_internal)?;
@@ -321,21 +336,40 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        self.host
-            .materialize_session(
-                Session::new(),
-                self.build_materialized_request(create, prompt_system_prompt),
-            )
-            .await
-            .map_err(schedule_internal)
+        let request = self.build_materialized_request(create, prompt_system_prompt);
+        let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
+        let result = materialize_session(
+            &self.service,
+            &self.runtime_adapter,
+            Session::new(),
+            request,
+            {
+                let service = Arc::clone(&self.service);
+                let runtime_adapter = Arc::clone(&self.runtime_adapter);
+                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+            },
+        )
+        .await
+        .map_err(schedule_internal)?;
+        #[cfg(feature = "comms")]
+        configure_peer_ingress(
+            &self.runtime_adapter,
+            &self.service,
+            &result.session_id,
+            keep_alive,
+        )
+        .await;
+        #[cfg(not(feature = "comms"))]
+        let _ = keep_alive;
+        Ok(result.session_id)
     }
 
     async fn deliver_prompt(
         &self,
         session_id: &SessionId,
-        occurrence: &Occurrence,
+        occurrence: &crate::Occurrence,
         dispatch: ScheduledPromptDispatch,
-    ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+    ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         match self
             .accept_scheduled_prompt_with_completion(
                 session_id,
@@ -355,7 +389,7 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
             Err(error) => Ok(immediate_delivery_failure(
                 occurrence,
                 error.to_string(),
-                OccurrenceFailureClass::RuntimeRejected,
+                crate::OccurrenceFailureClass::RuntimeRejected,
                 None,
                 dispatch.materialized_session_id,
             )),
@@ -365,12 +399,12 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
     async fn deliver_event(
         &self,
         session_id: &SessionId,
-        occurrence: &Occurrence,
+        occurrence: &crate::Occurrence,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         materialized_session_id: Option<SessionId>,
-    ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+    ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         match self
             .accept_scheduled_event_with_completion(
                 session_id,
@@ -389,7 +423,7 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
             Err(error) => Ok(immediate_delivery_failure(
                 occurrence,
                 error.to_string(),
-                OccurrenceFailureClass::RuntimeRejected,
+                crate::OccurrenceFailureClass::RuntimeRejected,
                 None,
                 materialized_session_id,
             )),
@@ -397,7 +431,7 @@ impl SurfaceScheduleSessionHost for RuntimeScheduleSessionHost {
     }
 }
 
-fn schedule_internal(error: RuntimeSessionHostError) -> ScheduleDomainError {
+fn schedule_internal(error: impl std::fmt::Display) -> ScheduleDomainError {
     ScheduleDomainError::Internal(error.to_string())
 }
 

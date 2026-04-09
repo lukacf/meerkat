@@ -11,7 +11,6 @@ pub mod error;
 pub mod handlers;
 pub mod protocol;
 pub mod router;
-pub mod runtime_session_host;
 pub mod server;
 pub mod session_executor;
 pub mod session_runtime;

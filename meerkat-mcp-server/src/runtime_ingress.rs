@@ -1,7 +1,12 @@
 use async_trait::async_trait;
+#[cfg(feature = "comms")]
+use meerkat::surface::configure_peer_ingress;
 use meerkat::{
-    FactoryAgentBuilder, PersistentSessionService,
-    surface::{SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides},
+    CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
+    surface::{
+        SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
+        SurfaceSessionRecoveryOverrides, build_recovered_session, materialize_session,
+    },
 };
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
@@ -17,7 +22,6 @@ use meerkat_core::{ConfigRuntime, EventEnvelope, PendingSystemContextAppend};
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_runtime::completion::CompletionHandle;
 use meerkat_runtime::{AcceptOutcome, Input, RuntimeSessionAdapter};
-use meerkat_surface_runtime::{RuntimeSessionHost, RuntimeSessionHostError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -29,7 +33,6 @@ pub(crate) type SharedMcpRuntimeSessions =
 pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapter>>>>;
 
 pub(crate) struct McpRuntimeIngressResources {
-    pub runtime_host: Arc<RuntimeSessionHost>,
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub runtime_adapter: Arc<RuntimeSessionAdapter>,
     pub config_runtime: Arc<ConfigRuntime>,
@@ -42,7 +45,6 @@ pub(crate) struct McpRuntimeIngressResources {
 
 #[derive(Clone)]
 pub(crate) struct McpRuntimeIngressContext {
-    runtime_host: Arc<RuntimeSessionHost>,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
     config_runtime: Arc<ConfigRuntime>,
@@ -56,7 +58,6 @@ pub(crate) struct McpRuntimeIngressContext {
 impl McpRuntimeIngressContext {
     pub(crate) fn new(resources: McpRuntimeIngressResources) -> Self {
         Self {
-            runtime_host: resources.runtime_host,
             service: resources.service,
             runtime_adapter: resources.runtime_adapter,
             config_runtime: resources.config_runtime,
@@ -215,14 +216,128 @@ impl McpRuntimeIngressContext {
         crate::compose_external_tool_dispatchers(callback_tools, mcp_tools)
             .map_err(|error| SessionError::Agent(AgentError::InternalError(error)))
     }
+
+    async fn materialize_with_state(
+        &self,
+        session: Session,
+        request: CreateSessionRequest,
+        keep_alive: bool,
+        state: Arc<McpRuntimeSessionState>,
+    ) -> Result<RunResult, SessionError> {
+        let session_id = session.id().clone();
+        self.runtime_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), state.clone());
+        let context = self.clone();
+        let result = materialize_session(
+            &self.service,
+            &self.runtime_adapter,
+            session,
+            request,
+            move |runtime_session_id| {
+                Box::new(McpSessionRuntimeExecutor::new(
+                    context,
+                    runtime_session_id,
+                    state,
+                ))
+            },
+        )
+        .await;
+
+        match result {
+            Ok(result) => {
+                #[cfg(feature = "comms")]
+                configure_peer_ingress(
+                    &self.runtime_adapter,
+                    &self.service,
+                    &result.session_id,
+                    keep_alive,
+                )
+                .await;
+                Ok(result)
+            }
+            Err(error) => {
+                self.clear_session(&session_id).await;
+                Err(surface_materialize_session_error(error))
+            }
+        }
+    }
+
+    pub(crate) async fn materialize_session_with_result(
+        &self,
+        session: Session,
+        request: CreateSessionRequest,
+        callback_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    ) -> Result<RunResult, SessionError> {
+        let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
+        let state = Arc::new(McpRuntimeSessionState::default());
+        state.set_callback_tools(callback_tools).await;
+        self.materialize_with_state(session, request, keep_alive, state)
+            .await
+    }
+
+    async fn rematerialize_persisted_session(
+        &self,
+        session_id: &SessionId,
+        state: Arc<McpRuntimeSessionState>,
+    ) -> Result<SessionId, SessionError> {
+        let session = self
+            .service
+            .load_persisted(session_id)
+            .await?
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let current_snapshot = self.config_runtime.get().await.ok();
+        let current_generation = current_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation)
+            .or_else(|| {
+                session
+                    .session_metadata()
+                    .as_ref()
+                    .and_then(|meta| meta.config_generation)
+            });
+        let external_tools = self.external_tools_for_session(session_id, &state).await?;
+        let recovered = build_recovered_session(
+            session.clone(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                llm_client_override: None,
+                external_tools,
+                realm_id: Some(self.realm_id.clone()),
+                instance_id: self.instance_id.clone(),
+                backend: Some(self.backend.clone()),
+                config_generation: current_generation,
+                ..Default::default()
+            },
+        )
+        .map_err(surface_recovery_session_error)?;
+        let keep_alive = recovered.keep_alive;
+        let result = self
+            .materialize_with_state(
+                session,
+                recovered.into_deferred_create_request(),
+                keep_alive,
+                state,
+            )
+            .await?;
+        Ok(result.session_id)
+    }
 }
 
-fn runtime_host_session_error(error: RuntimeSessionHostError) -> SessionError {
+fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> SessionError {
     match error {
-        RuntimeSessionHostError::Session(error) => error,
-        RuntimeSessionHostError::PersistedSessionNotFound(id) => SessionError::NotFound { id },
+        SurfaceRuntimeMaterializeError::Session(error) => error,
         other => SessionError::Agent(AgentError::InternalError(other.to_string())),
     }
+}
+
+fn surface_recovery_session_error(
+    error: meerkat::surface::SurfaceSessionRecoveryError,
+) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(error.to_string()))
 }
 
 #[derive(Default)]
@@ -432,42 +547,10 @@ async fn apply_runtime_turn(
     {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
-            let persisted = context.service.load_persisted(session_id).await?.ok_or(
-                SessionError::NotFound {
-                    id: session_id.clone(),
-                },
-            )?;
-            let current_snapshot = context.config_runtime.get().await.ok();
-            let current_generation = current_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.generation)
-                .or_else(|| {
-                    persisted
-                        .session_metadata()
-                        .as_ref()
-                        .and_then(|meta| meta.config_generation)
-                });
-
-            let external_tools = context
-                .external_tools_for_session(session_id, state)
-                .await?;
             context
-                .runtime_host
-                .materialize_persisted_session(
-                    session_id,
-                    &SurfaceSessionRecoveryOverrides::default(),
-                    SurfaceSessionRecoveryContext {
-                        llm_client_override: None,
-                        external_tools,
-                        realm_id: Some(context.realm_id.clone()),
-                        instance_id: context.instance_id.clone(),
-                        backend: Some(context.backend.clone()),
-                        config_generation: current_generation,
-                        ..Default::default()
-                    },
-                )
+                .rematerialize_persisted_session(session_id, state.clone())
                 .await
-                .map_err(runtime_host_session_error)?;
+                .map(|_| ())?;
             context
                 .service
                 .apply_runtime_turn_outcome(

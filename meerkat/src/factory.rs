@@ -185,6 +185,8 @@ pub struct AgentBuildConfig {
     pub model: String,
     /// Explicit provider. If `None`, inferred from the model name.
     pub provider: Option<Provider>,
+    /// Durable self-hosted server binding for configured aliases.
+    pub self_hosted_server_id: Option<String>,
     /// Max tokens per turn. If `None`, uses `Config::max_tokens`.
     pub max_tokens: Option<u32>,
     /// Override the system prompt. If `None`, uses the default composed prompt.
@@ -330,6 +332,7 @@ impl std::fmt::Debug for AgentBuildConfig {
         f.debug_struct("AgentBuildConfig")
             .field("model", &self.model)
             .field("provider", &self.provider)
+            .field("self_hosted_server_id", &self.self_hosted_server_id)
             .field("max_tokens", &self.max_tokens)
             .field(
                 "system_prompt",
@@ -398,6 +401,7 @@ impl AgentBuildConfig {
         Self {
             model: model.into(),
             provider: None,
+            self_hosted_server_id: None,
             max_tokens: None,
             system_prompt: None,
             output_schema: None,
@@ -489,6 +493,7 @@ impl AgentBuildConfig {
     /// Merge `SessionBuildOptions` into this build config.
     pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
         self.provider = build.provider;
+        self.self_hosted_server_id = build.self_hosted_server_id.clone();
         self.output_schema = build.output_schema.clone();
         self.structured_output_retries = build.structured_output_retries;
         self.hooks_override = build.hooks_override.clone();
@@ -534,6 +539,7 @@ impl AgentBuildConfig {
     pub fn to_session_build_options(&self) -> SessionBuildOptions {
         SessionBuildOptions {
             provider: self.provider,
+            self_hosted_server_id: self.self_hosted_server_id.clone(),
             output_schema: self.output_schema.clone(),
             structured_output_retries: self.structured_output_retries,
             hooks_override: self.hooks_override.clone(),
@@ -988,6 +994,9 @@ impl AgentFactory {
         if !mask.provider {
             build_config.provider = Some(metadata.provider);
         }
+        if !mask.model && !mask.provider {
+            build_config.self_hosted_server_id = metadata.self_hosted_server_id.clone();
+        }
         if !mask.provider_params {
             build_config.provider_params = metadata.provider_params.clone();
         }
@@ -1121,7 +1130,13 @@ impl AgentFactory {
                                 build_config.model
                             ))
                         })?;
-                    Ok((Provider::SelfHosted, Some(server_id)))
+                    Ok((
+                        Provider::SelfHosted,
+                        build_config
+                            .self_hosted_server_id
+                            .clone()
+                            .or(Some(server_id)),
+                    ))
                 }
                 Provider::Other => Ok((Provider::Other, None)),
                 other => Ok((other, None)),
@@ -1133,7 +1148,14 @@ impl AgentFactory {
                 .self_hosted
                 .as_ref()
                 .map(|server| server.server_id.clone());
-            return Ok((entry.provider, server_id));
+            return Ok((
+                entry.provider,
+                if matches!(entry.provider, Provider::SelfHosted) {
+                    build_config.self_hosted_server_id.clone().or(server_id)
+                } else {
+                    None
+                },
+            ));
         }
 
         let inferred = ProviderResolver::infer_from_model(&build_config.model);
@@ -1152,17 +1174,9 @@ impl AgentFactory {
     fn build_self_hosted_client_from_registry(
         &self,
         registry: &ModelRegistry,
-        model: &str,
+        identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
-        self.build_self_hosted_client_for_identity(
-            registry,
-            &SessionLlmIdentity {
-                model: model.to_string(),
-                provider: Provider::SelfHosted,
-                self_hosted_server_id: None,
-                provider_params: None,
-            },
-        )
+        self.build_self_hosted_client_for_identity(registry, identity)
     }
 
     fn build_self_hosted_client_for_identity(
@@ -1483,16 +1497,36 @@ impl AgentFactory {
         let registry = self.model_registry(config)?;
 
         // 2. Resolve provider and any self-hosted server binding.
-        let (provider, self_hosted_server_id) =
+        let resumed_self_hosted_server_id = resumed_session_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.self_hosted_server_id.clone());
+        let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
+        let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
+            build_config
+                .self_hosted_server_id
+                .clone()
+                .or(resumed_self_hosted_server_id)
+                .or(resolved_self_hosted_server_id)
+        } else {
+            None
+        };
 
         // 3. Create LLM client
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
             Some(client) => Arc::clone(client),
             None => {
                 if matches!(provider, Provider::SelfHosted) {
-                    self.build_self_hosted_client_from_registry(&registry, &build_config.model)
-                        .map_err(BuildAgentError::LlmClient)?
+                    self.build_self_hosted_client_from_registry(
+                        &registry,
+                        &SessionLlmIdentity {
+                            model: build_config.model.clone(),
+                            provider,
+                            self_hosted_server_id: self_hosted_server_id.clone(),
+                            provider_params: build_config.provider_params.clone(),
+                        },
+                    )
+                    .map_err(BuildAgentError::LlmClient)?
                 } else {
                     let (api_key, base_url) = self.resolve_provider_credentials(provider, config);
                     if api_key.is_none() {
@@ -2365,6 +2399,83 @@ impl AgentFactory {
         }
 
         Ok(agent)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::{
+        SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
+    };
+
+    #[test]
+    fn resumed_self_hosted_binding_overrides_current_registry_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        config.self_hosted.servers.insert(
+            "local".to_string(),
+            SelfHostedServerConfig {
+                transport: SelfHostedTransport::OpenAiCompatible,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                api_style: SelfHostedApiStyle::ChatCompletions,
+                bearer_token: None,
+                bearer_token_env: None,
+            },
+        );
+        config.self_hosted.models.insert(
+            "gemma-4-e2b".to_string(),
+            SelfHostedModelConfig {
+                server: "local".to_string(),
+                remote_model: "gemma4:e2b".to_string(),
+                display_name: "Gemma 4 E2B".to_string(),
+                family: "gemma-4".to_string(),
+                tier: meerkat_models::ModelTier::Supported,
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                vision: true,
+                image_tool_results: true,
+                inline_video: false,
+                supports_temperature: true,
+                supports_thinking: true,
+                supports_reasoning: true,
+                call_timeout_secs: Some(600),
+            },
+        );
+
+        let mut resumed = Session::new();
+        resumed
+            .set_session_metadata(SessionMetadata {
+                model: "gemma-4-e2b".to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: Provider::SelfHosted,
+                self_hosted_server_id: Some("other".to_string()),
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+            })
+            .expect("resume metadata");
+
+        let mut build = AgentBuildConfig::new("gemma-4-e2b");
+        build.resume_session = Some(resumed);
+        let _ = AgentFactory::apply_resumed_session_metadata(&mut build);
+
+        let registry = factory.model_registry(&config).expect("registry");
+        let (provider, server_id) = factory
+            .resolve_provider_from_registry(&registry, &build)
+            .expect("resolved provider");
+
+        assert_eq!(provider, Provider::SelfHosted);
+        assert_eq!(server_id.as_deref(), Some("other"));
     }
 }
 

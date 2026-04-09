@@ -3446,6 +3446,7 @@ async fn run_agent(
 
     let mut build = SessionBuildOptions {
         provider: Some(provider.as_core()),
+        self_hosted_server_id: None,
         output_schema,
         structured_output_retries,
         hooks_override,
@@ -3960,6 +3961,9 @@ async fn resume_session_with_llm_override(
 
     let mut build = SessionBuildOptions {
         provider: Some(provider_core),
+        self_hosted_server_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.self_hosted_server_id.clone()),
         output_schema: None,
         structured_output_retries: 2,
         hooks_override,

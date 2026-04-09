@@ -2447,6 +2447,7 @@ async fn create_session_inner(
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let mut build = SessionBuildOptions {
         provider: req.provider,
+        self_hosted_server_id: None,
         output_schema: req.output_schema,
         structured_output_retries: req
             .structured_output_retries
@@ -3190,6 +3191,9 @@ async fn continue_session_inner(
         };
         let mut build = SessionBuildOptions {
             provider: req.provider,
+            self_hosted_server_id: session
+                .session_metadata()
+                .and_then(|meta| meta.self_hosted_server_id),
             output_schema: req.output_schema,
             structured_output_retries: req
                 .structured_output_retries

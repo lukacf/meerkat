@@ -2529,6 +2529,7 @@ async fn handle_meerkat_run(
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let mut build = SessionBuildOptions {
         provider: input.provider.map(ProviderInput::to_provider),
+        self_hosted_server_id: None,
         output_schema,
         structured_output_retries: input
             .structured_output_retries
@@ -2797,6 +2798,9 @@ async fn handle_meerkat_resume(
         })?;
     let mut build = SessionBuildOptions {
         provider,
+        self_hosted_server_id: stored_metadata
+            .as_ref()
+            .and_then(|m| m.self_hosted_server_id.clone()),
         output_schema,
         structured_output_retries: input
             .structured_output_retries

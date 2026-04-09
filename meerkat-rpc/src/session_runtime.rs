@@ -474,19 +474,6 @@ impl SessionRuntime {
         self.default_llm_client.clone()
     }
 
-    fn llm_identity_from_pending_build(build_config: &AgentBuildConfig) -> SessionLlmIdentity {
-        let provider = build_config
-            .provider
-            .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
-            .unwrap_or(meerkat_core::Provider::Other);
-        SessionLlmIdentity {
-            model: build_config.model.clone(),
-            provider,
-            self_hosted_server_id: None,
-            provider_params: build_config.provider_params.clone(),
-        }
-    }
-
     async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
         let config = if let Some(runtime) = &self.config_runtime {
             runtime
@@ -509,16 +496,66 @@ impl SessionRuntime {
         })
     }
 
-    fn provider_supports_inline_video(identity: &SessionLlmIdentity) -> bool {
-        meerkat_core::Config::default()
-            .model_registry()
+    async fn llm_identity_from_pending_build(
+        &self,
+        build_config: &AgentBuildConfig,
+    ) -> Result<SessionLlmIdentity, RpcError> {
+        let registry = self.model_registry().await?;
+        let model = build_config.model.clone();
+        let provider = if let Some(provider) = build_config.provider {
+            provider
+        } else {
+            registry
+                .entry(&model)
+                .map(|entry| entry.provider)
+                .or_else(|| meerkat_core::Provider::infer_from_model(&model))
+                .unwrap_or(meerkat_core::Provider::Other)
+        };
+        let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
+            if let Some(server_id) = build_config.self_hosted_server_id.clone() {
+                Some(server_id)
+            } else if let Some(metadata) = build_config
+                .resume_session
+                .as_ref()
+                .and_then(Session::session_metadata)
+            {
+                metadata.self_hosted_server_id
+            } else if let Some(entry) = registry.entry(&model) {
+                entry
+                    .self_hosted
+                    .as_ref()
+                    .map(|server| server.server_id.clone())
+            } else {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "self-hosted provider requires a registered model alias; '{model}' is not configured"
+                    ),
+                    data: None,
+                });
+            }
+        } else {
+            None
+        };
+        Ok(SessionLlmIdentity {
+            model,
+            provider,
+            self_hosted_server_id,
+            provider_params: build_config.provider_params.clone(),
+        })
+    }
+
+    async fn provider_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
+        self.model_registry()
+            .await
             .ok()
             .and_then(|registry| registry.profile_for(&identity.model))
             .map(|profile| profile.inline_video)
             .unwrap_or(false)
     }
 
-    fn validate_prompt_video_input(
+    async fn validate_prompt_video_input(
+        &self,
         prompt: &ContentInput,
         identity: &SessionLlmIdentity,
     ) -> Result<(), RpcError> {
@@ -533,7 +570,7 @@ impl SessionRuntime {
             data: None,
         })?;
 
-        if meerkat_core::has_video(blocks) && !Self::provider_supports_inline_video(identity) {
+        if meerkat_core::has_video(blocks) && !self.provider_supports_inline_video(identity).await {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: format!(
@@ -613,6 +650,7 @@ impl SessionRuntime {
     ) {
         build_config.model = identity.model.clone();
         build_config.provider = Some(identity.provider);
+        build_config.self_hosted_server_id = identity.self_hosted_server_id.clone();
         build_config.provider_params = identity.provider_params.clone();
     }
 
@@ -1017,7 +1055,8 @@ impl SessionRuntime {
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;
-        Self::validate_prompt_video_input(&prompt, &effective_identity)?;
+        self.validate_prompt_video_input(&prompt, &effective_identity)
+            .await?;
 
         if self.live_session_is_stale(session_id).await? {
             let _ = self.service.discard_live_session(session_id).await;
@@ -1228,7 +1267,8 @@ impl SessionRuntime {
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;
-        Self::validate_prompt_video_input(&prompt, &effective_identity)?;
+        self.validate_prompt_video_input(&prompt, &effective_identity)
+            .await?;
 
         let pending_session = {
             let mut pending = self.pending.write().await;
@@ -1359,7 +1399,7 @@ impl SessionRuntime {
                 }
                 let resolved_identity = self
                     .resolve_target_llm_identity(
-                        &Self::llm_identity_from_pending_build(&build_config),
+                        &self.llm_identity_from_pending_build(&build_config).await?,
                         ov,
                     )
                     .await?;
@@ -1555,6 +1595,9 @@ impl SessionRuntime {
             })?;
         let mut build = SessionBuildOptions {
             provider: stored_metadata.as_ref().map(|meta| meta.provider),
+            self_hosted_server_id: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.self_hosted_server_id.clone()),
             output_schema: None,
             structured_output_retries: 2,
             hooks_override: HookRunOverrides::default(),
@@ -1706,13 +1749,15 @@ impl SessionRuntime {
     /// and will be materialized inside the service on the first `start_turn`.
     pub async fn create_session(
         &self,
-        build_config: AgentBuildConfig,
+        mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
     ) -> Result<SessionId, RpcError> {
-        let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
+        let effective_llm_identity = self.llm_identity_from_pending_build(&build_config).await?;
+        build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         if let Some(prompt) = deferred_prompt.as_ref() {
-            Self::validate_prompt_video_input(prompt, &effective_llm_identity)?;
+            self.validate_prompt_video_input(prompt, &effective_llm_identity)
+                .await?;
         }
 
         // Check combined capacity (pending + active).
@@ -1893,7 +1938,7 @@ impl SessionRuntime {
                 }
                 let resolved_identity = self
                     .resolve_target_llm_identity(
-                        &Self::llm_identity_from_pending_build(&build_config),
+                        &self.llm_identity_from_pending_build(&build_config).await?,
                         ov,
                     )
                     .await?;
@@ -2007,7 +2052,7 @@ impl SessionRuntime {
                                 data: None,
                             })?;
                         let effective_llm_identity =
-                            Self::llm_identity_from_pending_build(&build_config);
+                            self.llm_identity_from_pending_build(&build_config).await?;
                         let mut pending = self.pending.write().await;
                         pending.insert(
                             session_id.clone(),
@@ -2144,13 +2189,17 @@ impl SessionRuntime {
     async fn restore_pending_from_promoting(
         &self,
         session_id: &SessionId,
-        build_config: AgentBuildConfig,
+        mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
     ) {
-        let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
+        let Ok(effective_llm_identity) = self.llm_identity_from_pending_build(&build_config).await
+        else {
+            return;
+        };
+        build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         let mut pending = self.pending.write().await;
         pending.insert(
             session_id.clone(),
@@ -2222,6 +2271,7 @@ impl SessionRuntime {
 
         if let Some(ref meta) = stored_metadata {
             build_config.provider = Some(meta.provider);
+            build_config.self_hosted_server_id = meta.self_hosted_server_id.clone();
             build_config.provider_params = meta.provider_params.clone();
             build_config.max_tokens = Some(meta.max_tokens);
             build_config.keep_alive = meta.keep_alive;
@@ -2270,7 +2320,8 @@ impl SessionRuntime {
         let labels: Option<BTreeMap<String, String>> = None;
 
         {
-            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
+            let effective_llm_identity =
+                self.llm_identity_from_pending_build(&build_config).await?;
             let mut pending = self.pending.write().await;
             pending.insert(
                 session_id.clone(),
@@ -3294,6 +3345,53 @@ mod tests {
         )
     }
 
+    fn self_hosted_test_config(server: &str, inline_video: bool) -> Config {
+        let mut config = Config::default();
+        config.self_hosted.servers.insert(
+            server.to_string(),
+            meerkat_core::SelfHostedServerConfig {
+                transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
+                base_url: format!(
+                    "http://127.0.0.1:{}",
+                    if server == "local" { 11434 } else { 22434 }
+                ),
+                api_style: meerkat_core::SelfHostedApiStyle::ChatCompletions,
+                bearer_token: None,
+                bearer_token_env: None,
+            },
+        );
+        config.self_hosted.models.insert(
+            "gemma-4-e2b".to_string(),
+            meerkat_core::SelfHostedModelConfig {
+                server: server.to_string(),
+                remote_model: "gemma4:e2b".to_string(),
+                display_name: "Gemma 4 E2B".to_string(),
+                family: "gemma-4".to_string(),
+                tier: meerkat_models::ModelTier::Supported,
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+                vision: true,
+                image_tool_results: true,
+                inline_video,
+                supports_temperature: true,
+                supports_thinking: true,
+                supports_reasoning: true,
+                call_timeout_secs: Some(600),
+            },
+        );
+        config
+    }
+
+    fn inline_video_prompt() -> ContentInput {
+        ContentInput::Blocks(vec![meerkat_core::ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 1000,
+            data: meerkat_core::VideoData::Inline {
+                data: "AAAA".to_string(),
+            },
+        }])
+    }
+
     #[cfg(feature = "mcp")]
     fn mcp_test_server_path() -> PathBuf {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
@@ -3322,6 +3420,75 @@ mod tests {
             "env": {},
             "name": server_name,
         }))
+    }
+
+    #[tokio::test]
+    async fn create_session_accepts_video_for_self_hosted_alias_from_runtime_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", true)),
+        );
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        )));
+
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    ..AgentBuildConfig::new("gemma-4-e2b")
+                },
+                None,
+                Some(inline_video_prompt()),
+            )
+            .await
+            .expect("self-hosted inline-video alias should validate against runtime registry");
+
+        assert!(runtime.pending_session_exists(&session_id).await);
+    }
+
+    #[tokio::test]
+    async fn create_session_pins_self_hosted_server_id_before_materialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", false)),
+        );
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        ));
+        runtime.set_config_runtime(config_runtime.clone());
+
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    ..AgentBuildConfig::new("gemma-4-e2b")
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("pending self-hosted session should stage");
+
+        config_runtime
+            .set(self_hosted_test_config("other", false), None)
+            .await
+            .expect("config patch");
+
+        let pending = runtime.pending.read().await;
+        let staged = pending.get(&session_id).expect("pending session");
+        assert_eq!(
+            staged
+                .effective_llm_identity
+                .self_hosted_server_id
+                .as_deref(),
+            Some("local"),
+            "pending sessions must remain pinned to the server selected at create time"
+        );
     }
 
     #[cfg(feature = "mcp")]

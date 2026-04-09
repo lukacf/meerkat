@@ -174,6 +174,7 @@ pub struct CreateSessionRequest {
 #[derive(Clone)]
 pub struct SessionBuildOptions {
     pub provider: Option<Provider>,
+    pub self_hosted_server_id: Option<String>,
     pub output_schema: Option<OutputSchema>,
     pub structured_output_retries: u32,
     pub hooks_override: HookRunOverrides,
@@ -596,6 +597,7 @@ impl Default for SessionBuildOptions {
     fn default() -> Self {
         Self {
             provider: None,
+            self_hosted_server_id: None,
             output_schema: None,
             structured_output_retries: 2,
             hooks_override: HookRunOverrides::default(),

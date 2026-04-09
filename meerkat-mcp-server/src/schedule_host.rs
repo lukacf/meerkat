@@ -190,6 +190,7 @@ impl McpScheduleContext {
             .or(create.config_generation);
         let build = SessionBuildOptions {
             provider: create.provider,
+            self_hosted_server_id: None,
             output_schema,
             structured_output_retries: create.structured_output_retries,
             hooks_override: Default::default(),

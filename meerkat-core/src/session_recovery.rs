@@ -177,6 +177,7 @@ pub fn build_recovered_session(
 
     let mut build = SessionBuildOptions {
         provider: Some(overrides.provider.unwrap_or(metadata.provider)),
+        self_hosted_server_id: metadata.self_hosted_server_id.clone(),
         output_schema: overrides
             .output_schema
             .clone()

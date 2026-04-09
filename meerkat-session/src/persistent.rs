@@ -1247,109 +1247,135 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
 
             let accepted_at = meerkat_core::time_compat::SystemTime::now();
-            let mut attempts = 0usize;
-            loop {
-                attempts += 1;
-                let (status, snapshot_state, persisted_state) = {
-                    let guard = match state_arc.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            tracing::warn!(
-                                session_id = %id,
-                                "system-context state lock poisoned while snapshotting live append"
-                            );
-                            poisoned.into_inner()
-                        }
-                    };
-                    let snapshot_state = guard.clone();
-                    let mut candidate = snapshot_state.clone();
-                    let status = candidate
-                        .stage_append(&req, accepted_at)
-                        .map_err(|err| err.into_control_error(id))?;
-                    (status, snapshot_state, candidate)
-                };
-
-                // Persist the durable control state before mutating the live
-                // runtime state so an error never leaves the caller observing a
-                // failure while the next LLM boundary still applies the append.
-                let mut session = if self.runtime_store.is_some() {
-                    match self.load_authoritative_session_base(id).await? {
-                        Some(session) => session,
-                        None => {
-                            if created_gate {
-                                drop(gate_guard);
-                                self.checkpointer_gates.lock().await.remove(id);
-                            }
-                            return Err(SessionControlError::Session(SessionError::Agent(
-                                meerkat_core::error::AgentError::InternalError(
-                                    "runtime-backed live session is missing its last committed snapshot"
-                                        .to_string(),
-                                ),
-                            )));
-                        }
-                    }
-                } else {
-                    match self.export_session_with_labels(id).await {
-                        Ok(session) => session,
-                        Err(err) => {
-                            if created_gate && matches!(err, SessionError::NotFound { .. }) {
-                                drop(gate_guard);
-                                self.checkpointer_gates.lock().await.remove(id);
-                            }
-                            return Err(SessionControlError::Session(err));
-                        }
+            let (status, snapshot_state, persisted_state) = {
+                let mut guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while staging live append"
+                        );
+                        poisoned.into_inner()
                     }
                 };
+                let snapshot_state = guard.clone();
+                let mut candidate = snapshot_state.clone();
+                let status = candidate
+                    .stage_append(&req, accepted_at)
+                    .map_err(|err| err.into_control_error(id))?;
+                *guard = candidate.clone();
+                (status, snapshot_state, candidate)
+            };
 
+            let mut session = if self.runtime_store.is_some() {
+                match self.load_authoritative_session_base(id).await? {
+                    Some(session) => session,
+                    None => {
+                        if created_gate {
+                            drop(gate_guard);
+                            self.checkpointer_gates.lock().await.remove(id);
+                        }
+                        return Err(SessionControlError::Session(SessionError::Agent(
+                            meerkat_core::error::AgentError::InternalError(
+                                "runtime-backed live session is missing its last committed snapshot"
+                                    .to_string(),
+                            ),
+                        )));
+                    }
+                }
+            } else {
+                match self.export_session_with_labels(id).await {
+                    Ok(session) => session,
+                    Err(err) => {
+                        if created_gate && matches!(err, SessionError::NotFound { .. }) {
+                            drop(gate_guard);
+                            self.checkpointer_gates.lock().await.remove(id);
+                        }
+                        return Err(SessionControlError::Session(err));
+                    }
+                }
+            };
+
+            let persist_result = async {
                 self.reject_if_archived_session(id, &session).await?;
-                write_system_context_state(&mut session, persisted_state)?;
+                write_system_context_state(&mut session, persisted_state.clone())?;
                 self.save_normalized_session(session)
                     .await
                     .map_err(SessionControlError::Session)?;
+                Ok::<(), SessionControlError>(())
+            }
+            .await;
 
-                let _ = self
-                    .inner
-                    .enqueue_system_context_append(id, req.clone(), accepted_at)
-                    .await;
-
-                let commit_result = {
+            if let Err(err) = persist_result {
+                let rollback_result = {
                     let mut guard = match state_arc.lock() {
                         Ok(guard) => guard,
                         Err(poisoned) => {
                             tracing::warn!(
                                 session_id = %id,
-                                "system-context state lock poisoned while committing live append"
+                                "system-context state lock poisoned while rolling back failed live append"
                             );
                             poisoned.into_inner()
                         }
                     };
-                    if *guard == snapshot_state {
-                        let live_status = guard
-                            .stage_append(&req, accepted_at)
-                            .map_err(|err| err.into_control_error(id))?;
-                        Some(live_status)
+                    if *guard == persisted_state {
+                        *guard = snapshot_state;
+                        Ok(())
                     } else {
-                        None
+                        Err(())
                     }
                 };
-
-                if let Some(live_status) = commit_result {
-                    debug_assert_eq!(live_status, status);
+                if rollback_result.is_ok() {
                     let _ = self.inner.sync_system_context_state(id).await;
-                    drop(gate_guard);
-                    return Ok(AppendSystemContextResult { status });
-                }
-
-                if attempts >= 8 {
+                } else {
                     tracing::warn!(
                         session_id = %id,
-                        "system-context state kept changing after the durable append committed; discarding the live session so the next access reloads the authoritative stored state"
+                        "live system-context state diverged after a failed durable append; discarding the live session to restore authoritative state"
                     );
                     drop(gate_guard);
                     let _ = self.discard_live_session(id).await;
-                    return Ok(AppendSystemContextResult { status });
                 }
+                return Err(err);
             }
+
+            let reconciled_state = {
+                let guard = match state_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            "system-context state lock poisoned while reconciling durable append state"
+                        );
+                        poisoned.into_inner()
+                    }
+                };
+                guard.clone()
+            };
+            if reconciled_state != persisted_state {
+                let mut session = if self.runtime_store.is_some() {
+                    match self.load_authoritative_session_base(id).await? {
+                        Some(session) => session,
+                        None => {
+                            drop(gate_guard);
+                            let _ = self.discard_live_session(id).await;
+                            return Ok(AppendSystemContextResult { status });
+                        }
+                    }
+                } else {
+                    self.export_session_with_labels(id)
+                        .await
+                        .map_err(SessionControlError::Session)?
+                };
+                self.reject_if_archived_session(id, &session).await?;
+                write_system_context_state(&mut session, reconciled_state)?;
+                self.save_normalized_session(session)
+                    .await
+                    .map_err(SessionControlError::Session)?;
+            }
+
+            let _ = self.inner.sync_system_context_state(id).await;
+            drop(gate_guard);
+            return Ok(AppendSystemContextResult { status });
         }
 
         if let Some(gate) = existing_gate {
@@ -2872,6 +2898,55 @@ mod tests {
         assert!(
             !guard.seen.contains_key("ctx-save-failure"),
             "failed append must not reserve the idempotency key in live state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_live_session_merges_shared_system_context_state() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service =
+            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let id = result.session_id;
+
+        let state = service
+            .inner
+            .system_context_state(&id)
+            .await
+            .expect("live session should expose shared system-context state");
+        {
+            let mut guard = state.lock().expect("system-context state lock");
+            guard
+                .stage_append(
+                    &AppendSystemContextRequest {
+                        text: "queued live append".to_string(),
+                        source: Some("mob".to_string()),
+                        idempotency_key: Some("ctx-export-merge".to_string()),
+                    },
+                    meerkat_core::time_compat::SystemTime::now(),
+                )
+                .expect("staging into shared state should succeed");
+        }
+
+        let exported = service
+            .export_live_session(&id)
+            .await
+            .expect("export should succeed");
+        let exported_state = exported
+            .system_context_state()
+            .expect("exported session should include merged system-context state");
+        assert_eq!(exported_state.pending.len(), 1);
+        assert_eq!(exported_state.pending[0].text, "queued live append");
+        assert!(
+            exported_state.seen.contains_key("ctx-export-merge"),
+            "exported session should include the staged idempotency key"
         );
     }
 

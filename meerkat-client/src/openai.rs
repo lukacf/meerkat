@@ -19,7 +19,7 @@ use std::collections::HashSet;
 
 /// Client for OpenAI Responses API
 pub struct OpenAiClient {
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
     http: reqwest::Client,
 }
@@ -35,11 +35,22 @@ impl OpenAiClient {
 
     /// Create a new OpenAI client with the given API key
     pub fn new(api_key: String) -> Self {
-        Self::new_with_base_url(api_key, "https://api.openai.com".to_string())
+        Self::new_with_optional_api_key_and_base_url(
+            Some(api_key),
+            "https://api.openai.com".to_string(),
+        )
     }
 
     /// Create a new OpenAI client with an explicit base URL
     pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
+        Self::new_with_optional_api_key_and_base_url(Some(api_key), base_url)
+    }
+
+    /// Create a new OpenAI client with an optional API key and explicit base URL.
+    pub fn new_with_optional_api_key_and_base_url(
+        api_key: Option<String>,
+        base_url: String,
+    ) -> Self {
         let http =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
                 .unwrap_or_else(|_| reqwest::Client::new());
@@ -343,10 +354,16 @@ impl LlmClient for OpenAiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
 
-            let response = self.http
+            let request_builder = self
+                .http
                 .post(format!("{}/v1/responses", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
+                .header("Content-Type", "application/json");
+            let request_builder = if let Some(api_key) = &self.api_key {
+                request_builder.header("Authorization", format!("Bearer {api_key}"))
+            } else {
+                request_builder
+            };
+            let response = request_builder
                 .json(&body)
                 .send()
                 .await

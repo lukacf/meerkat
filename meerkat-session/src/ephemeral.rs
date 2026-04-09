@@ -23,9 +23,8 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolResult, Usage};
 use meerkat_core::{
-    AppendSystemContextStatus, InputId, PendingDeferredPrompt, PendingSystemContextAppend,
-    PendingToolResultsMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
-    SessionSystemContextState,
+    InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -103,10 +102,6 @@ enum SessionCommand {
     StageToolFilter {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
-    },
-    StageSystemContextAppend {
-        req: AppendSystemContextRequest,
-        accepted_at: SystemTime,
     },
     SyncSystemContextState {
         reply_tx: oneshot::Sender<()>,
@@ -362,29 +357,6 @@ pub trait SessionAgent: Send {
     /// Synchronize the shared system-context control state into the canonical session metadata.
     fn sync_system_context_state(&mut self) {}
 
-    /// Stage one system-context append against the shared control state.
-    fn stage_system_context_append(
-        &mut self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<AppendSystemContextStatus, meerkat_core::SystemContextStageError> {
-        let status = {
-            let state = self.system_context_state();
-            let mut guard = match state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    tracing::warn!(
-                        "system-context state lock poisoned while applying queued append"
-                    );
-                    poisoned.into_inner()
-                }
-            };
-            guard.stage_append(req, accepted_at)?
-        };
-        self.sync_system_context_state();
-        Ok(status)
-    }
-
     /// Get an event injector for pushing external events.
     ///
     /// Called once before the agent moves into its dedicated task. The returned
@@ -594,7 +566,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<meerkat_core::Session, SessionError> {
-        let (command_tx, deferred_turn_state) = {
+        let (command_tx, deferred_turn_state, system_context_state) = {
             let sessions = self.sessions.read().await;
             let handle = sessions
                 .get(id)
@@ -602,6 +574,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             (
                 handle.command_tx.clone(),
                 Arc::clone(&handle.deferred_turn_state),
+                Arc::clone(&handle.system_context_state),
             )
         };
 
@@ -627,6 +600,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "failed to serialize deferred-turn state: {err}"
             )))
         })?;
+
+        let system_context = match system_context_state.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("system-context state lock poisoned while exporting session");
+                poisoned.into_inner().clone()
+            }
+        };
+        session
+            .set_system_context_state(system_context)
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to serialize system-context state: {err}"
+                )))
+            })?;
 
         Ok(session)
     }
@@ -687,27 +675,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
-    }
-
-    pub(crate) async fn enqueue_system_context_append(
-        &self,
-        id: &SessionId,
-        req: AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<(), SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        handle
-            .command_tx
-            .send(SessionCommand::StageSystemContextAppend { req, accepted_at })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })
     }
 
     pub(crate) async fn sync_system_context_state(
@@ -1889,10 +1856,6 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StageToolFilter { filter, reply_tx } => {
                 let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
-                continue;
-            }
-            SessionCommand::StageSystemContextAppend { req, accepted_at } => {
-                let _ = agent.stage_system_context_append(&req, accepted_at);
                 continue;
             }
             SessionCommand::SyncSystemContextState { reply_tx } => {

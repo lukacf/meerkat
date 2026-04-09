@@ -27,6 +27,7 @@ pub struct OpenAiCompatibleClient {
     http: reqwest::Client,
     responses_delegate: Option<crate::OpenAiClient>,
     supports_temperature: bool,
+    supports_thinking: bool,
     supports_reasoning: bool,
 }
 
@@ -37,15 +38,16 @@ impl OpenAiCompatibleClient {
         base_url: String,
         bearer_token: Option<String>,
         supports_temperature: bool,
+        supports_thinking: bool,
         supports_reasoning: bool,
     ) -> Self {
         let http =
             crate::http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
                 .unwrap_or_else(|_| reqwest::Client::new());
         let responses_delegate = matches!(mode, OpenAiCompatibleMode::Responses).then(|| {
-            crate::OpenAiClient::new_with_base_url(
-                bearer_token.clone().unwrap_or_else(|| "local".to_string()),
-                base_url.clone(),
+            crate::OpenAiClient::new_with_optional_api_key_and_base_url(
+                bearer_token.clone(),
+                trim_v1_suffix(&base_url),
             )
         });
         Self {
@@ -56,6 +58,7 @@ impl OpenAiCompatibleClient {
             http,
             responses_delegate,
             supports_temperature,
+            supports_thinking,
             supports_reasoning,
         }
     }
@@ -102,10 +105,29 @@ impl OpenAiCompatibleClient {
         }
 
         if let Some(params) = &request.provider_params {
-            if self.supports_reasoning
-                && let Some(reasoning) = params.get("reasoning_effort")
-            {
-                body["reasoning"] = serde_json::json!({ "effort": reasoning.clone() });
+            if self.supports_reasoning {
+                if let Some(reasoning) = params.get("reasoning")
+                    && reasoning.is_object()
+                {
+                    body["reasoning"] = reasoning.clone();
+                }
+                if let Some(reasoning_effort) = params.get("reasoning_effort") {
+                    if !body["reasoning"].is_object() {
+                        body["reasoning"] = serde_json::json!({});
+                    }
+                    body["reasoning"]["effort"] = reasoning_effort.clone();
+                    body["reasoning_effort"] = reasoning_effort.clone();
+                }
+                if self.supports_thinking
+                    && let Some(chat_template_kwargs) = params.get("chat_template_kwargs")
+                {
+                    body["chat_template_kwargs"] = chat_template_kwargs.clone();
+                }
+                if self.supports_thinking
+                    && let Some(thinking) = params.get("thinking")
+                {
+                    body["thinking"] = thinking.clone();
+                }
             }
             if let Some(structured) = params.get("structured_output") {
                 let output_schema: OutputSchema = serde_json::from_value(structured.clone())
@@ -271,16 +293,27 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    fn parse_chat_completions_line(line: &str) -> Option<ChatCompletionsChunk> {
+    fn parse_chat_completions_line(line: &str) -> Result<Option<ChatCompletionsChunk>, LlmError> {
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
-                return None;
+                return Ok(None);
             }
-            serde_json::from_str(data).ok()
+            serde_json::from_str(data)
+                .map(Some)
+                .map_err(|err| LlmError::StreamParseError {
+                    message: format!("failed to parse chat completions chunk: {err}; line={data}"),
+                })
         } else {
-            None
+            Ok(None)
         }
     }
+}
+
+fn trim_v1_suffix(base_url: &str) -> String {
+    base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string()
 }
 
 fn ensure_additional_properties_false(value: &mut Value) {
@@ -365,6 +398,7 @@ impl LlmClient for OpenAiCompatibleClient {
                     let mut stream = stream_result?;
                     let mut buffer = String::with_capacity(512);
                     let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
+                    let mut reasoning_text = String::new();
                     let mut done_emitted = false;
 
                     while let Some(chunk) = stream.next().await {
@@ -377,11 +411,11 @@ impl LlmClient for OpenAiCompatibleClient {
                             let parsed = if should_process {
                                 Self::parse_chat_completions_line(line)
                             } else {
-                                None
+                                Ok(None)
                             };
                             buffer.drain(..=newline_pos);
 
-                            if let Some(event) = parsed {
+                            if let Some(event) = parsed? {
                                 if let Some(event_usage) = event.usage {
                                     let usage = Usage {
                                         input_tokens: event_usage.prompt_tokens.unwrap_or(0),
@@ -400,6 +434,19 @@ impl LlmClient for OpenAiCompatibleClient {
                                             yield LlmEvent::TextDelta {
                                                 delta: content,
                                                 meta: None,
+                                            };
+                                        }
+                                        let reasoning_delta = delta
+                                            .reasoning_content
+                                            .as_ref()
+                                            .or(delta.reasoning.as_ref())
+                                            .or(delta.thinking.as_ref());
+                                        if let Some(reasoning) = reasoning_delta
+                                            && !reasoning.is_empty()
+                                        {
+                                            reasoning_text.push_str(reasoning);
+                                            yield LlmEvent::ReasoningDelta {
+                                                delta: reasoning.clone(),
                                             };
                                         }
                                         if let Some(tool_calls) = delta.tool_calls {
@@ -456,6 +503,12 @@ impl LlmClient for OpenAiCompatibleClient {
                                                 }
                                             }
                                         }
+                                        if !reasoning_text.is_empty() {
+                                            yield LlmEvent::ReasoningComplete {
+                                                text: std::mem::take(&mut reasoning_text),
+                                                meta: None,
+                                            };
+                                        }
                                         if !done_emitted {
                                             done_emitted = true;
                                             yield LlmEvent::Done {
@@ -468,6 +521,20 @@ impl LlmClient for OpenAiCompatibleClient {
                         }
                     }
 
+                    if !buffer.trim().is_empty() {
+                        Err::<(), _>(LlmError::IncompleteResponse {
+                            message: format!(
+                                "chat completions stream ended with an incomplete SSE buffer: {}",
+                                buffer.trim()
+                            ),
+                        })?;
+                    }
+                    if !reasoning_text.is_empty() {
+                        yield LlmEvent::ReasoningComplete {
+                            text: reasoning_text,
+                            meta: None,
+                        };
+                    }
                     if !done_emitted {
                         yield LlmEvent::Done {
                             outcome: LlmDoneOutcome::Success {
@@ -539,6 +606,12 @@ struct ChatDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ChatToolCallDelta>>,
 }
 
@@ -572,12 +645,41 @@ struct ChatUsage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use axum::{
+        Json, Router,
+        extract::{Request, State},
+        response::IntoResponse,
+        routing::post,
+    };
     use meerkat_core::UserMessage;
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
     async fn chat_sse(State(payload): State<String>) -> impl IntoResponse {
         ([("content-type", "text/event-stream")], payload)
+    }
+
+    #[derive(Clone)]
+    struct ResponsesStubState {
+        payload: String,
+        auth_headers: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    async fn responses_sse(
+        State(state): State<ResponsesStubState>,
+        request: Request,
+    ) -> impl IntoResponse {
+        let auth = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(std::string::ToString::to_string);
+        state
+            .auth_headers
+            .lock()
+            .expect("auth header capture lock")
+            .push(auth);
+        ([("content-type", "text/event-stream")], state.payload)
     }
 
     async fn models() -> impl IntoResponse {
@@ -599,6 +701,31 @@ mod tests {
         (format!("http://{addr}/v1"), handle)
     }
 
+    async fn spawn_responses_stub_server(
+        payload: String,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Option<String>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let auth_headers = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/responses", post(responses_sse))
+            .route("/v1/models", axum::routing::get(models))
+            .with_state(ResponsesStubState {
+                payload,
+                auth_headers: Arc::clone(&auth_headers),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}/v1"), auth_headers, handle)
+    }
+
     #[tokio::test]
     async fn chat_completions_stream_accumulates_tool_calls() {
         let payload = concat!(
@@ -615,6 +742,7 @@ mod tests {
             base_url,
             None,
             true,
+            false,
             false,
         );
         let request = LlmRequest::new(
@@ -648,6 +776,120 @@ mod tests {
         }
         assert!(saw_complete);
         assert!(saw_done);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_completions_stream_emits_reasoning_events() {
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think. \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Need one more step.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Final answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let (base_url, handle) = spawn_chat_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            true,
+            true,
+            true,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-31b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let events: Vec<_> = client.stream(&request).collect().await;
+        let mut reasoning_deltas = Vec::new();
+        let mut reasoning_complete = None;
+        for event in events {
+            match event.expect("event") {
+                LlmEvent::ReasoningDelta { delta } => reasoning_deltas.push(delta),
+                LlmEvent::ReasoningComplete { text, .. } => reasoning_complete = Some(text),
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            reasoning_deltas,
+            vec![
+                "Let me think. ".to_string(),
+                "Need one more step.".to_string()
+            ]
+        );
+        assert_eq!(
+            reasoning_complete,
+            Some("Let me think. Need one more step.".to_string())
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn build_chat_completions_body_preserves_reasoning_overrides() {
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            true,
+            true,
+            true,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-31b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        )
+        .with_provider_param("reasoning_effort", "medium")
+        .with_provider_param(
+            "chat_template_kwargs",
+            serde_json::json!({ "enable_thinking": true }),
+        )
+        .with_provider_param("thinking", serde_json::json!({ "type": "enabled" }));
+
+        let body = client
+            .build_chat_completions_body(&request)
+            .expect("body should build");
+
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[tokio::test]
+    async fn responses_mode_uses_single_v1_prefix_and_omits_auth_when_unset() {
+        let payload = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n",
+            "data: {\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n"
+        )
+        .to_string();
+        let (base_url, auth_headers, handle) = spawn_responses_stub_server(payload).await;
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            base_url,
+            None,
+            true,
+            true,
+            true,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-e2b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let events: Vec<_> = client.stream(&request).collect().await;
+        assert!(
+            events.iter().all(Result::is_ok),
+            "responses mode should succeed against a single /v1/responses endpoint"
+        );
+        let auth_headers = auth_headers.lock().expect("auth header capture lock");
+        assert_eq!(auth_headers.len(), 1);
+        assert_eq!(auth_headers[0], None);
         handle.abort();
     }
 

@@ -19,8 +19,8 @@ use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
     AgentToolDispatcher, Config, Provider, ProviderConfig, SelfHostedApiStyle,
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, Session, SessionId,
-    SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef,
-    ToolDispatchOutcome, ToolError, UserMessage,
+    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride,
+    ToolDef, ToolDispatchOutcome, ToolError, UserMessage,
 };
 use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
@@ -398,6 +398,62 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
     assert_eq!(metadata.model, "gemma-4-31b");
     assert_eq!(metadata.provider, Provider::SelfHosted);
     assert_eq!(metadata.self_hosted_server_id.as_deref(), Some("local"));
+}
+
+#[tokio::test]
+async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.self_hosted.servers.insert(
+        "local".to_string(),
+        SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::ChatCompletions,
+            bearer_token: None,
+            bearer_token_env: None,
+        },
+    );
+    config.self_hosted.models.insert(
+        "gemma-4-e2b".to_string(),
+        SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "gemma4:e2b".to_string(),
+            display_name: "Gemma 4 E2B".to_string(),
+            family: "gemma-4".to_string(),
+            tier: meerkat_models::ModelTier::Supported,
+            context_window: Some(128_000),
+            max_output_tokens: Some(8_192),
+            vision: true,
+            image_tool_results: true,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: true,
+            supports_reasoning: true,
+            call_timeout_secs: Some(600),
+        },
+    );
+
+    let err = match factory
+        .build_llm_client_for_identity(
+            &config,
+            &SessionLlmIdentity {
+                model: "gemma-4-e2b".to_string(),
+                provider: Provider::SelfHosted,
+                self_hosted_server_id: Some("other".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("mismatched server binding should be rejected"),
+        Err(err) => err,
+    };
+
+    let message = err.to_string();
+    assert!(message.contains("bound to server 'other'"));
+    assert!(message.contains("resolves to 'local'"));
 }
 
 /// 5. `build_agent` with `enable_builtins=true` produces agent with builtin tools.

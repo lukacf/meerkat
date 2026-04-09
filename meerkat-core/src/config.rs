@@ -860,6 +860,7 @@ pub struct ProviderSettings {
 #[serde(rename_all = "snake_case")]
 pub enum SelfHostedTransport {
     #[default]
+    #[serde(alias = "openai_compatible")]
     OpenAiCompatible,
 }
 
@@ -1937,6 +1938,31 @@ initial_delay = "750ms"
         assert_eq!(parsed.max_tokens, Some(100_000));
         assert_eq!(parsed.max_duration, Some(Duration::from_secs(300)));
         assert_eq!(parsed.max_tool_calls, Some(50));
+    }
+
+    #[test]
+    fn test_self_hosted_transport_accepts_openai_compatible_alias() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.ollama]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+"#,
+            )
+            .expect("alias should parse");
+
+        assert_eq!(
+            config
+                .self_hosted
+                .servers
+                .get("ollama")
+                .expect("server should exist")
+                .transport,
+            SelfHostedTransport::OpenAiCompatible
+        );
     }
 
     #[test]

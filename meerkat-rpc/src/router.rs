@@ -4508,6 +4508,10 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
+        recorded_requests
+            .lock()
+            .expect("recorded requests lock poisoned")
+            .clear();
 
         let first_turn = {
             let router = router.clone();
@@ -4528,10 +4532,11 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if !recorded_requests
+                if recorded_requests
                     .lock()
                     .expect("recorded requests lock poisoned")
-                    .is_empty()
+                    .len()
+                    >= 1
                 {
                     break;
                 }

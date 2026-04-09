@@ -1084,7 +1084,7 @@ impl AgentFactory {
             .model_registry()
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         if matches!(identity.provider, Provider::SelfHosted) {
-            return self.build_self_hosted_client_from_registry(&registry, &identity.model);
+            return self.build_self_hosted_client_for_identity(&registry, identity);
         }
         let (api_key, base_url) = self.resolve_provider_credentials(identity.provider, config);
         self.build_llm_client(identity.provider, api_key, base_url)
@@ -1154,12 +1154,39 @@ impl AgentFactory {
         registry: &ModelRegistry,
         model: &str,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
-        let entry = registry.entry(model).ok_or_else(|| {
-            FactoryError::ClientCreationFailed(format!("unknown model '{model}'"))
+        self.build_self_hosted_client_for_identity(
+            registry,
+            &SessionLlmIdentity {
+                model: model.to_string(),
+                provider: Provider::SelfHosted,
+                self_hosted_server_id: None,
+                provider_params: None,
+            },
+        )
+    }
+
+    fn build_self_hosted_client_for_identity(
+        &self,
+        registry: &ModelRegistry,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Arc<dyn LlmClient>, FactoryError> {
+        let entry = registry.entry(&identity.model).ok_or_else(|| {
+            FactoryError::ClientCreationFailed(format!("unknown model '{}'", identity.model))
         })?;
         let self_hosted = entry.self_hosted.as_ref().ok_or_else(|| {
-            FactoryError::ClientCreationFailed(format!("model '{model}' is not self-hosted"))
+            FactoryError::ClientCreationFailed(format!(
+                "model '{}' is not self-hosted",
+                identity.model
+            ))
         })?;
+        if let Some(expected_server_id) = identity.self_hosted_server_id.as_deref()
+            && self_hosted.server_id != expected_server_id
+        {
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "self-hosted model '{}' is bound to server '{}', but registry resolves to '{}'",
+                identity.model, expected_server_id, self_hosted.server_id
+            )));
+        }
         if self_hosted.transport != meerkat_core::SelfHostedTransport::OpenAiCompatible {
             return Err(FactoryError::UnsupportedProvider(
                 "only openai_compatible transport is supported".to_string(),
@@ -1179,6 +1206,7 @@ impl AgentFactory {
             self_hosted.base_url.clone(),
             self_hosted.resolve_bearer_token(),
             entry.profile.supports_temperature,
+            entry.profile.supports_thinking,
             entry.profile.supports_reasoning,
         )))
     }

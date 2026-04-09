@@ -1673,9 +1673,7 @@ async fn handle_run_command(
 
     let model = model.unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
-    let resolved_provider = provider
-        .or_else(|| Provider::infer_from_model(&model))
-        .unwrap_or_default();
+    let resolved_provider = resolve_cli_provider(&config, &model, provider);
 
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
@@ -3867,11 +3865,7 @@ async fn resume_session_with_llm_override(
     let provider_core = stored_metadata
         .as_ref()
         .map(|meta| meta.provider)
-        .unwrap_or_else(|| {
-            Provider::infer_from_model(&model)
-                .unwrap_or_default()
-                .as_core()
-        });
+        .unwrap_or_else(|| resolve_cli_provider(&config, &model, None).as_core());
 
     tracing::info!(
         "Resuming session {} with {} messages (provider: {:?}, model: {})",
@@ -7292,6 +7286,19 @@ impl Provider {
     }
 }
 
+fn resolve_cli_provider(config: &Config, model: &str, explicit: Option<Provider>) -> Provider {
+    explicit
+        .or_else(|| {
+            config
+                .model_registry()
+                .ok()
+                .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
+                .and_then(Provider::from_core)
+        })
+        .or_else(|| Provider::infer_from_model(model))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -10478,6 +10485,41 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         assert_eq!(Provider::infer_from_model("mistral-7b"), None);
         assert_eq!(Provider::infer_from_model("custom-model"), None);
         assert_eq!(Provider::infer_from_model(""), None);
+    }
+
+    #[test]
+    fn test_resolve_cli_provider_prefers_self_hosted_registry_alias() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.ollama]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+
+[self_hosted.models.gemma-4-e2b]
+server = "ollama"
+remote_model = "gemma4:e2b"
+display_name = "Gemma 4 E2B"
+family = "gemma"
+tier = "supported"
+context_window = 128000
+max_output_tokens = 8192
+vision = true
+image_tool_results = true
+inline_video = false
+supports_temperature = true
+supports_thinking = true
+supports_reasoning = true
+"#,
+            )
+            .expect("valid self-hosted config");
+
+        assert_eq!(
+            resolve_cli_provider(&config, "gemma-4-e2b", None),
+            Provider::SelfHosted
+        );
     }
 
     #[cfg(feature = "comms")]

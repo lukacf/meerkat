@@ -138,7 +138,7 @@ fn append_self_hosted(
         return Ok(());
     }
 
-    let default_model = config.models.keys().next().cloned().ok_or_else(|| {
+    let default_model = config.models.keys().min().cloned().ok_or_else(|| {
         ConfigError::InternalError("self-hosted models unexpectedly empty".to_string())
     })?;
     defaults.insert(Provider::SelfHosted, default_model);

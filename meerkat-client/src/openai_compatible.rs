@@ -314,11 +314,12 @@ impl LlmClient for OpenAiCompatibleClient {
         match self.mode {
             OpenAiCompatibleMode::Responses => {
                 let Some(delegate) = self.responses_delegate.as_ref() else {
-                    let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-                        Err(LlmError::Transport(
-                            "responses mode requires a configured delegate client".to_string(),
-                        ))?;
-                    });
+                    let inner: LlmStream<'a> = Box::pin(futures::stream::once(async {
+                        Err(LlmError::InvalidRequest {
+                            message: "responses mode requires a configured delegate client"
+                                .to_string(),
+                        })
+                    }));
                     return inner;
                 };
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {

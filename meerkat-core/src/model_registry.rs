@@ -214,6 +214,8 @@ pub fn normalize_base_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+
     use super::*;
     use crate::config::{
         SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,

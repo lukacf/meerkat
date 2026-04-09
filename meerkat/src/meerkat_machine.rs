@@ -7,6 +7,8 @@
 use async_trait::async_trait;
 use meerkat_core::AgentExecutionSnapshot;
 use meerkat_core::CommsCapabilityError;
+use meerkat_core::CommsDrainMode;
+use meerkat_core::CommsDrainPhase;
 use meerkat_core::ExternalToolSurfaceBaseState;
 use meerkat_core::ExternalToolSurfaceDeltaOperation;
 use meerkat_core::ExternalToolSurfaceDeltaPhase;
@@ -26,7 +28,7 @@ use meerkat_runtime::{MeerkatMachineSpineSnapshot, RuntimeSessionAdapter};
 use meerkat_session::{EphemeralSessionService, SessionAgentBuilder};
 
 use crate::SessionError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use meerkat_core::PeerIngressEntrySnapshot;
@@ -73,6 +75,62 @@ pub(crate) enum MeerkatMachineInvariantViolation {
         input_id: meerkat_core::lifecycle::InputId,
         lifecycle: Option<meerkat_runtime::InputLifecycleState>,
     },
+    QueueContainsWrongHandlingMode {
+        queue: &'static str,
+        input_id: meerkat_core::lifecycle::InputId,
+        handling_mode: Option<meerkat_core::types::HandlingMode>,
+    },
+    AdmittedInputMissingContentShape {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    AdmittedInputMissingHandlingMode {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    AdmittedInputMissingLifecycle {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    QueuedInputMissingOwningQueue {
+        input_id: meerkat_core::lifecycle::InputId,
+        handling_mode: meerkat_core::types::HandlingMode,
+    },
+    ProcessRequestedWithoutWake,
+    ProcessRequestedWithoutSteerQueue,
+    WakeRequestedWithoutQueuedWork,
+    InputBoundarySequenceWithoutRun {
+        input_id: meerkat_core::lifecycle::InputId,
+        last_boundary_sequence: u64,
+    },
+    InputBoundarySequenceIllegalLifecycle {
+        input_id: meerkat_core::lifecycle::InputId,
+        lifecycle: meerkat_runtime::InputLifecycleState,
+        last_boundary_sequence: u64,
+    },
+    InputLifecycleMissingRunBinding {
+        input_id: meerkat_core::lifecycle::InputId,
+        lifecycle: meerkat_runtime::InputLifecycleState,
+    },
+    AppliedPendingConsumptionMissingBoundarySequence {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    DestroyedIngressStillHasQueuedWork {
+        queue: &'static str,
+        count: usize,
+    },
+    DestroyedIngressStillHasCurrentRun {
+        run_id: meerkat_core::lifecycle::RunId,
+    },
+    DestroyedIngressStillHasContributors {
+        contributor_count: usize,
+    },
+    DestroyedIngressStillRequestsWake,
+    DestroyedIngressStillRequestsProcessing,
+    DestroyedIngressHasNonTerminalInput {
+        input_id: meerkat_core::lifecycle::InputId,
+        lifecycle: meerkat_runtime::InputLifecycleState,
+    },
+    QueueAppearsInBothQueues {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
     CurrentRunWithoutContributors {
         run_id: meerkat_core::lifecycle::RunId,
     },
@@ -85,6 +143,20 @@ pub(crate) enum MeerkatMachineInvariantViolation {
     CurrentRunContributorIllegalLifecycle {
         input_id: meerkat_core::lifecycle::InputId,
         lifecycle: Option<meerkat_runtime::InputLifecycleState>,
+    },
+    CurrentRunContributorRunMismatch {
+        input_id: meerkat_core::lifecycle::InputId,
+        current_run_id: meerkat_core::lifecycle::RunId,
+        last_run_id: Option<meerkat_core::lifecycle::RunId>,
+    },
+    CurrentRunContributorPendingConsumptionMissingBoundary {
+        input_id: meerkat_core::lifecycle::InputId,
+        current_run_id: meerkat_core::lifecycle::RunId,
+    },
+    CurrentRunBoundInputMissingContributor {
+        input_id: meerkat_core::lifecycle::InputId,
+        current_run_id: meerkat_core::lifecycle::RunId,
+        lifecycle: meerkat_runtime::InputLifecycleState,
     },
     TerminalInputWithoutOutcome {
         input_id: meerkat_core::lifecycle::InputId,
@@ -189,9 +261,111 @@ pub(crate) enum MeerkatMachineInvariantViolation {
     CompletionWaiterUnknownInput {
         input_id: meerkat_core::lifecycle::InputId,
     },
+    CompletionWaiterZeroCount {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    CompletionWaiterResolvedInput {
+        input_id: meerkat_core::lifecycle::InputId,
+        lifecycle: Option<meerkat_runtime::InputLifecycleState>,
+        terminal_outcome_present: bool,
+    },
+    DestroyedRuntimeStillHasCompletionWaiters {
+        waiter_count: usize,
+    },
+    StoppedRuntimeStillHasCompletionWaiters {
+        waiter_count: usize,
+    },
+    DrainSlotMissingPhase,
+    DrainPhaseWithoutSlot {
+        phase: CommsDrainPhase,
+    },
+    DrainModeWithoutSlot {
+        mode: CommsDrainMode,
+    },
+    DrainHandleWithoutSlot,
+    DrainPhaseMissingMode {
+        phase: CommsDrainPhase,
+    },
+    DrainInactiveWithMode {
+        mode: CommsDrainMode,
+    },
+    DrainInactiveWithHandle,
+    DrainTerminalPhaseWithHandle {
+        phase: CommsDrainPhase,
+    },
+    DetachedWakeBindingMismatch {
+        binding_present: bool,
+        ops_present: bool,
+    },
+    OpsOperationCountMismatch {
+        operation_count: usize,
+        operations_len: usize,
+    },
     ActiveOpsExceedsOperationCount {
         active_count: usize,
         operation_count: usize,
+    },
+    ActiveOpsStatusCountMismatch {
+        active_count: usize,
+        nonterminal_count: usize,
+    },
+    WaitOperationIdsWithoutWaitRequest {
+        wait_operation_count: usize,
+    },
+    PendingWaitCarrierShapeMismatch {
+        pending_wait_present: bool,
+        pending_wait_request_id_present: bool,
+    },
+    PendingWaitCarrierWithoutWaitRequest,
+    WaitRequestWithoutTrackedOperations {
+        wait_request_id: meerkat_core::lifecycle::WaitRequestId,
+    },
+    WaitRequestMissingPendingWaitCarrier {
+        wait_request_id: meerkat_core::lifecycle::WaitRequestId,
+    },
+    PendingWaitCarrierRequestMismatch {
+        wait_request_id: meerkat_core::lifecycle::WaitRequestId,
+        pending_wait_request_id: meerkat_core::lifecycle::WaitRequestId,
+    },
+    WaitRequestAlreadySatisfied {
+        wait_request_id: meerkat_core::lifecycle::WaitRequestId,
+    },
+    WaitTargetsUnknownOperation {
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    DetachedWakePresenceMismatch {
+        pending_present: bool,
+        signaled_present: bool,
+    },
+    DetachedWakeSignaledWithoutPending,
+    OperationPeerReadyWithoutExpectedKind {
+        operation_id: meerkat_core::ops::OperationId,
+        kind: meerkat_core::ops_lifecycle::OperationKind,
+    },
+    OperationPeerReadyWithoutHandle {
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    OperationHandleWithoutPeerReady {
+        operation_id: meerkat_core::ops::OperationId,
+    },
+    OperationTerminalOutcomeMismatch {
+        operation_id: meerkat_core::ops::OperationId,
+        status: meerkat_core::ops_lifecycle::OperationStatus,
+        terminal_outcome_present: bool,
+    },
+    OperationCompletionTimestampMismatch {
+        operation_id: meerkat_core::ops::OperationId,
+        status: meerkat_core::ops_lifecycle::OperationStatus,
+        completed_at_present: bool,
+        elapsed_ms_present: bool,
+    },
+    OperationActiveWithoutStartTimestamp {
+        operation_id: meerkat_core::ops::OperationId,
+        status: meerkat_core::ops_lifecycle::OperationStatus,
+    },
+    OperationTerminalWithWatchers {
+        operation_id: meerkat_core::ops::OperationId,
+        watcher_count: u32,
     },
 }
 
@@ -249,6 +423,43 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         });
     }
 
+    if inputs.ingress_phase == meerkat_runtime::IngressPhase::Destroyed {
+        for (queue_name, queue) in [
+            ("queue", &inputs.queue),
+            ("steer_queue", &inputs.steer_queue),
+        ] {
+            if !queue.is_empty() {
+                violations.push(
+                    MeerkatMachineInvariantViolation::DestroyedIngressStillHasQueuedWork {
+                        queue: queue_name,
+                        count: queue.len(),
+                    },
+                );
+            }
+        }
+        if let Some(run_id) = &inputs.current_run_id {
+            violations.push(
+                MeerkatMachineInvariantViolation::DestroyedIngressStillHasCurrentRun {
+                    run_id: run_id.clone(),
+                },
+            );
+        }
+        if !inputs.current_run_contributors.is_empty() {
+            violations.push(
+                MeerkatMachineInvariantViolation::DestroyedIngressStillHasContributors {
+                    contributor_count: inputs.current_run_contributors.len(),
+                },
+            );
+        }
+        if inputs.wake_requested {
+            violations.push(MeerkatMachineInvariantViolation::DestroyedIngressStillRequestsWake);
+        }
+        if inputs.process_requested {
+            violations
+                .push(MeerkatMachineInvariantViolation::DestroyedIngressStillRequestsProcessing);
+        }
+    }
+
     match (
         &inputs.current_run_id,
         inputs.current_run_contributors.is_empty(),
@@ -294,10 +505,69 @@ pub(crate) fn validate_meerkat_machine_snapshot(
                     },
                 );
             }
+
+            let expected_handling_mode = match queue_name {
+                "queue" => Some(meerkat_core::types::HandlingMode::Queue),
+                "steer_queue" => Some(meerkat_core::types::HandlingMode::Steer),
+                _ => None,
+            };
+            if input.handling_mode != expected_handling_mode {
+                violations.push(
+                    MeerkatMachineInvariantViolation::QueueContainsWrongHandlingMode {
+                        queue: queue_name,
+                        input_id: input_id.clone(),
+                        handling_mode: input.handling_mode,
+                    },
+                );
+            }
         }
     }
 
+    for input_id in &inputs.queue {
+        if inputs.steer_queue.contains(input_id) {
+            violations.push(MeerkatMachineInvariantViolation::QueueAppearsInBothQueues {
+                input_id: input_id.clone(),
+            });
+        }
+    }
+
+    if inputs.process_requested && !inputs.wake_requested {
+        violations.push(MeerkatMachineInvariantViolation::ProcessRequestedWithoutWake);
+    }
+
+    if inputs.process_requested && inputs.steer_queue.is_empty() {
+        violations.push(MeerkatMachineInvariantViolation::ProcessRequestedWithoutSteerQueue);
+    }
+
+    if inputs.wake_requested && inputs.queue.is_empty() && inputs.steer_queue.is_empty() {
+        violations.push(MeerkatMachineInvariantViolation::WakeRequestedWithoutQueuedWork);
+    }
+
     for input in &inputs.admission_order {
+        if input.content_shape.is_none() {
+            violations.push(
+                MeerkatMachineInvariantViolation::AdmittedInputMissingContentShape {
+                    input_id: input.input_id.clone(),
+                },
+            );
+        }
+
+        if input.handling_mode.is_none() {
+            violations.push(
+                MeerkatMachineInvariantViolation::AdmittedInputMissingHandlingMode {
+                    input_id: input.input_id.clone(),
+                },
+            );
+        }
+
+        if input.lifecycle.is_none() {
+            violations.push(
+                MeerkatMachineInvariantViolation::AdmittedInputMissingLifecycle {
+                    input_id: input.input_id.clone(),
+                },
+            );
+        }
+
         match (input.lifecycle, input.terminal_outcome.clone()) {
             (Some(lifecycle), None) if lifecycle.is_terminal() => {
                 violations.push(
@@ -318,6 +588,101 @@ pub(crate) fn validate_meerkat_machine_snapshot(
             }
             _ => {}
         }
+
+        if input.lifecycle == Some(meerkat_runtime::InputLifecycleState::Queued) {
+            match input.handling_mode {
+                Some(meerkat_core::types::HandlingMode::Queue)
+                    if !inputs.queue.contains(&input.input_id) =>
+                {
+                    violations.push(
+                        MeerkatMachineInvariantViolation::QueuedInputMissingOwningQueue {
+                            input_id: input.input_id.clone(),
+                            handling_mode: meerkat_core::types::HandlingMode::Queue,
+                        },
+                    );
+                }
+                Some(meerkat_core::types::HandlingMode::Steer)
+                    if !inputs.steer_queue.contains(&input.input_id) =>
+                {
+                    violations.push(
+                        MeerkatMachineInvariantViolation::QueuedInputMissingOwningQueue {
+                            input_id: input.input_id.clone(),
+                            handling_mode: meerkat_core::types::HandlingMode::Steer,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(last_boundary_sequence) = input.last_boundary_sequence {
+            if input.last_run_id.is_none() {
+                violations.push(
+                    MeerkatMachineInvariantViolation::InputBoundarySequenceWithoutRun {
+                        input_id: input.input_id.clone(),
+                        last_boundary_sequence,
+                    },
+                );
+            }
+
+            if matches!(
+                input.lifecycle,
+                Some(
+                    meerkat_runtime::InputLifecycleState::Queued
+                        | meerkat_runtime::InputLifecycleState::Staged
+                )
+            ) {
+                violations.push(
+                    MeerkatMachineInvariantViolation::InputBoundarySequenceIllegalLifecycle {
+                        input_id: input.input_id.clone(),
+                        lifecycle: input
+                            .lifecycle
+                            .expect("queued/staged lifecycle matched above"),
+                        last_boundary_sequence,
+                    },
+                );
+            }
+        }
+
+        if matches!(
+            input.lifecycle,
+            Some(
+                meerkat_runtime::InputLifecycleState::Staged
+                    | meerkat_runtime::InputLifecycleState::AppliedPendingConsumption
+            )
+        ) && input.last_run_id.is_none()
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::InputLifecycleMissingRunBinding {
+                    input_id: input.input_id.clone(),
+                    lifecycle: input
+                        .lifecycle
+                        .expect("staged/applied-pending lifecycle matched above"),
+                },
+            );
+        }
+
+        if input.lifecycle == Some(meerkat_runtime::InputLifecycleState::AppliedPendingConsumption)
+            && input.last_boundary_sequence.is_none()
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::AppliedPendingConsumptionMissingBoundarySequence {
+                    input_id: input.input_id.clone(),
+                },
+            );
+        }
+
+        if inputs.ingress_phase == meerkat_runtime::IngressPhase::Destroyed
+            && let Some(lifecycle) = input.lifecycle
+            && !lifecycle.is_terminal()
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::DestroyedIngressHasNonTerminalInput {
+                    input_id: input.input_id.clone(),
+                    lifecycle,
+                },
+            );
+        }
     }
 
     for input_id in &inputs.current_run_contributors {
@@ -337,6 +702,49 @@ pub(crate) fn validate_meerkat_machine_snapshot(
                     lifecycle: input.lifecycle,
                 },
             );
+        }
+
+        if let Some(current_run_id) = &inputs.current_run_id {
+            if input.last_run_id.as_ref() != Some(current_run_id) {
+                violations.push(
+                    MeerkatMachineInvariantViolation::CurrentRunContributorRunMismatch {
+                        input_id: input_id.clone(),
+                        current_run_id: current_run_id.clone(),
+                        last_run_id: input.last_run_id.clone(),
+                    },
+                );
+            }
+            if input.lifecycle
+                == Some(meerkat_runtime::InputLifecycleState::AppliedPendingConsumption)
+                && input.last_boundary_sequence.is_none()
+            {
+                violations.push(
+                    MeerkatMachineInvariantViolation::CurrentRunContributorPendingConsumptionMissingBoundary {
+                        input_id: input_id.clone(),
+                        current_run_id: current_run_id.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    if let Some(current_run_id) = &inputs.current_run_id {
+        let contributor_ids: HashSet<_> = inputs.current_run_contributors.iter().cloned().collect();
+        for input in admitted_inputs.values() {
+            if input.last_run_id.as_ref() == Some(current_run_id)
+                && contributor_lifecycle_is_valid(input.lifecycle)
+                && !contributor_ids.contains(&input.input_id)
+            {
+                violations.push(
+                    MeerkatMachineInvariantViolation::CurrentRunBoundInputMissingContributor {
+                        input_id: input.input_id.clone(),
+                        current_run_id: current_run_id.clone(),
+                        lifecycle: input
+                            .lifecycle
+                            .expect("contributor-compatible lifecycle matched above"),
+                    },
+                );
+            }
         }
     }
 
@@ -385,15 +793,56 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         );
     }
 
+    if control.phase == RuntimeState::Destroyed && completion_waiters.waiter_count > 0 {
+        violations.push(
+            MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasCompletionWaiters {
+                waiter_count: completion_waiters.waiter_count,
+            },
+        );
+    }
+    if control.phase == RuntimeState::Stopped && completion_waiters.waiter_count > 0 {
+        violations.push(
+            MeerkatMachineInvariantViolation::StoppedRuntimeStillHasCompletionWaiters {
+                waiter_count: completion_waiters.waiter_count,
+            },
+        );
+    }
+
     for entry in &completion_waiters.waiting_inputs {
-        if !admitted_inputs.contains_key(&entry.input_id) {
+        let Some(input) = admitted_inputs.get(&entry.input_id) else {
             violations.push(
                 MeerkatMachineInvariantViolation::CompletionWaiterUnknownInput {
                     input_id: entry.input_id.clone(),
                 },
             );
+            continue;
+        };
+
+        if entry.waiter_count == 0 {
+            violations.push(
+                MeerkatMachineInvariantViolation::CompletionWaiterZeroCount {
+                    input_id: entry.input_id.clone(),
+                },
+            );
+        }
+
+        let terminal_outcome_present = input.terminal_outcome.is_some();
+        if input
+            .lifecycle
+            .is_some_and(|lifecycle| lifecycle.is_terminal())
+            || terminal_outcome_present
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::CompletionWaiterResolvedInput {
+                    input_id: entry.input_id.clone(),
+                    lifecycle: input.lifecycle,
+                    terminal_outcome_present,
+                },
+            );
         }
     }
+
+    push_drain_mismatches(&mut violations, &snapshot.spine.drain);
 
     if let Some(peer) = &snapshot.peer {
         let queue_mismatch = match peer.authority_phase {
@@ -523,6 +972,78 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         }
     }
 
+    push_ops_mismatches(&mut violations, &snapshot.spine.binding, ops);
+
+    violations
+}
+
+fn push_drain_mismatches(
+    violations: &mut Vec<MeerkatMachineInvariantViolation>,
+    drain: &meerkat_runtime::MeerkatDrainSnapshot,
+) {
+    if !drain.slot_present {
+        if let Some(phase) = drain.phase {
+            violations.push(MeerkatMachineInvariantViolation::DrainPhaseWithoutSlot { phase });
+        }
+        if let Some(mode) = drain.mode {
+            violations.push(MeerkatMachineInvariantViolation::DrainModeWithoutSlot { mode });
+        }
+        if drain.handle_present {
+            violations.push(MeerkatMachineInvariantViolation::DrainHandleWithoutSlot);
+        }
+        return;
+    }
+
+    let Some(phase) = drain.phase else {
+        violations.push(MeerkatMachineInvariantViolation::DrainSlotMissingPhase);
+        return;
+    };
+
+    match phase {
+        CommsDrainPhase::Inactive => {
+            if let Some(mode) = drain.mode {
+                violations.push(MeerkatMachineInvariantViolation::DrainInactiveWithMode { mode });
+            }
+            if drain.handle_present {
+                violations.push(MeerkatMachineInvariantViolation::DrainInactiveWithHandle);
+            }
+        }
+        CommsDrainPhase::Starting
+        | CommsDrainPhase::Running
+        | CommsDrainPhase::ExitedRespawnable
+        | CommsDrainPhase::Stopped => {
+            if drain.mode.is_none() {
+                violations.push(MeerkatMachineInvariantViolation::DrainPhaseMissingMode { phase });
+            }
+        }
+    }
+
+    if drain.handle_present
+        && matches!(
+            phase,
+            CommsDrainPhase::Inactive
+                | CommsDrainPhase::ExitedRespawnable
+                | CommsDrainPhase::Stopped
+        )
+    {
+        violations.push(MeerkatMachineInvariantViolation::DrainTerminalPhaseWithHandle { phase });
+    }
+}
+
+fn push_ops_mismatches(
+    violations: &mut Vec<MeerkatMachineInvariantViolation>,
+    binding: &meerkat_runtime::MeerkatBindingSnapshot,
+    ops: &meerkat_runtime::MeerkatOpsSnapshot,
+) {
+    if ops.operation_count != ops.operations.len() {
+        violations.push(
+            MeerkatMachineInvariantViolation::OpsOperationCountMismatch {
+                operation_count: ops.operation_count,
+                operations_len: ops.operations.len(),
+            },
+        );
+    }
+
     if ops.active_count > ops.operation_count {
         violations.push(
             MeerkatMachineInvariantViolation::ActiveOpsExceedsOperationCount {
@@ -532,7 +1053,193 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         );
     }
 
-    violations
+    let nonterminal_count = ops
+        .operations
+        .iter()
+        .filter(|operation| !operation.status.is_terminal())
+        .count();
+    if ops.operation_count == ops.operations.len() && ops.active_count != nonterminal_count {
+        violations.push(
+            MeerkatMachineInvariantViolation::ActiveOpsStatusCountMismatch {
+                active_count: ops.active_count,
+                nonterminal_count,
+            },
+        );
+    }
+
+    match (&ops.wait_request_id, ops.wait_operation_ids.is_empty()) {
+        (None, false) => violations.push(
+            MeerkatMachineInvariantViolation::WaitOperationIdsWithoutWaitRequest {
+                wait_operation_count: ops.wait_operation_ids.len(),
+            },
+        ),
+        (Some(wait_request_id), true) => violations.push(
+            MeerkatMachineInvariantViolation::WaitRequestWithoutTrackedOperations {
+                wait_request_id: wait_request_id.clone(),
+            },
+        ),
+        _ => {}
+    }
+    if ops.pending_wait_present != ops.pending_wait_request_id.is_some() {
+        violations.push(
+            MeerkatMachineInvariantViolation::PendingWaitCarrierShapeMismatch {
+                pending_wait_present: ops.pending_wait_present,
+                pending_wait_request_id_present: ops.pending_wait_request_id.is_some(),
+            },
+        );
+    }
+    match (&ops.wait_request_id, ops.pending_wait_present) {
+        (None, true) => {
+            violations.push(MeerkatMachineInvariantViolation::PendingWaitCarrierWithoutWaitRequest)
+        }
+        (Some(wait_request_id), false) => violations.push(
+            MeerkatMachineInvariantViolation::WaitRequestMissingPendingWaitCarrier {
+                wait_request_id: wait_request_id.clone(),
+            },
+        ),
+        _ => {}
+    }
+    if let (Some(wait_request_id), Some(pending_wait_request_id)) =
+        (&ops.wait_request_id, &ops.pending_wait_request_id)
+        && wait_request_id != pending_wait_request_id
+    {
+        violations.push(
+            MeerkatMachineInvariantViolation::PendingWaitCarrierRequestMismatch {
+                wait_request_id: wait_request_id.clone(),
+                pending_wait_request_id: pending_wait_request_id.clone(),
+            },
+        );
+    }
+
+    let operation_ids: HashSet<_> = ops
+        .operations
+        .iter()
+        .map(|operation| operation.id.clone())
+        .collect();
+    let operations_by_id: HashMap<_, _> = ops
+        .operations
+        .iter()
+        .map(|operation| (operation.id.clone(), operation))
+        .collect();
+    for operation_id in &ops.wait_operation_ids {
+        if !operation_ids.contains(operation_id) {
+            violations.push(
+                MeerkatMachineInvariantViolation::WaitTargetsUnknownOperation {
+                    operation_id: operation_id.clone(),
+                },
+            );
+        }
+    }
+    if let Some(wait_request_id) = &ops.wait_request_id
+        && !ops.wait_operation_ids.is_empty()
+        && ops.wait_operation_ids.iter().all(|operation_id| {
+            operations_by_id
+                .get(operation_id)
+                .is_some_and(|operation| operation.status.is_terminal())
+        })
+    {
+        violations.push(
+            MeerkatMachineInvariantViolation::WaitRequestAlreadySatisfied {
+                wait_request_id: wait_request_id.clone(),
+            },
+        );
+    }
+
+    let pending_present = ops.detached_wake_pending.is_some();
+    let signaled_present = ops.detached_wake_signaled.is_some();
+    if pending_present != signaled_present {
+        violations.push(
+            MeerkatMachineInvariantViolation::DetachedWakePresenceMismatch {
+                pending_present,
+                signaled_present,
+            },
+        );
+    }
+    if pending_present == signaled_present && binding.detached_wake_present != pending_present {
+        violations.push(
+            MeerkatMachineInvariantViolation::DetachedWakeBindingMismatch {
+                binding_present: binding.detached_wake_present,
+                ops_present: pending_present,
+            },
+        );
+    }
+    if ops.detached_wake_pending == Some(false) && ops.detached_wake_signaled == Some(true) {
+        violations.push(MeerkatMachineInvariantViolation::DetachedWakeSignaledWithoutPending);
+    }
+
+    for operation in &ops.operations {
+        if operation.peer_ready && !operation.kind.expects_peer_channel() {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationPeerReadyWithoutExpectedKind {
+                    operation_id: operation.id.clone(),
+                    kind: operation.kind,
+                },
+            );
+        }
+        if operation.peer_ready && operation.peer_handle.is_none() {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationPeerReadyWithoutHandle {
+                    operation_id: operation.id.clone(),
+                },
+            );
+        }
+        if !operation.peer_ready && operation.peer_handle.is_some() {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationHandleWithoutPeerReady {
+                    operation_id: operation.id.clone(),
+                },
+            );
+        }
+
+        let terminal_outcome_present = operation.terminal_outcome.is_some();
+        if operation.status.is_terminal() != terminal_outcome_present {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationTerminalOutcomeMismatch {
+                    operation_id: operation.id.clone(),
+                    status: operation.status,
+                    terminal_outcome_present,
+                },
+            );
+        }
+
+        let completed_at_present = operation.completed_at_ms.is_some();
+        let elapsed_ms_present = operation.elapsed_ms.is_some();
+        if operation.status.is_terminal() != completed_at_present
+            || operation.status.is_terminal() != elapsed_ms_present
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationCompletionTimestampMismatch {
+                    operation_id: operation.id.clone(),
+                    status: operation.status,
+                    completed_at_present,
+                    elapsed_ms_present,
+                },
+            );
+        }
+
+        if matches!(
+            operation.status,
+            meerkat_core::ops_lifecycle::OperationStatus::Running
+                | meerkat_core::ops_lifecycle::OperationStatus::Retiring
+        ) && operation.started_at_ms.is_none()
+        {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationActiveWithoutStartTimestamp {
+                    operation_id: operation.id.clone(),
+                    status: operation.status,
+                },
+            );
+        }
+
+        if operation.status.is_terminal() && operation.watcher_count != 0 {
+            violations.push(
+                MeerkatMachineInvariantViolation::OperationTerminalWithWatchers {
+                    operation_id: operation.id.clone(),
+                    watcher_count: operation.watcher_count,
+                },
+            );
+        }
+    }
 }
 
 fn push_peer_authority_mismatches(
@@ -924,9 +1631,14 @@ mod tests {
     use meerkat_core::DeferredPromptPolicy;
     #[cfg(feature = "comms")]
     use meerkat_core::PlainEventSource;
-    #[cfg(feature = "comms")]
+    use meerkat_core::agent::CommsRuntime;
     use meerkat_core::comms::TrustedPeerSpec;
-    use meerkat_core::lifecycle::{InputId, RunId};
+    use meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase;
+    use meerkat_core::lifecycle::{InputId, RunId, WaitRequestId};
+    use meerkat_core::ops::OperationId;
+    use meerkat_core::ops_lifecycle::{
+        OperationKind, OperationLifecycleSnapshot, OperationPeerHandle, OperationStatus,
+    };
     use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
     #[cfg(feature = "comms")]
     use meerkat_core::types::HandlingMode;
@@ -941,7 +1653,10 @@ mod tests {
         Input, InputLifecycleState, InputTerminalOutcome, MeerkatAdmittedInputSnapshot,
         MeerkatCompletionWaiterSnapshot, PromptInput,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     fn invalid_tool_surface_entry(
         surface_id: &str,
@@ -982,6 +1697,30 @@ mod tests {
             is_prompt: true,
         }
     }
+
+    fn invalid_operation_snapshot(
+        operation_id: OperationId,
+        kind: OperationKind,
+        status: OperationStatus,
+    ) -> OperationLifecycleSnapshot {
+        OperationLifecycleSnapshot {
+            id: operation_id,
+            kind,
+            display_name: "invalid-op".into(),
+            status,
+            peer_ready: false,
+            progress_count: 0,
+            watcher_count: 0,
+            terminal_outcome: None,
+            child_session_id: None,
+            peer_handle: None,
+            created_at_ms: 1,
+            started_at_ms: None,
+            completed_at_ms: None,
+            elapsed_ms: None,
+        }
+    }
+
     struct MockLlmClient;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1070,6 +1809,43 @@ mod tests {
         );
     }
 
+    struct FakeDrainRuntime {
+        notify: Arc<Notify>,
+        dismiss: AtomicBool,
+    }
+
+    impl FakeDrainRuntime {
+        fn idle() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+                dismiss: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl CommsRuntime for FakeDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn dismiss_received(&self) -> bool {
+            self.dismiss.load(Ordering::Acquire)
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
     #[tokio::test]
     async fn capture_meerkat_machine_snapshot_reports_registered_runtime_without_live_turn()
     -> Result<(), String> {
@@ -1098,6 +1874,54 @@ mod tests {
         assert!(snapshot.tools.is_none());
         assert!(snapshot.tool_surface.is_none());
         assert!(snapshot.peer.is_none());
+        assert!(!snapshot.spine.drain.slot_present);
+        assert_eq!(snapshot.spine.drain.phase, None);
+        assert_eq!(snapshot.spine.drain.mode, None);
+        assert!(!snapshot.spine.drain.handle_present);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_machine_snapshot_joins_stopped_comms_drain_state() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let _bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let spawned = runtime_adapter
+            .maybe_spawn_comms_drain(
+                &session_id,
+                true,
+                Some(Arc::new(FakeDrainRuntime::idle()) as Arc<dyn CommsRuntime>),
+            )
+            .await;
+        assert!(spawned, "registered session should spawn a comms drain");
+
+        runtime_adapter.abort_comms_drain(&session_id).await;
+
+        let snapshot = capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| {
+                "runtime-registered session should produce a Meerkat snapshot".to_string()
+            })?;
+
+        assert_snapshot_is_valid(&snapshot);
+        assert!(snapshot.spine.drain.slot_present);
+        assert_eq!(snapshot.spine.drain.phase, Some(CommsDrainPhase::Stopped));
+        assert_eq!(
+            snapshot.spine.drain.mode,
+            Some(CommsDrainMode::PersistentHost)
+        );
+        assert!(!snapshot.spine.drain.handle_present);
 
         Ok(())
     }
@@ -1357,7 +2181,8 @@ mod tests {
 
         snapshot.spine.control.phase = RuntimeState::Running;
         snapshot.spine.control.current_run_id = None;
-        snapshot.spine.inputs.current_run_id = Some(RunId::new());
+        let current_run_id = RunId::new();
+        snapshot.spine.inputs.current_run_id = Some(current_run_id.clone());
         snapshot.spine.ops.active_count = snapshot.spine.ops.operation_count + 1;
 
         let turn = snapshot
@@ -1370,27 +2195,79 @@ mod tests {
 
         let queue_input_id = InputId::new();
         let contributor_input_id = InputId::new();
+        let boundaryless_contributor_input_id = InputId::new();
+        let missing_metadata_input_id = InputId::new();
+        let missing_queue_membership_input_id = InputId::new();
         let waiter_input_id = InputId::new();
+        let resolved_waiter_input_id = InputId::new();
+        let mut queue_input = invalid_input_snapshot(
+            queue_input_id.clone(),
+            Some(InputLifecycleState::Staged),
+            None,
+        );
+        queue_input.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+
+        let mut contributor_input = invalid_input_snapshot(
+            contributor_input_id.clone(),
+            Some(InputLifecycleState::Queued),
+            None,
+        );
+        contributor_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        contributor_input.last_run_id = Some(current_run_id.clone());
+
+        let mut boundaryless_contributor_input = invalid_input_snapshot(
+            boundaryless_contributor_input_id.clone(),
+            Some(InputLifecycleState::AppliedPendingConsumption),
+            None,
+        );
+        boundaryless_contributor_input.handling_mode =
+            Some(meerkat_core::types::HandlingMode::Queue);
+
+        let mut missing_metadata_input =
+            invalid_input_snapshot(missing_metadata_input_id.clone(), None, None);
+        missing_metadata_input.content_shape = None;
+        missing_metadata_input.handling_mode = None;
+
+        let mut missing_queue_membership_input = invalid_input_snapshot(
+            missing_queue_membership_input_id.clone(),
+            Some(InputLifecycleState::Queued),
+            None,
+        );
+        missing_queue_membership_input.handling_mode =
+            Some(meerkat_core::types::HandlingMode::Queue);
+
+        let resolved_waiter_input = invalid_input_snapshot(
+            resolved_waiter_input_id.clone(),
+            Some(InputLifecycleState::Consumed),
+            Some(InputTerminalOutcome::Consumed),
+        );
+
         snapshot.spine.inputs.admission_order = vec![
-            invalid_input_snapshot(
-                queue_input_id.clone(),
-                Some(InputLifecycleState::Staged),
-                None,
-            ),
-            invalid_input_snapshot(
-                contributor_input_id.clone(),
-                Some(InputLifecycleState::Queued),
-                None,
-            ),
+            queue_input,
+            contributor_input,
+            boundaryless_contributor_input,
+            missing_metadata_input,
+            missing_queue_membership_input,
+            resolved_waiter_input,
         ];
         snapshot.spine.inputs.queue = vec![queue_input_id.clone()];
-        snapshot.spine.inputs.current_run_contributors = vec![contributor_input_id.clone()];
-        snapshot.spine.completion_waiters.input_count = 2;
-        snapshot.spine.completion_waiters.waiter_count = 3;
-        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
-            input_id: waiter_input_id.clone(),
-            waiter_count: 2,
-        }];
+        snapshot.spine.inputs.steer_queue = vec![queue_input_id.clone()];
+        snapshot.spine.inputs.current_run_contributors = vec![
+            contributor_input_id.clone(),
+            boundaryless_contributor_input_id.clone(),
+        ];
+        snapshot.spine.completion_waiters.input_count = 4;
+        snapshot.spine.completion_waiters.waiter_count = 4;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![
+            MeerkatCompletionWaiterSnapshot {
+                input_id: waiter_input_id.clone(),
+                waiter_count: 2,
+            },
+            MeerkatCompletionWaiterSnapshot {
+                input_id: resolved_waiter_input_id.clone(),
+                waiter_count: 0,
+            },
+        ];
 
         snapshot.tool_surface = Some(ExternalToolSurfaceSnapshot {
             phase: meerkat_core::ExternalToolSurfaceGlobalPhase::Operating,
@@ -1423,6 +2300,41 @@ mod tests {
         )));
         assert!(violations.iter().any(|violation| matches!(
             violation,
+            MeerkatMachineInvariantViolation::QueueContainsWrongHandlingMode {
+                queue: "queue",
+                input_id,
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+            } if input_id == &queue_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::QueueAppearsInBothQueues { input_id }
+                if input_id == &queue_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::AdmittedInputMissingContentShape { input_id }
+                if input_id == &missing_metadata_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::AdmittedInputMissingHandlingMode { input_id }
+                if input_id == &missing_metadata_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::AdmittedInputMissingLifecycle { input_id }
+                if input_id == &missing_metadata_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::QueuedInputMissingOwningQueue {
+                input_id,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            } if input_id == &missing_queue_membership_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
             MeerkatMachineInvariantViolation::CurrentRunContributorIllegalLifecycle {
                 input_id,
                 lifecycle: Some(InputLifecycleState::Queued),
@@ -1430,15 +2342,30 @@ mod tests {
         )));
         assert!(violations.iter().any(|violation| matches!(
             violation,
+            MeerkatMachineInvariantViolation::CurrentRunContributorRunMismatch {
+                input_id,
+                current_run_id: run_id,
+                last_run_id: None,
+            } if input_id == &boundaryless_contributor_input_id && run_id == &current_run_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::CurrentRunContributorPendingConsumptionMissingBoundary {
+                input_id,
+                current_run_id: run_id,
+            } if input_id == &boundaryless_contributor_input_id && run_id == &current_run_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
             MeerkatMachineInvariantViolation::CompletionWaiterInputCountMismatch {
-                recorded_input_count: 2,
-                waiting_inputs_len: 1,
+                recorded_input_count: 4,
+                waiting_inputs_len: 2,
             }
         )));
         assert!(violations.iter().any(|violation| matches!(
             violation,
             MeerkatMachineInvariantViolation::CompletionWaiterCountMismatch {
-                recorded_waiter_count: 3,
+                recorded_waiter_count: 4,
                 summed_waiter_count: 2,
             }
         )));
@@ -1446,6 +2373,19 @@ mod tests {
             violation,
             MeerkatMachineInvariantViolation::CompletionWaiterUnknownInput { input_id }
                 if input_id == &waiter_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::CompletionWaiterZeroCount { input_id }
+                if input_id == &resolved_waiter_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::CompletionWaiterResolvedInput {
+                input_id,
+                lifecycle: Some(InputLifecycleState::Consumed),
+                terminal_outcome_present: true,
+            } if input_id == &resolved_waiter_input_id
         )));
         assert!(violations.iter().any(|violation| matches!(
             violation,
@@ -1473,6 +2413,245 @@ mod tests {
                 visible: true,
                 base_state: ExternalToolSurfaceBaseState::Removed,
             } if surface_id == "invalid-visible-removed-surface"
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_ops_shape_violations() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let base_snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let missing_wait_target = OperationId::new();
+        let orphaned_pending_wait_request_id = WaitRequestId::new();
+        let mut malformed_snapshot = base_snapshot.clone();
+        malformed_snapshot.spine.ops.operation_count = 1;
+        malformed_snapshot.spine.ops.wait_request_id = None;
+        malformed_snapshot.spine.ops.pending_wait_present = true;
+        malformed_snapshot.spine.ops.pending_wait_request_id =
+            Some(orphaned_pending_wait_request_id);
+        malformed_snapshot.spine.ops.wait_operation_ids = vec![missing_wait_target.clone()];
+        malformed_snapshot.spine.ops.detached_wake_pending = Some(true);
+        malformed_snapshot.spine.ops.detached_wake_signaled = None;
+
+        let malformed_violations = validate_meerkat_machine_snapshot(&malformed_snapshot);
+
+        assert!(malformed_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OpsOperationCountMismatch {
+                operation_count: 1,
+                operations_len: 0,
+            }
+        )));
+        assert!(malformed_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitOperationIdsWithoutWaitRequest {
+                wait_operation_count: 1,
+            }
+        )));
+        assert!(malformed_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::PendingWaitCarrierWithoutWaitRequest
+        )));
+        assert!(malformed_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitTargetsUnknownOperation { operation_id }
+                if operation_id == &missing_wait_target
+        )));
+        assert!(malformed_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DetachedWakePresenceMismatch {
+                pending_present: true,
+                signaled_present: false,
+            }
+        )));
+
+        let wait_request_id = WaitRequestId::new();
+        let mut empty_wait_snapshot = base_snapshot.clone();
+        empty_wait_snapshot.spine.ops.wait_request_id = Some(wait_request_id.clone());
+        empty_wait_snapshot.spine.ops.pending_wait_present = false;
+        empty_wait_snapshot.spine.ops.pending_wait_request_id = None;
+        empty_wait_snapshot.spine.ops.wait_operation_ids.clear();
+
+        let empty_wait_violations = validate_meerkat_machine_snapshot(&empty_wait_snapshot);
+
+        assert!(empty_wait_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitRequestWithoutTrackedOperations {
+                wait_request_id: active_wait_request_id,
+            } if active_wait_request_id == &wait_request_id
+        )));
+        assert!(empty_wait_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitRequestMissingPendingWaitCarrier {
+                wait_request_id: active_wait_request_id,
+            } if active_wait_request_id == &wait_request_id
+        )));
+
+        let mut stale_detached_wake_snapshot = base_snapshot.clone();
+        stale_detached_wake_snapshot
+            .spine
+            .binding
+            .detached_wake_present = true;
+        stale_detached_wake_snapshot.spine.ops.detached_wake_pending = Some(false);
+        stale_detached_wake_snapshot
+            .spine
+            .ops
+            .detached_wake_signaled = Some(true);
+
+        let stale_detached_wake_violations =
+            validate_meerkat_machine_snapshot(&stale_detached_wake_snapshot);
+
+        assert!(
+            stale_detached_wake_violations
+                .iter()
+                .any(|violation| matches!(
+                    violation,
+                    MeerkatMachineInvariantViolation::DetachedWakeSignaledWithoutPending
+                ))
+        );
+
+        let peer_handle = OperationPeerHandle {
+            peer_name: "child".into(),
+            trusted_peer: TrustedPeerSpec::new("child", "child-id", "inproc://child")
+                .map_err(|err| err.to_string())?,
+        };
+        let running_operation_id = OperationId::new();
+        let terminal_operation_id = OperationId::new();
+        let wait_request_id = WaitRequestId::new();
+        let mismatched_pending_wait_request_id = WaitRequestId::new();
+        let mut operation_shape_snapshot = base_snapshot.clone();
+        operation_shape_snapshot.spine.binding.detached_wake_present = false;
+        operation_shape_snapshot.spine.ops.operation_count = 2;
+        operation_shape_snapshot.spine.ops.active_count = 2;
+        operation_shape_snapshot.spine.ops.wait_request_id = Some(wait_request_id.clone());
+        operation_shape_snapshot.spine.ops.pending_wait_present = true;
+        operation_shape_snapshot.spine.ops.pending_wait_request_id =
+            Some(mismatched_pending_wait_request_id.clone());
+        operation_shape_snapshot.spine.ops.wait_operation_ids = vec![terminal_operation_id.clone()];
+        operation_shape_snapshot.spine.ops.detached_wake_pending = Some(false);
+        operation_shape_snapshot.spine.ops.detached_wake_signaled = Some(false);
+        operation_shape_snapshot.spine.ops.operations = vec![
+            OperationLifecycleSnapshot {
+                peer_ready: true,
+                ..invalid_operation_snapshot(
+                    running_operation_id.clone(),
+                    OperationKind::BackgroundToolOp,
+                    OperationStatus::Running,
+                )
+            },
+            OperationLifecycleSnapshot {
+                peer_handle: Some(peer_handle),
+                watcher_count: 2,
+                ..invalid_operation_snapshot(
+                    terminal_operation_id.clone(),
+                    OperationKind::MobMemberChild,
+                    OperationStatus::Completed,
+                )
+            },
+        ];
+
+        let operation_shape_violations =
+            validate_meerkat_machine_snapshot(&operation_shape_snapshot);
+
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::ActiveOpsStatusCountMismatch {
+                active_count: 2,
+                nonterminal_count: 1,
+            }
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::WaitRequestAlreadySatisfied {
+                wait_request_id: active_wait_request_id,
+            } if active_wait_request_id == &wait_request_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::PendingWaitCarrierRequestMismatch {
+                wait_request_id: active_wait_request_id,
+                pending_wait_request_id,
+            } if active_wait_request_id == &wait_request_id
+                && pending_wait_request_id == &mismatched_pending_wait_request_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DetachedWakeBindingMismatch {
+                binding_present: false,
+                ops_present: true,
+            }
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationPeerReadyWithoutExpectedKind {
+                operation_id,
+                kind: OperationKind::BackgroundToolOp,
+            } if operation_id == &running_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationPeerReadyWithoutHandle { operation_id }
+                if operation_id == &running_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationActiveWithoutStartTimestamp {
+                operation_id,
+                status: OperationStatus::Running,
+            } if operation_id == &running_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationHandleWithoutPeerReady { operation_id }
+                if operation_id == &terminal_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationTerminalOutcomeMismatch {
+                operation_id,
+                status: OperationStatus::Completed,
+                terminal_outcome_present: false,
+            } if operation_id == &terminal_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationCompletionTimestampMismatch {
+                operation_id,
+                status: OperationStatus::Completed,
+                completed_at_present: false,
+                elapsed_ms_present: false,
+            } if operation_id == &terminal_operation_id
+        )));
+        assert!(operation_shape_violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::OperationTerminalWithWatchers {
+                operation_id,
+                watcher_count: 2,
+            } if operation_id == &terminal_operation_id
         )));
 
         Ok(())
@@ -1870,6 +3049,652 @@ mod tests {
                 terminal_outcome: InputTerminalOutcome::Consumed,
             } if input_id == &nonterminal_with_outcome_id
         )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_ingress_boundary_shape_violations()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let queued_input_id = InputId::new();
+        let applied_input_id = InputId::new();
+        let current_run_id = RunId::new();
+
+        let mut queued_input = invalid_input_snapshot(
+            queued_input_id.clone(),
+            Some(InputLifecycleState::Queued),
+            None,
+        );
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        queued_input.last_run_id = Some(current_run_id);
+        queued_input.last_boundary_sequence = Some(7);
+
+        let mut applied_input = invalid_input_snapshot(
+            applied_input_id.clone(),
+            Some(InputLifecycleState::AppliedPendingConsumption),
+            None,
+        );
+        applied_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        applied_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        applied_input.last_boundary_sequence = Some(9);
+
+        snapshot.spine.inputs.admission_order = vec![queued_input, applied_input];
+        snapshot.spine.inputs.queue = vec![queued_input_id.clone()];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::InputBoundarySequenceIllegalLifecycle {
+                input_id,
+                lifecycle: InputLifecycleState::Queued,
+                last_boundary_sequence: 7,
+            } if input_id == &queued_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::InputBoundarySequenceWithoutRun {
+                input_id,
+                last_boundary_sequence: 9,
+            } if input_id == &applied_input_id
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_process_request_shape_violations()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        snapshot.spine.inputs.process_requested = true;
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.steer_queue.clear();
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(
+            violations.contains(&MeerkatMachineInvariantViolation::ProcessRequestedWithoutWake)
+        );
+        assert!(
+            violations
+                .contains(&MeerkatMachineInvariantViolation::ProcessRequestedWithoutSteerQueue)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_wake_without_queued_work()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        snapshot.spine.inputs.wake_requested = true;
+        snapshot.spine.inputs.queue.clear();
+        snapshot.spine.inputs.steer_queue.clear();
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(
+            violations.contains(&MeerkatMachineInvariantViolation::WakeRequestedWithoutQueuedWork)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_ingress_run_binding_shape_violations()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let staged_input_id = InputId::new();
+        let pending_input_id = InputId::new();
+        let pending_run_id = RunId::new();
+
+        let mut staged_input = invalid_input_snapshot(
+            staged_input_id.clone(),
+            Some(InputLifecycleState::Staged),
+            None,
+        );
+        staged_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        staged_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        let mut pending_input = invalid_input_snapshot(
+            pending_input_id.clone(),
+            Some(InputLifecycleState::AppliedPendingConsumption),
+            None,
+        );
+        pending_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        pending_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        pending_input.last_run_id = Some(pending_run_id);
+
+        snapshot.spine.inputs.admission_order = vec![staged_input, pending_input];
+        snapshot.spine.inputs.queue.clear();
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::InputLifecycleMissingRunBinding {
+                input_id,
+                lifecycle: InputLifecycleState::Staged,
+            } if input_id == &staged_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::AppliedPendingConsumptionMissingBoundarySequence {
+                input_id,
+            } if input_id == &pending_input_id
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_missing_run_bound_contributor()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let current_run_id = RunId::new();
+        let present_input_id = InputId::new();
+        let missing_input_id = InputId::new();
+
+        let mut present_input = invalid_input_snapshot(
+            present_input_id.clone(),
+            Some(InputLifecycleState::Staged),
+            None,
+        );
+        present_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        present_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        present_input.last_run_id = Some(current_run_id.clone());
+
+        let mut missing_input = invalid_input_snapshot(
+            missing_input_id.clone(),
+            Some(InputLifecycleState::AppliedPendingConsumption),
+            None,
+        );
+        missing_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        missing_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        missing_input.last_run_id = Some(current_run_id.clone());
+        missing_input.last_boundary_sequence = Some(7);
+
+        snapshot.spine.control.phase = RuntimeState::Running;
+        snapshot.spine.control.current_run_id = Some(current_run_id.clone());
+        snapshot.spine.inputs.current_run_id = Some(current_run_id.clone());
+        snapshot.spine.inputs.current_run_contributors = vec![present_input_id];
+        snapshot.spine.inputs.queue.clear();
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.admission_order = vec![present_input, missing_input];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::CurrentRunBoundInputMissingContributor {
+                input_id,
+                current_run_id: violation_run_id,
+                lifecycle: InputLifecycleState::AppliedPendingConsumption,
+            } if input_id == &missing_input_id && violation_run_id == &current_run_id
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_destroyed_ingress_violations()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let queued_input_id = InputId::new();
+        let mut queued_input = invalid_input_snapshot(
+            queued_input_id.clone(),
+            Some(InputLifecycleState::Queued),
+            None,
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        let active_input_id = InputId::new();
+        let mut active_input = invalid_input_snapshot(
+            active_input_id.clone(),
+            Some(InputLifecycleState::Staged),
+            None,
+        );
+        active_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.inputs.ingress_phase = meerkat_runtime::IngressPhase::Destroyed;
+        snapshot.spine.inputs.queue = vec![queued_input_id.clone()];
+        snapshot.spine.inputs.steer_queue = vec![queued_input_id.clone()];
+        snapshot.spine.inputs.current_run_id = Some(RunId::new());
+        snapshot.spine.inputs.current_run_contributors = vec![active_input_id.clone()];
+        snapshot.spine.inputs.wake_requested = true;
+        snapshot.spine.inputs.process_requested = true;
+        snapshot.spine.inputs.admission_order = vec![queued_input, active_input];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressStillHasQueuedWork {
+                queue: "queue",
+                count: 1,
+            }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressStillHasQueuedWork {
+                queue: "steer_queue",
+                count: 1,
+            }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressStillHasCurrentRun { .. }
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressStillHasContributors {
+                contributor_count: 1,
+            }
+        )));
+        assert!(
+            violations
+                .contains(&MeerkatMachineInvariantViolation::DestroyedIngressStillRequestsWake)
+        );
+        assert!(
+            violations.contains(
+                &MeerkatMachineInvariantViolation::DestroyedIngressStillRequestsProcessing
+            )
+        );
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressHasNonTerminalInput {
+                input_id,
+                lifecycle: InputLifecycleState::Queued,
+            } if input_id == &queued_input_id
+        )));
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedIngressHasNonTerminalInput {
+                input_id,
+                lifecycle: InputLifecycleState::Staged,
+            } if input_id == &active_input_id
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_destroyed_completion_waiters()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.control.phase = RuntimeState::Destroyed;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id.clone()];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.completion_waiters.input_count = 1;
+        snapshot.spine.completion_waiters.waiter_count = 1;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
+            input_id,
+            waiter_count: 1,
+        }];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasCompletionWaiters {
+                waiter_count: 1,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_stopped_completion_waiters()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.control.phase = RuntimeState::Stopped;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id.clone()];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.completion_waiters.input_count = 1;
+        snapshot.spine.completion_waiters.waiter_count = 1;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
+            input_id,
+            waiter_count: 1,
+        }];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::StoppedRuntimeStillHasCompletionWaiters {
+                waiter_count: 1,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_drain_shape_violations() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let snapshot = capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| {
+                "live runtime-backed session should produce a Meerkat snapshot".to_string()
+            })?;
+
+        let mut missing_slot = snapshot.clone();
+        missing_slot.spine.drain.slot_present = false;
+        missing_slot.spine.drain.phase = Some(CommsDrainPhase::Running);
+        missing_slot.spine.drain.mode = Some(CommsDrainMode::PersistentHost);
+        missing_slot.spine.drain.handle_present = true;
+        let missing_slot_violations = validate_meerkat_machine_snapshot(&missing_slot);
+        assert!(missing_slot_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainPhaseWithoutSlot {
+                phase: CommsDrainPhase::Running,
+            }
+        ));
+        assert!(missing_slot_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainModeWithoutSlot {
+                mode: CommsDrainMode::PersistentHost,
+            }
+        ));
+        assert!(
+            missing_slot_violations
+                .contains(&MeerkatMachineInvariantViolation::DrainHandleWithoutSlot)
+        );
+
+        let mut missing_phase = snapshot.clone();
+        missing_phase.spine.drain.slot_present = true;
+        missing_phase.spine.drain.phase = None;
+        let missing_phase_violations = validate_meerkat_machine_snapshot(&missing_phase);
+        assert!(
+            missing_phase_violations
+                .contains(&MeerkatMachineInvariantViolation::DrainSlotMissingPhase)
+        );
+
+        let mut inactive = snapshot.clone();
+        inactive.spine.drain.slot_present = true;
+        inactive.spine.drain.phase = Some(CommsDrainPhase::Inactive);
+        inactive.spine.drain.mode = Some(CommsDrainMode::Timed);
+        inactive.spine.drain.handle_present = true;
+        let inactive_violations = validate_meerkat_machine_snapshot(&inactive);
+        assert!(inactive_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainInactiveWithMode {
+                mode: CommsDrainMode::Timed,
+            }
+        ));
+        assert!(
+            inactive_violations
+                .contains(&MeerkatMachineInvariantViolation::DrainInactiveWithHandle)
+        );
+        assert!(inactive_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainTerminalPhaseWithHandle {
+                phase: CommsDrainPhase::Inactive,
+            }
+        ));
+
+        let mut stopped = snapshot;
+        stopped.spine.drain.slot_present = true;
+        stopped.spine.drain.phase = Some(CommsDrainPhase::Stopped);
+        stopped.spine.drain.mode = None;
+        stopped.spine.drain.handle_present = true;
+        let stopped_violations = validate_meerkat_machine_snapshot(&stopped);
+        assert!(stopped_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainPhaseMissingMode {
+                phase: CommsDrainPhase::Stopped,
+            }
+        ));
+        assert!(stopped_violations.contains(
+            &MeerkatMachineInvariantViolation::DrainTerminalPhaseWithHandle {
+                phase: CommsDrainPhase::Stopped,
+            }
+        ));
 
         Ok(())
     }

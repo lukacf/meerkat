@@ -494,7 +494,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         );
                         let mut d = driver.lock().await;
                         if d.as_driver_mut().accept_input(input).await.is_ok() {
-                            state.pending.store(false, std::sync::atomic::Ordering::Release);
+                            clear_legacy_detached_wake_signal(state);
                         }
                         drop(d);
                         if process_queue(
@@ -605,6 +605,15 @@ async fn maybe_inject_feed_wake(
         state.notify.notify_one();
         false // Legacy path doesn't inject inline — idle arm handles it
     }
+}
+
+fn clear_legacy_detached_wake_signal(state: &crate::detached_wake::DetachedWakeState) {
+    state
+        .pending
+        .store(false, std::sync::atomic::Ordering::Release);
+    state
+        .signaled
+        .store(false, std::sync::atomic::Ordering::Release);
 }
 
 /// Process all queued inputs until the queue is empty.
@@ -1344,6 +1353,22 @@ mod tests {
             }
             other => panic!("Expected CallbackPending, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clear_legacy_detached_wake_signal_resets_pending_and_signaled() {
+        let state = crate::detached_wake::DetachedWakeState::new();
+        state
+            .pending
+            .store(true, std::sync::atomic::Ordering::Release);
+        state
+            .signaled
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        clear_legacy_detached_wake_signal(&state);
+
+        assert!(!state.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!state.signaled.load(std::sync::atomic::Ordering::Acquire));
     }
 
     // --- execution_kind stamping tests ---

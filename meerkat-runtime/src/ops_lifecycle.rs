@@ -536,6 +536,8 @@ pub(crate) struct RuntimeOpsDiagnosticSnapshot {
     pub operation_count: usize,
     pub active_count: usize,
     pub wait_request_id: Option<WaitRequestId>,
+    pub pending_wait_present: bool,
+    pub pending_wait_request_id: Option<WaitRequestId>,
     pub wait_operation_ids: Vec<OperationId>,
     pub operations: Vec<OperationLifecycleSnapshot>,
 }
@@ -714,6 +716,11 @@ impl RuntimeOpsLifecycleRegistry {
             operation_count: state.authority.operation_count(),
             active_count: state.authority.active_count(),
             wait_request_id: state.authority.wait_request_id().cloned(),
+            pending_wait_present: state.pending_wait.is_some(),
+            pending_wait_request_id: state
+                .pending_wait
+                .as_ref()
+                .map(|pending_wait| pending_wait.wait_request_id.clone()),
             wait_operation_ids: state.authority.wait_operation_ids().to_vec(),
             operations,
         }
@@ -1201,6 +1208,7 @@ mod tests {
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
     use meerkat_core::types::SessionId;
+    use std::sync::atomic::Ordering;
     use uuid::Uuid;
 
     fn test_run_id() -> RunId {
@@ -1297,6 +1305,39 @@ mod tests {
                 other => panic!("expected completed, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn background_terminal_sets_detached_wake_pending_without_signaled_latch() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let wake = std::sync::Arc::new(crate::detached_wake::DetachedWakeState::new());
+        registry.set_detached_wake(std::sync::Arc::clone(&wake));
+
+        let spec = background_spec("wake");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        assert!(
+            wake.pending.load(Ordering::Acquire),
+            "background terminal should arm detached wake pending state"
+        );
+        assert!(
+            !wake.signaled.load(Ordering::Acquire),
+            "ops lifecycle should not set the legacy signaled latch directly"
+        );
     }
 
     #[tokio::test]

@@ -118,6 +118,8 @@ pub struct MeerkatOpsSnapshot {
     pub operation_count: usize,
     pub active_count: usize,
     pub wait_request_id: Option<WaitRequestId>,
+    pub pending_wait_present: bool,
+    pub pending_wait_request_id: Option<WaitRequestId>,
     pub wait_operation_ids: Vec<OperationId>,
     pub operations: Vec<OperationLifecycleSnapshot>,
     pub detached_wake_pending: Option<bool>,

@@ -10,6 +10,7 @@ Current working direction:
 Likely artifacts to keep here:
 
 - machine-by-machine collapse matrix
+- cutover gate and semantic-freeze checklist
 - implementation progress log
 - Meerkat kernel shape
 - Meerkat owned-facts ledger

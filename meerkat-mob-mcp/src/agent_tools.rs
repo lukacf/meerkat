@@ -850,6 +850,9 @@ impl AgentMobToolSurface {
         Self::encode_result(call, json!({"mobs": mob_list}))
     }
     // ─── Profile CRUD dispatch ────────────────────────────────────────
+    // TODO: Profile mutation authority. Currently gated on mob capability + store
+    // availability. Per-profile authority checks are a follow-up concern for
+    // multi-tenant realm scenarios.
 
     async fn dispatch_mob_profile_create(
         &self,

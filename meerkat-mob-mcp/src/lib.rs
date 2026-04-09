@@ -153,9 +153,17 @@ impl MobMcpState {
             #[cfg(not(target_arch = "wasm32"))]
             if self.realm_profile_store.is_none() {
                 let db_path = mob_root.join("realm_profiles.db");
-                if let Ok(store) = meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
-                    self.realm_profile_store =
-                        Some(Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>);
+                match meerkat_mob::SqliteRealmProfileStore::open(&db_path) {
+                    Ok(store) => {
+                        self.realm_profile_store =
+                            Some(Arc::new(store) as Arc<dyn meerkat_mob::RealmProfileStore>);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to create realm profile store at {}: {e}",
+                            db_path.display()
+                        );
+                    }
                 }
             }
             mob_root

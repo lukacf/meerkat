@@ -1356,8 +1356,10 @@ impl SqliteRealmProfileStore {
         let conn = rusqlite::Connection::open(db_path).map_err(|e| {
             MobStoreError::Internal(format!("failed to open realm profile store: {e}"))
         })?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(se)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
+        )
+        .map_err(se)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS realm_profiles (
                 name TEXT PRIMARY KEY,
@@ -2004,5 +2006,74 @@ mod tests {
     async fn realm_profile_list_empty() {
         let (_dir, store) = sqlite_realm_profile_store();
         contract_tests::test_list_empty(&store).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // SqliteRealmProfileStore::open() standalone constructor tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sqlite_realm_profile_store_open_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("realm_profiles.db");
+        assert!(!nested.parent().unwrap().exists());
+        let _store = SqliteRealmProfileStore::open(&nested).unwrap();
+        assert!(nested.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn sqlite_realm_profile_store_open_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("realm_profiles.db");
+
+        // First open: create a profile.
+        {
+            let store = SqliteRealmProfileStore::open(&db_path).unwrap();
+            let profile = Profile {
+                model: "claude-sonnet-4-5".into(),
+                skills: Vec::new(),
+                tools: ToolConfig::default(),
+                peer_description: String::new(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            };
+            store.create("test-profile", &profile).await.unwrap();
+        }
+
+        // Second open: must see the profile from the first session.
+        {
+            let store = SqliteRealmProfileStore::open(&db_path).unwrap();
+            let got = store.get("test-profile").await.unwrap();
+            assert!(got.is_some(), "profile must survive reopen");
+            assert_eq!(got.unwrap().profile.model, "claude-sonnet-4-5");
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_realm_profile_store_open_contract_create_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("realm_profiles.db");
+        let store = SqliteRealmProfileStore::open(&db_path).unwrap();
+        contract_tests::test_create_and_get(&store).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_realm_profile_store_open_contract_get_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("realm_profiles.db");
+        let store = SqliteRealmProfileStore::open(&db_path).unwrap();
+        contract_tests::test_get_nonexistent(&store).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_realm_profile_store_open_contract_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("realm_profiles.db");
+        let store = SqliteRealmProfileStore::open(&db_path).unwrap();
+        contract_tests::test_list(&store).await;
     }
 }

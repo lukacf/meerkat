@@ -11,6 +11,9 @@ Likely artifacts to keep here:
 
 - machine-by-machine collapse matrix
 - cutover gate and semantic-freeze checklist
+- Meerkat cutover checklist
+- Meerkat M1 freeze note
+- Meerkat M2 freeze note
 - implementation progress log
 - Meerkat kernel shape
 - Meerkat owned-facts ledger

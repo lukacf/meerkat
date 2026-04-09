@@ -269,8 +269,22 @@ pub(crate) enum MeerkatMachineInvariantViolation {
         lifecycle: Option<meerkat_runtime::InputLifecycleState>,
         terminal_outcome_present: bool,
     },
+    DestroyedRuntimeStillHasQueuedWork {
+        queue: &'static str,
+        count: usize,
+    },
     DestroyedRuntimeStillHasCompletionWaiters {
         waiter_count: usize,
+    },
+    RetiredRuntimeStillHasCompletionWaiters {
+        waiter_count: usize,
+    },
+    AttachedRuntimeStillHasSteerQueuedWork {
+        count: usize,
+    },
+    StoppedRuntimeStillHasQueuedWork {
+        queue: &'static str,
+        count: usize,
     },
     StoppedRuntimeStillHasCompletionWaiters {
         waiter_count: usize,
@@ -402,9 +416,7 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         .map(|input| (input.input_id.clone(), input))
         .collect();
 
-    if control.current_run_id.is_some()
-        && !matches!(control.phase, RuntimeState::Running | RuntimeState::Retired)
-    {
+    if control.current_run_id.is_some() && control.phase != RuntimeState::Running {
         violations.push(
             MeerkatMachineInvariantViolation::CurrentRunInIllegalControlPhase {
                 phase: control.phase,
@@ -793,10 +805,54 @@ pub(crate) fn validate_meerkat_machine_snapshot(
         );
     }
 
+    if matches!(
+        control.phase,
+        RuntimeState::Destroyed | RuntimeState::Stopped
+    ) {
+        for (queue_name, queue) in [
+            ("queue", &inputs.queue),
+            ("steer_queue", &inputs.steer_queue),
+        ] {
+            if queue.is_empty() {
+                continue;
+            }
+
+            match control.phase {
+                RuntimeState::Destroyed => violations.push(
+                    MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasQueuedWork {
+                        queue: queue_name,
+                        count: queue.len(),
+                    },
+                ),
+                RuntimeState::Stopped => violations.push(
+                    MeerkatMachineInvariantViolation::StoppedRuntimeStillHasQueuedWork {
+                        queue: queue_name,
+                        count: queue.len(),
+                    },
+                ),
+                _ => {}
+            }
+        }
+    }
+
     if control.phase == RuntimeState::Destroyed && completion_waiters.waiter_count > 0 {
         violations.push(
             MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasCompletionWaiters {
                 waiter_count: completion_waiters.waiter_count,
+            },
+        );
+    }
+    if control.phase == RuntimeState::Retired && completion_waiters.waiter_count > 0 {
+        violations.push(
+            MeerkatMachineInvariantViolation::RetiredRuntimeStillHasCompletionWaiters {
+                waiter_count: completion_waiters.waiter_count,
+            },
+        );
+    }
+    if control.phase == RuntimeState::Attached && !inputs.steer_queue.is_empty() {
+        violations.push(
+            MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork {
+                count: inputs.steer_queue.len(),
             },
         );
     }
@@ -3540,6 +3596,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_destroyed_queued_work() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.control.phase = RuntimeState::Destroyed;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasQueuedWork {
+                queue: "queue",
+                count: 1,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn validate_meerkat_machine_snapshot_reports_stopped_completion_waiters()
     -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
@@ -3597,6 +3711,235 @@ mod tests {
             MeerkatMachineInvariantViolation::StoppedRuntimeStillHasCompletionWaiters {
                 waiter_count: 1,
             }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_stopped_queued_work() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.control.phase = RuntimeState::Stopped;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::StoppedRuntimeStillHasQueuedWork {
+                queue: "queue",
+                count: 1,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_retired_completion_waiters()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+
+        snapshot.spine.control.phase = RuntimeState::Retired;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id.clone()];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.completion_waiters.input_count = 1;
+        snapshot.spine.completion_waiters.waiter_count = 1;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
+            input_id,
+            waiter_count: 1,
+        }];
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::RetiredRuntimeStillHasCompletionWaiters {
+                waiter_count: 1,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_retired_active_run() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let run_id = RunId::new();
+        snapshot.spine.control.phase = RuntimeState::Retired;
+        snapshot.spine.control.current_run_id = Some(run_id.clone());
+        snapshot.spine.inputs.current_run_id = Some(run_id);
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue.clear();
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.wake_requested = false;
+        snapshot.spine.inputs.process_requested = false;
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::CurrentRunInIllegalControlPhase {
+                phase: RuntimeState::Retired,
+            }
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_meerkat_machine_snapshot_reports_attached_steer_queue() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let queued_input_id = InputId::new();
+        let mut queued_input = invalid_input_snapshot(
+            queued_input_id.clone(),
+            Some(InputLifecycleState::Queued),
+            None,
+        );
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+
+        snapshot.spine.control.phase = RuntimeState::Attached;
+        snapshot.spine.control.current_run_id = None;
+        snapshot.spine.inputs.current_run_id = None;
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.inputs.queue.clear();
+        snapshot.spine.inputs.steer_queue = vec![queued_input_id];
+        snapshot.spine.inputs.wake_requested = true;
+        snapshot.spine.inputs.process_requested = true;
+        snapshot.spine.completion_waiters.input_count = 0;
+        snapshot.spine.completion_waiters.waiter_count = 0;
+        snapshot.spine.completion_waiters.waiting_inputs.clear();
+
+        let violations = validate_meerkat_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork { count: 1 }
         )));
 
         Ok(())

@@ -1,10 +1,12 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Detached-wake contract tests for background shell job notification.
 //!
-//! These tests verify the waker task that injects Input::Continuation into
-//! a quiescent session when background operations reach terminal state.
+//! These tests verify the current runtime-loop-owned detached-wake paths that
+//! inject `Input::Continuation` into a quiescent session when background
+//! operations reach terminal state.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -98,6 +100,93 @@ impl CoreExecutor for ResultExecutor {
 // ─── CHOKE-004-IT: Idle runtime wakes after background op terminal ───
 
 #[tokio::test]
+async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_trigger() {
+    struct CountingExecutor {
+        apply_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_count.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: Some(RunResult {
+                    text: "done".into(),
+                    session_id: SessionId::new(),
+                    usage: Usage::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                }),
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let apply_count = Arc::new(AtomicUsize::new(0));
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingExecutor {
+                apply_count: Arc::clone(&apply_count),
+            }),
+        )
+        .await;
+
+    let registry = adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .expect("session registry should exist");
+
+    let spec = background_spec("idle-feed");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id, "done"))
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if apply_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("feed-backed idle wake should inject a continuation without manual trigger");
+
+    assert_eq!(
+        apply_count.load(Ordering::SeqCst),
+        1,
+        "background completion should produce exactly one continuation apply on the idle feed path"
+    );
+}
+
+#[tokio::test]
 async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
     let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
     let session_id = SessionId::new();
@@ -107,7 +196,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
         .await;
 
-    // Waker task is spawned automatically during register_session_with_executor.
+    // The runtime loop owns detached wake for registered sessions.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -122,23 +211,14 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         .complete_operation(&op_id, op_result(&op_id, "done"))
         .unwrap();
 
-    // The completion sets pending=true. The runtime loop signals the Notify
-    // after processing (since queue is empty = quiescent). The waker task
-    // then injects a ContinuationInput through accept_input_with_completion.
+    // The completion becomes visible through the completion feed. Once the
+    // runtime loop reaches a quiescent point, it injects a ContinuationInput
+    // through the canonical ingress seam.
     // Give the async machinery time to propagate.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Verify: the waker task consumed the pending flag by injecting a continuation.
-    // We can't directly observe the continuation injection, but we CAN verify
-    // that pending was cleared (the waker task clears it after admission).
-    //
-    // The waker task needs a wake signal from the runtime loop. The runtime loop
-    // signals after process_queue returns. Since there's no queued input,
-    // process_queue won't run. We need to trigger a wake signal.
-    //
-    // Actually: the runtime loop only calls maybe_signal_detached_wake after
-    // process_queue, which only runs on wake_rx signals. So we need to trigger
-    // a wake. Let's send a prompt to trigger the loop, which will then signal.
+    // Trigger the runtime loop so it reaches the post-drain wake check and can
+    // inject the continuation on the feed-backed path.
     use meerkat_runtime::{Input, InputDurability, InputHeader, PromptInput};
     let trigger_input = Input::Prompt(PromptInput {
         header: InputHeader {
@@ -166,27 +246,15 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
     }
 
-    // After the turn completes and queue drains, maybe_signal_detached_wake fires.
-    // The waker task picks it up and injects the continuation.
-    // Give the waker task time to process.
+    // After the turn completes and queue drains, the runtime loop injects the
+    // continuation. Give that continuation time to process.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Check that the continuation was admitted by verifying the runtime accepted
-    // and processed a second input (the continuation). The continuation's
-    // accept_input_with_completion should have succeeded, clearing pending.
-    // If the waker task consumed the pending flag, it was admitted.
-    //
-    // Note: the waker task also clears the pending flag after injection.
-    // Check via the DetachedWakeState that's stored on the entry.
-    // Since we can't access the entry directly, verify via the ops_lifecycle
-    // detached_wake_pending flag indirectly — after the waker fires, pending
-    // should be cleared (false).
-    //
-    // We need to give the continuation turn time to complete too.
+    // Give the continuation turn time to complete too.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The test passes if we got here without hanging or panicking.
-    // The waker task successfully injected the continuation.
+    // The runtime loop successfully injected the continuation.
 }
 
 // ─── CHOKE-004-IT-B: Five completions produce one coalesced wake ───
@@ -200,7 +268,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
         .await;
 
-    // Waker task is spawned automatically during register_session_with_executor.
+    // The runtime loop owns detached wake for registered sessions.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -251,7 +319,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         let _ = tokio::time::timeout(Duration::from_secs(2), handle.wait()).await;
     }
 
-    // Give the waker task time to fire the single coalesced continuation.
+    // Give the runtime loop time to fire the single coalesced continuation.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 5 completions -> pending=true (set once, stays true) -> 1 notify -> 1 continuation.

@@ -5171,6 +5171,1915 @@ Next likely step:
 - continue extending live durability proofs only where the joined snapshot has
   already demonstrated stable owner-backed truth
 
+## Slice 159 - MeerkatMachine proves plain reset clears the steer lane but preserves wait_all
+
+Goal:
+
+- extend the plain registered steer lane into `reset()`
+- verify whether reset follows the plain destroy steer behavior or the plain
+  retire backtrack on current owner code
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_but_preserves_wait_all`
+  - the new test proves that plain `reset()`:
+    - starts from a pending steered input in `inputs.steer_queue`
+    - clears the steered completion waiter immediately
+    - clears the steer queue immediately
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId`
+      agreement until the background operation settles
+
+Why this slice matters:
+
+- it closes the remaining ambiguity between plain `reset()` and the already
+  divergent plain `retire()` / plain `destroy()` steer paths
+- it strengthens the lifecycle map with another direct owner-backed steer-lane
+  teardown case instead of assuming all teardown families behave alike
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_but_preserves_wait_all`
+
+Result:
+
+- `MeerkatMachine` now has direct evidence that plain reset clears the steer
+  lane immediately while still preserving the separate ops wait carrier
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was to keep this on the plain registered path instead of
+  speculating about the attached steer-lane reset family before the owner path
+  proves it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep selecting distinct steer-lane lifecycle seams where current owner code
+  exposes a real semantic answer rather than extrapolating from nearby
+  teardown families
+
+## Slice 160 - MobMachine adds a live branch-fallback durability proof
+
+Goal:
+
+- extend active multi-step tracked-run coverage beyond the plain branch and
+  shared-path shapes, but only if the live aggregate sustains the same durable
+  bar
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_branch_fallback_shape`
+  - the new live proof shows an active `branch_fallback` run preserves:
+    - durable `flow_id == branch_fallback` and `Running` status
+    - schema version `4` and non-terminal shape
+    - zero frame/loop structure
+    - the full ordered-step and dependency maps for the fallback branch family
+    - `DependencyMode::Any` on the `join` step
+    - branch labels for both repair candidates
+    - default collection policy kinds and zero quorum thresholds
+    - zeroed retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it adds a distinct multi-step conditional family where one branch is allowed
+  to fail later, without forcing failure timing into the machine proof surface
+- it keeps `MobMachine` on the durable tracked-run aggregate instead of
+  elevating runtime failure mechanics into new machine-owned fields
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_fallback_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that the active branch-fallback
+  family collapses onto the same durable tracked-run surface used for the
+  other active multi-step families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key restraint was to stop at the active durable shape and avoid
+  promoting failure-counter or terminal-visibility claims that still depend on
+  timing
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-authority switch signal
+
+Next likely step:
+
+- keep extending active multi-step coverage only where the live tracked-run
+  aggregate sustains the same durable bar without leaning on cleanup or
+  failure timing
+
+## Slice 161 - MeerkatMachine proves plain stop clears the steer lane but preserves wait_all
+
+Goal:
+
+- extend the plain registered steer lane into `stop_runtime_executor()`
+- verify whether stop follows the plain reset/destroy steer behavior or the
+  plain retire backtrack on current owner code
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_waiter_and_queue_but_preserves_wait_all`
+  - the new test proves that plain `stop_runtime_executor()`:
+    - starts from a pending steered input in `inputs.steer_queue`
+    - clears the steered completion waiter immediately
+    - clears the steer queue immediately
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId`
+      agreement until the background operation settles
+
+Why this slice matters:
+
+- it closes the remaining ambiguity between plain `stop_runtime_executor()`
+  and the already divergent plain `retire()` steer path
+- it strengthens the lifecycle map with another direct owner-backed
+  steer-lane teardown case rather than assuming all teardown families behave
+  alike
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_waiter_and_queue_but_preserves_wait_all`
+
+Result:
+
+- `MeerkatMachine` now has direct evidence that plain stop clears the steer
+  lane immediately while still preserving the separate ops wait carrier
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was to keep this on the plain registered path instead of
+  speculating about the attached steer-lane stop family before the owner path
+  proves it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep selecting distinct steer-lane lifecycle seams where current owner code
+  exposes a real semantic answer rather than extrapolating from nearby
+  teardown families
+
+## Slice 162 - MobMachine backtracks active root-frame status visibility
+
+Goal:
+
+- test whether active root-frame runs now surface non-empty materialized
+  `step_statuses` strongly enough to promote that fact into the durable
+  tracked-run proof bar
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - tried strengthening
+    `test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+    to require non-empty active `step_statuses`
+  - the live runtime rejected that claim, so the assertion was removed and the
+    test returned to the smaller stable fact:
+    - if `step_statuses` are present, their keys stay inside the ordered-step
+      universe
+
+Why this slice matters:
+
+- it gives us a direct answer about another tempting active-run surface:
+  root-frame status visibility is still too timing-shaped to promote
+- that is exactly the kind of claim we want to reject now instead of carrying
+  a cleaner parallel architecture into cutover work
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+
+Result:
+
+- `MobMachine` keeps the smaller bounded-status identity fact for active
+  root-frame runs, and does not yet promote non-empty active status
+  visibility into machine-owned truth
+
+Backtracks encountered:
+
+- yes: the stronger hypothesis failed immediately on the live runtime
+- the fix was to back out the claim rather than weaken the runtime-facing
+  family into a timing-dependent story
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is useful convergence because it removes a false promotion before any
+  write-side switch
+
+Next likely step:
+
+- keep extending active family coverage only where the live tracked-run
+  aggregate sustains the stronger fact without leaning on materialization
+  timing
+
+## Slice 155 - MeerkatMachine backtracks invalid attached steer no-wake assumptions
+
+Goal:
+
+- correct the observational model after discovering that attached steered
+  inputs are not valid queue-only no-wake admissions on the current runtime
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immediate_processing`
+  - removed the older attached-loop steered destroy proof that relied on
+    `accept_input_without_wake(...)` for a steered prompt
+  - the new test proves that attached steered admission:
+    - requests immediate processing through the live attached executor path
+    - routes one control command through the executor seam
+    - moves the runtime into `Running`
+    - binds control and ingress to the same active run
+    - does not remain in `inputs.steer_queue`
+    - completes normally through the attached loop and returns to `Attached`
+
+Why this slice matters:
+
+- it fixes an invalid observational assumption before cutover work hardens
+  around it
+- the old tests were staging an impossible state by treating a steered prompt
+  as queue-only work on an attached runtime
+- the corrected proof now reflects the current owner boundary: attached
+  steered inputs become active immediately rather than staying in a dormant
+  steer queue
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immediate_processing`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached steered
+  admission is an immediate-processing seam, not a valid queue-only no-wake
+  seam
+
+Backtracks encountered:
+
+- the focused run showed the new attached steered retire proof was invalid for
+  the same reason as an older attached steered destroy proof: both depended on
+  `accept_input_without_wake(...)` even though steered admission requests
+  immediate processing
+- the first replacement proof still assumed the cleaner story that steered
+  admission would not touch the executor control seam; the live runtime showed
+  one control command, so the proof was tightened to match current behavior
+- the correct response was to remove the impossible story rather than weaken
+  the helper or fake the state
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is a healthy convergence backtrack, not a write-authority switch signal
+
+Next likely step:
+
+- keep selecting lifecycle seams only where the live admission path can be
+  observed without inventing impossible preconditions
+
+## Slice 156 - MobMachine adds a live two-step tracked-run shape proof
+
+Goal:
+
+- extend `MobMachine` beyond single-step and dispatch-family shapes by proving
+  that a linear two-step flow also survives as durable tracked-run truth in the
+  joined snapshot
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added `test_capture_mob_machine_snapshot_tracks_live_two_step_shape`
+  - the new test proves that an active `two_step` run preserves:
+    - durable `flow_id == two_step`
+    - `Running` status and non-terminal shape
+    - schema version `4`
+    - no persisted frame or loop structure
+    - ordered steps `first -> second`
+    - the declared dependency map where `second` depends on `first`
+    - durable dependency modes, condition flags, branch map, collection policy
+      kinds, and quorum thresholds for both steps
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it moves `MobMachine` beyond the single-step/dispatch family and shows the
+  tracked-run aggregate can preserve a basic multi-step dependency ledger
+  without timing-sensitive cleanup assumptions
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_two_step_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that a simple linear two-step flow
+  survives as durable tracked-run kernel truth in the joined snapshot
+
+Backtracks encountered:
+
+- none in the final slice
+- the key restraint was sticking to durable maps and bounded status identity
+  instead of assuming richer active-step materialization than the live runtime
+  guarantees
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this broadens tracked-run coverage, but it is still not a write-side switch
+  signal
+
+Next likely step:
+
+- keep moving one small step outward from the dispatch matrix into other durable
+  tracked-run families, only when the live aggregate sustains them cleanly
+
+## Slice 157 - MeerkatMachine promotes the attached-steer backtrack into a validator rule
+
+Goal:
+
+- turn the attached steer admission correction into an executable
+  `MeerkatMachine` rule so the joined machine rejects the impossible idle
+  `Attached + steer_queue` state directly
+
+What landed:
+
+- `meerkat/src/meerkat_machine.rs`
+  - added `AttachedRuntimeStillHasSteerQueuedWork`
+  - `validate_meerkat_machine_snapshot(...)` now rejects snapshots where
+    `control.phase == Attached` while `inputs.steer_queue` is non-empty
+  - added the focused negative proof
+    `validate_meerkat_machine_snapshot_reports_attached_steer_queue`
+
+Why this slice matters:
+
+- the previous Meerkat backtrack showed that attached steered admission goes
+  active immediately and routes through the executor seam instead of remaining
+  as dormant steer-queued work
+- promoting that into the validator keeps the executable machine honest and
+  prevents the old impossible state from quietly re-entering later slices
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_attached_steer_queue`
+
+Result:
+
+- `MeerkatMachine` now rejects the impossible attached idle steer-queue state
+  as an explicit invariant violation
+
+Backtracks encountered:
+
+- none in the final slice
+- this slice is the codified follow-through from the earlier attached-steer
+  backtrack rather than a new semantic dispute
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this strengthens the joined machine model but does not yet imply any
+  write-side switch
+
+Next likely step:
+
+- continue promoting only those Meerkat invariants that are now stable across
+  multiple owner-backed observations
+
+## Slice 158 - MobMachine adds a live shared-path conditional two-step proof
+
+Goal:
+
+- extend `MobMachine` from linear two-step tracked-run truth into a conditional
+  two-step flow while staying on durable stored maps rather than runtime
+  timing folklore
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added `test_capture_mob_machine_snapshot_tracks_live_shared_path_shape`
+  - the new test proves that an active `shared_paths` run preserves:
+    - durable `flow_id == shared_paths`
+    - `Running` status and non-terminal shape
+    - schema version `4`
+    - no persisted frame or loop structure
+    - ordered steps `start -> follow`
+    - dependency map where `follow` depends on `start`
+    - dependency modes, branch map, and zero quorum thresholds for both steps
+    - collection policy kinds `Any` for `start` and `All` for `follow`
+    - condition flags showing `follow` is conditional while `start` is not
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it broadens tracked-run coverage beyond the dispatch-family matrix and the
+  plain linear `two_step` flow
+- it shows the durable aggregate can preserve a conditional follower shape
+  without us depending on when the condition actually becomes true at runtime
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_shared_path_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that a conditional two-step flow
+  survives as durable tracked-run kernel truth in the joined snapshot
+
+Backtracks encountered:
+
+- none in the final slice
+- the key restraint was proving only durable tracked-run maps and bounded
+  status identity, not richer active-step semantics
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this broadens the tracked-run surface, but it is still not a write-side
+  switch signal
+
+Next likely step:
+
+- keep moving outward from simple tracked-run families only where the live
+  aggregate clearly sustains the next shape
+
+## Slice 143 - MeerkatMachine proves reset abandons queued work on both plain and attached paths
+
+Goal:
+
+- tighten the current reset lifecycle map by checking whether queued input
+  teardown is really owned behavior on both the plain and attached-loop paths
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+    so the plain reset path now proves:
+    - `inputs.queue` is empty immediately after reset
+    - `inputs.steer_queue` is empty immediately after reset
+    - both queues remain empty after the preserved `wait_all` settles
+  - strengthened
+    `meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the attached reset path now proves:
+    - `inputs.queue` is empty immediately after reset
+    - `inputs.steer_queue` is empty immediately after reset
+    - both queues remain empty after the preserved `wait_all` settles
+
+Why this slice matters:
+
+- it upgrades reset from "completion waiters clear" to the stronger current
+  owner truth we actually need for cutover work: reset abandons queued input on
+  both plain and attached paths
+- it is exactly the sort of path-specific lifecycle fact that is easy to
+  overgeneralize later if we do not pin it down now
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that current reset
+  semantics clear both ordinary and steered queued work on plain and attached
+  paths, while still preserving ops-owned `wait_all` until the operation
+  settles
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key restraint was to test this only on reset, where the live runtime
+  already strongly implied queue abandonment, rather than promoting a broader
+  phase rule
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another clean convergence slice, but not a write-authority switch
+  signal
+
+Next likely step:
+
+- keep extending only lifecycle facts that the live owner path clearly sustains
+  without broadening them into phase-wide folklore
+
+## Slice 144 - MobMachine adds a live fan-out dispatch durability proof
+
+Goal:
+
+- cover the remaining distinct dispatch family at the same durable single-step
+  tracked-run bar already proven for one-to-one and fan-in
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_out_dispatch_shape`
+  - the new live proof shows an active fan-out dispatch run preserves:
+    - durable `flow_id == dispatch`
+    - `status == Running`
+    - schema version `4`
+    - non-terminal shape
+    - zero frame/loop structure
+    - the full single-step kernel maps for `dispatch`
+    - `CollectionPolicyKind::Any` with zero quorum threshold
+    - zeroed failure counters, retry budget, and escalation threshold
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it completes the dispatch-family coverage across one-to-one, fan-in, and
+  fan-out without promoting `dispatch_mode` itself into a tracked-run fact
+- it keeps `MobMachine` on the durable aggregate surface instead of reaching
+  into timing-sensitive runtime behavior
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_out_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has live evidence that active fan-out dispatch runs collapse
+  onto the same durable single-step tracked-run shape already trusted in the
+  other dispatch families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to keep the proof on persisted tracked-run fields and not
+  invent a new `dispatch_mode` machine fact
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens family coverage, but it is still not a write-authority
+  switch signal
+
+Next likely step:
+
+- continue selecting only distinct active families whose durable tracked-run
+  aggregates already sustain the same proof bar
+
+## Slice 147 - MeerkatMachine proves plain recover preserves steered input and wait_all
+
+Goal:
+
+- cover the steered ingress lane explicitly on the plain registered recover
+  path instead of continuing to reuse only ordinary queued prompts
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait_all`
+  - the new test proves that plain `recover()`:
+    - preserves `inputs.steer_queue == [input_id]`
+    - keeps `inputs.queue` empty
+    - preserves `wake_requested` and `process_requested`
+    - preserves the input-owned completion waiter
+    - preserves the ops-owned `wait_all` carrier and request-id agreement
+    - still leaves the steered input pending after `wait_all` settles
+
+Why this slice matters:
+
+- it upgrades the lifecycle map from "queued work survives recover" to the more
+  precise fact that the dedicated steer lane also survives recover with its own
+  wake/process semantics intact
+- it broadens the observational model without inventing any new owner
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait_all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_tracks_steered_prompt_input`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that plain recover
+  preserves steered queued work and its wake/process semantics while also
+  preserving active `wait_all`
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key restraint was to keep this on the plain recover path instead of
+  assuming the whole lifecycle matrix behaves identically for steer inputs
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this strengthens a distinct ingress lane, but it is not a write-authority
+  switch signal
+
+Next likely step:
+
+- continue selecting genuinely distinct owner lanes, especially where steer,
+  lifecycle, and queued-work semantics intersect
+
+## Slice 148 - MobMachine adds a live fan-in all-policy dispatch proof
+
+Goal:
+
+- extend dispatch-family coverage to the fan-in + `CollectionPolicy::All`
+  combination on the same durable single-step tracked-run surface already used
+  for other dispatch families
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_in_all_dispatch_shape`
+  - the new live proof shows an active fan-in all-policy dispatch run
+    preserves:
+    - durable `flow_id == dispatch`
+    - `status == Running`
+    - schema version `4`
+    - non-terminal shape
+    - zero frame/loop structure
+    - the full single-step kernel maps for `dispatch`
+    - `CollectionPolicyKind::All` with zero quorum threshold
+    - zeroed failure counters, retry budget, and escalation threshold
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it expands the active dispatch-family matrix with another distinct routing +
+  aggregation combination while staying entirely on persisted tracked-run state
+- it gives `MobMachine` better coverage without promoting dispatch mechanics
+  themselves into machine-owned truth
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_in_all_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has live evidence that active fan-in all-policy dispatch
+  runs collapse onto the same durable single-step tracked-run shape already
+  trusted elsewhere
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to keep the proof on durable tracked-run fields rather than
+  inventing a new `dispatch_mode` machine fact
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens family coverage, but it is still not a write-authority
+  switch signal
+
+Next likely step:
+
+- continue selecting only distinct active families whose durable tracked-run
+  aggregates already sustain the same proof bar
+
+## Slice 145 - MeerkatMachine proves stop abandons queued work on both plain and attached paths
+
+Goal:
+
+- tighten the current stop lifecycle map by checking whether queued input
+  teardown is really owner-backed behavior on both the plain and attached-loop
+  paths
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+    so the plain stop path now proves:
+    - `inputs.queue` is empty immediately after stop
+    - `inputs.steer_queue` is empty immediately after stop
+    - both queues remain empty after the preserved `wait_all` settles
+  - strengthened
+    `meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the attached stop path now proves:
+    - `inputs.queue` is empty immediately after stop
+    - `inputs.steer_queue` is empty immediately after stop
+    - both queues remain empty after the preserved `wait_all` settles
+
+Why this slice matters:
+
+- it upgrades stop from "completion waiters clear" to the stronger current
+  owner truth we need for cutover work: stop abandons queued input on both
+  plain and attached paths
+- it complements the earlier reset slice and gives us a cleaner teardown matrix
+  for the non-terminal control path that still preserves ops-owned `wait_all`
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that current stop
+  semantics clear both ordinary and steered queued work on plain and attached
+  paths, while still preserving ops-owned `wait_all` until the operation
+  settles
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key restraint was to keep this on the stop family rather than promoting a
+  broader phase-wide queued-work rule
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another clean convergence slice, but not a write-authority switch
+  signal
+
+Next likely step:
+
+- keep extending lifecycle facts only where the live owner path strongly
+  sustains the narrower claim before any broader phase generalization
+
+## Slice 146 - MobMachine adds a live fan-out all-policy dispatch proof
+
+Goal:
+
+- cover the next distinct dispatch family by combining fan-out routing with the
+  non-default `CollectionPolicy::All` on the same durable single-step tracked-run
+  surface
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_out_all_dispatch_shape`
+  - the new live proof shows an active fan-out all-policy dispatch run
+    preserves:
+    - durable `flow_id == dispatch`
+    - `status == Running`
+    - schema version `4`
+    - non-terminal shape
+    - zero frame/loop structure
+    - the full single-step kernel maps for `dispatch`
+    - `CollectionPolicyKind::All` with zero quorum threshold
+    - zeroed failure counters, retry budget, and escalation threshold
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it extends the dispatch-family coverage beyond the default `Any` aggregation
+  path without inventing a new tracked-run fact for `dispatch_mode`
+- it keeps `MobMachine` on the durable aggregate surface instead of reaching
+  into timing-sensitive dispatch/runtime behavior
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_out_all_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has live evidence that active fan-out all-policy dispatch
+  runs still collapse onto the same durable single-step tracked-run shape
+  already trusted in the other dispatch families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to keep the proof on persisted tracked-run fields and not
+  promote dispatch mechanics themselves into machine truth
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens family coverage, but it is still not a write-authority
+  switch signal
+
+Next likely step:
+
+- continue selecting only distinct active families whose durable tracked-run
+  aggregates already sustain the same proof bar
+
+## Slice 139 - MeerkatMachine narrows retire queue cleanup to the attached-loop path
+
+Goal:
+
+- probe whether settled `Retired` snapshots can finally support a broad
+  no-queued-work rule, and keep only the smaller truth the live owner path
+  actually sustains
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the attached-loop `Retired` snapshots now also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+
+Why this slice matters:
+
+- it keeps a useful Meerkat fact without lying about the broader phase: once an
+  attached loop has actually drained preserved work and returned to `Retired`,
+  the queued-work residue is gone
+- it also reconfirms that the plain registered retire path is still not ready
+  for a global `Retired => no queued work` validator rule
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` gained a narrower attached-loop retire queue-cleanup proof
+- no broad `RetiredRuntimeStillHasQueuedWork` validator rule was promoted
+
+Backtracks encountered:
+
+- the plain retire split lane failed immediately when asked to prove settled
+  queue emptiness, so those assertions were backed out
+- that keeps the machine aligned to current owner truth instead of a nicer
+  phase story
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is convergence through narrowing, not a write-side switch
+
+Next likely step:
+
+- keep probing Meerkat settled-phase cleanup only where focused lanes can tell
+  us whether the fact is truly global or still path-dependent
+
+## Slice 140 - MobMachine adds a live one-to-one dispatch durability proof
+
+Goal:
+
+- extend active tracked-run coverage to a dispatch-mode flow family without
+  inventing `dispatch_mode` as a durable MobMachine field
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_one_to_one_dispatch_shape`
+    to prove the active one-to-one dispatch run preserves:
+    - `flow_id == dispatch`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+    - durable single-step kernel maps for the lone `dispatch` step
+    - `CollectionPolicyKind::Any`
+    - zeroed failure counters, retry budget, and escalation threshold
+    - non-empty, kernel-bounded materialized `step_status` identity
+
+Why this slice matters:
+
+- it broadens active-run family coverage into a flow whose orchestration
+  behavior differs, while still staying on the durable tracked-run fields the
+  aggregate already owns today
+- it explicitly avoids promoting `dispatch_mode` itself, because that is still
+  config truth rather than persisted kernel truth
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_one_to_one_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has live active-run durability coverage for the one-to-one
+  dispatch family at the same structural bar as the other step-only active
+  paths
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was choosing family coverage rather than a new tracked-run
+  field the aggregate does not actually persist
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens durable family coverage without moving write authority
+
+Next likely step:
+
+- keep adding active flow families only when the joined tracked-run snapshot
+  clearly sustains the same durable structure without timing folklore
+
+## Slice 141 - MeerkatMachine proves attached recover/recycle replay drains queued work
+
+Goal:
+
+- strengthen the attached-loop `recover()` / `recycle()` lifecycle map with one
+- more path-specific truth that does not over-promote a global phase rule
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the post-replay and settled attached snapshots now also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the post-replay and settled attached snapshots now also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+
+Why this slice matters:
+
+- it captures a real attached-loop fact: once replay has actually finished and
+  the runtime returns to `Attached`, preserved queued work has been fully
+  drained
+- it stays intentionally path-specific after the plain retire probe showed that
+  broader phase-level queue cleanup rules can still be false
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has stronger attached-path evidence that replay-driven
+  lifecycle handoffs drain queued work before the runtime settles back into
+  `Attached`
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was keeping this as attached-path truth instead of trying to
+  generalize it into a new global validator rule
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is stronger lifecycle convergence, not a write-side switch
+
+Next likely step:
+
+- continue extending attached/plain lifecycle maps only where the focused owner
+  lanes clearly sustain the additional fact
+
+## Slice 142 - MobMachine adds a live fan-in dispatch durability proof
+
+Goal:
+
+- broaden active tracked-run family coverage to the `DispatchMode::FanIn`
+  orchestration path without inventing `dispatch_mode` as a durable machine
+  field
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_in_dispatch_shape`
+    to prove the active fan-in dispatch run preserves:
+    - `flow_id == dispatch`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+    - durable single-step kernel maps for the lone `dispatch` step
+    - `CollectionPolicyKind::Any`
+    - zeroed failure counters, retry budget, and escalation threshold
+    - non-empty, kernel-bounded materialized `step_status` identity
+
+Why this slice matters:
+
+- it adds a second dispatch-mode family to the active durability set, so we are
+  no longer leaning on only the one-to-one dispatch path
+- it deliberately avoids turning `dispatch_mode` itself into tracked-run truth,
+  since that still lives in config rather than the durable run aggregate
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_in_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has live active-run durability coverage for both one-to-one
+  and fan-in dispatch families at the same single-step structural bar
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was family coverage rather than a new tracked-run field the
+  durable aggregate does not currently own
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens tracked-run family coverage without moving write authority
+
+Next likely step:
+
+- keep adding flow families only when the joined tracked-run snapshot clearly
+  sustains the same durable structure without timing folklore
+
+## Slice 133 - MeerkatMachine backs settled recover teardown rules on plain and attached paths
+
+Goal:
+
+- extend the settled current-run teardown rule into the recover family without
+  flattening the replay or queued-input semantics that recover intentionally
+  preserves
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` attached snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+
+Why this slice matters:
+
+- it aligns recover with the settled teardown rule already established for
+  retire, stop, destroy, and the corresponding attached-loop paths
+- it keeps the current implementation truth intact: recover may still preserve
+  queued work or ops-owned wait carriers, but once the handoff has settled it
+  must not continue to claim an active current run
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has direct plain and attached recover coverage for the
+  settled active-run teardown rule
+
+Backtracks encountered:
+
+- none in code; this slice confirmed the existing owner boundary rather than
+  moving it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is stronger lifecycle convergence, not a write-side switch
+
+Next likely step:
+
+- keep extending settled teardown rules only into lifecycle families where the
+  owner-backed semantics are already stable enough to prove directly
+
+## Slice 134 - MobMachine lifts retry-limited active runs to the durable single-step shape bar
+
+Goal:
+
+- raise the active retry-limited path to the same durable single-step tracked
+  run shape already proven for stable collection-policy and root-frame paths
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_retry_limit_shape`
+    so active retry-limited runs now also prove:
+    - `flow_id == demo`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+    - ordered step / dependency / dependency mode / condition / branch /
+      collection-policy / quorum maps for the lone `start` step
+
+Why this slice matters:
+
+- it promotes the retry-limited path only after the live tracked-run aggregate
+  showed it follows the same durable single-step pattern as the already-stable
+  step-only paths
+- it still avoids timing-sensitive retry behavior or stronger step-status
+  materialization claims
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_retry_limit_shape`
+
+Result:
+
+- `MobMachine` now has the retry-limited active path at the same structural
+  single-step durability bar as the other stable step-only flow families
+
+Backtracks encountered:
+
+- none in the final slice; this was deliberately scoped to facts the current
+  durable aggregate already owns
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens durable tracked-run shape without moving write authority
+
+Next likely step:
+
+- continue raising active flow families to the same structural bar only when
+  the live aggregate clearly sustains them
+
+## Slice 137 - MeerkatMachine backs settled reset teardown rules on plain and attached paths
+
+Goal:
+
+- extend the settled current-run teardown rule into the reset family without
+  flattening the split lifetime between input waiters and ops-owned `wait_all`
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+  - strengthened
+    `meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` attached snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+
+Why this slice matters:
+
+- it brings reset into the same settled teardown rule already proven for
+  retire, stop, destroy, recover, and recycle, across both plain and
+  attached-loop paths
+- it keeps the current implementation truth intact: reset may preserve the
+  ops-owned wait carrier even after input waiters are cleared, but once the
+  handoff has settled it must not continue to claim an active current run
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has direct plain and attached reset coverage for the
+  settled active-run teardown rule
+
+Backtracks encountered:
+
+- none in code; this slice confirmed the existing owner boundary rather than
+  moving it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is stronger lifecycle convergence, not a write-side switch
+
+Next likely step:
+
+- keep extending settled teardown rules only where the owner-backed lifecycle
+  semantics are already stable enough to prove directly
+
+## Slice 138 - MobMachine adds a baseline active single-step durability proof
+
+Goal:
+
+- prove the plain single-step `demo` flow on the same durable tracked-run
+  structural bar already used by retry-limited, supervisor, and collection
+  variants
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_single_step_shape`
+    to prove active single-step runs preserve:
+    - `flow_id == demo`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+    - ordered step / dependency / dependency mode / condition / branch /
+      collection-policy / quorum maps for the lone `start` step
+    - zeroed failure counters, retry budget, and escalation threshold
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it gives `MobMachine` a plain baseline active-run proof, not just decorated
+  variants like retry-limited or supervisor-threshold flows
+- it still avoids timing-sensitive claims beyond the bounded step-status fact
+  already accepted on healthy active single-step paths
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_single_step_shape`
+
+Result:
+
+- `MobMachine` now has a baseline active single-step tracked-run durability
+  proof at the same structural bar as the already-stable single-step families
+
+Backtracks encountered:
+
+- none in the final slice; the new path sustained the same durable structure as
+  the other healthy single-step flow families
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens durable tracked-run shape without moving write authority
+
+Next likely step:
+
+- continue selecting active run families only when the live aggregate clearly
+  sustains the same durable structural bar
+
+## Slice 135 - MeerkatMachine backs settled recycle teardown rules on plain and attached paths
+
+Goal:
+
+- extend the settled current-run teardown rule into the recycle family without
+  flattening the preserved-work semantics that recycle intentionally keeps
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+  - strengthened
+    `meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so the settled post-`wait_all` attached snapshot now also proves:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+
+Why this slice matters:
+
+- it aligns recycle with the settled teardown rule already established for
+  retire, stop, destroy, recover, and the corresponding attached-loop paths
+- it keeps the current implementation truth intact: recycle may still preserve
+  queued work or ops-owned wait carriers, but once the handoff has settled it
+  must not continue to claim an active current run
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has direct plain and attached recycle coverage for the
+  settled active-run teardown rule
+
+Backtracks encountered:
+
+- none in code; this slice confirmed the existing owner boundary rather than
+  moving it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is stronger lifecycle convergence, not a write-side switch
+
+Next likely step:
+
+- keep extending settled teardown rules only into lifecycle families where the
+  owner-backed semantics are already stable enough to prove directly
+
+## Slice 136 - MobMachine lifts supervisor-threshold active runs to the durable single-step shape bar
+
+Goal:
+
+- raise the active supervisor-threshold path to the same durable single-step
+  tracked-run shape already proven for retry-limited and stable collection
+  paths
+
+What landed:
+
+- `/Users/luka/.codex/worktrees/c5c6/meerkat/meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_supervisor_threshold_shape`
+    so active supervisor-threshold runs now also prove:
+    - `flow_id == demo`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+    - ordered step / dependency / dependency mode / condition / branch /
+      collection-policy / quorum maps for the lone `start` step
+
+Why this slice matters:
+
+- it promotes the supervisor-threshold path only after confirming it follows
+  the same durable single-step pattern as the already-stable step-only paths
+- it still avoids timing-sensitive escalation behavior or stronger step-status
+  materialization claims
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_supervisor_threshold_shape`
+
+Result:
+
+- `MobMachine` now has the supervisor-threshold active path at the same
+  structural single-step durability bar as the retry-limited and
+  collection-policy families
+
+Backtracks encountered:
+
+- none in the final slice; this was deliberately scoped to facts the current
+  durable aggregate already owns
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this strengthens durable tracked-run shape without moving write authority
+
+Next likely step:
+
+- continue raising active flow families to the same structural bar only when
+  the live aggregate clearly sustains them
+
+## Slice 129 - MeerkatMachine rejects settled retired active-run bindings
+
+Goal:
+
+- tighten the executable Meerkat validator only where the lifecycle matrix has
+  already converged enough to support it: once a runtime is actually settled in
+  `Retired`, it should no longer advertise an active run binding
+
+What landed:
+
+- `meerkat/src/meerkat_machine.rs`
+  - tightened `CurrentRunInIllegalControlPhase` so `current_run_id` is now only
+    legal while `control.phase == Running`
+  - added focused negative proof:
+    - `validate_meerkat_machine_snapshot_reports_retired_active_run`
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened:
+    - `meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+    - `meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - both settled `Retired` snapshots must now prove:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+
+Why this slice matters:
+
+- earlier validator logic still allowed `Retired` to carry `current_run_id`
+  even after the retire lifecycle matrix had converged on a different story
+- this promotes a real settled-phase ownership fact without flattening the
+  temporary attached-loop drain behavior, which still legitimately re-enters
+  `Running` before returning to `Retired`
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_retired_active_run`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now rejects a stale settled-retire shape that still claimed
+  an active run binding after retire had fully settled
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the useful restraint was proving only the settled `Retired` state, not the
+  temporary attached-loop `Running` drain phase
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another converged validator rule, not a write-side switch
+
+Next likely step:
+
+- continue promoting settled-phase Meerkat invariants only where both the plain
+  and attached lifecycle paths now agree on the same owner truth
+
+## Slice 130 - MobMachine bounds active root-frame step-status identity without assuming materialization
+
+Goal:
+
+- strengthen the active root-frame tracked-run proof without reintroducing the
+  timing-sensitive assumption that frame-aware runs must already materialize a
+  non-empty `step_status` map
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+    so the active tracked root-frame run now also proves:
+    - any surfaced `step_statuses` keys stay inside the ordered-step universe
+
+Why this slice matters:
+
+- it keeps the root-frame path moving forward on a real bounded-status fact
+  while respecting the current live aggregate, which does not yet sustain
+  non-empty status materialization strongly enough to treat that as durable
+  machine truth
+- it matches the broader methodology here: keep the smaller owned fact, reject
+  the nicer imagined one
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+
+Result:
+
+- `MobMachine` now has a slightly stronger active root-frame proof without
+  overclaiming the current status-materialization surface
+
+Backtracks encountered:
+
+- the initial attempt required
+  `!tracked_run.step_statuses.is_empty()`
+- the live root-frame lane failed immediately, so that stronger claim was
+  removed and replaced with the smaller bounded-status assertion
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is convergence work, not a write-side switch
+
+Next likely step:
+
+- keep preferring active Mob facts that are clearly durable or validator-grade,
+  and keep backing off whenever a frame-aware path fails to sustain
+  materialized status coverage
+
+## Slice 131 - MeerkatMachine backs settled active-run teardown rules across stop and destroy
+
+Goal:
+
+- strengthen the newly converged Meerkat rule that active run bindings only
+  exist while `Running` by proving it across the other settled teardown paths,
+  not just retire
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened the settled snapshots in:
+    - `meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes`
+    - `meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    - `meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+    - `meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - each settled snapshot must now also prove:
+    - `control.current_run_id == None`
+    - `inputs.current_run_id == None`
+
+Why this slice matters:
+
+- the validator now rejects any non-`Running` control phase that still claims a
+- current run, but that rule is only useful if the real teardown paths sustain it
+- this slice gives that live owner-backed evidence on both plain and attached
+  stop/destroy paths, not just settled retire
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now has live teardown-path evidence that once stop or
+  destroy has actually settled, neither the control plane nor ingress ledger
+  still advertises a current run binding
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was staying on the settled snapshots rather than trying
+  to assert anything stronger about intermediate stop/destroy publication timing
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another converged lifecycle invariant family, not a write-side switch
+
+Next likely step:
+
+- continue harvesting settled-phase Meerkat invariants where multiple lifecycle
+  paths now agree on the same owner truth
+
+## Slice 132 - MobMachine bounds active loop step-status identity without assuming materialization
+
+Goal:
+
+- raise the active loop path to the same bounded-status bar as the root-frame
+  path without assuming the live loop aggregate must already materialize a
+  non-empty step-status map
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_loop_presence`
+    so the active tracked loop run now also proves:
+    - any surfaced `step_statuses` keys stay inside the ordered-step universe
+
+Why this slice matters:
+
+- it continues the pattern of promoting smaller, clearly owned active-run
+  status facts instead of assuming stronger materialization than the live loop
+  path really sustains
+- it brings the loop path in line with the bounded status identity we already
+  kept on the root-frame path after the earlier backtrack
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_loop_presence`
+
+Result:
+
+- `MobMachine` now has a slightly stronger loop-path proof while still staying
+  on durable or validator-grade truth
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was again not requiring non-empty loop `step_status`
+  materialization, only bounded status identity when entries do exist
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is convergence work, not a write-side switch
+
+Next likely step:
+
+- continue preferring bounded active-run status facts or durable structure
+  facts over stronger status-coverage claims that still depend on timing
+
+## Slice 125 - MeerkatMachine rejects settled stopped/destroyed queue residue
+
+Goal:
+
+- promote a control-side queue invariant only after confirming the live runtime
+  really clears queued work once `Stopped` or `Destroyed` has settled
+
+What landed:
+
+- `meerkat/src/meerkat_machine.rs`
+  - added:
+    - `DestroyedRuntimeStillHasQueuedWork`
+    - `StoppedRuntimeStillHasQueuedWork`
+  - `validate_meerkat_machine_snapshot(...)` now rejects settled `Destroyed`
+    and `Stopped` snapshots that still carry either ordinary queued work or
+    steer-queued work
+  - added focused negative proofs:
+    - `validate_meerkat_machine_snapshot_reports_destroyed_queued_work`
+    - `validate_meerkat_machine_snapshot_reports_stopped_queued_work`
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened the existing live destroy/stop completion-waiter tests on
+    both plain and attached-loop paths so the settled snapshots must also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+
+Why this slice matters:
+
+- it upgrades the Meerkat validator from “settled stop/destroy clears waiters”
+  to the stronger executable statement that settled stop/destroy also leaves no
+  queued input residue behind
+- it stays on current owner truth instead of assuming anything stronger about
+  `Retired`, which still has process-capable semantics in the live control
+  authority
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_destroyed_queued_work`
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_stopped_queued_work`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_with_runtime_loop`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_runtime_executor`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_runtime_executor_with_runtime_loop`
+
+Result:
+
+- `MeerkatMachine` now executable-checks that once `Stopped` or `Destroyed`
+  has actually settled, queued work cannot still be present in either ingress
+  queue
+
+Backtracks encountered:
+
+- the key backtrack happened before editing: the tempting `Retired =>
+  no current_run` rule was wrong, so this slice stayed on the safer settled
+  stop/destroy queue seam instead
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is a stronger settled-state validator, not a write-side switch
+
+Next likely step:
+
+- keep selecting Meerkat invariants that are both current-owner-backed and
+  phase-stable, especially where lifecycle handoff has already converged
+
+## Slice 126 - MobMachine raises active any-policy runs to single-step kernel maps
+
+Goal:
+
+- bring the active `CollectionPolicy::Any` tracked-run proof up to the same
+  durable single-step kernel-map bar already proven for `CollectionPolicy::All`
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+    so the active tracked any-policy run must now also preserve:
+    - `ordered_steps == ["collect"]`
+    - `step_dependencies == { collect: [] }`
+    - `step_dependency_modes == { collect: All }`
+    - `step_has_conditions == { collect: false }`
+    - `step_branches == { collect: None }`
+
+Why this slice matters:
+
+- it keeps the Mob work on durable tracked-run truth instead of timing-shaped
+  step-status coverage
+- it aligns the active `Any` path with the same single-step kernel-map surface
+  already proven on the `All` path
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now has live evidence that the active any-policy collection path
+  preserves the same durable single-step kernel maps as the active all-policy
+  path
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to stay on durable tracked-run maps and not re-promote the
+  timing-sensitive step-status coverage that earlier slices had already ruled
+  out
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is durability convergence, not a write-side switch
+
+Next likely step:
+
+- continue extending active tracked-run proofs only where the live aggregate
+  keeps the relevant fields durably present without cleanup races
+
+## Slice 127 - MeerkatMachine rejects a too-strong retired-queue candidate
+
+Goal:
+
+- test whether settled `Retired` snapshots can be promoted to the same
+  no-queued-work bar already proven for settled `Stopped` and `Destroyed`
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened
+    `meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+    so that once the attached runtime loop has fully drained preserved work and
+    the runtime returns to `Retired`, the snapshot must also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+
+Why this slice matters:
+
+- it gives us one smaller, trustworthy Meerkat fact: the attached-loop retire
+  path does finish draining queued work before the runtime settles back into
+  `Retired`
+- it also exposed that the broader plain-registered `Retired => no queued work`
+  rule is not yet safe to promote
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` gained a stronger attached-loop retire proof, but no new
+  retired-phase validator rule landed
+
+Backtracks encountered:
+
+- the candidate `RetiredRuntimeStillHasQueuedWork` validator rule was rejected
+  by the focused plain retire lane
+- the plain no-loop retire path currently leaves queued-work residue visible in
+  the snapshot even after input-owned completion waiters clear
+- a quick `EphemeralRuntimeDriver::retire()` projection rebuild did not fix
+  that, which points to deeper ingress-authority truth rather than a simple
+  projection cache bug
+- I backed out the validator rule and the plain-path queue assertions rather
+  than forcing the machine to lie
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this was productive because it found a real authority/shell mismatch, not
+  because it advanced write authority
+
+Next likely step:
+
+- keep probing Meerkat lifecycle seams where a focused lane can tell us whether
+  a candidate rule is real machine truth or still hidden shell residue
+
+## Slice 128 - MobMachine proves active quorum runs surface materialized step status
+
+Goal:
+
+- raise the active quorum collection path to the same smaller healthy-run
+  status bar already sustained by the active any-policy and all-policy paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+    so the active tracked quorum run must now also prove:
+    - `!tracked_run.step_statuses.is_empty()`
+
+Why this slice matters:
+
+- it stays on a live tracked-run fact the current aggregate already owns
+  durably for healthy active collection runs
+- it brings the quorum path up to the same “materialized but not full-coverage”
+  status surface that already held for any/all
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now has live evidence that healthy active quorum runs surface at
+  least one materialized step status while keeping those status keys inside the
+  ordered-step universe
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to stop at non-empty status presence instead of trying to
+  prove broader active-run step-status coverage
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is durability convergence, not a write-side switch
+
+Next likely step:
+
+- keep extending active tracked-run proofs only where the live aggregate keeps
+  the relevant fields durably present without cleanup races
+
+## Slice 127 - MeerkatMachine rejects settled retired queue residue
+
+Goal:
+
+- promote the next phase-stable Meerkat queue invariant only after confirming
+  the live runtime really leaves `Retired` with no queued work once the phase
+  has settled
+
+What landed:
+
+- `meerkat/src/meerkat_machine.rs`
+  - added `RetiredRuntimeStillHasQueuedWork`
+  - `validate_meerkat_machine_snapshot(...)` now rejects settled `Retired`
+    snapshots that still carry ordinary queued work or steer-queued work
+  - added focused negative proof:
+    - `validate_meerkat_machine_snapshot_reports_retired_queued_work`
+- `meerkat-runtime/src/session_adapter.rs`
+  - strengthened the existing plain and attached-loop retire split tests so the
+    settled `Retired` snapshots must also prove:
+    - `inputs.queue.is_empty()`
+    - `inputs.steer_queue.is_empty()`
+
+Why this slice matters:
+
+- it extends the settled-phase queue rules from `Stopped` and `Destroyed` to
+  `Retired`, but only at the point where current owner behavior is already
+  phase-stable
+- it deliberately avoids the stronger and wrong rule that `Retired` can never
+  carry `current_run_id`; the live control authority still allows that during
+  drain handoff
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_retired_queued_work`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+
+Result:
+
+- `MeerkatMachine` now executable-checks that once `Retired` has actually
+  settled, queued work cannot still be present in either ingress queue
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the important restraint was keeping this on the settled `Retired` snapshot
+  instead of trying to outlaw all queued work during the live attached-loop
+  drain handoff
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is a stronger settled-state validator, not a write-side switch
+
+Next likely step:
+
+- keep selecting phase-stable Meerkat invariants whose live owner behavior has
+  already converged across plain and attached lifecycle paths
+
+## Slice 128 - MobMachine proves active quorum runs surface materialized step status
+
+Goal:
+
+- raise the active quorum collection path to the same healthy-run status bar
+  already sustained by the active any-policy and all-policy paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+    so the active tracked quorum run must now also prove:
+    - `!tracked_run.step_statuses.is_empty()`
+
+Why this slice matters:
+
+- it stays on a live tracked-run fact that the current aggregate already owns
+  durably for healthy active collection runs
+- it brings the quorum path up to the same smaller “materialized but not
+  full-coverage” status surface that already worked for any/all
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now has live evidence that healthy active quorum runs surface at
+  least one materialized step status while staying inside the ordered-step
+  universe
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to stop at non-empty status presence instead of trying to
+  prove broader active-run step-status coverage
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is durability convergence, not a write-side switch
+
+Next likely step:
+
+- keep extending active tracked-run proofs only where the live aggregate keeps
+  the relevant fields durably present without cleanup races
+
 ## Slice 89 - MeerkatMachine proves attached-loop reset preserves wait_all while abandoning queued work
 
 Goal:
@@ -5893,6 +7802,1593 @@ Next likely step:
 
 - continue promoting only active-branch facts that survive live snapshots
   without depending on cleanup timing or terminal visibility
+
+## Slice 101 - MeerkatMachine proves attached-loop reset splits completion and wait-all lifetimes
+
+Goal:
+
+- capture the current attached-loop `reset()` seam with both an input-owned
+  completion waiter and an ops-owned `wait_all` live at the same time, so the
+  split is proved directly instead of inferred from separate tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - proved that on an attached runtime with queued progress work, a live
+    completion waiter, and an active background operation under `wait_all`:
+    - `reset_runtime()` abandons the queued input immediately
+    - the completion-waiter carrier clears immediately and resolves
+      `RuntimeTerminated("runtime reset")`
+    - runtime control phase returns to `Idle`
+    - the authority-owned `wait_request_id` and pending wait carrier both
+      survive reset
+    - no executor `apply()` or `control()` call is used on the reset path
+    - the ops-owned `wait_all` carrier only clears once the background
+      operation itself settles
+
+Why this slice matters:
+
+- it proves directly that attached-loop reset already has the same split
+  between input-owned and ops-owned waiting semantics that retire exposed
+- it strengthens the Meerkat lifecycle matrix without changing any owner
+  boundary
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo test -p meerkat-mob --lib`
+- `cargo check -p meerkat --lib --features comms`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached-loop reset
+  clears input-owned completion waiters immediately while preserving the
+  ops-owned `wait_all` carrier until the operation settles
+
+Backtracks encountered:
+
+- none in the final slice
+- the important discipline was keeping the proof on current owner seams
+  rather than simplifying reset into a hypothetical unified teardown
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this deepens lifecycle convergence, but it does not yet justify a write-side
+  switch
+
+Next likely step:
+
+- continue selecting Meerkat lifecycle seams where current input-owned and
+  ops-owned behavior still diverge and need to be frozen explicitly
+
+## Slice 102 - MobMachine proves active collection-policy runs preserve durable identity and running status
+
+Goal:
+
+- take the same small durable run-identity/state step on the active
+  collection-policy path that already held on the active branch and loop paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+    so the active collection tracked run must now preserve:
+    - `flow_id == collect`
+    - `status == Running`
+  - kept the already-proven collection-path truths:
+    - ordered steps
+    - dependency/dependency-mode maps
+    - condition flags
+    - branch map
+    - collection policy kind and quorum threshold
+    - zeroed failure counters
+    - materialized step-status keys remain inside the ordered-step universe
+
+Why this slice matters:
+
+- it upgrades the collection path from pure structural durability to a small
+  active-run identity/state proof
+- it stays on durable tracked-run truth and avoids timing-sensitive terminal
+  or cleanup surfaces
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+
+Result:
+
+- `MobMachine` now has live evidence that active collection-policy runs
+  preserve durable `flow_id` identity and remain in `Running` while delayed
+  collection targets are still in flight
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was staying on active-run identity/state rather than
+  promoting another timing-shaped collection status claim
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this improves confidence in active tracked-run truth without moving the
+  canonical write boundary
+
+Next likely step:
+
+- continue promoting only collection-path facts that survive live snapshots
+  without depending on cleanup timing or terminal visibility
+
+## Slice 103 - MeerkatMachine proves attached-loop stop splits completion and wait-all lifetimes
+
+Goal:
+
+- capture the current attached-loop `stop_runtime_executor()` seam with both
+  an input-owned completion waiter and an ops-owned `wait_all` live at the
+  same time, so the split is proved directly instead of inferred from
+  separate tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - proved that on an attached runtime with queued progress work, a live
+    completion waiter, and an active background operation under `wait_all`:
+    - `stop_runtime_executor()` clears the completion-waiter carrier
+      immediately and resolves it as `RuntimeTerminated("runtime stopped")`
+    - runtime phase eventually publishes `Stopped`
+    - the authority-owned `wait_request_id` and pending wait carrier both
+      survive stop
+    - queued ordinary work is preempted before attached-loop `apply()` runs
+    - the attached executor observes exactly one stop control command
+    - the ops-owned `wait_all` carrier only clears once the background
+      operation itself settles
+
+Why this slice matters:
+
+- it completes the same direct split proof for stop that we already had for
+  retire and reset
+- it keeps the Meerkat lifecycle story grounded in current attached-loop owner
+  behavior instead of a simplified teardown model
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached-loop stop
+  clears input-owned completion waiters immediately while preserving the
+  ops-owned `wait_all` carrier until the operation settles
+
+Backtracks encountered:
+
+- the first attempt used a non-existent completion helper on the attached-loop
+  path
+- the final proof switched back to the real carrier seam by registering the
+  completion waiter directly through the session completion registry
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting attached-loop lifecycle seams that expose surprising
+  current owner behavior instead of assuming the lifecycle should already be
+  uniform
+
+## Slice 104 - MobMachine proves active any-policy runs preserve durable identity and defaults
+
+Goal:
+
+- extend the active `CollectionPolicy::Any` path from pure collection-policy
+  shape into durable active-run identity and default scalar truth
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+    so the active any-policy tracked run must now preserve:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `max_step_retries == 0`
+    - `escalation_threshold == 0`
+  - kept the already-proven any-policy truths:
+    - collection policy kind `Any`
+    - zero quorum threshold
+    - zeroed failure counters
+    - at least one materialized step status
+    - surfaced step-status keys remain inside the ordered-step universe
+
+Why this slice matters:
+
+- it upgrades the active any-policy path from policy-only durability to a
+  cleaner active-run identity/defaults proof
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  terminal or cleanup surfaces
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active any-policy runs preserve
+  durable run identity, running status, modern schema, and zeroed default
+  retry/escalation limits while delayed targets are still in flight
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was adding only defaults already proven durable by the
+  live tracked-run aggregate
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not yet justify a switch to
+  write authority
+
+Next likely step:
+
+- continue promoting only active-path facts whose durability is proven by the
+  live tracked-run aggregate rather than by timing-sensitive observer effects
+
+## Slice 105 - MeerkatMachine proves attached-loop destroy splits completion and wait-all lifetimes
+
+Goal:
+
+- capture the current attached-loop `destroy()` seam with both an input-owned
+  completion waiter and an ops-owned `wait_all` live at the same time, so the
+  split is proved directly instead of inferred from separate tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - proved that on an attached runtime with queued progress work, a live
+    completion waiter, and an active background operation under `wait_all`:
+    - `destroy()` abandons queued input immediately
+    - the completion-waiter carrier clears immediately and resolves
+      `RuntimeTerminated("runtime destroyed")`
+    - runtime control phase becomes `Destroyed`
+    - the authority-owned `wait_request_id` and pending wait carrier both
+      survive destroy
+    - queued ordinary work is bypassed before attached-loop `apply()` runs
+    - destroy still bypasses the executor control seam on this path
+    - the ops-owned `wait_all` carrier only clears once the background
+      operation itself settles
+
+Why this slice matters:
+
+- it completes the same direct split proof for destroy that we already had for
+  retire, reset, and stop
+- it keeps the Meerkat lifecycle story grounded in current attached-loop owner
+  behavior instead of a simplified teardown model
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached-loop destroy
+  clears input-owned completion waiters immediately while preserving the
+  ops-owned `wait_all` carrier until the operation settles
+
+Backtracks encountered:
+
+- none in the final slice
+- the important discipline was keeping the proof on the current destroy seam,
+  including the fact that destroy still bypasses executor control here
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting attached-loop lifecycle seams that expose surprising
+  current owner behavior instead of assuming the lifecycle should already be
+  uniform
+
+## Slice 106 - MobMachine proves active all-policy runs preserve durable identity and defaults
+
+Goal:
+
+- extend the active `CollectionPolicy::All` path from policy-only durability
+  into durable active-run identity and default scalar truth
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+    so the active all-policy tracked run must now preserve:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `max_step_retries == 0`
+    - `escalation_threshold == 0`
+  - kept the already-proven all-policy truths:
+    - collection policy kind `All`
+    - zero quorum threshold
+    - zeroed failure counters
+    - at least one materialized step status
+    - surfaced step-status keys remain inside the ordered-step universe
+
+Why this slice matters:
+
+- it upgrades the active all-policy path from policy-only durability to a
+  cleaner active-run identity/defaults proof
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  terminal or cleanup surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active all-policy runs preserve
+  durable run identity, running status, modern schema, and zeroed default
+  retry/escalation limits while delayed targets are still in flight
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was adding only defaults already proven durable by the
+  live tracked-run aggregate
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not yet justify a switch to
+  write authority
+
+Next likely step:
+
+- continue promoting only active-path facts whose durability is proven by the
+  live tracked-run aggregate rather than by timing-sensitive observer effects
+
+## Slice 107 - MeerkatMachine proves attached-loop recover splits completion and wait-all lifetimes
+
+Goal:
+
+- capture the current attached-loop `recover()` seam with both an input-owned
+  completion waiter and an ops-owned `wait_all` live at the same time, so the
+  split is proved directly instead of inferred from separate tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - proved that on an attached runtime with recoverable queued progress work,
+    a live completion waiter, and an active background operation under
+    `wait_all`:
+    - `recover()` reports `inputs_recovered == 1`
+    - the attached loop wakes exactly once and re-enters `Running` while
+      replaying recovered work
+    - the completion-waiter carrier survives through that replay phase
+    - the authority-owned `wait_request_id` and pending wait carrier also
+      survive through that same phase
+    - no executor control command is routed through the attached executor seam
+    - once the recovered queued work finishes replaying, completion waiters
+      clear and runtime returns to `Attached`
+    - the ops-owned `wait_all` carrier remains live after that point and only
+      clears once the background operation itself settles
+
+Why this slice matters:
+
+- it completes the same direct split proof for recover that we already had for
+  reset, stop, retire, and destroy
+- it keeps the Meerkat lifecycle story grounded in current attached-loop owner
+  behavior instead of a simplified replay model
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached-loop recover
+  clears input-owned completion waiters only after recovered work finishes
+  replaying, while preserving the ops-owned `wait_all` carrier until the
+  operation settles
+
+Backtracks encountered:
+
+- none in the final slice
+- the important discipline was keeping the proof on the current recover seam,
+  including the fact that recover returns to `Attached`, not `Idle`
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting attached-loop lifecycle seams that expose surprising
+  current owner behavior instead of assuming the lifecycle should already be
+  uniform
+
+## Slice 108 - MobMachine proves active quorum-policy runs preserve durable identity and defaults
+
+Goal:
+
+- extend the active quorum collection path from policy-only durability into
+  durable active-run identity and default scalar truth
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+    so the active quorum tracked run must now preserve:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `max_step_retries == 0`
+    - `escalation_threshold == 0`
+  - kept the already-proven quorum-policy truths:
+    - ordered steps
+    - dependency/dependency-mode maps
+    - condition flags
+    - branch map
+    - collection policy kind `Quorum`
+    - quorum threshold `2`
+    - zeroed failure counters
+    - surfaced step-status keys remain inside the ordered-step universe
+
+Why this slice matters:
+
+- it brings the active quorum path up to the same active-run identity/defaults
+  bar that already held for the `Any` and `All` paths
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  terminal or cleanup surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active quorum-policy runs preserve
+  durable run identity, running status, modern schema, and zeroed default
+  retry/escalation limits while delayed targets are still in flight
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was adding only defaults already proven durable by the
+  live tracked-run aggregate
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not yet justify a switch to
+  write authority
+
+Next likely step:
+
+- continue promoting only active-path facts whose durability is proven by the
+  live tracked-run aggregate rather than by timing-sensitive observer effects
+
+## Slice 109 - MeerkatMachine proves attached-loop recycle splits completion and wait-all lifetimes
+
+Goal:
+
+- capture the current attached-loop `recycle()` seam with both an input-owned
+  completion waiter and an ops-owned `wait_all` live at the same time, so the
+  split is proved directly instead of inferred from separate tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+  - proved that on an attached runtime with queued progress work, a live
+    completion waiter, and an active background operation under `wait_all`:
+    - `recycle()` reports `inputs_transferred == 1`
+    - the attached loop wakes exactly once and re-enters `Running` while
+      replaying preserved work
+    - the completion-waiter carrier survives through that replay phase
+    - the authority-owned `wait_request_id` and pending wait carrier also
+      survive through that same phase
+    - no executor control command is routed through the attached executor seam
+    - once the preserved queued work finishes replaying, completion waiters
+      clear and runtime returns to `Attached`
+    - the ops-owned `wait_all` carrier remains live after that point and only
+      clears once the background operation itself settles
+
+Why this slice matters:
+
+- it completes the same direct split proof for recycle that we already had for
+  recover, reset, stop, retire, and destroy
+- it keeps the Meerkat lifecycle story grounded in current attached-loop owner
+  behavior instead of a simplified replay model
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached-loop recycle
+  clears input-owned completion waiters only after preserved work finishes
+  replaying, while preserving the ops-owned `wait_all` carrier until the
+  operation settles
+
+Backtracks encountered:
+
+- none in the final slice
+- the important discipline was keeping the proof on the current recycle seam,
+  including the fact that recycle returns to `Attached`, not `Idle`
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting attached-loop lifecycle seams that expose surprising
+  current owner behavior instead of assuming the lifecycle should already be
+  uniform
+
+## Slice 110 - MobMachine proves active root-frame runs preserve durable identity and running status
+
+Goal:
+
+- extend the active root-frame path from structural durability into a small
+  active-run identity/state proof
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+    so the active root-frame tracked run must now preserve:
+    - `flow_id == demo`
+    - `status == Running`
+  - kept the already-proven root-frame truths:
+    - `schema_version == 4`
+    - `frame_count > 0`
+    - no loop or loop-iteration state
+    - durable step/dependency/kernel maps for the lone root-frame step
+    - zeroed failure counters
+    - zero retry/escalation defaults
+    - `completed_at_present == false`
+
+Why this slice matters:
+
+- it upgrades the root-frame path from pure structure/defaults durability to a
+  small but useful active-run identity/state proof
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  terminal or cleanup surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_root_frame_presence`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active root-frame runs preserve
+  durable run identity and remain in `Running` while the never-terminal root
+  frame keeps the run alive
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was adding only the small active-run identity/state
+  facts already supported by the live tracked-run aggregate
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not yet justify a switch to
+  write authority
+
+Next likely step:
+
+- continue promoting only active-path facts whose durability is proven by the
+  live tracked-run aggregate rather than by timing-sensitive observer effects
+
+## Slice 111 - MeerkatMachine proves registered destroy splits completion and wait-all lifetimes
+
+Goal:
+
+- pin down the non-attached destroy path with both input-owned completion
+  waiters and ops-owned `wait_all` active at the same time
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that on the registered idle path:
+    - queued prompt work can still carry a live completion waiter when
+      destroy begins
+    - an active background op can still own a live `wait_all` request at the
+      same time
+    - `destroy()` abandons the queued input immediately
+    - the input-owned completion waiter clears immediately and resolves with
+      `RuntimeTerminated("runtime destroyed")`
+    - runtime control phase becomes `Destroyed`
+    - the ops-owned `wait_all` carrier and `WaitRequestId` remain live until
+      the background op itself settles
+    - the runtime stays `Destroyed` after that settlement
+
+Why this slice matters:
+
+- it completes the split-lifetime proof on the non-attached destroy path,
+  not just the attached-loop path
+- it strengthens the Meerkat lifecycle map by showing that destroy is
+  consistent across both runtime topologies: input-owned waiters are torn
+  down immediately while ops-owned waits remain tied to op truth
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that registered
+  destroy splits completion-waiter and `wait_all` lifetimes the same way the
+  attached-loop destroy path already did
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful read was that the previously proven attached-loop split was not
+  a special-case anomaly; the registered path exhibits the same ownership
+  boundary
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting Meerkat lifecycle seams that compare attached and
+  non-attached behavior without assuming they should already be uniform
+
+## Slice 112 - MobMachine proves active branch runs preserve durable schema and defaults
+
+Goal:
+
+- raise the active branch path to the same durability/defaults bar already
+  proven for the collection-policy paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+    so the active branch tracked run must now also preserve:
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - `max_step_retries == 0`
+    - `escalation_threshold == 0`
+  - kept the already-proven branch truths:
+    - `flow_id == branching`
+    - `status == Running`
+    - branch/dependency/kernel map durability for the active branch run
+
+Why this slice matters:
+
+- it brings the active branch path up to the same modern-schema/defaults
+  durability bar as the active `All` / `Any` / `Quorum` collection paths
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  step-status or output projection surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active branch runs preserve the
+  same durable schema/default scalar truths as the active collection paths,
+  alongside the branch/dependency facts already frozen
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was keeping the slice on durable tracked-run scalars
+  instead of retrying a timing-sensitive branch step-status promotion
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active branch facts that survive the live tracked-run
+  aggregate as cleanly as the collection paths did
+
+## Slice 113 - MeerkatMachine proves registered reset splits completion and wait-all lifetimes
+
+Goal:
+
+- close the non-attached reset gap by proving that registered `reset()`
+  enforces the same input/ops lifetime split already observed on attached
+  runtimes
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that on the registered idle path:
+    - queued prompt work can still carry a live completion waiter when reset
+      begins
+    - an active background op can still own a live `wait_all` request at the
+      same time
+    - `reset()` abandons the queued input immediately
+    - the input-owned completion waiter clears immediately and resolves with
+      `RuntimeTerminated("runtime reset")`
+    - runtime control phase returns to `Idle`
+    - the ops-owned `wait_all` carrier and `WaitRequestId` remain live until
+      the background op itself settles
+    - the runtime stays `Idle` after that settlement
+
+Why this slice matters:
+
+- it extends the registered lifecycle map beyond destroy and shows the same
+  ownership split holds for reset too
+- it strengthens the evidence that the input/ops lifetime boundary is a real
+  Meerkat semantic seam, not an attached-runtime quirk
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that registered reset
+  splits completion-waiter and `wait_all` lifetimes the same way registered
+  destroy and attached-loop reset already did
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful read was that registered reset followed the expected owner split
+  cleanly, so the boundary stayed stable rather than forcing another
+  lifecycle-specific exception
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting registered lifecycle seams whose combined split proof is
+  still missing, rather than assuming the separate carrier tests are already
+  enough
+
+## Slice 114 - MobMachine proves active branch runs preserve healthy failure counters
+
+Goal:
+
+- raise the active branch path to the same healthy-counter bar already proven
+  for the active collection-policy and frame/loop paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+    so the active branch tracked run must now also preserve:
+    - `failure_count == 0`
+    - `consecutive_failure_count == 0`
+  - kept the already-proven branch truths:
+    - `flow_id == branching`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - zero retry/escalation defaults
+    - branch/dependency/kernel map durability for the active branch run
+
+Why this slice matters:
+
+- it brings the active branch path up to the same healthy-run counter bar as
+  the collection and frame/loop paths
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  terminal or cleanup surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active branch runs preserve the same
+  healthy failure-counter defaults as the other active tracked-run shapes we
+  already trust
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was promoting only the healthy counters the live branch
+  path already owned durably, instead of reaching again for timing-sensitive
+  branch step-status coverage
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active branch facts that survive the live tracked-run
+  aggregate as cleanly as the collection, frame, and loop paths did
+
+## Slice 115 - MeerkatMachine proves registered stop splits completion and wait-all lifetimes
+
+Goal:
+
+- close the non-attached stop gap by proving that registered
+  `stop_runtime_executor()` enforces the same input/ops lifetime split
+  already observed on attached runtimes
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that on the registered idle path:
+    - queued prompt work can still carry a live completion waiter when stop
+      begins
+    - an active background op can still own a live `wait_all` request at the
+      same time
+    - `stop_runtime_executor()` tears down the queued input immediately
+    - the input-owned completion waiter clears immediately and resolves with
+      `RuntimeTerminated("runtime stopped")`
+    - runtime control phase becomes `Stopped`
+    - the ops-owned `wait_all` carrier and `WaitRequestId` remain live until
+      the background op itself settles
+    - the runtime stays `Stopped` after that settlement
+
+Why this slice matters:
+
+- it extends the registered lifecycle split map beyond destroy and reset and
+  shows the same ownership boundary holds for stop too
+- it gives us the direct combined proof for stop instead of relying on two
+  separate carrier-level observations
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct owner-backed evidence that registered stop
+  splits completion-waiter and `wait_all` lifetimes the same way registered
+  destroy/reset and attached-loop stop already did
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful read was that registered stop followed the same owner split
+  cleanly, so the boundary stayed stable rather than forcing a stop-specific
+  exception
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue selecting registered lifecycle seams whose combined split proof is
+  still missing, especially where separate completion and wait-all tests are
+  already green but not yet unified
+
+## Slice 116 - MobMachine proves active branch runs preserve structural absence of frames and loops
+
+Goal:
+
+- raise the active branch path to the same structural clarity bar as the
+  root-frame and loop paths by proving that plain branch flows stay free of
+  frame/loop state
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+    so the active branch tracked run must now also preserve:
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+  - kept the already-proven branch truths:
+    - `flow_id == branching`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - zero retry/escalation defaults
+    - zero healthy failure counters
+    - branch/dependency/kernel map durability for the active branch run
+
+Why this slice matters:
+
+- it establishes that the active branch path is not just healthy and
+  schema-modern, but also structurally plain: no persisted frame or loop
+  machinery leaks into this tracked-run shape
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  step-status or output surfaces
+
+Verification:
+
+- `cargo fmt --all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_condition_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active branch runs preserve the
+  expected absence of frame and loop structure, not just branch-specific
+  kernel maps and healthy scalar defaults
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was again structural: only facts the live tracked-run
+  aggregate clearly owned were promoted
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active branch facts that survive the live tracked-run
+  aggregate as cleanly as the collection, frame, and loop paths did
+
+## Slice 117 - MeerkatMachine proves registered retire splits completion and wait-all lifetimes
+
+Goal:
+
+- complete the registered lifecycle split matrix by proving that plain
+  `retire()` without a live runtime loop follows the same ownership boundary
+  as the other registered teardown paths
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that:
+    - a registered runtime can carry queued work plus a live completion waiter
+      before retire
+    - a background op can simultaneously keep an ops-owned `wait_all` carrier
+      live
+    - `retire()` abandons queued work immediately
+    - the completion waiter resolves with
+      `RuntimeTerminated("retired without runtime loop")`
+    - runtime control phase moves to `Retired`
+    - input-owned completion waiters clear immediately
+    - ops-owned `wait_all` and its `WaitRequestId` remain live until the
+      background op itself settles
+
+Why this slice matters:
+
+- it closes the remaining plain registered teardown path in the
+  completion-vs-wait-all split matrix
+- it confirms that current registered retire semantics match the ownership
+  pattern already observed for registered reset, destroy, and stop
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct registered-lifecycle evidence that `retire()`
+  tears down input-owned completion waiters immediately while preserving the
+  ops-owned `wait_all` carrier until the underlying op settles
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was keeping the proof on current registered owner truth
+  instead of trying to fold in attached-loop behavior again
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue closing the remaining registered-vs-attached lifecycle seams only
+  where current owner behavior is still not directly proven
+
+## Slice 118 - MobMachine proves active collection runs preserve structural absence of frames and loops
+
+Goal:
+
+- raise the active quorum collection path to the same structural clarity bar as
+  the branch path by proving that plain collection flows stay free of frame and
+  loop structure
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+    so the active tracked quorum collection run must now also preserve:
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+  - kept the already-proven collection truths:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - zero retry/escalation defaults
+    - zero healthy failure counters
+    - durable quorum collection-policy shape
+
+Why this slice matters:
+
+- it establishes that the active quorum collection path is not just policy
+  shaped and healthy, but also structurally plain: no persisted frame or loop
+  machinery leaks into this tracked-run shape
+- it continues to stay on durable tracked-run truth and avoids timing-sensitive
+  step-status or output surfaces
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active quorum collection runs
+  preserve the expected absence of frame and loop structure, not just policy
+  shape and healthy scalar defaults
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was again structural: only facts the live tracked-run
+  aggregate clearly owned were promoted
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active collection facts that survive the live
+  tracked-run aggregate as cleanly as the branch, frame, and loop paths did
+
+## Slice 119 - MeerkatMachine proves registered recover splits completion and wait-all lifetimes
+
+Goal:
+
+- add the first direct combined registered recovery proof so plain `recover()`
+  is covered as one owner-backed lifecycle seam instead of only through
+  separate completion-waiter and wait-all tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that:
+    - a registered idle runtime can carry queued work plus an input-owned
+      completion waiter before recover
+    - the same registered runtime can simultaneously carry an ops-owned
+      `wait_all` carrier
+    - `recover()` preserves both carriers and the queued input immediately
+      after recovery
+    - once the background operation settles, `wait_all` clears first
+    - the queued input and its completion waiter remain live afterward
+      because the recovered work is still queued and unexecuted
+
+Why this slice matters:
+
+- it shows that plain registered recover is not merely “preserve everything”
+  folklore; the runtime actually has a visible lifetime split:
+  `wait_all` can settle while the recovered queued input is still pending
+- it closes a meaningful gap between the teardown family, which now has direct
+  split proofs, and the plain recovery family, which had only piecemeal
+  coverage before this slice
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct registered recover evidence that queued-input
+  completion waiters can legitimately outlive the ops-owned `wait_all` carrier
+  on the same recovered runtime
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was keeping the proof on a plain registered path rather
+  than mixing it with the already-proven attached-loop replay behavior
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue closing the remaining plain recovery lifecycle seams only where the
+  current owner behavior is still covered piecemeal rather than directly
+
+## Slice 120 - MobMachine proves active any-policy runs preserve structural absence of frames and loops
+
+Goal:
+
+- raise the active `CollectionPolicy::Any` path to the same structural clarity
+  bar as the quorum collection path by proving that any-policy collection flows
+  stay free of frame and loop structure
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+    so the active tracked any-policy run must now also preserve:
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+  - kept the already-proven any-policy truths:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - zero retry/escalation defaults
+    - zero healthy failure counters
+    - at least one materialized step status
+    - durable any-policy kind and zero quorum threshold
+
+Why this slice matters:
+
+- it establishes that the active any-policy collection path is not just
+  policy-shaped and healthy, but also structurally plain: no persisted frame
+  or loop machinery leaks into this tracked-run shape
+- it keeps the Mob side on durable tracked-run truth and avoids the
+  timing-sensitive active-step-status surfaces that have forced backtracks
+  elsewhere
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_any_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active any-policy collection runs
+  preserve the expected absence of frame and loop structure, not just policy
+  shape and healthy scalar defaults
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was again structural: only facts the live tracked-run
+  aggregate clearly owned were promoted
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active collection facts that survive the live
+  tracked-run aggregate as cleanly as the branch, frame, and loop paths did
+
+## Slice 121 - MeerkatMachine proves registered recycle splits completion and wait-all lifetimes
+
+Goal:
+
+- add the direct combined registered recycle proof so plain `recycle()` is
+  covered as one owner-backed lifecycle seam instead of only through separate
+  completion-waiter and wait-all tests
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that:
+    - a registered idle runtime can carry queued work plus an input-owned
+      completion waiter before recycle
+    - the same registered runtime can simultaneously carry an ops-owned
+      `wait_all` carrier
+    - `recycle()` preserves both carriers and the queued input immediately
+      after recycle
+    - once the background operation settles, `wait_all` clears first
+    - the transferred queued input and its completion waiter remain live
+      afterward because the recycled work is still pending and unexecuted
+
+Why this slice matters:
+
+- it gives plain registered recycle the same direct split-lifetime treatment we
+  already established for registered recover and the teardown family
+- it makes current recycle semantics explicit: recycle is not a teardown path;
+  it preserves queued input ownership while allowing the ops-owned wait carrier
+  to settle independently
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now has direct registered recycle evidence that queued-input
+  completion waiters can legitimately outlive the ops-owned `wait_all` carrier
+  on the same recycled runtime
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was keeping the proof on a plain registered path rather
+  than mixing it with the already-proven attached-loop replay behavior
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, but not a write-side switch point yet
+
+Next likely step:
+
+- continue closing the remaining plain recovery/lifecycle seams only where the
+  current owner behavior is still covered piecemeal rather than directly
+
+## Slice 122 - MobMachine proves active all-policy runs preserve structural absence of frames and loops
+
+Goal:
+
+- raise the active `CollectionPolicy::All` path to the same structural clarity
+  bar as the quorum and any-policy collection paths by proving that all-policy
+  collection flows stay free of frame and loop structure
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - extended
+    `test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+    so the active tracked all-policy run must now also preserve:
+    - `frame_count == 0`
+    - `loop_count == 0`
+    - `loop_iteration_count == 0`
+  - kept the already-proven all-policy truths:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - zero retry/escalation defaults
+    - zero healthy failure counters
+    - at least one materialized step status
+    - durable all-policy kind and zero quorum threshold
+
+Why this slice matters:
+
+- it brings the last active collection-policy path up to the same plain
+  structural bar as quorum and any-policy
+- it continues to stay on durable tracked-run truth and avoids the
+  timing-sensitive active-step-status or output surfaces that still do not
+  survive the live aggregate cleanly enough
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active all-policy collection runs
+  preserve the expected absence of frame and loop structure, not just policy
+  shape and healthy scalar defaults
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was again structural: only facts the live tracked-run
+  aggregate clearly owned were promoted
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is good convergence evidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active collection facts that survive the live
+  tracked-run aggregate as cleanly as the branch, frame, and loop paths did
+
+## Slice 123 - MeerkatMachine rejects retired snapshots that still carry completion waiters
+
+Goal:
+
+- lift a lifecycle conclusion we have now proven repeatedly into the executable
+  Meerkat validator: once the runtime is actually `Retired`, input-owned
+  completion waiters should already be gone
+
+What landed:
+
+- `meerkat/src/meerkat_machine.rs`
+  - added
+    `MeerkatMachineInvariantViolation::RetiredRuntimeStillHasCompletionWaiters`
+  - extended `validate_meerkat_machine_snapshot(...)` to reject snapshots where:
+    - `control.phase == RuntimeState::Retired`
+    - `completion_waiters.waiter_count > 0`
+  - added
+    `validate_meerkat_machine_snapshot_reports_retired_completion_waiters`
+    to prove the validator reports this shape directly
+
+Why this slice matters:
+
+- the direct lifecycle proofs now show a stable pattern:
+  registered retire tears completion waiters down immediately, and attached
+  retire only carries them while the runtime is temporarily back in `Running`
+  for drain replay
+- encoding that into the validator turns an observed lifecycle truth into a
+  machine-level invariant instead of leaving it implicit in test folklore
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_retired_completion_waiters`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MeerkatMachine` now rejects a stale retired snapshot shape that the current
+  owner-backed lifecycle proofs say should never survive into steady-state
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was grounding the new validator rule in the already
+  converged retire proofs rather than guessing from analogy alone
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is a stronger executable invariant, but not a write-side switch point
+
+Next likely step:
+
+- continue harvesting validator-grade invariants only where the lifecycle
+  matrix has already converged enough to support them cleanly
+
+## Slice 124 - MobMachine proves active all-policy runs preserve durable single-step kernel maps
+
+Goal:
+
+- bring the active `CollectionPolicy::All` path up another notch by proving it
+  preserves the same durable single-step kernel maps we already trust on the
+  quorum collection and root-frame paths
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+    so the active tracked all-policy run must now also preserve:
+    - `ordered_steps == ["collect"]`
+    - `step_dependencies == { collect: [] }`
+    - `step_dependency_modes == { collect: All }`
+    - `step_has_conditions == { collect: false }`
+    - `step_branches == { collect: None }`
+  - kept the already-proven all-policy truths:
+    - `flow_id == collect`
+    - `status == Running`
+    - `schema_version == 4`
+    - `completed_at_present == false`
+    - structural absence of frames/loops
+    - zero retry/escalation defaults
+    - zero healthy failure counters
+    - at least one materialized step status
+    - durable all-policy kind and zero quorum threshold
+
+Why this slice matters:
+
+- it extends the active all-policy path from “plain healthy scalar shape” to
+  “durable single-step kernel map shape,” which is a more useful convergence
+  signal for future flow-kernel cutover work
+- it still stays on durable tracked-run truth and avoids timing-sensitive
+  output or full-status-coverage claims
+
+Verification:
+
+- `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_retired_completion_waiters`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_all_collection_policy_shape`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
+- `cargo check -p meerkat --lib --features comms`
+- `git diff --check`
+
+Result:
+
+- `MobMachine` now has live evidence that active all-policy collection runs
+  preserve not just policy/default scalars and structural plainness, but also
+  the durable single-step kernel maps underneath them
+
+Backtracks encountered:
+
+- none in the final slice
+- the useful restraint was promoting only the single-step kernel maps the live
+  tracked-run aggregate already carries durably
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this improves convergence confidence, but it does not justify a switch to
+  write authority yet
+
+Next likely step:
+
+- continue promoting only active tracked-run facts that survive the live
+  aggregate as clearly as the collection, branch, frame, and loop paths do
 
 ## Slice 87 - MeerkatMachine makes attached-loop reset semantics explicit
 
@@ -7108,6 +10604,445 @@ Next likely step:
 - continue preferring durable tracked-run facts or live durability proofs over
   escalation/retry cleanup behavior that still depends on timing
 
+## Slice 149 - MeerkatMachine proves plain recycle preserves steered input and wait_all
+
+Goal:
+
+- extend the plain registered steer lane from `recover()` into `recycle()`
+- prove current owner truth for steered queued work without inventing a nicer
+  synthetic ingress model
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait_all`
+  - the new test proves that plain `recycle()`:
+    - keeps `inputs.queue` empty and preserves the steered input in
+      `inputs.steer_queue`
+    - preserves `wake_requested` and `process_requested`
+    - preserves the input-owned completion waiter
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId` agreement
+    - allows `wait_all` to settle first while the steered input remains pending
+
+Why this slice matters:
+
+- it closes the remaining plain steer-lane gap between `recover()` and
+  `recycle()`
+- it gives `MeerkatMachine` one more owner-backed ingress/lifecycle seam that
+  is genuinely distinct from ordinary queued prompt recovery
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait_all`
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_tracks_steered_prompt_input`
+
+Result:
+
+- `MeerkatMachine` now has direct evidence that plain recycle preserves the
+  steer lane and the wait-all carrier together, with the steered input still
+  pending after `wait_all` settles
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was to keep this on the plain registered path rather than
+  speculating about attached-loop steer replay before the owner path proves it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this strengthens the ingress/lifecycle map, but it is still not a write-side
+  switch signal
+
+Next likely step:
+
+- keep selecting distinct owner-backed lifecycle seams where queued and steered
+  inputs can diverge in current code
+
+## Slice 150 - MobMachine adds a live one-to-one all-policy dispatch proof
+
+Goal:
+
+- extend the active dispatch-family durability map with a new combination only
+  if the live tracked-run aggregate sustains the same durable single-step shape
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_one_to_one_all_dispatch_shape`
+  - the new test proves that active `DispatchMode::OneToOne` plus
+    `CollectionPolicy::All` runs preserve:
+    - durable `flow_id` and `Running` status
+    - schema `4` and non-terminal shape
+    - zero frame/loop structure
+    - the single-step kernel maps for `dispatch`
+    - `RunCollectionPolicyKind::All` and zero quorum threshold
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it gives `MobMachine` another distinct active dispatch family without
+  promoting a new semantic field
+- it keeps the dispatch-family matrix converging at the same durable
+  single-step tracked-run bar
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_one_to_one_all_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that one-to-one all-policy
+  dispatch collapses onto the same durable single-step tracked-run surface as
+  the other active dispatch families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to avoid treating dispatch mode itself as a machine-owned
+  field and instead prove only the durable tracked-run shape
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-authority switch signal
+
+Next likely step:
+
+- continue adding dispatch-family or lifecycle coverage only when the live
+  owner path sustains it at the same durable bar
+
+## Slice 151 - MeerkatMachine backtracks plain retire steer teardown and records the real split
+
+Goal:
+
+- extend the plain registered steer lane into `retire()`
+- observe current owner truth for the split between input-owned steered
+  completion waiters and ops-owned `wait_all`
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_steer_queue_visible`
+  - the new test proves that plain `retire()`:
+    - starts from a pending steered input in `inputs.steer_queue`
+    - terminates the input-owned steered completion waiter immediately
+    - still leaves the steered input visible in `inputs.steer_queue`
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId` agreement
+      until the background operation actually settles
+
+Why this slice matters:
+
+- it exposes a real seam mismatch between steered completion-waiter teardown and
+  steer-queue visibility on the plain retire path
+- it strengthens the lifecycle map with a distinct owner-backed retire case
+  rather than another ordinary queued-input proof
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_steer_queue_visible`
+
+Result:
+
+- `MeerkatMachine` now has direct evidence that plain retire clears the
+  steered completion waiter but does not currently clear the steer-queue
+  projection at the same time
+
+Backtracks encountered:
+
+- yes: the first hypothesis was wrong
+- the live runtime rejected the nicer story that plain retire clears steered
+  queued work immediately, so the test was rewritten to capture the real owner
+  truth instead of preserving the hypothesis
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is a convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep selecting distinct steer-lane lifecycle seams only where current owner
+  code exposes stable truth directly
+
+## Slice 152 - MobMachine adds a live fan-in quorum dispatch proof
+
+Goal:
+
+- extend the active dispatch-family durability map with a quorum variant only
+  if the live tracked-run aggregate sustains the same durable single-step shape
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_in_quorum_dispatch_shape`
+  - the new test proves that active `DispatchMode::FanIn` plus
+    `CollectionPolicy::Quorum { n: 2 }` runs preserve:
+    - durable `flow_id` and `Running` status
+    - schema `4` and non-terminal shape
+    - zero frame/loop structure
+    - the single-step kernel maps for `dispatch`
+    - `RunCollectionPolicyKind::Quorum` and threshold `2`
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it adds the first dispatch-family proof that carries a non-zero quorum
+  threshold through the joined `MobMachine` snapshot
+- it keeps expanding the dispatch-family matrix without promoting a new
+  machine-owned field
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_in_quorum_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that the fan-in quorum dispatch
+  family collapses onto the same durable single-step tracked-run surface as
+  the other active dispatch families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to stop at durable tracked-run shape and avoid asserting
+  dispatch-mode-specific runtime behavior beyond what the aggregate preserves
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-authority switch signal
+
+Next likely step:
+
+- continue extending either steer-lane lifecycle coverage or dispatch-family
+  coverage only where the live owner path sustains the same durable bar
+
+## Slice 153 - MeerkatMachine proves plain destroy clears the steer lane but preserves wait_all
+
+Goal:
+
+- extend the plain registered steer lane into `destroy()`
+- verify whether destroy follows the plain retire backtrack or behaves like the
+  generic queue-teardown rules already visible in current owner code
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all`
+  - the new test proves that plain `destroy()`:
+    - starts from a pending steered input in `inputs.steer_queue`
+    - clears the steered completion waiter immediately
+    - clears the steer queue immediately
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId` agreement
+      until the background operation settles
+
+Why this slice matters:
+
+- it distinguishes the plain destroy steer path from the plain retire steer
+  backtrack
+- it strengthens the lifecycle map with a second direct owner-backed steer-lane
+  teardown case
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all`
+
+Result:
+
+- `MeerkatMachine` now has direct evidence that plain destroy clears the steer
+  lane immediately while still preserving the separate ops wait carrier
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key value of this slice is precisely that it did *not* match the plain
+  retire steer behavior
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep probing only distinct steer-lane lifecycle seams where current owner
+  code can answer a real semantic question
+
+## Slice 154 - MobMachine adds a live fan-out quorum dispatch proof
+
+Goal:
+
+- extend the active dispatch-family durability map with the fan-out quorum
+  variant, but only if the live tracked-run aggregate sustains the same durable
+  single-step shape
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_fan_out_quorum_dispatch_shape`
+  - the new test proves that active `DispatchMode::FanOut` plus
+    `CollectionPolicy::Quorum { n: 2 }` runs preserve:
+    - durable `flow_id` and `Running` status
+    - schema `4` and non-terminal shape
+    - zero frame/loop structure
+    - the single-step kernel maps for `dispatch`
+    - `RunCollectionPolicyKind::Quorum` and threshold `2`
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it complements the fan-in quorum proof and strengthens the dispatch-family
+  matrix without inventing a new machine-owned field
+- it shows the durable tracked-run surface survives a second quorum dispatch
+  mode
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_fan_out_quorum_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that the fan-out quorum dispatch
+  family collapses onto the same durable single-step tracked-run surface as
+  the other active dispatch families
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the restraint was to stay on the durable aggregate and not elevate
+  dispatch-mode-specific runtime mechanics into new machine fields
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-authority switch signal
+
+Next likely step:
+
+- continue extending steer-lane lifecycle coverage or dispatch-family coverage
+  only where the live owner path sustains the same durable bar
+
+## Slice 155 - MeerkatMachine proves attached destroy clears the steer lane but preserves wait_all
+
+Goal:
+
+- extend the steer-lane destroy observation from the plain registered path into
+  the attached-loop path
+- verify whether a live executor changes the owner truth or whether destroy
+  still bypasses queued steered work completely
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_destroy_with_runtime_loop_clears_steered_waiter_and_queue_but_preserves_wait_all`
+  - the new test proves that attached `destroy()`:
+    - starts from a pending steered input in `inputs.steer_queue`
+    - clears the steered completion waiter immediately
+    - clears the steer queue immediately
+    - preserves the ops-owned `wait_all` carrier and `WaitRequestId`
+      agreement until the background operation settles
+    - still bypasses both `apply()` and `control()` on the executor seam
+
+Why this slice matters:
+
+- it confirms the plain destroy steer behavior survives even when an attached
+  executor exists
+- it narrows the real distinction to `retire()` vs `destroy()`, not
+  plain-vs-attached destroy behavior
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_destroy_with_runtime_loop_clears_steered_waiter_and_queue_but_preserves_wait_all`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached destroy clears
+  the steer lane immediately while preserving the separate ops wait carrier
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main question was whether the attached executor would alter destroy
+  semantics, and current owner truth says it does not
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep probing steer-lane lifecycle seams only where the current owner path can
+  answer a real semantic question we have not already covered
+
+## Slice 156 - MobMachine adds a live one-to-one quorum dispatch proof
+
+Goal:
+
+- extend the active dispatch-family durability map with the final obvious
+  quorum variant, but only if the live tracked-run aggregate sustains the same
+  durable single-step shape
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_capture_mob_machine_snapshot_tracks_live_one_to_one_quorum_dispatch_shape`
+  - the new test proves that active `DispatchMode::OneToOne` plus
+    `CollectionPolicy::Quorum { n: 2 }` runs preserve:
+    - durable `flow_id` and `Running` status
+    - schema `4` and non-terminal shape
+    - zero frame/loop structure
+    - the single-step kernel maps for `dispatch`
+    - `RunCollectionPolicyKind::Quorum` and threshold `2`
+    - zeroed failure/retry/escalation defaults
+    - bounded materialized step-status identity
+
+Why this slice matters:
+
+- it closes the obvious dispatch-family quorum matrix on the observed
+  tracked-run surface
+- it stays disciplined by proving only the durable aggregate shape, not a new
+  dispatch-mode semantic field
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_one_to_one_quorum_dispatch_shape`
+
+Result:
+
+- `MobMachine` now has owner-backed evidence that the one-to-one quorum
+  dispatch family also collapses onto the same durable single-step tracked-run
+  surface as the rest of the active dispatch matrix
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key restraint was to treat this as an aggregate durability proof rather
+  than concluding anything yet about the higher-level semantic desirability of
+  one-to-one quorum
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-authority switch signal
+
+Next likely step:
+
+- continue only with distinct lifecycle or tracked-run seams that still answer
+  genuinely new owner-boundary questions
+
 ## Slice 73 - MeerkatMachine preserves active wait_all after destroy
 
 Goal:
@@ -7216,3 +11151,994 @@ Next likely step:
 
 - continue extending live durability proofs only where the joined snapshot has
   already demonstrated stable owner-backed truth
+
+## Slice 163 - MeerkatMachine proves attached steered completion can clear before wait_all
+
+Goal:
+
+- strengthen the attached steer lane without guessing about interrupt semantics
+- verify whether an attached steered prompt can complete normally while an
+  independent ops-owned `wait_all` carrier remains live
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completion_and_wait_all_lifetimes`
+  - the new test proves that on an attached runtime:
+    - a steered prompt enters `Running` immediately and leaves both `queue` and
+      `steer_queue`
+    - the prompt's completion waiter and an independent `wait_all` carrier can
+      coexist while the executor is blocked in `apply()`
+    - once `apply()` is released, the steered prompt completes and the runtime
+      returns to `Attached`
+    - the input-owned completion waiter clears at that point
+    - the ops-owned `wait_all` carrier and `WaitRequestId` agreement remain
+      live until the background operation itself settles
+
+Why this slice matters:
+
+- it extends the attached steer lane past admission and into the first real
+  split-lifetime proof
+- it stays honest by observing the current normal completion path instead of
+  assuming how attached steer should behave under reset/stop/destroy interrupts
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `MeerkatMachine` now has owner-backed evidence that attached steered work can
+  clear the input-owned completion carrier while preserving a separate
+  authority-owned ops wait carrier
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was not jumping straight to attached steer interrupt
+  semantics before we had a stable completion-vs-wait split on the current
+  owner path
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is another convergence slice, not a write-side switch signal
+
+Next likely step:
+
+- keep attached steer work on owner-backed seams only, especially where a live
+  executor is already proving distinct completion, queue, or control behavior
+
+## Slice 164 - MobMachine rejects tracked runs without ordered steps
+
+Goal:
+
+- encode one generic tracked-run integrity rule that already falls out of the
+  durable surface across all live families we have validated
+- improve `MobMachine` without forcing another family-specific active-status
+  claim
+
+What landed:
+
+- `meerkat-mob/src/mob_machine.rs`
+  - added `MobMachineInvariantViolation::TrackedRunMissingOrderedSteps`
+  - taught `validate_mob_machine_snapshot(...)` to reject present tracked runs
+    whose durable `ordered_steps` projection is empty
+  - added
+    `validate_mob_machine_snapshot_reports_tracked_run_without_ordered_steps`
+    as the focused negative proof
+
+Why this slice matters:
+
+- every active family we currently trust already proves a non-empty ordered step
+  universe, so this promotes a real generic truth rather than another
+  family-specific convenience assertion
+- it improves the executable model at the validator layer instead of leaning on
+  timing-sensitive `step_status` materialization
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib validate_mob_machine_snapshot_reports_tracked_run_without_ordered_steps`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now rejects an obviously malformed durable tracked-run shape
+  before any family-specific map or status reasoning starts
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the key decision was to prefer a generic durable-surface invariant over
+  another speculative active-family status promotion
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is useful convergence work, but still not a write-side switch signal
+
+Next likely step:
+
+- continue raising generic durable-surface invariants where they are already
+  supported across the live tracked-run families, and avoid status-materialization
+  claims unless the runtime sustains them directly
+
+## Slice 165 - MeerkatMachine isolates attached steered completion from detached-wake reentry
+
+Goal:
+
+- verify whether attached steered completion can still clear after `wait_all`
+  settles first when detached-wake continuation reentry is not in scope
+- correct the observational model if the earlier background-op proof was mixing
+  two different seams together
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - updated
+    `meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_completion_after_wait_all_settles`
+  - switched the waited operation from `BackgroundToolOp` to `MobMemberChild`
+    so the test no longer arms detached-wake continuation injection
+  - removed the temporary debug panic used to inspect the false failing shape
+  - the corrected proof now shows that when detached-wake reentry is isolated
+    out of the scenario:
+    - attached steered work remains `Running` while `apply()` is blocked
+    - `wait_all` can settle first and clear independently
+    - the input-owned completion waiter still survives until `apply()` finishes
+    - once `apply()` completes, the runtime returns to `Attached`
+    - no follow-on continuation run starts on this path
+
+Why this slice matters:
+
+- it confirms the earlier red probe was a mixed-seam problem, not a broken
+  attached steered completion path
+- it keeps the Meerkat model honest by separating:
+  - the completion-vs-`wait_all` split
+  - detached-wake continuation reentry for background ops
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_completion_after_wait_all_settles`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `MeerkatMachine` now has a clean attached steered proof for
+  completion-after-`wait_all` ordering without detached-wake interference
+
+Backtracks encountered:
+
+- yes: the first version used `BackgroundToolOp`, which let detached wake inject
+  a continuation immediately after the steered completion cleared
+- the correct response was to isolate the seam instead of baking detached-wake
+  reentry into the attached steered completion proof
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is useful convergence because it removes a mixed-seam false failure
+  before switch work
+
+Next likely step:
+
+- keep the steer lane and detached-wake continuation work separate unless the
+  explicit goal is to prove their interaction on the live path
+
+## Slice 166 - MobMachine rejects tracked runs with self-dependencies
+
+Goal:
+
+- add another generic durable-surface integrity rule that holds across tracked
+  runs without depending on any one active family
+- strengthen `MobMachine` with structure the durable aggregate already owns
+
+What landed:
+
+- `meerkat-mob/src/mob_machine.rs`
+  - added `MobMachineInvariantViolation::TrackedRunSelfDependency`
+  - taught `validate_mob_machine_snapshot(...)` to reject tracked runs whose
+    dependency map points a step at itself
+  - added the focused negative proof
+    `validate_mob_machine_snapshot_reports_tracked_run_self_dependency`
+
+Why this slice matters:
+
+- self-dependency is invalid durable flow-run truth regardless of which live
+- family produced the tracked run
+- it strengthens the executable validator without leaning on timing-sensitive
+  status materialization or active-family quirks
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib validate_mob_machine_snapshot_reports_tracked_run_self_dependency`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now rejects another malformed tracked-run shape before higher
+  level branch, collection, or status reasoning starts
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was choosing a generic durable rule instead of another
+  family-specific active-status promotion
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is clean convergence work, but still not a write-side switch signal
+
+Next likely step:
+
+- keep promoting generic tracked-run integrity rules that the durable surface
+  already supports across families
+
+## Slice 167 - MeerkatMachine splits attached steered destroy between completion and wait_all
+
+Goal:
+
+- extend the attached steer lane with a real destroy seam
+- verify whether plain `destroy()` can terminate an in-flight attached steered
+  completion waiter while leaving an independent ops-owned `wait_all` carrier
+  alive
+- keep detached wake out of scope so the proof only exercises steer completion
+  vs destroy vs `wait_all`
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_completion_and_wait_all_lifetimes`
+  - the test uses an attached blocking executor plus `OperationKind::MobMemberChild`
+    so the runtime stays on the live attached steer path without arming detached
+    wake continuation injection
+  - the new proof shows that:
+    - the attached steered prompt enters `Running` and owns a completion waiter
+    - `destroy()` clears that input-owned completion waiter immediately even
+      while `apply()` is still blocked
+    - `destroy()` preserves the authority-owned `wait_all` carrier and request-id
+      agreement until the waited operation itself settles
+    - once `apply()` is released and the waited operation completes, the settled
+      snapshot lands in `Destroyed` with no current-run binding and no remaining
+      wait carrier
+
+Why this slice matters:
+
+- it gives the steer lane a direct attached destroy split proof instead of only
+  plain registered destroy behavior
+- it confirms the current owner boundary:
+  - input-owned completion waiters terminate at destroy
+  - ops-owned `wait_all` survives until the waited operation settles
+- it does so without re-mixing detached-wake continuation behavior into the
+  steer model
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_completion_and_wait_all_lifetimes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `MeerkatMachine` now has an attached steer destroy split-lifetime proof
+  alongside the existing attached steer completion ordering proofs
+
+Backtracks encountered:
+
+- no owner-boundary backtrack in the final slice
+- the main restraint was keeping the waited operation on `MobMemberChild`
+  specifically to avoid detached-wake continuation reentry
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is clean convergence work, but still not a write-side switch signal
+
+Next likely step:
+
+- continue filling attached steer lifecycle seams only where the live runtime
+  owns them directly, and keep detached wake isolated unless the explicit goal
+  is to model that interaction
+
+## Slice 168 - MobMachine rejects duplicate tracked-run dependencies
+
+Goal:
+
+- strengthen the generic durable tracked-run validator with another integrity
+  rule that does not depend on any one active family
+- reject a malformed dependency shape before branch, collection, or step-status
+  reasoning starts
+
+What landed:
+
+- `meerkat-mob/src/mob_machine.rs`
+  - added `MobMachineInvariantViolation::TrackedRunDuplicateDependency`
+  - taught `validate_mob_machine_snapshot(...)` to reject dependency vectors that
+    repeat the same dependency step for a given owner step
+  - added the focused negative proof
+    `validate_mob_machine_snapshot_reports_tracked_run_duplicate_dependency`
+
+Why this slice matters:
+
+- duplicate dependencies are invalid durable flow-run truth regardless of which
+  live family produced the tracked run
+- the rule is purely structural and generic, so it strengthens `MobMachine`
+  without leaning on timing-shaped active-status behavior
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib validate_mob_machine_snapshot_reports_tracked_run_duplicate_dependency`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now rejects another malformed tracked-run shape at the durable
+  surface boundary
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main discipline was choosing another generic durable rule instead of
+  another active-family promotion
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is clean convergence work, but still not a write-side switch signal
+
+Next likely step:
+
+- keep preferring generic tracked-run integrity rules when they are clearly
+  supported across families, and only promote new live family facts when the
+  durable aggregate sustains them directly
+
+## Slice 169 - MeerkatMachine proves attached steer stop is deferred until apply finishes
+
+Goal:
+
+- probe the first attached steer seam that genuinely crosses the live control
+  plane instead of a direct driver mutation
+- verify whether `stop_runtime_executor()` interrupts an in-flight attached
+  steered `apply()` or waits behind it
+- keep detached wake out of scope so the proof only covers attached steer
+  completion vs queued stop vs independent `wait_all`
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - added
+    `meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_until_apply_finishes`
+  - the test uses an attached blocking executor plus `OperationKind::MobMemberChild`
+    so the runtime stays on the live attached steer path without arming
+    detached-wake continuation injection
+  - the new proof shows that:
+    - the attached steered prompt enters `Running` and owns a completion waiter
+    - `stop_runtime_executor()` stays queued while `apply()` is still blocked
+      and does not immediately reach the executor control seam
+    - `wait_all` can settle first while the steered completion waiter and
+      current-run binding both stay live
+    - once `apply()` finishes, the steered completion resolves normally,
+      then the queued stop drains and moves the runtime to `Stopped`
+
+Why this slice matters:
+
+- it keeps the attached steer model honest about the real control-plane shape:
+  stop is deferred, not an in-flight interrupt
+- it sharpens the ownership split:
+  - input-owned steered completion still belongs to the active run until
+    `apply()` returns
+  - ops-owned `wait_all` can settle independently before the queued stop drains
+- it does so without re-mixing detached-wake behavior into the steer lane
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_until_apply_finishes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `MeerkatMachine` now has an explicit attached steer proof for deferred stop
+  ordering on the live loop path
+
+Backtracks encountered:
+
+- no owner-boundary backtrack in the final slice
+- the main discipline was keeping the waited operation on `MobMemberChild`
+  specifically so stop ordering was not obscured by detached-wake continuation
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is strong convergence work, but it is still not a write-side switch
+  signal
+
+Next likely step:
+
+- keep extending attached steer lifecycle seams only where the live loop owns
+  the behavior directly, and keep out-of-band continuation behavior isolated
+  unless it becomes the explicit target
+
+## Slice 170 - MobMachine proves branch fallback preserves durable failure_count
+
+Goal:
+
+- raise one active multi-step family to include a non-zero durable failure fact
+  instead of only healthy zeroed counters
+- verify that the branch-fallback family really sustains failed-branch history
+  while the overall run is still `Running`
+
+What landed:
+
+- `meerkat-mob/src/runtime/tests.rs`
+  - strengthened
+    `test_capture_mob_machine_snapshot_tracks_live_branch_fallback_shape`
+  - the polling gate now waits for the joined tracked-run surface to show
+    `failure_count > 0` while the run is still `Running`
+  - the live proof now asserts that the active branch-fallback run preserves
+    durable `failure_count == 1` alongside the existing ordered-step,
+    dependency, branch, policy, and bounded step-status facts
+
+Why this slice matters:
+
+- it is the first active multi-step family proof that carries a positive
+  persisted failure count through the joined `MobMachine` surface
+- that gives us a stronger signal that failure history is durable machine truth
+  here, not just a terminalization artifact
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_machine_snapshot_tracks_live_branch_fallback_shape`
+- `cargo test -p meerkat-mob --lib`
+
+Result:
+
+- `MobMachine` now proves that a running fallback flow can preserve one durable
+  failed branch while the successful fallback path is still live
+
+Backtracks encountered:
+
+- no code-level backtrack in the final slice
+- the main restraint was only promoting `failure_count`, not
+  `consecutive_failure_count`, because the latter is still more timing-shaped
+  under mixed fail-then-success execution
+
+Cutover gate read:
+
+- `MobMachine` remains on the observability side of the gate
+- this is clean convergence work, but still not a write-side switch signal
+
+Next likely step:
+
+- continue preferring live multi-step family proofs when they can promote a
+  clearly durable fact without leaning on cleanup timing or transient status
+
+## Slice 171 - MeerkatMachine starts cutover checklist with interrupt_current_run semantics
+
+Goal:
+
+- turn the Meerkat cutover gate into a concrete execution checklist
+- start burning down the first explicit freeze blocker instead of only
+  documenting it
+- freeze the current adapter semantics for `interrupt_current_run`
+
+What landed:
+
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - added a Meerkat-only cutover checklist derived from the gate
+  - marked `M1` (`interrupt` / cancel semantics) as the first in-progress
+    freeze blocker
+- `meerkat-runtime/src/session_adapter.rs`
+  - added `interrupt_current_run_returns_not_ready_without_attached_loop`
+  - added
+    `interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes`
+  - the attached proof uses a blocking executor on an attached steered prompt
+    path, which reaches the live `apply()` seam without mixing in
+    detached-wake behavior, so the result still isolates the actual
+    adapter/control-loop semantics:
+    - `interrupt_current_run()` succeeds only when a live control channel exists
+    - without an attached loop it returns `NotReady { state: Idle }`
+    - with an attached loop it does not interrupt in-flight `apply()`
+    - the run, current-run binding, and completion waiter all stay live until
+      `apply()` returns
+    - once `apply()` returns, the queued cancel drains through the executor
+      control seam and the runtime returns to `Attached`
+
+Why this slice matters:
+
+- it converts the cutover conversation into an executable Meerkat freeze
+  program instead of a general research direction
+- it freezes the first named shell action in the Meerkat kernel verbs list
+  through the real adapter path
+- it removes a real ambiguity from the cutover gate: `interrupt_current_run`
+  is currently a deferred executor-side control request, not a runtime-side
+  state transition and not an in-flight interrupt
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib interrupt_current_run_returns_not_ready_without_attached_loop`
+- `cargo test -p meerkat-runtime --lib interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+
+Result:
+
+- `MeerkatMachine` now has the first direct proofs for the current
+  `interrupt_current_run` boundary, and the cutover work has a concrete
+  checklist to execute
+
+Backtracks encountered:
+
+- no owner-boundary backtrack in the final slice
+- the main discipline was keeping the proof off the detached-wake path, even
+  though attached steer metadata was required to hit the real live `apply()`
+  seam
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- this is the start of the accelerated freeze push, but `M1` is still only
+  partially complete because cooperative-yield interrupt behavior and
+  cancel-after-boundary are still uncovered
+
+Next likely step:
+
+- continue `M1` by freezing the cooperative-yield / `InterruptYielding` path,
+  then tie that back to live turn cancellation posture instead of keeping it
+  only at policy-table level
+
+## Slice 172 - MeerkatMachine freezes adapter InterruptYielding semantics and validates session-layer cooperative interrupt
+
+Goal:
+
+- finish the non-speculative part of `M1` by distinguishing hard cancel from
+  cooperative interrupt on the live Meerkat path
+- freeze the runtime-adapter `InterruptYielding` seam instead of leaving it as
+  lower-level driver folklore
+- confirm the session-layer cooperative interrupt proof still holds on the
+  current codebase
+
+What landed:
+
+- `meerkat-runtime/src/session_adapter.rs`
+  - corrected
+    `interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes`
+    to use an attached steered prompt, which is the real live `apply()` seam
+  - added
+    `running_peer_message_interrupt_yielding_drains_before_next_apply`
+  - the new proof freezes current runtime-adapter behavior for a running peer
+    message:
+    - the peer input is accepted while the first apply is still running
+    - the peer input remains queued while the first apply is blocked
+    - `InterruptYielding` does not hard-cancel the current run
+    - the queued `InterruptYielding` control drains after the current apply
+      returns and before the next queued input starts
+- `meerkat-session/tests/ephemeral_contract.rs`
+  - revalidated
+    `test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+    against the current codebase
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - updated `M1` wording to reflect that adapter/runtime interrupt proofs and
+    the session-layer cooperative interrupt proof now both exist
+
+Why this slice matters:
+
+- it freezes the exact distinction we need before cutover:
+  `CancelCurrentRun` is a deferred hard-cancel request, while
+  `InterruptYielding` is a deferred cooperative interrupt request that the
+  runtime adapter delivers before the next queued input starts
+- it also makes the ownership split explicit instead of smearing it:
+  adapter/runtime owns delivery semantics, while the actual cooperative yield
+  behavior still lives at the session task boundary today
+- that narrows `M1` from “generic interrupt uncertainty” down to the remaining
+  live `cancel_after_boundary` posture
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib interrupt_current_run_returns_not_ready_without_attached_loop`
+- `cargo test -p meerkat-runtime --lib interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes`
+- `cargo test -p meerkat-runtime --lib running_peer_message_interrupt_yielding_drains_before_next_apply`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+
+Result:
+
+- `MeerkatMachine` now has direct proofs for:
+  - plain `interrupt_current_run` rejection without an attached loop
+  - attached deferred hard-cancel semantics
+  - adapter/runtime `InterruptYielding` delivery ordering
+  - session-layer cooperative interrupt without hard cancel
+- the remaining explicit `M1` blocker is the live `cancel_after_boundary`
+  posture
+
+Backtracks encountered:
+
+- the first attached interrupt harness used a peer-progress helper that never
+  entered the live `apply()` seam
+- the first `InterruptYielding` harness mixed two different sources of the
+  signal: the initial attached steered prompt and the running peer message
+- correcting both sharpened the machine story instead of weakening it
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- but `M1` is now materially narrower: interrupt delivery is mostly frozen,
+  while `cancel_after_boundary` remains the clear next blocker
+
+Next likely step:
+
+- continue `M1` by tying live Meerkat effects back to `cancel_after_boundary`,
+  or document explicitly if that posture still lives one layer below the
+  current adapter seam
+
+## Slice 173 - MeerkatMachine narrows M1 to cancel_after_boundary lowering gap
+
+Goal:
+
+- decide whether `M1` still lacks interrupt proofs, or whether the remaining
+  blocker is specifically `cancel_after_boundary`
+- avoid spending more slices rediscovering already-frozen interrupt semantics
+
+What landed:
+
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - added an explicit `M1` read:
+    - `interrupt_current_run` is frozen well enough at the adapter/runtime
+      boundary for plain and attached runtimes
+    - runtime-adapter `InterruptYielding` delivery is frozen as a queued
+      control seam that drains before the next queued apply starts
+    - session-layer cooperative interrupt is still anchored by a live
+      `meerkat-session` proof and does not hard-cancel the turn
+    - the remaining `M1` blocker is `cancel_after_boundary`
+- repo trace:
+  - searched for live `TurnExecutionInput::CancelAfterBoundary` callsites
+  - current results show only authority-local uses in
+    `meerkat-core/src/turn_execution_authority.rs`
+  - no live Meerkat lowering path was found yet in the adapter, runtime loop,
+    session layer, or runner code
+
+Why this slice matters:
+
+- it converts `M1` from a vague freeze item into a precise remaining problem
+- the blocker is no longer “interrupt semantics are unclear”
+- the blocker is “`cancel_after_boundary` does not yet have a discovered live
+  Meerkat lowering outside the authority itself”
+- that is a much more actionable cutover fact: the next move is either to
+  surface the lowering or to classify the gap explicitly before cutover
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+- `rg -n "TurnExecutionInput::CancelAfterBoundary|CancelAfterBoundary \\{" /Users/luka/.codex/worktrees/c5c6/meerkat`
+
+Result:
+
+- `M1` is now mostly frozen on the interrupt side
+- the remaining blocker is the missing discovered live lowering for
+  `cancel_after_boundary`
+
+Backtracks encountered:
+
+- no owner-boundary backtrack in the final read
+- the useful negative result was the repo trace itself: no live lowering path
+  was found, so this cannot honestly be marked frozen yet
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate
+- but the gate is now failing `M1` for one narrow reason instead of a broad
+  interrupt/cancel cloud
+
+Next likely step:
+
+- either surface a concrete live `cancel_after_boundary` lowering path, or
+  move to `M2` while carrying `cancel_after_boundary` as an explicit Meerkat
+  freeze blocker that still needs a write-side landing
+
+## Slice 174 - MeerkatMachine freezes M1 as an exact-current-state asset
+
+Goal:
+
+- close `M1` honestly enough to stop rediscovering interrupt semantics
+- freeze the exact current Meerkat boundary without inventing a live
+  `cancel_after_boundary` lowering
+
+What landed:
+
+- `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+  - added a dedicated exact-current-state freeze note for Meerkat `M1`
+  - freezes:
+    - plain and attached `interrupt_current_run`
+    - runtime-adapter `InterruptYielding`
+    - session-layer cooperative interrupt
+  - classifies `cancel_after_boundary` as authority-local or target-state
+    until a real lowering exists
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - flipped `M1` to `Done`
+  - made the exact current freeze decision explicit
+  - moved immediate execution order on to `M2`
+- `docs/architecture/two-kernel-research/README.md`
+  - added the Meerkat `M1` freeze note to the active artifact index
+
+Why this slice matters:
+
+- it turns `M1` from an open research item into a freezable cutover asset
+- it also prevents a false freeze by separating:
+  - live interrupt semantics that are now proven
+  - `cancel_after_boundary`, which is still not a discovered live Meerkat
+    lowering
+- that is the exact kind of exact-vs-target-state classification the cutover
+  gate requires before we move into the remaining Meerkat freeze blockers
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+- `git diff --check`
+
+Result:
+
+- `M1` is resolved for the exact current Meerkat cutover boundary
+- the next Meerkat freeze blocker is now `M2`: detached-wake and
+  continuation interaction
+
+Backtracks encountered:
+
+- none in the final freeze landing itself
+- the important backtrack was already incorporated into the freeze asset:
+  `cancel_after_boundary` was removed from the frozen live boundary instead of
+  being promoted without a discovered lowering
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side of the gate overall
+- but `M1` no longer blocks semantic freeze
+
+Next likely step:
+
+- start `M2` by classifying exact current detached-wake and continuation
+  behavior across legacy and feed-backed paths
+
+## Slice 175 - MeerkatMachine fixes feed-backed detached-wake startup race
+
+Goal:
+
+- make the feed-backed detached-wake path honest enough to freeze
+- verify that a background completion can wake a freshly registered idle
+  runtime without relying on a manual prompt trigger
+
+What landed:
+
+- `meerkat-runtime/src/runtime_loop.rs`
+  - changed feed-backed loop seeding so runtime-backed cursor state always wins
+    over the current feed watermark, even when the cursor is all zeros
+  - added direct runtime-loop proofs:
+    - `maybe_inject_feed_wake_feed_path_injects_inline_continuation_when_quiescent`
+    - `maybe_inject_feed_wake_legacy_path_sets_signaled_without_inline_injection`
+- `meerkat-runtime/tests/detached_wake_contract.rs`
+  - added
+    `choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_trigger`
+  - updated the stale detached-wake comments so they describe the current
+    runtime-loop-owned model instead of a retired waker-task story
+
+Why this slice matters:
+
+- the first direct idle feed-backed proof started red and exposed a real race:
+  a newly spawned runtime loop could seed from the current feed watermark and
+  silently skip a background completion that landed before its first select
+  iteration
+- fixing that race turns detached wake into a freezable exact-current seam
+  instead of a timing-sensitive maybe
+- it also cleanly separates:
+  - canonical feed-backed inline injection
+  - legacy `DetachedWakeState` signaled-notify fallback
+
+Verification:
+
+- `cargo test -p meerkat-runtime --test detached_wake_contract choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_trigger`
+- `cargo test -p meerkat-runtime --lib maybe_inject_feed_wake_feed_path_injects_inline_continuation_when_quiescent`
+- `cargo test -p meerkat-runtime --lib maybe_inject_feed_wake_legacy_path_sets_signaled_without_inline_injection`
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+
+Result:
+
+- fresh registered runtimes no longer skip early background completions on the
+  feed-backed detached-wake path
+- feed-backed and legacy detached-wake behavior now both have direct
+  runtime-loop proofs
+
+Backtracks encountered:
+
+- yes: the first idle feed-backed proof failed
+- that failure was a real startup race in the loop watermark seeding, not a
+  bad test
+- fixing the code was the honest move; freezing around the race would have
+  been architecture debt
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side overall
+- but `M2` is now ready to freeze as an exact-current-state asset
+
+Next likely step:
+
+- land the `M2` freeze note and move the Meerkat checklist on to `M3`
+
+## Slice 176 - MeerkatMachine freezes M2 as an exact-current-state asset
+
+Goal:
+
+- close `M2` honestly enough to stop rediscovering detached-wake semantics
+- classify canonical feed-backed behavior separately from the legacy
+  compatibility fallback
+
+What landed:
+
+- `docs/architecture/two-kernel-research/meerkat-m2-freeze.md`
+  - added a dedicated exact-current-state freeze note for detached wake and
+    continuation interaction
+  - freezes:
+    - canonical feed-backed idle and post-drain continuation injection
+    - deferred non-quiescent behavior
+    - completion-kind filtering
+    - continuation shape
+    - legacy `DetachedWakeState` compatibility behavior
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - flipped `M2` to `Done`
+  - removed detached wake from the remaining Meerkat freeze blockers
+  - moved immediate execution order on to `M3`
+- `docs/architecture/two-kernel-research/README.md`
+  - added the Meerkat `M2` freeze note to the active artifact index
+
+Why this slice matters:
+
+- it converts `M2` from a lingering historical seam into a frozen exact-current
+  cutover asset
+- it also makes the compatibility boundary explicit instead of letting the
+  legacy latch path blur together with the registered-runtime feed path
+- that is the exact sort of exact-vs-compatibility classification the cutover
+  gate requires before we move into the remaining Meerkat blockers
+
+Verification:
+
+- `cargo test -p meerkat-runtime --test detached_wake_contract`
+- `cargo test -p meerkat-runtime --lib maybe_inject_feed_wake_feed_path_injects_inline_continuation_when_quiescent`
+- `cargo test -p meerkat-runtime --lib maybe_inject_feed_wake_legacy_path_sets_signaled_without_inline_injection`
+
+Result:
+
+- `M2` is resolved for the exact current Meerkat cutover boundary
+- the next Meerkat freeze blocker is now `M3`: turn / ops / barrier coupling
+
+Backtracks encountered:
+
+- none in the final freeze landing itself
+- the key backtrack was already folded into the freeze asset: the startup race
+  was fixed instead of being classified as an acceptable current behavior
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side overall
+- but `M2` no longer blocks semantic freeze
+
+Next likely step:
+
+- start `M3` by mapping exact current turn / ops / barrier coupling on the
+  live runtime path
+
+## Slice 177 - MeerkatMachine adversarial M1 re-audit confirms freeze asset
+
+Goal:
+
+- challenge `M1` after the later Meerkat convergence work instead of assuming
+  the older freeze note is still accurate
+- verify that no newly surfaced live code path quietly invalidates the frozen
+  exact-current interrupt/cancel story
+
+What landed:
+
+- re-audited `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+  against the current codebase
+- re-traced live interrupt and cancel-adjacent callsites across:
+  - `meerkat-runtime`
+  - `meerkat-session`
+  - `meerkat-core`
+  - `meerkat`
+- confirmed that the current live boundary still matches the frozen split:
+  - plain and attached `interrupt_current_run`
+  - runtime-adapter `InterruptYielding`
+  - session-layer cooperative `interrupt_yielding`
+- confirmed again that `cancel_after_boundary` still has authority and
+  snapshot presence, but no discovered live runtime/session lowering
+
+Why this slice matters:
+
+- later Meerkat work touched adjacent runtime behavior, so `M1` needed an
+  explicit re-audit before we kept treating it as closed
+- this slice converts “we froze it once” into “we rechecked it after more
+  runtime work and it still holds”
+- that is the right bar for keeping `M1` out of the remaining freeze blockers
+
+Verification:
+
+- `rg -n "CancelAfterBoundary|cancel_after_boundary|interrupt_current_run|InterruptYielding|interrupt_yielding" ...`
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+
+Result:
+
+- `M1` remains frozen as an exact-current-state asset
+- no new live lowering for `cancel_after_boundary` was discovered
+- no post-freeze drift was found in the interrupt/cooperative-interrupt split
+
+Backtracks encountered:
+
+- none
+- the useful result was negative: the audit did not uncover any hidden live
+  path that would force `M1` back open
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side overall
+- `M1` remains done and does not block Meerkat freeze
+
+Next likely step:
+
+- continue on `M3` rather than reopening `M1`
+
+## Slice 178 - MeerkatMachine hardens M1 into a review-ready freeze asset
+
+Goal:
+
+- make `M1` easier to review without reopening it for target-state design work
+- turn the existing freeze note into a self-contained asset with an explicit
+  verification lane and explicit reopen conditions
+
+What landed:
+
+- `docs/architecture/two-kernel-research/meerkat-m1-freeze.md`
+  - added a dedicated reviewer verification lane
+  - added explicit reopen conditions
+  - added explicit non-reopen conditions so adjacent Meerkat work does not
+    accidentally drag `M1` back open
+  - marked the note as a review-ready exact-current-state asset
+- `docs/architecture/two-kernel-research/meerkat-cutover-checklist.md`
+  - updated the current `M1` read to reflect that the freeze note is now
+    review-ready, not merely present
+
+Why this slice matters:
+
+- the blocker was no longer semantic uncertainty; it was review clarity
+- this slice makes it obvious what evidence reviewers should rerun and what
+  kinds of future changes really would require reopening `M1`
+- that is the right final packaging step before we move full attention to the
+  remaining Meerkat freeze blockers
+
+Verification:
+
+- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-session --test ephemeral_contract test_interrupt_yielding_interrupts_cooperative_wait_without_cancel`
+- `git diff --check`
+
+Result:
+
+- `M1` remains frozen as an exact-current-state asset
+- the asset is now review-ready and self-contained
+- no new live `cancel_after_boundary` lowering was discovered
+
+Backtracks encountered:
+
+- none
+- this slice intentionally avoided inventing new semantics; it only hardened
+  the freeze boundary and reviewer guidance
+
+Cutover gate read:
+
+- `MeerkatMachine` remains on the observability side overall
+- `M1` is fully packaged and no longer needs more work before review
+
+Next likely step:
+
+- move to `M3` and keep `M1` closed unless one of the explicit reopen
+  conditions is triggered

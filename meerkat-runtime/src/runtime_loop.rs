@@ -321,9 +321,12 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
-        // Seed from epoch cursor state if available (runtime-backed surfaces),
-        // otherwise fall back to the feed watermark to avoid replaying historical
-        // completions from a prior runtime loop (e.g., after stop/resume).
+        // Seed from epoch cursor state when available (runtime-backed surfaces).
+        // Even an all-zero cursor must win over the feed watermark so a fresh
+        // runtime loop cannot silently skip background completions that land
+        // before the task reaches its first select iteration. Only callers that
+        // do not provide cursor state fall back to the feed watermark to avoid
+        // replaying historical completions.
         let initial_watermark = epoch_cursor_state
             .as_ref()
             .map(|cs| {
@@ -333,14 +336,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 let inj = cs
                     .runtime_last_injected_seq
                     .load(std::sync::atomic::Ordering::Acquire);
-                // Use the max of observed/injected as the initial watermark only
-                // if non-zero (recovered state); otherwise fall back to feed.
-                let recovered = obs.max(inj);
-                if recovered > 0 {
-                    recovered
-                } else {
-                    completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0)
-                }
+                obs.max(inj)
             })
             .unwrap_or_else(|| completion_feed.as_ref().map(|f| f.watermark()).unwrap_or(0));
         let mut observed_seq: meerkat_core::completion_feed::CompletionSeq = initial_watermark;
@@ -842,6 +838,44 @@ mod tests {
     use super::*;
     use crate::input::*;
     use chrono::Utc;
+    use std::sync::Arc;
+
+    use meerkat_core::ops_lifecycle::{
+        OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+    };
+    use meerkat_core::types::SessionId;
+
+    fn background_spec(name: &str) -> OperationSpec {
+        OperationSpec {
+            id: meerkat_core::ops_lifecycle::OperationId::new(),
+            kind: OperationKind::BackgroundToolOp,
+            owner_session_id: SessionId::new(),
+            display_name: name.into(),
+            source_label: "runtime-loop-test".into(),
+            child_session_id: None,
+            expect_peer_channel: false,
+        }
+    }
+
+    fn op_result(id: &meerkat_core::ops_lifecycle::OperationId, content: &str) -> OperationResult {
+        OperationResult {
+            id: id.clone(),
+            content: content.into(),
+            is_error: false,
+            duration_ms: 42,
+            tokens_used: 7,
+        }
+    }
+
+    fn make_shared_ephemeral_driver(runtime_id: &str) -> crate::session_adapter::SharedDriver {
+        Arc::new(crate::tokio::sync::Mutex::new(
+            crate::session_adapter::DriverEntry::Ephemeral(
+                crate::driver::ephemeral::EphemeralRuntimeDriver::new(
+                    crate::identifiers::LogicalRuntimeId::new(runtime_id),
+                ),
+            ),
+        ))
+    }
 
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(PromptInput {
@@ -1369,6 +1403,94 @@ mod tests {
 
         assert!(!state.pending.load(std::sync::atomic::Ordering::Acquire));
         assert!(!state.signaled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_feed_path_injects_inline_continuation_when_quiescent() {
+        let driver = make_shared_ephemeral_driver("feed-inline");
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+
+        let spec = background_spec("feed-inline");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+
+        let feed = registry.completion_feed_handle();
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            Some(feed.as_ref()),
+            None,
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+        )
+        .await;
+
+        assert!(
+            injected,
+            "feed-backed path should inject inline when quiescent"
+        );
+        assert_eq!(observed_seq, feed.watermark());
+        assert_eq!(last_injected_seq, feed.watermark());
+
+        let mut guard = driver.lock().await;
+        assert_eq!(guard.as_driver().active_input_ids().len(), 1);
+        let (_input_id, input) = guard
+            .dequeue_next()
+            .expect("continuation should be queued inline");
+        match input {
+            Input::Continuation(continuation) => {
+                assert_eq!(continuation.reason, "detached_background_op_completed");
+                assert_eq!(
+                    continuation.handling_mode,
+                    meerkat_core::types::HandlingMode::Steer
+                );
+            }
+            other => panic!("expected inline continuation injection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_legacy_path_sets_signaled_without_inline_injection() {
+        let driver = make_shared_ephemeral_driver("legacy-signal");
+        let state = Arc::new(crate::detached_wake::DetachedWakeState::new());
+        state
+            .pending
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+
+        let injected = maybe_inject_feed_wake(
+            &driver,
+            None,
+            Some(&state),
+            &mut observed_seq,
+            &mut last_injected_seq,
+            None,
+        )
+        .await;
+
+        assert!(
+            !injected,
+            "legacy detached wake should only signal the idle arm, not inject inline"
+        );
+        assert!(state.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(state.signaled.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(observed_seq, 0);
+        assert_eq!(last_injected_seq, 0);
+
+        let guard = driver.lock().await;
+        assert!(
+            guard.as_driver().active_input_ids().is_empty(),
+            "legacy signaling path should not enqueue a continuation inline"
+        );
     }
 
     // --- execution_kind stamping tests ---

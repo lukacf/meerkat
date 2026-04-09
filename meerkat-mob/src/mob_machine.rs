@@ -225,6 +225,9 @@ pub(crate) enum MobMachineInvariantViolation {
         status: MobRunStatus,
         completed_at_present: bool,
     },
+    TrackedRunMissingOrderedSteps {
+        run_id: RunId,
+    },
     TrackedRunOrderedStepsDuplicate {
         run_id: RunId,
         step_id: StepId,
@@ -307,6 +310,15 @@ pub(crate) enum MobMachineInvariantViolation {
         run_id: RunId,
         step_id: StepId,
         dependency_step_id: StepId,
+    },
+    TrackedRunDuplicateDependency {
+        run_id: RunId,
+        step_id: StepId,
+        dependency_step_id: StepId,
+    },
+    TrackedRunSelfDependency {
+        run_id: RunId,
+        step_id: StepId,
     },
     TrackedRunStepStatusUnknownStep {
         run_id: RunId,
@@ -855,6 +867,14 @@ fn push_tracked_run_store_mismatches(
             );
         }
 
+        if run_projection.ordered_steps.is_empty() {
+            violations.push(
+                MobMachineInvariantViolation::TrackedRunMissingOrderedSteps {
+                    run_id: run_id.clone(),
+                },
+            );
+        }
+
         if run_projection.consecutive_failure_count > run_projection.failure_count {
             violations.push(
                 MobMachineInvariantViolation::TrackedRunConsecutiveFailureCountExceedsFailureCount {
@@ -985,6 +1005,25 @@ fn push_tracked_run_store_mismatches(
                             dependency_step_id: dependency_step_id.clone(),
                         },
                     );
+                }
+                let duplicate_dependency_count = dependencies
+                    .iter()
+                    .filter(|candidate| *candidate == dependency_step_id)
+                    .count();
+                if duplicate_dependency_count > 1 {
+                    violations.push(
+                        MobMachineInvariantViolation::TrackedRunDuplicateDependency {
+                            run_id: run_id.clone(),
+                            step_id: step_id.clone(),
+                            dependency_step_id: dependency_step_id.clone(),
+                        },
+                    );
+                }
+                if dependency_step_id == step_id {
+                    violations.push(MobMachineInvariantViolation::TrackedRunSelfDependency {
+                        run_id: run_id.clone(),
+                        step_id: step_id.clone(),
+                    });
                 }
             }
         }
@@ -1982,6 +2021,198 @@ mod tests {
                 failure_count: 1,
                 consecutive_failure_count: 2,
             } if run_id == &flow_run_id
+        )));
+    }
+
+    #[test]
+    fn validate_mob_machine_snapshot_reports_tracked_run_without_ordered_steps() {
+        let flow_run_id = RunId::new();
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([flow_run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([flow_run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(flow_run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster: Roster::new(),
+            members: Vec::new(),
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                flow_run_id.clone(),
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: Vec::new(),
+                    step_dependencies: BTreeMap::new(),
+                    step_dependency_modes: BTreeMap::new(),
+                    step_has_conditions: BTreeMap::new(),
+                    step_branches: BTreeMap::new(),
+                    step_collection_policy_kinds: BTreeMap::new(),
+                    step_quorum_thresholds: BTreeMap::new(),
+                    step_statuses: BTreeMap::new(),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let violations = validate_mob_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MobMachineInvariantViolation::TrackedRunMissingOrderedSteps { run_id }
+                if run_id == &flow_run_id
+        )));
+    }
+
+    #[test]
+    fn validate_mob_machine_snapshot_reports_tracked_run_self_dependency() {
+        let flow_run_id = RunId::new();
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([flow_run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([flow_run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(flow_run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster: Roster::new(),
+            members: Vec::new(),
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                flow_run_id.clone(),
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: vec![StepId::from("start")],
+                    step_dependencies: BTreeMap::from([(
+                        StepId::from("start"),
+                        vec![StepId::from("start")],
+                    )]),
+                    step_dependency_modes: BTreeMap::from([(
+                        StepId::from("start"),
+                        DependencyMode::All,
+                    )]),
+                    step_has_conditions: BTreeMap::from([(StepId::from("start"), false)]),
+                    step_branches: BTreeMap::from([(StepId::from("start"), None)]),
+                    step_collection_policy_kinds: BTreeMap::from([(
+                        StepId::from("start"),
+                        RunCollectionPolicyKind::All,
+                    )]),
+                    step_quorum_thresholds: BTreeMap::from([(StepId::from("start"), 0)]),
+                    step_statuses: BTreeMap::new(),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let violations = validate_mob_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MobMachineInvariantViolation::TrackedRunSelfDependency { run_id, step_id }
+                if run_id == &flow_run_id && step_id == &StepId::from("start")
+        )));
+    }
+
+    #[test]
+    fn validate_mob_machine_snapshot_reports_tracked_run_duplicate_dependency() {
+        let flow_run_id = RunId::new();
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([flow_run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([flow_run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(flow_run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster: Roster::new(),
+            members: Vec::new(),
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                flow_run_id.clone(),
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: vec![StepId::from("start"), StepId::from("dep")],
+                    step_dependencies: BTreeMap::from([
+                        (
+                            StepId::from("start"),
+                            vec![StepId::from("dep"), StepId::from("dep")],
+                        ),
+                        (StepId::from("dep"), Vec::new()),
+                    ]),
+                    step_dependency_modes: BTreeMap::from([
+                        (StepId::from("start"), DependencyMode::All),
+                        (StepId::from("dep"), DependencyMode::All),
+                    ]),
+                    step_has_conditions: BTreeMap::from([
+                        (StepId::from("start"), false),
+                        (StepId::from("dep"), false),
+                    ]),
+                    step_branches: BTreeMap::from([
+                        (StepId::from("start"), None),
+                        (StepId::from("dep"), None),
+                    ]),
+                    step_collection_policy_kinds: BTreeMap::from([
+                        (StepId::from("start"), RunCollectionPolicyKind::All),
+                        (StepId::from("dep"), RunCollectionPolicyKind::All),
+                    ]),
+                    step_quorum_thresholds: BTreeMap::from([
+                        (StepId::from("start"), 0),
+                        (StepId::from("dep"), 0),
+                    ]),
+                    step_statuses: BTreeMap::new(),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let violations = validate_mob_machine_snapshot(&snapshot);
+
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            MobMachineInvariantViolation::TrackedRunDuplicateDependency {
+                run_id,
+                step_id,
+                dependency_step_id,
+            }
+                if run_id == &flow_run_id
+                    && step_id == &StepId::from("start")
+                    && dependency_step_id == &StepId::from("dep")
         )));
     }
 

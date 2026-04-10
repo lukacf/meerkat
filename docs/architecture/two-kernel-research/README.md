@@ -31,6 +31,29 @@ Likely artifacts to keep here:
 - Meerkat coverage matrix for target alphabet and regions
 - Meerkat glossary for frozen target terminology
 - Meerkat fairness assumptions for target-state liveness work
+- top-level exact-current MobMachine freeze note
+- top-level target-state MobMachine freeze note
+- Mob input/effect alphabet
+- Mob lowering map
+- Mob ownership decisions
+- Mob cutover checklist
+- Mob proof-obligations handoff for TLA+
+- Mob final proof handoff and audit envelope
+- Mob final freeze closeout
+- Mob final package audit
+- Mob target self-containment audit
+- Mob final traceability audit
+- Mob proof-coverage handoff for TLA+
+- Mob effect-coverage handoff for target effects
+- Mob flow-family coverage handoff for target flows
+- Mob refinement map from exact-current snapshot to target regions
+- Mob refinement-delta handoff against exact-current behavior
+- Mob transition catalog for target-state proof work
+- Mob state schema and canonical initial state
+- Mob derived predicates for target-state proof work
+- Mob coverage matrix for target alphabet and regions
+- Mob glossary for frozen target terminology
+- Mob fairness assumptions for target-state liveness work
 - experimental target-state TLA+ scaffold and bounded TLC configs
 - implementation progress log
 - Meerkat kernel shape
@@ -46,3 +69,16 @@ Likely artifacts to keep here:
 Current assumption:
 
 - scheduling remains outside the present kernel boundary unless we explicitly decide to promote it into a separate third kernel
+
+Current freeze status:
+
+- `M1 = MeerkatMachine` has a frozen target package plus bounded TLC base and
+  stress passes
+- `M2 = MobMachine` now also has a frozen target package plus bounded TLC base
+  and stress passes, including flow dependency-ready dispatch, explicit
+  work/step coupling, explicit quorum contribution state, terminal run work
+  cleanup, task/run terminal-binding cleanup, per-identity history alignment,
+  explicit per-step dispatch-mode state, a closed target-state cutover
+  checklist, explicit proof / effect / refinement coverage handoffs, and an
+  explicit proof handoff that distinguishes canonical bounded passes from a
+  wider exploratory audit envelope

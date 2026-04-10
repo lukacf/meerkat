@@ -89,6 +89,64 @@ At this point the target `MeerkatMachine` freeze is not just documented and
 cross-linked; it has an executable bounded model that survives a nontrivial
 safety suite.
 
+## 2026-04-10 — Slice 220: Mob target freeze package closes
+
+The Mob target-state package is now explicit enough to review as one frozen
+asset instead of as a scattered set of passing TLC runs.
+
+What closed in this slice:
+
+- added `mob-cutover-checklist.md` as the explicit `M2 = MobMachine`
+  target-state close-out artifact
+- reran bounded TLC after the latest work/step and quorum-contribution
+  strengthenings:
+  - base config passed
+  - stress config passed
+- reran the target alphabet coverage audit against
+  `mob-machine-coverage-matrix.md` and `tla/MobMachineTarget.tla`
+- confirmed the audit is clean:
+  - `MISSING_INPUTS []`
+  - `EXTRA_INPUTS []`
+  - `MISSING_EFFECTS []`
+  - `EXTRA_EFFECTS []`
+- confirmed hedge sweeps over active `mob-machine-*` freeze docs are clean
+
+Why this matters:
+
+- the Mob target machine now has the same kind of explicit close-out artifact
+  that made the Meerkat freeze reviewable
+- the target machine is no longer “probably complete if you read enough docs”
+- alphabet coverage, executable TLC, and freeze-package completeness all now
+  point at the same answer: `M2 = MobMachine` is frozen strongly enough to
+  start TLA+ proof work
+
+## 2026-04-10 — Slice 221: Mob handoff package gains alphabet, lowering map, and ownership decisions
+
+The Mob freeze package was broad and executable, but it was still missing the
+same handoff artifacts that made the Meerkat freeze review-proof.
+
+What landed:
+
+- `mob-input-effect-alphabet.md`
+- `mob-lowering-map.md`
+- `mob-ownership-decisions.md`
+
+Why this matters:
+
+- the target Mob alphabet is now explicit as a handoff artifact, not just
+  recoverable from the transition catalog and coverage matrix
+- implementation refinement no longer depends on remembering the current
+  actor/handle paths from code spelunking alone
+- the remaining target-state ownership choices are now frozen instead of being
+  spread implicitly across older architecture notes
+
+Package alignment updates:
+
+- `mob-machine-freeze.md` now treats those notes as part of the canonical
+  target proof handoff package
+- `mob-cutover-checklist.md` now requires them for `C7`
+- `README.md` and `tla/README.md` now list them in the active Mob package
+
 ## 2026-04-09 — Slice 1: Meerkat runtime spine snapshot
 
 Goal:
@@ -13394,3 +13452,1052 @@ Result:
 - the target single-machine freeze is now materially stronger than the first
   TLC pass, and the added obligations have already forced honest corrections
   into the target model
+
+## Slice 208 - Mob target TLC exposed dispatch-capacity as a terminalization obligation
+
+Goal:
+
+- push the `MobMachine` target scaffold past the first bounded TLC pass without
+  baking in a false running-flow theorem
+
+What landed:
+
+- widened the target model so work submission and step dispatch choose only
+  dispatch-capable members
+- added `FailRunNoDispatchCapacity` as an explicit target transition
+- promoted dispatch-capable-member vocabulary into the Mob freeze, derived
+  predicates, proof obligations, and transition catalog
+- backed out the false state invariant that required dispatch capacity to hold
+  in every running-undispatched state
+
+Why this slice matters:
+
+- TLC found a real target mismatch: a run can still be `Running` while the
+  last dispatch-capable member transitions to `Retiring`, and the honest model
+  response is an explicit failure transition, not a false safety theorem
+
+Verification:
+
+- bounded TLC base after the dispatch-capacity correction
+- bounded TLC stress after the dispatch-capacity correction
+
+Result:
+
+- the Mob target machine now treats dispatch capacity as a terminalization
+  obligation instead of an always-true state invariant
+
+## Slice 209 - Mob target TLC base and stress are green
+
+Goal:
+
+- confirm the corrected `MobMachine` target state is coherent under bounded TLC
+
+What landed:
+
+- base TLC passed on `MobMachineTarget.cfg`
+- stress TLC passed on `MobMachineTargetStress.cfg`
+- the target scaffold now covers the full Mob input alphabet with no missing
+  transition definitions or `Next` entries
+
+Verification:
+
+- base TLC:
+  - `9,385` states generated
+  - `3,834` distinct states
+  - depth `7`
+- stress TLC:
+  - `45,139` states generated
+  - `16,221` distinct states
+  - depth `8`
+- coverage audit:
+  - `Missing defs: []`
+  - `Missing next: []`
+
+Result:
+
+- the `MobMachine` target scaffold is now executable, bounded, and complete
+  enough to act as a real proof handoff asset
+
+## Slice 210 - Mob freeze package is now a full proof handoff
+
+Goal:
+
+- make the Mob freeze package internally closed, not just TLC-green
+
+What landed:
+
+- updated `tla/README.md` so it accurately reports both Meerkat and Mob target
+  passes and the target corrections TLC forced on Mob
+- added an explicit proof-handoff section to `mob-machine-freeze.md`
+- updated the top-level research README to mark both `M1` and `M2` as frozen
+  target packages with bounded TLC base/stress passes
+
+Why this slice matters:
+
+- without the handoff packaging, the Mob freeze would still depend on local
+  context about which files matter and why the model changed
+
+Verification:
+
+- doc consistency pass across active `mob-machine-*` freeze files
+- `git diff --check`
+
+Result:
+
+- `M2 = MobMachine` now has an honest, self-contained target freeze package
+  that is ready for deeper TLA+ proof work
+
+## Slice 211 - Mob target dispatch now respects dependency readiness
+
+Goal:
+
+- close the biggest remaining flow gap in the target model by making step
+  dispatch depend on actual dependency satisfaction instead of any `None`
+  status slot
+
+What landed:
+
+- added explicit target predicates for:
+  - `AllDependenciesSatisfied`
+  - `AnyDependencySatisfied`
+  - `ReadyDirectDispatchStep`
+  - `ReadyResolvedStep`
+  - `HasDispatchReadyStep`
+- changed `ResolveAnyJoin` so it moves an `Any` join into explicit
+  machine-owned `Pending` state instead of pretending dispatch happened
+- changed `DispatchStep` so it only chooses dependency-ready steps
+- changed `FailRunNoDispatchCapacity` so it only fires when a run has
+  dispatch-ready undispatched work and no dispatch-capable member remains
+
+Why this slice matters:
+
+- before this slice, the target machine could dispatch blocked steps and fail
+  runs for mere blockedness instead of actual dispatch starvation
+- after this slice, the target flow story is materially closer to a real
+  orchestration kernel rather than a loose state bag
+
+Verification:
+
+- bounded TLC base passed after the dependency-ready dispatch correction:
+  - `9,479` states generated
+  - `3,914` distinct states
+  - depth `7`
+- bounded TLC stress passed after the dependency-ready dispatch correction:
+  - `217,271` states generated
+  - `71,736` distinct states
+  - depth `9`
+
+Result:
+
+- the target Mob flow machine now distinguishes blocked work from
+  dispatch-ready work honestly
+
+## Slice 212 - Mob target terminal runs now clear live task bindings
+
+Goal:
+
+- tighten the task-board surface so it behaves like one machine, not a stale
+  projection over terminal runs
+
+What landed:
+
+- added `LiveTaskRunBindingInvariant`
+- changed `CompleteRun`, `FailRun`, `CancelRun`, `FailRunNoDispatchCapacity`,
+  and terminalizing `MarkStepCompleted` / `MarkStepFailed` paths so they clear
+  any live task binding to the terminalized run
+- changed `UpdateTask` so new task attachments only target non-terminal runs
+
+Why this slice matters:
+
+- before this slice, the target model could leave active task bindings pointing
+  at already terminal runs
+- that would have made the task-board region weaker than the frozen machine
+  claims about owning coordination truth
+
+Verification:
+
+- bounded TLC base passed after task/run cleanup tightening:
+  - `9,479` states generated
+  - `3,914` distinct states
+  - depth `7`
+- bounded TLC stress passed after task/run cleanup tightening:
+  - `217,256` states generated
+  - `71,696` distinct states
+  - depth `9`
+
+Result:
+
+- live task/run binding semantics are now part of the honest Mob target
+
+## Slice 213 - TLC rejected a false global history-frontier theorem
+
+Goal:
+
+- strengthen the history surface without baking in the wrong interpretation of
+  per-identity history state
+
+What landed:
+
+- attempted `HistoryFrontierInvariant`
+- TLC immediately falsified it
+- backed it out and replaced it with
+  `HistoryIdentitySequenceInvariant`, which matches current target semantics:
+  `last_seq_by_identity[id] = event_count_by_identity[id]`
+
+Why this slice matters:
+
+- this was an honest backtrack the freeze package needed
+- the model makes clear that `last_seq_by_identity` is per-identity local
+  sequence truth, not a copy of the global frontier
+
+Verification:
+
+- bounded TLC base passed after the history backtrack:
+  - `9,479` states generated
+  - `3,914` distinct states
+  - depth `7`
+- bounded TLC stress passed after the history backtrack:
+  - `217,256` states generated
+  - `71,696` distinct states
+  - depth `9`
+
+Result:
+
+- the Mob history freeze is now stronger and more honest at the same time
+
+## Slice 214 - Mob freeze docs are realigned to the stronger target model
+
+Goal:
+
+- bring the freeze prose back into exact alignment with the target model after
+  the flow/task/history strengthening pass
+
+What landed:
+
+- updated:
+  - `mob-machine-derived-predicates.md`
+  - `mob-machine-proof-obligations.md`
+  - `mob-machine-transition-catalog.md`
+  - `mob-machine-freeze.md`
+  - `mob-machine-state-schema.md`
+  - `tla/README.md`
+  - top-level `README.md`
+- the freeze docs now explicitly say that:
+  - `Any` joins enter explicit ready/pending state before dispatch
+  - only dependency-ready work may dispatch
+  - terminal runs clear live task bindings
+  - per-identity history sequence/count truth stays aligned
+
+Verification:
+
+- doc consistency pass across active `mob-machine-*` freeze files
+- `git diff --check`
+
+Result:
+
+- the Mob freeze package is again honest about what the target model actually
+  proves today
+
+## Slice 215 - Target Mob steps now drain live bound work when they terminalize
+
+Goal:
+
+- stop treating flow-step terminalization and bound-work terminalization as
+  parallel sidecars inside the target machine
+
+What landed:
+
+- added `BoundLiveWork(r, step)` to the target model
+- strengthened `WorkStepStateInvariant` so terminal step states cannot retain
+  live bound work
+- changed `MarkStepCompleted`, `MarkStepFailed`, `MarkStepSkipped`, and
+  `MarkStepCanceled` so they drain any live work bound to that step
+- changed terminalizing `MarkStepFailed` paths to drain residual live work
+  across the run when the run fails
+
+Why this slice matters:
+
+- before this slice, TLC could drive the target machine into a state where a
+  step was already `Canceled` while its bound work still remained live
+- that is exactly the kind of split-brain flow/work story the target Mob
+  kernel is supposed to eliminate
+
+Verification:
+
+- bounded TLC base passed after step/work tightening:
+  - `9,479` states generated
+  - `3,894` distinct states
+  - depth `7`
+- bounded TLC stress passed after step/work tightening:
+  - `208,853` states generated
+  - `67,559` distinct states
+  - depth `9`
+
+Result:
+
+- terminal step transitions now own their bound live work cleanup
+
+## Slice 216 - Target Mob terminal runs now drain residual live bound work
+
+Goal:
+
+- extend the same one-machine cleanup rule from terminal steps to terminal
+  runs
+
+What landed:
+
+- added `BoundLiveWorkForRun(r)` and `TerminalRunWorkInvariant`
+- changed `CompleteRun`, `FailRun`, `CancelRun`, and
+  `FailRunNoDispatchCapacity` so they drain any residual live work bound to
+  the terminalized run
+- changed terminalizing `MarkStepCompleted` / `MarkStepFailed` paths so
+  residual run-bound live work cannot leak past run terminalization
+
+Why this slice matters:
+
+- the previous target model could still have left run-bound live work attached
+  to a completed, failed, or canceled run
+- that would have meant the target kernel still had two partially independent
+  terminalization stories
+
+Verification:
+
+- bounded TLC base passed after run/work tightening:
+  - `9,479` states generated
+  - `3,894` distinct states
+  - depth `7`
+- bounded TLC stress passed after run/work tightening:
+  - `208,853` states generated
+  - `67,559` distinct states
+  - depth `9`
+
+Result:
+
+- terminal runs now own cleanup of residual live bound work too
+
+## Slice 217 - Dispatch lifecycle is now explicit in the target Mob machine
+
+Goal:
+
+- tighten the handoff between dependency resolution, dispatch readiness, and
+  work allocation
+
+What landed:
+
+- added `PendingStepHasNoBoundWorkInvariant`
+- added `DispatchedStepHasBoundWorkInvariant`
+- confirmed they hold under both TLC configs without additional transition
+  changes
+
+Why this slice matters:
+
+- `Pending` now means “machine-owned ready state before dispatch,” not “ready
+  and maybe already carrying work”
+- `Dispatched` now means “there is a bound work record,” not just a label in
+  the flow region
+
+Verification:
+
+- bounded TLC base passed after dispatch lifecycle tightening:
+  - `9,479` states generated
+  - `3,894` distinct states
+  - depth `7`
+- bounded TLC stress passed after dispatch lifecycle tightening:
+  - `208,853` states generated
+  - `67,559` distinct states
+  - depth `9`
+
+Result:
+
+- the target Mob machine now has a materially stronger one-machine story for
+  flow-step dispatch, work allocation, and terminal cleanup
+
+## Slice 218 - Branch groups now prove their shared dependency sets
+
+Goal:
+
+- align the target model with the freeze claim that multi-member branch groups
+  must not silently diverge in dependency shape
+
+What landed:
+
+- added `BranchGroupDependencyInvariant`
+- proved under TLC that steps sharing a non-`None` branch label keep identical
+  dependency sets
+
+Why this slice matters:
+
+- the freeze docs already claimed branch-group dependency agreement was part of
+  the target machine
+- this slice makes the executable model enforce that claim instead of leaving
+  it as prose
+
+Verification:
+
+- bounded TLC base passed:
+  - `9,479` states generated
+  - `3,894` distinct states
+  - depth `7`
+- bounded TLC stress passed:
+  - `208,853` states generated
+  - `67,559` distinct states
+  - depth `9`
+
+Result:
+
+- branch-group structural consistency is now part of the proved target model
+
+## Slice 219 - Quorum collection now has explicit observed-contribution state
+
+Goal:
+
+- stop treating quorum collection as a free-floating step resolution and make
+  contribution progress explicit machine state
+
+What landed:
+
+- added `flows.step_collection_observed`
+- added `RecordCollectionContribution`
+- added `QuorumReady(r, step)`
+- tightened `ResolveCollection` so quorum completion now requires observed
+  contribution count to meet the stored threshold
+- excluded quorum steps from the direct `MarkStepCompleted` path
+- added `QuorumCompletedObservedInvariant`
+
+Why this slice matters:
+
+- before this slice, quorum completion was under-modeled and could resolve
+  without any explicit collected contributions
+- that was too weak for a “fully featured including flows” Mob freeze
+
+Verification:
+
+- bounded TLC base passed after quorum collection strengthening:
+  - `9,479` states generated
+  - `3,894` distinct states
+  - depth `7`
+- bounded TLC stress passed after quorum collection strengthening:
+  - `208,853` states generated
+  - `67,559` distinct states
+  - depth `9`
+
+Result:
+
+- the target Mob machine now models quorum collection progress explicitly
+  instead of treating it as an ungrounded step-resolution shortcut
+
+## Slice 220 - Mob target freeze package closes
+
+Goal:
+
+- close `M2 = MobMachine` as a proof-start-ready target package rather than a
+  pile of partial notes
+
+What landed:
+
+- added the missing Mob close-out artifact: `mob-cutover-checklist.md`
+- verified the bounded TLC base and stress runs on `MobMachineTarget`
+- verified the target alphabet coverage audit is clean
+- verified the active Mob freeze docs no longer carry hedge phrases
+
+Why this slice matters:
+
+- without an explicit Mob close-out asset, the package still looked less
+  settled than `MeerkatMachine`
+- this slice moves `MobMachine` from “strong notes” to “reviewable target
+  freeze package”
+
+Result:
+
+- `M2 = MobMachine` now has a closed target-state cutover checklist and a
+  green executable scaffold
+
+## Slice 221 - Mob handoff package gains alphabet, lowering map, and ownership decisions
+
+Goal:
+
+- make the Mob proof handoff package explicit enough for real TLA+ and later
+  refinement review
+
+What landed:
+
+- added `mob-input-effect-alphabet.md`
+- added `mob-lowering-map.md`
+- added `mob-ownership-decisions.md`
+- wired those artifacts into the Mob freeze, research index, and TLA scaffold
+  README
+
+Why this slice matters:
+
+- the Mob freeze was missing the same handoff surfaces that made the Meerkat
+  package honestly reviewable
+- closing those gaps makes the target machine auditable instead of relying on
+  implicit interpretation
+
+Result:
+
+- the Mob package now has an explicit target alphabet, lowering map, and
+  ownership-decision record
+
+## Slice 222 - Mob derived vocabulary is now fully executable
+
+Goal:
+
+- remove the silent gap between the documented derived Mob vocabulary and the
+  executable TLA model
+
+What landed:
+
+- added the missing derived predicates directly to `MobMachineTarget.tla`,
+  including:
+  - identity/authority helpers
+  - topology helpers
+  - work/run helpers
+  - structural flow helpers
+  - task/history helpers
+- verified that every predicate listed in
+  `mob-machine-derived-predicates.md` now has a direct definition in the TLA
+  model
+
+Why this slice matters:
+
+- before this slice, the docs advertised a larger proof vocabulary than the
+  executable model actually exposed
+- that would have made the freeze package look more complete than it really
+  was
+
+Result:
+
+- the documented Mob derived vocabulary now matches the executable proof
+  surface exactly
+
+## Slice 223 - Mob proof obligations now map explicitly to invariants and fairness
+
+Goal:
+
+- stop implying proof coverage and state it directly
+
+What landed:
+
+- added `mob-machine-proof-coverage.md`
+- added named fairness bundles to `MobMachineTarget.tla` and exposed
+  `TargetFairness` / `FairSpec`
+- aligned `mob-machine-fairness-assumptions.md`,
+  `mob-machine-proof-obligations.md`, `mob-machine-coverage-matrix.md`, the
+  Mob freeze, and the TLA README with that coverage story
+
+Why this slice matters:
+
+- a no-excuses target freeze should make it obvious how each obligation lands:
+  invariant, transition, fairness bundle, or future refinement item
+- this slice closes that last silent handoff gap
+
+Verification:
+
+- derived-predicate coverage audit passed
+- transition-in-`Next` audit remained clean
+- bounded TLC base remained green
+- bounded TLC stress remained green
+
+Result:
+
+- the Mob target package now has explicit proof coverage, not just green TLC
+  and implied intent
+
+## Slice 224 - Mob effect mapping is now explicit
+
+Goal:
+
+- stop relying on implied mapping between named target effects and the
+  executable `effects` region in the TLA model
+
+What landed:
+
+- added `mob-machine-effect-coverage.md`
+- mapped every named target effect to:
+  - one concrete `effects.*` field in `MobMachineTarget.tla`
+  - at least one emitting transition
+
+Why this slice matters:
+
+- before this slice, the freeze package still required readers to infer how
+  semantic effects such as `SubmitWorkToMeerkat` or `PersistMobRun` showed up
+  in the executable model
+- that was too soft for a no-excuses proof handoff
+
+Result:
+
+- the Mob effect surface is now explicit and reviewable
+
+## Slice 225 - Mob target delta is now explicit
+
+Goal:
+
+- make the exact-current vs target-state Mob delta reviewable as a first-class
+  handoff artifact
+
+What landed:
+
+- added `mob-machine-refinement-delta.md`
+- wired it into the freeze, checklist, proof obligations, research index, and
+  TLA scaffold README
+
+Why this slice matters:
+
+- the target machine can now be stronger than the rebased implementation
+  without relying on memory or oral history to explain why
+- that makes later proof and cutover review much safer
+
+Verification:
+
+- bounded TLC base remained green
+- bounded TLC stress remained green
+- transition-in-`Next` audit remained clean
+- derived-predicate coverage audit remained clean
+- hedge sweep over active Mob freeze docs remained clean
+
+Result:
+
+- the Mob target package now has explicit effect coverage and explicit
+  refinement delta, not just target-state notes
+
+## Slice 226 - Mob exact-current abstraction is now explicit
+
+Goal:
+
+- stop making reviewers reconstruct the mapping from today's joined
+  `MobMachineSnapshot` into the frozen target regions
+
+What landed:
+
+- added `mob-machine-refinement-map.md`
+- wired it into the freeze, checklist, proof obligations, research index, and
+  TLA scaffold README
+
+Why this slice matters:
+
+- the package already had an exact-current baseline and a target delta, but it
+  still lacked the explicit abstraction map between them
+- without that map, later proof and cutover review would still depend on
+  interpretation
+
+Result:
+
+- the Mob freeze package now states, region by region, whether each target
+  region is:
+  - strongly mapped from exact-current state
+  - partially mapped
+  - or an explicit target-state promotion
+
+## Slice 227 - Mob target seeds dispatch family as real run-start state
+
+Goal:
+
+- stop treating dispatch family as a documented field without executable
+  run-start semantics
+- close the last flow-family gap between the target freeze and the TLC model
+
+What landed:
+
+- `StartFlowRun` in `tla/MobMachineTarget.tla` now seeds an explicit per-step
+  `step_dispatch_mode` assignment from the ordered-step set of the new run
+- added `AggregateShapePartitionInvariant` so aggregate shape class is total
+  and mutually exclusive for every ordered step
+- strengthened the Mob docs to say the same thing:
+  - `mob-machine-freeze.md`
+  - `mob-machine-state-schema.md`
+  - `mob-machine-transition-catalog.md`
+  - `mob-machine-proof-obligations.md`
+  - `mob-machine-proof-coverage.md`
+- added `mob-machine-flow-family-coverage.md` so the freeze package is explicit
+  about how flow archetypes and dispatch families compose
+
+Why this slice matters:
+
+- before this slice, the target package claimed explicit dispatch-family truth
+  but the executable model still left `step_dispatch_mode` effectively
+  unseeded
+- that was too soft for a no-excuses flow freeze
+
+Verification:
+
+- bounded TLC base passed with explicit dispatch-mode seeding:
+  - `11,051` generated
+  - `4,890` distinct
+  - depth `7`
+- bounded TLC stress passed with explicit dispatch-mode seeding:
+  - `452,920` generated
+  - `156,041` distinct
+  - depth `9`
+- `git diff --check` stayed clean
+
+Result:
+
+- the target `MobMachine` now models dispatch family as real machine state at
+  run start rather than as a purely documentary promise
+- the flow freeze package is explicit about the coverage relationship between:
+  - flow archetypes
+  - dispatch families
+  - aggregate shape class
+
+## Slice 228 - Mob target now records dispatch width as execution-time truth
+
+Goal:
+
+- stop implying that dispatch multiplicity is known at run start
+- make flow-step fan-out / fan-in / one-to-one multiplicity explicit machine
+  state only when dispatch actually occurs
+
+What landed:
+
+- `StartFlowRun` now seeds `step_dispatch_width` to `0` for every ordered step
+- `DispatchStep` now chooses actual dispatch multiplicity at dispatch time and
+  stores it in `step_dispatch_width`
+- direct `SubmitWork` no longer masquerades as implicit flow-step dispatch
+- the target docs now say the same thing across:
+  - `mob-machine-freeze.md`
+  - `mob-machine-state-schema.md`
+  - `mob-machine-transition-catalog.md`
+  - `mob-input-effect-alphabet.md`
+  - `mob-machine-proof-obligations.md`
+  - `mob-machine-proof-coverage.md`
+  - `mob-machine-effect-coverage.md`
+  - `tla/README.md`
+
+Why this slice matters:
+
+- the previous package had explicit dispatch family but still blurred planned
+  shape and executed multiplicity
+- that would have let the proof package overclaim step/work coupling without
+  actually carrying multiplicity as machine truth
+
+Result:
+
+- dispatch width is now honest target machine state
+- bound work count and stored dispatch width are tied together by the target
+  invariants and TLC scaffold
+
+## Slice 229 - Mob target top-level lifecycle is now fully documented
+
+Goal:
+
+- stop leaving the top-level mob lifecycle implicit in the TLA model while the
+  prose package focused only on member and flow lifecycle
+
+What landed:
+
+- added `StopMob`, `CompleteMob`, and `DestroyMob` to the transition catalog
+- added top-level lifecycle obligations and proof coverage
+- added top-level lifecycle semantics to `mob-machine-freeze.md`
+- tightened target-facing wording so target docs now describe machine
+  permissions and guarantees directly instead of relying on loose “may/should”
+  phrasing
+
+Why this slice matters:
+
+- the target package is not honestly single-machine if the machine-level phase
+  transitions only exist in the executable model
+- reviewers should not have to infer terminal mob lifecycle from `Next`
+
+Result:
+
+- top-level mob lifecycle is now first-class in the target package, not just in
+  the scaffold
+
+## Slice 230 - Mob freeze package passed final mechanical honesty audit
+
+Goal:
+
+- verify that the target package is actually closed, not merely broad
+
+What landed:
+
+- transition catalog and TLA `Next` arms were checked mechanically and now
+  match exactly
+- target-facing hedge sweep is clean; the only remaining hedge hit is the TLC
+  README note about bounded deadlock-check configuration
+- `git diff --check` remains clean
+
+Why this slice matters:
+
+- a freeze package can still hide a silent mismatch between prose and model
+  even when TLC passes
+- this closes the last silent-gap risk for the target `MobMachine`
+
+Result:
+
+- `MobMachine` now has a fully featured target freeze package that is honest
+  about flows, dispatch family, dispatch width, top-level lifecycle, effects,
+  obligations, and refinement framing
+- the next step is real TLA+ proof work, not more freeze repair
+
+## Slice 231 - Mob freeze gets an explicit proof handoff and wider audit envelope
+
+Goal:
+
+- stop leaving the Mob freeze handoff implicit in a pile of package docs
+- distinguish canonical bounded proof gates from wider exploratory search
+
+What landed:
+
+- added `mob-machine-proof-handoff.md`
+- linked the handoff into the target freeze and research index
+- added `MobMachineTargetAudit.cfg` as an explicitly exploratory widened TLC
+  config
+- recorded the wider search envelope in the handoff and TLA README
+
+Why this slice matters:
+
+- a freeze can still be misleading if it collapses “passed bounded gate” and
+  “explored more widely without failure” into one claim
+- this makes the proof posture honest for reviewers before the full proof pass
+
+Verification:
+
+- canonical bounded base and stress TLC remain the passing freeze gates
+- exploratory audit reached:
+  - `8,042,572` generated
+  - `2,379,112` distinct
+  - depth `11`
+  - with no invariant violations observed before deliberate termination
+- `git diff --check` stayed clean
+
+Result:
+
+- `MobMachine` now has the same style of explicit proof handoff as
+  `MeerkatMachine`
+- the freeze package cleanly separates:
+  - canonical bounded passes
+  - exploratory widened search
+  - next-step proof work
+
+## Slice 232 - Bounded liveness probe stays a proof target, not a freeze gate
+
+Goal:
+
+- pressure-test the frozen Mob target with real temporal properties
+- avoid treating bounded-liveness artifacts as freeze-complete proof
+
+What landed:
+
+- added named temporal properties to `MobMachineTarget.tla` for:
+  - destroyed-state absorption
+  - pending-spawn eventual clearance
+  - kickoff eventual clearance
+- ran an exploratory bounded `FairSpec` TLC pass against those properties
+- accepted TLC's warning that liveness with `StateConstraint` is not an honest
+  freeze-complete gate
+- updated the proof handoff and fairness docs to classify those temporal claims
+  as the next proof phase rather than as completed freeze checks
+
+Why this slice matters:
+
+- this prevents us from quietly collapsing “we have fairness assumptions” into
+  “we have already proved liveness”
+- the failed bounded temporal run is useful learning, not a reason to weaken
+  the target freeze
+
+What TLC taught us:
+
+- the counterexample was shaped by the bounded `step_count` cap rather than a
+  credible target-machine semantic hole
+- bounded safety remains the right canonical freeze gate
+
+Result:
+
+- the Mob freeze package is now more honest about the boundary between:
+  - completed bounded safety work
+  - exploratory liveness probing
+  - the upcoming real temporal proof pass
+
+## Slice 233 - Mob freeze gets an explicit closeout artifact
+
+Goal:
+
+- stop leaving freeze completion implied by the package shape
+- make it explicit when freeze authoring ends and proof work begins
+
+What landed:
+
+- added `mob-machine-freeze-closeout.md`
+- linked that closeout from the top-level target freeze and research index
+- made the reopen criteria explicit instead of leaving them implicit in the
+  proof handoff
+
+Why this slice matters:
+
+- a large package can still feel “maybe still open” even when the target
+  machine is actually frozen
+- this gives reviewers one canonical note for why freeze authoring is complete
+  and what would legitimately reopen it
+
+Result:
+
+- `MobMachine` now has the same kind of explicit freeze closeout posture as the
+  Meerkat side
+- the next honest step is proof, not more freeze authoring
+
+## Slice 234 - Mob freeze gets an explicit package-level audit
+
+Goal:
+
+- close the last reviewer ambiguity between semantic `Pending` vocabulary and
+  unresolved authoring markers
+- make package completeness explicit instead of inferred
+
+What landed:
+
+- added `mob-machine-package-audit.md`
+- recorded presence of the full target package
+- recorded the canonical bounded mechanical checks
+- recorded that the remaining open-marker sweep hits are semantic status words,
+  not unresolved TODOs
+
+Why this slice matters:
+
+- a large freeze package can still feel “not really closed” if grep-style
+  marker sweeps produce hits without context
+- this closes that ambiguity directly
+
+Result:
+
+- `MobMachine` now has an explicit package-level audit in addition to the proof
+  handoff and closeout
+- the next honest step is proof, not more freeze assembly
+
+## Slice 235 - Mob freeze gets an explicit self-containment audit
+
+Goal:
+
+- verify that the target package stands on its own rather than relying on the
+  exact-current baseline for machine meaning
+
+What landed:
+
+- added `mob-machine-self-containment-audit.md`
+- recorded that the exact-current Mob docs remain comparison/refinement aids,
+  not hidden semantic dependencies of the target machine
+
+Why this slice matters:
+
+- a freeze package is not fully honest if reviewers must reconstruct target
+  semantics from the implementation baseline
+- this closes the last target/current entanglement concern directly
+
+Result:
+
+- `MobMachine` target semantics are now explicitly self-contained
+- the next honest step remains proof, not more freeze authoring
+
+## Slice 236 - Mob freeze gets an explicit traceability audit
+
+Goal:
+
+- prove that the named target package vocabulary resolves to the executable
+  model rather than relying on reviewer trust
+
+What landed:
+
+- added `mob-machine-traceability-audit.md`
+- recorded that target-facing file references resolve
+- recorded that all documented transition names resolve to executable TLA
+  definitions
+- recorded that all documented derived predicate names resolve to executable TLA
+  definitions
+
+Why this slice matters:
+
+- a freeze package is stronger when named docs, named transitions, and named
+  predicates are mechanically traceable to the model
+- this closes the last “is this only narrative?” concern directly
+
+Result:
+
+- the target-facing `MobMachine` package is now document-complete, self-
+  contained, package-audited, and traceable to the executable model
+- the next honest step is proof, not more freeze authoring
+
+## Slice 237 - Mob freeze closure artifacts become first-class freeze inputs
+
+Goal:
+
+- remove the last gap between “the audits exist” and “the official freeze path
+  actually treats them as part of the closed package”
+
+What landed:
+
+- updated `mob-cutover-checklist.md` so the current posture and final review
+  criteria explicitly include:
+  - `mob-machine-proof-handoff.md`
+  - `mob-machine-self-containment-audit.md`
+  - `mob-machine-traceability-audit.md`
+  - `tla/MobMachineTargetAudit.cfg`
+- updated `mob-machine-proof-handoff.md` so the package-level reviewer audits
+  are part of the official handoff set
+- updated `mob-machine-package-audit.md` so package presence now explicitly
+  includes `mob-machine-self-containment-audit.md` and
+  `mob-machine-traceability-audit.md`
+- reran the closure checks:
+  - target-facing Mob docs sweep clean with `NO_HEDGES`
+  - package-presence audit resolves with `MISSING []`
+  - `git diff --check` is clean
+
+Why this slice matters:
+
+- before this pass, the Mob package was substantively closed, but the newest
+  closure artifacts were still slightly “adjacent” to the main freeze path
+- this removes that ambiguity and makes the package closure explicit in the
+  documents reviewers will actually read first
+
+Result:
+
+- the Mob freeze package now closes as one coherent reviewer-facing story
+  rather than as a pile of separately good documents
+- there is no remaining honest freeze-authoring work left; the next step is
+  the real TLA+ proof phase
+
+## Slice 238 - Mob proof phase adds a focused lifecycle liveness harness
+
+Goal:
+
+- stop treating top-level lifecycle temporal properties as a full-`FairSpec`
+  concern when they really belong to a smaller canonical proof lane
+
+What landed:
+
+- added `LifecycleOperationalNext`, `LifecycleHarnessNext`,
+  `LifecycleFairness`, `LifecycleSpec`, and `LifecycleFairSpec` to
+  `tla/MobMachineTarget.tla`
+- added `tla/MobMachineTargetLifecycleLiveness.cfg`
+- rerouted the canonical proof story so:
+  - `DestroyedAbsorbingProp`
+  - `PendingSpawnEventuallyClearsProp`
+  - `KickoffEventuallyClearsProp`
+  are covered by the focused lifecycle harness
+- kept `MobMachineTargetLiveness.cfg` as a wider exploratory full-`FairSpec`
+  run rather than a hidden canonical proof gate
+- updated:
+  - `tla/README.md`
+  - `mob-machine-proof-handoff.md`
+  - `mob-machine-freeze-closeout.md`
+  - `mob-cutover-checklist.md`
+
+Why this slice matters:
+
+- the earlier proof package had an asymmetry: work and flow had compact focused
+  liveness harnesses, but lifecycle properties still rode the much larger full
+  fair spec
+- that made the proof posture less honest than it looked, because the
+  top-level liveness run was growing much faster than the canonical lanes
+- this pass restores symmetry and makes every named temporal property part of a
+  bounded canonical proof lane
+
+Result:
+
+- `MobMachine` now has four canonical focused proof lanes:
+  - lifecycle
+  - provisioning/kickoff
+  - work ledger
+  - flow-step progress
+- full-`FairSpec` liveness remains useful exploratory search, but no longer
+  masquerades as unfinished canonical proof

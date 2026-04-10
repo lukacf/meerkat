@@ -439,7 +439,7 @@ impl Config {
         };
 
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
-            let mut merged_servers = BTreeMap::new();
+            let mut merged_servers = self.self_hosted.servers.clone();
             for (server_id, server_value) in servers {
                 let Some(server_table) = server_value.as_table() else {
                     continue;
@@ -474,7 +474,7 @@ impl Config {
         }
 
         if let Some(models) = self_hosted.get("models").and_then(toml::Value::as_table) {
-            let mut merged_models = BTreeMap::new();
+            let mut merged_models = self.self_hosted.models.clone();
             for (model_id, model_value) in models {
                 let Some(model_table) = model_value.as_table() else {
                     continue;
@@ -1966,6 +1966,55 @@ bearer_token_env = "OLLAMA_TOKEN"
         assert_eq!(server.base_url, "http://127.0.0.1:11434");
         assert_eq!(server.api_style, SelfHostedApiStyle::Responses);
         assert_eq!(server.bearer_token_env.as_deref(), Some("OLLAMA_TOKEN"));
+    }
+
+    #[test]
+    fn test_merge_self_hosted_partial_override_preserves_unrelated_inherited_entries() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+
+[self_hosted.servers.backup]
+base_url = "http://127.0.0.1:11435"
+
+[self_hosted.models.gemma-4-e2b]
+server = "local"
+remote_model = "gemma4:e2b"
+display_name = "Gemma 4 E2B"
+family = "gemma-4"
+
+[self_hosted.models.gemma-4-e4b]
+server = "backup"
+remote_model = "gemma4:e4b"
+display_name = "Gemma 4 E4B"
+family = "gemma-4"
+"#,
+            )
+            .expect("base self-hosted config");
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+            )
+            .expect("overlay self-hosted config");
+
+        assert!(config.self_hosted.servers.contains_key("backup"));
+        assert!(config.self_hosted.models.contains_key("gemma-4-e4b"));
+        let registry = config
+            .model_registry()
+            .expect("registry should remain valid");
+        assert_eq!(
+            registry
+                .entry("gemma-4-e4b")
+                .and_then(|entry| entry.self_hosted.as_ref())
+                .map(|server| server.server_id.as_str()),
+            Some("backup")
+        );
     }
 
     #[test]

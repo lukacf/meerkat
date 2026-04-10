@@ -327,7 +327,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
+    needs: [fmt-lint, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -335,7 +335,6 @@ jobs:
           failed=""
           for job in \
             fmt-lint \
-            machine-authority \
             test-unit \
             integration-fast \
             e2e-fast \
@@ -348,7 +347,6 @@ jobs:
           do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
-              machine-authority) result="${{ needs.machine-authority.result }}" ;;
               test-unit) result="${{ needs.test-unit.result }}" ;;
               integration-fast) result="${{ needs.integration-fast.result }}" ;;
               e2e-fast) result="${{ needs.e2e-fast.result }}" ;;

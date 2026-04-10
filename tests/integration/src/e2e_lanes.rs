@@ -133,7 +133,17 @@ async fn run_pre_command(
     cwd: &Path,
     env_overrides: &[(String, String)],
 ) -> Result<(), String> {
-    let key = format!("{}::{}", cwd.display(), command_display(entry.command));
+    let env_signature = env_overrides
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let key = format!(
+        "{}::{}::{}",
+        cwd.display(),
+        command_display(entry.command),
+        env_signature
+    );
     {
         let mut completed = completed_pre_commands().lock().unwrap();
         if !completed.insert(key) {

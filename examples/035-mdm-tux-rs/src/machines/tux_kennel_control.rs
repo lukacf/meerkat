@@ -338,6 +338,7 @@ mod tests {
                     name: "target-1".into(),
                     state: KennelTargetState::RecoveringClaim,
                     lease_id: None,
+                    rpc_addr: None,
                 }],
             },
         )
@@ -380,6 +381,7 @@ mod tests {
                     name: "target-1".into(),
                     state: KennelTargetState::Claimed,
                     lease_id: Some("lease-1".into()),
+                    rpc_addr: None,
                 }],
             },
         )

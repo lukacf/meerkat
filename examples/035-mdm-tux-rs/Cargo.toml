@@ -24,6 +24,7 @@ meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
 meerkat-mcp   = { path = "../../meerkat-mcp" }
 meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
+meerkat-rpc   = { path = "../../meerkat-rpc", features = ["mob"] }
 meerkat-runtime = { path = "../../meerkat-runtime" }
 meerkat-store = { path = "../../meerkat-store", features = ["jsonl", "sqlite"] }
 futures       = "0.3"

@@ -30,6 +30,7 @@ struct TargetRecord {
     name: String,
     pubkey: String,
     direct_addr: String,
+    rpc_addr: Option<String>,
     #[allow(dead_code)]
     labels: BTreeMap<String, String>,
     #[allow(dead_code)]
@@ -149,6 +150,7 @@ async fn handle_connection(
                 name,
                 pubkey,
                 direct_addr,
+                rpc_addr,
                 labels,
                 capabilities,
                 attached_tux_id,
@@ -163,6 +165,7 @@ async fn handle_connection(
                         name: name.clone(),
                         pubkey: pubkey.clone(),
                         direct_addr: direct_addr.clone(),
+                        rpc_addr: rpc_addr.clone(),
                         labels: labels.clone(),
                         capabilities: capabilities.clone(),
                         attached_tux_id: attached_tux_id.clone(),
@@ -373,6 +376,7 @@ struct RegisterTargetArgs {
     name: String,
     pubkey: String,
     direct_addr: String,
+    rpc_addr: Option<String>,
     labels: BTreeMap<String, String>,
     capabilities: BTreeMap<String, bool>,
     attached_tux_id: Option<String>,
@@ -401,6 +405,7 @@ fn register_target(
         name,
         pubkey,
         direct_addr,
+        rpc_addr,
         labels,
         capabilities,
         attached_tux_id,
@@ -432,6 +437,7 @@ fn register_target(
             existing.name = name;
             existing.pubkey = pubkey;
             existing.direct_addr = direct_addr;
+            existing.rpc_addr = rpc_addr;
             existing.labels = labels;
             existing.capabilities = capabilities;
             existing.tx = tx;
@@ -459,6 +465,7 @@ fn register_target(
             name,
             pubkey,
             direct_addr,
+            rpc_addr,
             labels,
             capabilities,
             tx,
@@ -497,6 +504,7 @@ fn list_targets(state: &KennelState, tux_id: &str, scope: ListScope) -> Vec<Targ
                     name: target.name.clone(),
                     state: KennelTargetState::Available,
                     lease_id: None,
+                    rpc_addr: target.rpc_addr.clone(),
                 })
             }
             (
@@ -519,6 +527,7 @@ fn list_targets(state: &KennelState, tux_id: &str, scope: ListScope) -> Vec<Targ
                 name: target.name.clone(),
                 state: KennelTargetState::PendingAttach,
                 lease_id: Some(lease_id.clone()),
+                rpc_addr: target.rpc_addr.clone(),
             }),
             (
                 ListScope::Mine,
@@ -532,6 +541,7 @@ fn list_targets(state: &KennelState, tux_id: &str, scope: ListScope) -> Vec<Targ
                 name: target.name.clone(),
                 state: KennelTargetState::Claimed,
                 lease_id: Some(lease_id.clone()),
+                rpc_addr: target.rpc_addr.clone(),
             }),
             (ListScope::Mine, kennel_lease::State::RecoveringClaim { tux_id: owner, .. })
                 if owner == tux_id =>
@@ -541,6 +551,7 @@ fn list_targets(state: &KennelState, tux_id: &str, scope: ListScope) -> Vec<Targ
                     name: target.name.clone(),
                     state: KennelTargetState::RecoveringClaim,
                     lease_id: None,
+                    rpc_addr: target.rpc_addr.clone(),
                 })
             }
             _ => None,
@@ -588,6 +599,7 @@ fn handle_claim_targets(
             target_name: target.name.clone(),
             target_pubkey: target.pubkey.clone(),
             target_direct_addr: target.direct_addr.clone(),
+            rpc_addr: target.rpc_addr.clone(),
             expires_at_ms,
         });
     }
@@ -1039,6 +1051,7 @@ mod tests {
                 name: "target-1".into(),
                 pubkey: "ed25519:target-1".into(),
                 direct_addr: "tcp://1.2.3.4:9000".into(),
+                rpc_addr: None,
                 labels: BTreeMap::new(),
                 capabilities: BTreeMap::new(),
                 tx,

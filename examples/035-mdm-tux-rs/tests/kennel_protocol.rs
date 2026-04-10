@@ -152,6 +152,7 @@ async fn kennel_target_register_and_list() {
             pubkey: target.id().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
+            rpc_addr: None,
             capabilities: Default::default(),
             attached_tux_id: None,
         })
@@ -203,6 +204,7 @@ async fn kennel_full_claim_attach_release_cycle() {
             pubkey: target.id().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
+            rpc_addr: None,
             capabilities: Default::default(),
             attached_tux_id: None,
         })
@@ -342,6 +344,7 @@ async fn kennel_target_disconnect_notifies_tux() {
             pubkey: target.id().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
+            rpc_addr: None,
             capabilities: Default::default(),
             attached_tux_id: None,
         })
@@ -532,6 +535,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
             pubkey: target.id().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
+            rpc_addr: None,
             capabilities: Default::default(),
             attached_tux_id: None,
         })
@@ -597,6 +601,7 @@ async fn kennel_release_sends_claim_released_to_tux() {
             pubkey: target.id().to_string(),
             direct_addr: "tcp://127.0.0.1:9999".into(),
             labels: Default::default(),
+            rpc_addr: None,
             capabilities: Default::default(),
             attached_tux_id: None,
         })

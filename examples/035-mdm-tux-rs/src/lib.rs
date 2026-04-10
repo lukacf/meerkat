@@ -22,6 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub mod kennel;
 pub mod machines;
+pub mod rpc_client;
 pub use kennel::*;
 
 pub async fn open_example_runtime_persistence(session_dir: &Path) -> anyhow::Result<PersistenceBundle> {

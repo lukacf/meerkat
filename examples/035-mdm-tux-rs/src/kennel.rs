@@ -29,6 +29,9 @@ pub struct TargetListEntry {
     pub state: KennelTargetState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_id: Option<String>,
+    /// TCP address for JSON-RPC connections (when available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +41,9 @@ pub struct ClaimGrant {
     pub target_name: String,
     pub target_pubkey: String,
     pub target_direct_addr: String,
+    /// TCP address for JSON-RPC connections (when available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_addr: Option<String>,
     pub expires_at_ms: i64,
 }
 
@@ -79,6 +85,9 @@ pub enum KennelPayload {
         name: String,
         pubkey: String,
         direct_addr: String,
+        /// TCP address for JSON-RPC connections (e.g. "tcp://192.168.0.180:4800").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rpc_addr: Option<String>,
         #[serde(default)]
         labels: BTreeMap<String, String>,
         #[serde(default)]

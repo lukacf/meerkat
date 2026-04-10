@@ -590,7 +590,7 @@ async fn main() -> anyhow::Result<()> {
             "Usage: mdm-target <HOST:PORT> [--name NAME] [--model MODEL --provider PROVIDER]"
         );
         eprintln!(
-            "   or: mdm-target --kennel HOST:PORT [--advertise IP] [--name NAME] [--model MODEL --provider PROVIDER]"
+            "   or: mdm-target --kennel HOST:PORT [--advertise IP] [--rpc-port PORT] [--name NAME] [--model MODEL --provider PROVIDER]"
         );
         eprintln!("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY");
         std::process::exit(1);
@@ -2153,7 +2153,65 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let explicit_ip = find_flag(args, "--advertise");
     let attachment_hint_path = data_dir.join("attachment_hint.json");
 
+    // ── RPC TCP server ────────────────────────────────────────────────────
+    let rpc_port: u16 = find_flag(args, "--rpc-port")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4800);
+    let rpc_session_runtime = {
+        let rpc_factory = AgentFactory::new(&session_dir)
+            .shell(true)
+            .builtins(true)
+            .comms(true)
+            .schedule(true)
+            .mob(true)
+            .with_comms_runtime(Arc::clone(&comms_runtime));
+        let home = dirs::home_dir();
+        let rpc_config = Config::load_from(&session_dir, home.as_deref())
+            .await
+            .unwrap_or_default();
+        let rpc_schedule_store = Arc::new(SqliteScheduleStore::open(
+            session_dir.join("rpc_schedule.sqlite"),
+        )?) as Arc<dyn meerkat::ScheduleStore>;
+        let rpc_jsonl = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
+        rpc_jsonl.init().await?;
+        let rpc_persistence = PersistenceBundle::new_with_schedule_store(
+            rpc_jsonl as Arc<dyn SessionStore>,
+            None,
+            Arc::new(MemoryBlobStore::new()),
+            rpc_schedule_store,
+        );
+        let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+        let rpc_runtime = Arc::new(
+            meerkat_rpc::session_runtime::SessionRuntime::new(
+                rpc_factory,
+                rpc_config,
+                10,
+                rpc_persistence,
+                meerkat_rpc::router::NotificationSink::noop(),
+            ),
+        );
+        let rpc_config_store_clone = Arc::clone(&rpc_config_store);
+        let rpc_runtime_clone = Arc::clone(&rpc_runtime);
+        tokio::spawn(async move {
+            let addr = format!("0.0.0.0:{rpc_port}");
+            if let Err(e) = meerkat_rpc::serve_tcp(
+                &addr,
+                rpc_runtime_clone,
+                rpc_config_store_clone,
+                None,
+            )
+            .await
+            {
+                eprintln!("[target] RPC server error: {e}");
+            }
+        });
+        rpc_runtime
+    };
+    let _ = rpc_session_runtime; // keep alive
+
     println!("=== MDM Target: {name} ===");
+    println!("rpc       : tcp://0.0.0.0:{rpc_port}");
     println!("comms     : tcp://0.0.0.0:{comms_port}");
     println!("kennel    : {kennel_addr}");
     println!("provider  : {provider} ({model})");
@@ -2209,6 +2267,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                 name: name.clone(),
                 pubkey: target_id.clone(),
                 direct_addr: advertised_addr.clone(),
+                rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                 labels: Default::default(),
                 capabilities: BTreeMap::from([
                     ("shell".to_string(), true),
@@ -2324,6 +2383,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                     name: name.clone(),
                                     pubkey: target_id.clone(),
                                     direct_addr: advertised_addr.clone(),
+                                    rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                                     labels: Default::default(),
                                     capabilities: BTreeMap::from([
                                         ("shell".to_string(), true),
@@ -2395,6 +2455,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                     name: name.clone(),
                                     pubkey: target_id.clone(),
                                     direct_addr: advertised_addr.clone(),
+                                    rpc_addr: Some(format!("tcp://{local_ip}:{rpc_port}")),
                                     labels: Default::default(),
                                     capabilities: BTreeMap::from([
                                         ("shell".to_string(), true),

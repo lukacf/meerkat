@@ -66,6 +66,21 @@ impl OpenAiCompatibleClient {
     fn request_with_remote_model(&self, request: &LlmRequest) -> LlmRequest {
         let mut request = request.clone();
         request.model = self.remote_model.clone();
+        let mut provider_params = request
+            .provider_params
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = provider_params.as_object_mut() {
+            obj.insert(
+                crate::OpenAiClient::INTERNAL_SUPPORTS_TEMPERATURE.to_string(),
+                Value::Bool(self.supports_temperature),
+            );
+            obj.insert(
+                crate::OpenAiClient::INTERNAL_SUPPORTS_REASONING.to_string(),
+                Value::Bool(self.supports_reasoning),
+            );
+        }
+        request.provider_params = Some(provider_params);
         request
     }
 
@@ -294,7 +309,10 @@ impl OpenAiCompatibleClient {
     }
 
     fn parse_chat_completions_line(line: &str) -> Result<Option<ChatCompletionsChunk>, LlmError> {
-        if let Some(data) = line.strip_prefix("data: ") {
+        if let Some(data) = line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+        {
             if data == "[DONE]" {
                 return Ok(None);
             }
@@ -891,6 +909,49 @@ mod tests {
         assert_eq!(auth_headers.len(), 1);
         assert_eq!(auth_headers[0], None);
         handle.abort();
+    }
+
+    #[test]
+    fn request_with_remote_model_preserves_self_hosted_capabilities_for_delegate() {
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::Responses,
+            "gemma4:e2b".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            true,
+            true,
+            true,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-e2b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let translated = client.request_with_remote_model(&request);
+
+        assert_eq!(translated.model, "gemma4:e2b");
+        assert_eq!(
+            translated
+                .provider_params
+                .as_ref()
+                .and_then(|params| params.get(crate::OpenAiClient::INTERNAL_SUPPORTS_TEMPERATURE)),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            translated
+                .provider_params
+                .as_ref()
+                .and_then(|params| params.get(crate::OpenAiClient::INTERNAL_SUPPORTS_REASONING)),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn parse_chat_completions_line_accepts_sse_data_without_space() {
+        let line = r#"data:{"choices":[{"delta":{"content":"Hello"}}]}"#;
+        let chunk =
+            OpenAiCompatibleClient::parse_chat_completions_line(line).expect("line should parse");
+        assert!(chunk.is_some());
     }
 
     #[test]

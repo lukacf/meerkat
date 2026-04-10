@@ -2480,9 +2480,11 @@ async fn create_session_inner(
     }
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+    let initial_identity =
+        resolve_validation_identity(&state.config_runtime, &model, req.provider).await;
     let mut build = SessionBuildOptions {
         provider: req.provider,
-        self_hosted_server_id: None,
+        self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
             .structured_output_retries
@@ -3458,21 +3460,15 @@ async fn continue_session_inner(
                 .await;
         }
 
+        let fallback_identity =
+            resolve_validation_identity(&state.config_runtime, &state.default_model, None).await;
         let current_identity = stored_metadata
             .as_ref()
             .map(meerkat::SessionMetadata::llm_identity)
-            .or_else(|| {
-                Some(meerkat_core::SessionLlmIdentity {
-                    model: state.default_model.to_string(),
-                    provider: meerkat_core::Provider::infer_from_model(&state.default_model)
-                        .unwrap_or(meerkat_core::Provider::Other),
-                    self_hosted_server_id: None,
-                    provider_params: None,
-                })
-            });
-        if let Some(identity) = current_identity
-            && let Err(err) =
-                validate_prompt_video_input(&state.config_runtime, &turn_prompt, &identity).await
+            .unwrap_or(fallback_identity);
+        if let Err(err) =
+            validate_prompt_video_input(&state.config_runtime, &turn_prompt, &current_identity)
+                .await
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;

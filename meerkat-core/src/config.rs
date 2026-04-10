@@ -15,7 +15,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -328,7 +328,16 @@ impl Config {
             self.hooks.entries.extend(other.hooks.entries);
         }
         if other.self_hosted != SelfHostedConfig::default() {
-            self.self_hosted = other.self_hosted;
+            if !other.self_hosted.servers.is_empty() {
+                self.self_hosted
+                    .servers
+                    .extend(other.self_hosted.servers.clone());
+            }
+            if !other.self_hosted.models.is_empty() {
+                self.self_hosted
+                    .models
+                    .extend(other.self_hosted.models.clone());
+            }
         }
     }
 
@@ -867,8 +876,8 @@ pub enum SelfHostedTransport {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfHostedApiStyle {
-    #[default]
     Responses,
+    #[default]
     ChatCompletions,
 }
 
@@ -889,7 +898,7 @@ impl Default for SelfHostedServerConfig {
         Self {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: String::new(),
-            api_style: SelfHostedApiStyle::Responses,
+            api_style: SelfHostedApiStyle::ChatCompletions,
             bearer_token: None,
             bearer_token_env: None,
         }
@@ -942,8 +951,8 @@ impl Default for SelfHostedModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(default)]
 pub struct SelfHostedConfig {
-    pub servers: HashMap<String, SelfHostedServerConfig>,
-    pub models: HashMap<String, SelfHostedModelConfig>,
+    pub servers: BTreeMap<String, SelfHostedServerConfig>,
+    pub models: BTreeMap<String, SelfHostedModelConfig>,
 }
 
 /// Runtime limits configured at the config layer.
@@ -1799,6 +1808,44 @@ model = "custom-model"
     }
 
     #[test]
+    fn test_merge_self_hosted_preserves_lower_layer_servers_and_models() {
+        let mut base = Config::default();
+        base.merge_toml_str(
+            r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+"#,
+        )
+        .expect("base self-hosted server");
+
+        let mut overlay = Config::default();
+        overlay
+            .merge_toml_str(
+                r#"
+[self_hosted.models.gemma-4-e2b]
+server = "local"
+remote_model = "gemma4:e2b"
+display_name = "Gemma 4 E2B"
+family = "gemma-4"
+"#,
+            )
+            .expect("overlay self-hosted model");
+
+        base.merge(overlay);
+
+        assert!(base.self_hosted.servers.contains_key("local"));
+        assert!(base.self_hosted.models.contains_key("gemma-4-e2b"));
+        let registry = base.model_registry().expect("merged self-hosted registry");
+        assert_eq!(
+            registry
+                .entry("gemma-4-e2b")
+                .and_then(|entry| entry.self_hosted.as_ref())
+                .map(|server| server.server_id.as_str()),
+            Some("local")
+        );
+    }
+
+    #[test]
     fn test_merge_providers_section_replaces_non_default() {
         let mut base = Config::default();
         base.providers.base_urls = Some(HashMap::from([
@@ -1962,6 +2009,14 @@ api_style = "chat_completions"
                 .expect("server should exist")
                 .transport,
             SelfHostedTransport::OpenAiCompatible
+        );
+    }
+
+    #[test]
+    fn test_self_hosted_server_config_defaults_to_chat_completions() {
+        assert_eq!(
+            SelfHostedServerConfig::default().api_style,
+            SelfHostedApiStyle::ChatCompletions
         );
     }
 

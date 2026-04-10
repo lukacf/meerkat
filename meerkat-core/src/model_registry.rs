@@ -150,6 +150,12 @@ fn append_self_hosted(
                 model.server
             ))
         })?;
+        if server.bearer_token.is_some() {
+            tracing::warn!(
+                server_id = %model.server,
+                "self-hosted server uses a literal bearer_token; bearer_token_env is recommended to avoid storing secrets in config files"
+            );
+        }
 
         let self_hosted = SelfHostedServerRef {
             server_id: model.server.clone(),

@@ -616,20 +616,28 @@ impl SessionRuntime {
             .clone()
             .or_else(|| current.provider_params.clone());
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
-            match registry.entry(&model) {
-                Some(entry) => entry
-                    .self_hosted
-                    .as_ref()
-                    .map(|server| server.server_id.clone()),
-                None if ov.model.is_none() => current.self_hosted_server_id.clone(),
-                None => {
-                    return Err(RpcError {
-                        code: error::INVALID_PARAMS,
-                        message: format!(
-                            "self-hosted provider requires a registered model alias; '{model}' is not configured"
-                        ),
-                        data: None,
-                    });
+            if ov.model.is_none() {
+                current.self_hosted_server_id.clone().or_else(|| {
+                    registry
+                        .entry(&model)
+                        .and_then(|entry| entry.self_hosted.as_ref())
+                        .map(|server| server.server_id.clone())
+                })
+            } else {
+                match registry.entry(&model) {
+                    Some(entry) => entry
+                        .self_hosted
+                        .as_ref()
+                        .map(|server| server.server_id.clone()),
+                    None => {
+                        return Err(RpcError {
+                            code: error::INVALID_PARAMS,
+                            message: format!(
+                                "self-hosted provider requires a registered model alias; '{model}' is not configured"
+                            ),
+                            data: None,
+                        });
+                    }
                 }
             }
         } else {
@@ -3488,6 +3496,47 @@ mod tests {
                 .as_deref(),
             Some("local"),
             "pending sessions must remain pinned to the server selected at create time"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_param_override_keeps_pinned_self_hosted_server_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        let store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
+            meerkat_core::MemoryConfigStore::new(self_hosted_test_config("local", false)),
+        );
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            store,
+            temp.path().join("config_state.json"),
+        ));
+        runtime.set_config_runtime(config_runtime.clone());
+
+        config_runtime
+            .set(self_hosted_test_config("other", false), None)
+            .await
+            .expect("config patch");
+
+        let current = SessionLlmIdentity {
+            model: "gemma-4-e2b".to_string(),
+            provider: meerkat_core::Provider::SelfHosted,
+            self_hosted_server_id: Some("local".to_string()),
+            provider_params: None,
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("provider-param override should resolve");
+
+        assert_eq!(
+            resolved.self_hosted_server_id.as_deref(),
+            Some("local"),
+            "provider-param overrides must preserve the pinned self-hosted server binding"
         );
     }
 

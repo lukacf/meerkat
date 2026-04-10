@@ -57,7 +57,8 @@ use meerkat_core::service::{
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
     FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
-    RuntimeBootstrap, ToolCategoryOverride, agent_event_type, format_verbose_event,
+    RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
+    format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -411,14 +412,40 @@ fn pending_system_context_appends(
         .collect()
 }
 
-fn provider_supports_inline_video(provider: meerkat_core::Provider) -> bool {
-    provider == meerkat_core::Provider::Gemini
-}
-
-fn validate_prompt_video_input(
-    prompt: &ContentInput,
+async fn resolve_validation_identity(
+    config_runtime: &meerkat_core::ConfigRuntime,
     model: &str,
     provider: Option<meerkat_core::Provider>,
+) -> SessionLlmIdentity {
+    let snapshot = config_runtime.get().await.ok().map(|state| state.config);
+    let registry = snapshot
+        .as_ref()
+        .and_then(|config| config.model_registry().ok());
+    let entry = registry.as_ref().and_then(|registry| registry.entry(model));
+    let provider = provider
+        .or_else(|| entry.map(|entry| entry.provider))
+        .or_else(|| meerkat_core::Provider::infer_from_model(model))
+        .unwrap_or(meerkat_core::Provider::Other);
+    let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
+        entry
+            .and_then(|entry| entry.self_hosted.as_ref())
+            .map(|server| server.server_id.clone())
+    } else {
+        None
+    };
+
+    SessionLlmIdentity {
+        model: model.to_string(),
+        provider,
+        self_hosted_server_id,
+        provider_params: None,
+    }
+}
+
+async fn validate_prompt_video_input(
+    config_runtime: &meerkat_core::ConfigRuntime,
+    prompt: &ContentInput,
+    identity: &SessionLlmIdentity,
 ) -> Result<(), String> {
     let blocks = match prompt {
         ContentInput::Text(_) => return Ok(()),
@@ -427,16 +454,24 @@ fn validate_prompt_video_input(
 
     meerkat_core::validate_inline_video_blocks(blocks)?;
 
-    if meerkat_core::has_video(blocks) {
-        let effective_provider = provider
-            .or_else(|| meerkat_core::Provider::infer_from_model(model))
-            .unwrap_or(meerkat_core::Provider::Other);
-        if !provider_supports_inline_video(effective_provider) {
-            return Err(format!(
-                "inline video input requires a Gemini model; current provider is '{}'",
-                effective_provider.as_str()
-            ));
-        }
+    let supports_inline_video = config_runtime
+        .get()
+        .await
+        .ok()
+        .and_then(|state| state.config.model_registry().ok())
+        .and_then(|registry| {
+            registry
+                .profile_for(&identity.model)
+                .map(|profile| profile.inline_video)
+        })
+        .unwrap_or(false);
+
+    if meerkat_core::has_video(blocks) && !supports_inline_video {
+        return Err(format!(
+            "inline video input is not supported by model '{}' on provider '{}'",
+            identity.model,
+            identity.provider.as_str()
+        ));
     }
 
     Ok(())
@@ -521,7 +556,7 @@ async fn apply_runtime_turn(
         });
     if let Some(identity) = session_identity
         && let Err(message) =
-            validate_prompt_video_input(&prompt, &identity.model, Some(identity.provider))
+            validate_prompt_video_input(&context.config_runtime, &prompt, &identity).await
     {
         return Err(SessionError::Agent(meerkat_core::AgentError::ConfigError(
             message,
@@ -2522,7 +2557,11 @@ async fn create_session_inner(
         labels: req.labels,
     };
 
-    if let Err(err) = validate_prompt_video_input(&svc_req.prompt, &svc_req.model, create_provider)
+    let validation_identity =
+        resolve_validation_identity(&state.config_runtime, &svc_req.model, create_provider).await;
+    if let Err(err) =
+        validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
+            .await
     {
         return RequestOutcome::Unpublished(Err(ApiError::BadRequest(err)));
     }
@@ -3189,11 +3228,20 @@ async fn continue_session_inner(
                 return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
             }
         };
-        let mut build = SessionBuildOptions {
-            provider: req.provider,
-            self_hosted_server_id: session
+        let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
+            session
+                .session_metadata()
+                .map(|meta| meta.provider)
+                .unwrap_or(Provider::Other),
+            session
                 .session_metadata()
                 .and_then(|meta| meta.self_hosted_server_id),
+            req.model.as_deref(),
+            req.provider,
+        );
+        let mut build = SessionBuildOptions {
+            provider: llm_binding.provider,
+            self_hosted_server_id: llm_binding.self_hosted_server_id,
             output_schema: req.output_schema,
             structured_output_retries: req
                 .structured_output_retries
@@ -3231,7 +3279,7 @@ async fn continue_session_inner(
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
-                provider: req.provider.is_some(),
+                provider: llm_binding.provider_overridden,
                 max_tokens: req.max_tokens.is_some(),
                 structured_output_retries: req.structured_output_retries.is_some(),
                 keep_alive: keep_alive_override.is_some(),
@@ -3263,8 +3311,15 @@ async fn continue_session_inner(
             labels: None,
         };
         let create_provider = create_req.build.as_ref().and_then(|build| build.provider);
-        if let Err(err) =
-            validate_prompt_video_input(&create_req.prompt, &create_req.model, create_provider)
+        let validation_identity =
+            resolve_validation_identity(&state.config_runtime, &create_req.model, create_provider)
+                .await;
+        if let Err(err) = validate_prompt_video_input(
+            &state.config_runtime,
+            &create_req.prompt,
+            &validation_identity,
+        )
+        .await
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
@@ -3417,7 +3472,7 @@ async fn continue_session_inner(
             });
         if let Some(identity) = current_identity
             && let Err(err) =
-                validate_prompt_video_input(&turn_prompt, &identity.model, Some(identity.provider))
+                validate_prompt_video_input(&state.config_runtime, &turn_prompt, &identity).await
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
@@ -4013,10 +4068,14 @@ mod tests {
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
-    use meerkat_core::SessionId;
+    use meerkat_core::{
+        MemoryConfigStore, SelfHostedApiStyle, SelfHostedServerConfig, SelfHostedTransport,
+        SessionId,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     struct MockLlmClient;
@@ -4079,6 +4138,51 @@ mod tests {
             .expect("hook override fixture must deserialize")
     }
 
+    fn self_hosted_test_config(inline_video: bool) -> Config {
+        let mut config = Config::default();
+        config.self_hosted.servers.insert(
+            "local".to_string(),
+            SelfHostedServerConfig {
+                transport: SelfHostedTransport::OpenAiCompatible,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                api_style: SelfHostedApiStyle::ChatCompletions,
+                bearer_token: None,
+                bearer_token_env: None,
+            },
+        );
+        config.self_hosted.models.insert(
+            "gemma-4-e2b".to_string(),
+            serde_json::from_value(json!({
+                "server": "local",
+                "remote_model": "gemma4:e2b",
+                "display_name": "Gemma 4 E2B",
+                "family": "gemma-4",
+                "tier": "supported",
+                "context_window": 128000,
+                "max_output_tokens": 8192,
+                "vision": true,
+                "image_tool_results": true,
+                "inline_video": inline_video,
+                "supports_temperature": true,
+                "supports_thinking": true,
+                "supports_reasoning": true,
+                "call_timeout_secs": 600
+            }))
+            .expect("self-hosted model config"),
+        );
+        config
+    }
+
+    fn inline_video_prompt() -> ContentInput {
+        ContentInput::Blocks(vec![meerkat_core::ContentBlock::Video {
+            media_type: "video/mp4".to_string(),
+            duration_ms: 1_000,
+            data: meerkat_core::VideoData::Inline {
+                data: "AAAA".to_string(),
+            },
+        }])
+    }
+
     #[tokio::test]
     async fn test_app_state_default() {
         let temp = TempDir::new().unwrap();
@@ -4088,6 +4192,22 @@ mod tests {
         assert!(!state.default_model.is_empty());
         assert!(state.max_tokens > 0);
         // runtime_adapter is always present (non-optional)
+    }
+
+    #[tokio::test]
+    async fn validate_prompt_video_input_accepts_self_hosted_alias_from_runtime_registry() {
+        let temp = TempDir::new().unwrap();
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(self_hosted_test_config(true)));
+        let config_runtime =
+            meerkat_core::ConfigRuntime::new(store, temp.path().join("config_state.json"));
+
+        let identity = resolve_validation_identity(&config_runtime, "gemma-4-e2b", None).await;
+        assert_eq!(identity.provider, Provider::SelfHosted);
+
+        validate_prompt_video_input(&config_runtime, &inline_video_prompt(), &identity)
+            .await
+            .expect("self-hosted aliases should validate inline video against the active registry");
     }
 
     #[test]

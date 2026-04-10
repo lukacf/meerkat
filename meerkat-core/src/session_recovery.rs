@@ -59,6 +59,13 @@ pub struct RecoveredSessionBuild {
     pub recoverable_tool_defs: Vec<ToolDef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeLlmBinding {
+    pub provider: Option<Provider>,
+    pub self_hosted_server_id: Option<String>,
+    pub provider_overridden: bool,
+}
+
 impl RecoveredSessionBuild {
     pub fn into_deferred_create_request(self) -> CreateSessionRequest {
         CreateSessionRequest {
@@ -118,6 +125,32 @@ pub fn session_allows_first_turn_build_overrides(session: &Session) -> bool {
         .is_some_and(SessionDeferredTurnState::allows_initial_turn_overrides)
 }
 
+pub fn resolve_resume_llm_binding(
+    stored_provider: Provider,
+    stored_self_hosted_server_id: Option<String>,
+    model_override: Option<&str>,
+    provider_override: Option<Provider>,
+) -> ResumeLlmBinding {
+    let model_changed = model_override.is_some();
+    let provider_overridden = provider_override.is_some() || model_changed;
+    let provider = if model_changed && provider_override.is_none() {
+        None
+    } else {
+        Some(provider_override.unwrap_or(stored_provider))
+    };
+    let self_hosted_server_id = if model_changed {
+        None
+    } else {
+        stored_self_hosted_server_id
+    };
+
+    ResumeLlmBinding {
+        provider,
+        self_hosted_server_id,
+        provider_overridden,
+    }
+}
+
 pub fn build_recovered_session(
     session: Session,
     overrides: &SurfaceSessionRecoveryOverrides,
@@ -140,9 +173,15 @@ pub fn build_recovered_session(
     }
 
     let build_state = session.build_state().unwrap_or_default();
+    let llm_binding = resolve_resume_llm_binding(
+        metadata.provider,
+        metadata.self_hosted_server_id.clone(),
+        overrides.model.as_deref(),
+        overrides.provider,
+    );
     let resume_override_mask = ResumeOverrideMask {
         model: overrides.model.is_some(),
-        provider: overrides.provider.is_some(),
+        provider: llm_binding.provider_overridden,
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
         provider_params: overrides.provider_params.is_some(),
@@ -176,8 +215,8 @@ pub fn build_recovered_session(
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
 
     let mut build = SessionBuildOptions {
-        provider: Some(overrides.provider.unwrap_or(metadata.provider)),
-        self_hosted_server_id: metadata.self_hosted_server_id.clone(),
+        provider: llm_binding.provider,
+        self_hosted_server_id: llm_binding.self_hosted_server_id,
         output_schema: overrides
             .output_schema
             .clone()
@@ -603,6 +642,42 @@ mod tests {
         assert!(
             matches!(error, SurfaceSessionRecoveryError::InvalidOverride(_)),
             "provider-only override should be treated as InvalidOverride"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_model_override_clears_persisted_self_hosted_binding() {
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.model = "gemma-4-e2b".to_string();
+        metadata.provider = Provider::SelfHosted;
+        metadata.self_hosted_server_id = Some("local".to_string());
+        session
+            .set_session_metadata(metadata)
+            .expect("updated session metadata");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides {
+                model: Some("gemma-4-31b".to_string()),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session with model override");
+
+        assert_eq!(recovered.model, "gemma-4-31b");
+        assert_eq!(
+            recovered.build.provider, None,
+            "model-only overrides should recompute provider from the new model"
+        );
+        assert_eq!(
+            recovered.build.self_hosted_server_id, None,
+            "model-only overrides must clear the persisted self-hosted server binding"
+        );
+        assert!(
+            recovered.build.resume_override_mask.provider,
+            "model-only overrides must block stale provider restoration during resume"
         );
     }
 

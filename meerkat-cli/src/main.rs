@@ -2127,7 +2127,7 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             let models_url = format!("{base_url}/models");
             let mut request = http.get(&models_url);
 
-            if let Some(token) = server.bearer_token.clone() {
+            if let Some(token) = server.resolve_bearer_token() {
                 request = request.bearer_auth(token);
             }
 

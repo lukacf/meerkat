@@ -49,7 +49,7 @@ impl BuiltinTool for SkillInvokeFunctionTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "skill_invoke_function".into(),
-            description: "Invoke a function exposed by a skill.".into(),
+            description: "Invoke a function exposed by a skill and return its output.\n\nSkill functions are executable operations defined by a skill — data transformations, validations, generators, or any computation the skill provides. The available functions and their expected arguments are documented in the skill's loaded instructions (from load_skill).\n\nParameters:\n- id: Canonical skill ID (e.g. \"extraction/email\").\n- function_name: Name of the function to invoke (documented in the skill's instructions).\n- arguments: JSON object of function arguments (defaults to null if omitted).\n\nExample:\n  skill_invoke_function {\"id\": \"extraction/email\", \"function_name\": \"extract\", \"arguments\": {\"raw_email\": \"From: alice@example.com\\nSubject: Invoice\\n...\"}}\n  Returns: {\"id\": \"extraction/email\", \"function_name\": \"extract\", \"output\": {\"sender\": \"alice@example.com\", \"subject\": \"Invoice\", \"fields\": [...]}}".into(),
             input_schema: crate::schema::schema_for::<SkillInvokeFunctionArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,

@@ -61,42 +61,121 @@ pub fn schedule_tools_list() -> Vec<Value> {
     vec![
         tool_descriptor(
             "meerkat_schedule_create",
-            "Create a realm-scoped schedule. Use an explicit TriggerSpec and TargetBinding; the input schema includes the exact JSON shapes for once, interval, calendar, session, and mob schedules. For follow-ups in an existing long-lived session such as TUX, use target_kind=session with type=exact_session or resumable_session and a real session_id. If you do not have a session_id, use materialize_on_demand_session instead.",
+            concat!(
+                "Create a realm-scoped schedule that fires occurrences according to a trigger and delivers them to a target.\n",
+                "\n",
+                "## Mental model\n",
+                "\n",
+                "A **schedule** is a persisted rule: trigger + target + policies. It lives in the active realm and survives restarts.\n",
+                "An **occurrence** is a single planned delivery. The scheduler pre-plans occurrences inside a planning horizon and marks each pending -> claimed -> dispatching -> completed (or skipped/misfired/delivery_failed).\n",
+                "A **target** is the session or mob member that receives the delivery when an occurrence fires.\n",
+                "\n",
+                "## Trigger types\n",
+                "\n",
+                "**once** -- fire exactly once at a UTC timestamp:\n",
+                "```json\n",
+                "{\"type\":\"once\",\"due_at_utc\":\"2026-04-10T14:00:00Z\"}\n",
+                "```\n",
+                "\n",
+                "**interval** -- fire repeatedly at a fixed cadence in seconds:\n",
+                "```json\n",
+                "{\"type\":\"interval\",\"start_at_utc\":\"2026-04-10T14:00:00Z\",\"every_seconds\":3600}\n",
+                "```\n",
+                "Optional end_at_utc stops the schedule: {\"type\":\"interval\",\"start_at_utc\":\"...\",\"every_seconds\":60,\"end_at_utc\":\"2026-04-11T00:00:00Z\"}\n",
+                "\n",
+                "**calendar** -- cron-style fields in a named timezone:\n",
+                "```json\n",
+                "{\"type\":\"calendar\",\"timezone\":\"Europe/Stockholm\",\"minute\":{\"kind\":\"values\",\"values\":[0]},\"hour\":{\"kind\":\"values\",\"values\":[9]},\"day_of_week\":{\"kind\":\"values\",\"values\":[1,2,3,4,5]}}\n",
+                "```\n",
+                "That fires at 09:00 every weekday in Stockholm. Omitted fields default to {\"kind\":\"any\"}.\n",
+                "\n",
+                "## Target types (session)\n",
+                "\n",
+                "**exact_session** -- deliver to a specific existing session. Use when you know the session_id and the session will exist at fire time. Fails if the session is gone.\n",
+                "```json\n",
+                "{\"target_kind\":\"session\",\"type\":\"exact_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check status\"}}\n",
+                "```\n",
+                "\n",
+                "**resumable_session** -- deliver to a session that may be idle or suspended. The runtime will resume it if needed. Use for long-lived TUX sessions where you want scheduled follow-ups.\n",
+                "```json\n",
+                "{\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Daily standup reminder\"}}\n",
+                "```\n",
+                "\n",
+                "**materialize_on_demand_session** -- create a brand-new session on first fire, then reuse it for subsequent occurrences. Use when no session exists yet. Requires a \"create\" spec with at least a model.\n",
+                "```json\n",
+                "{\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run daily report\"},\"create\":{\"model\":\"claude-sonnet-4-6\",\"system_prompt\":\"You are a reporting assistant.\"}}\n",
+                "```\n",
+                "\n",
+                "## Policies\n",
+                "\n",
+                "**misfire_policy** -- what happens when the scheduler misses the due time (e.g., downtime):\n",
+                "- {\"type\":\"skip\"} (RECOMMENDED) -- skip overdue occurrences. A small grace window (~30s) prevents normal jitter from causing misfires.\n",
+                "- {\"type\":\"catch_up_within\",\"window_seconds\":300} -- catch up if the occurrence is overdue by less than window_seconds.\n",
+                "\n",
+                "**overlap_policy** -- what happens when a new occurrence fires while a previous one is still running:\n",
+                "- \"skip_if_running\" (RECOMMENDED) -- skip the new occurrence if the previous one is still in-flight.\n",
+                "- \"allow_concurrent\" -- allow both to run at the same time.\n",
+                "\n",
+                "**missing_target_policy** -- what happens when the target session/mob does not exist at fire time:\n",
+                "- \"mark_misfired\" (RECOMMENDED) -- mark the occurrence as misfired so you can see it failed.\n",
+                "- \"skip\" -- silently skip the occurrence.\n",
+                "\n",
+                "## Recommended defaults\n",
+                "\n",
+                "For most schedules, use: misfire_policy={\"type\":\"skip\"}, overlap_policy=\"skip_if_running\", missing_target_policy=\"mark_misfired\".\n",
+                "\n",
+                "## End-to-end lifecycle example\n",
+                "\n",
+                "1. Create: meerkat_schedule_create with trigger, target, and policies. Returns a schedule object with schedule_id.\n",
+                "2. Inspect: meerkat_schedule_get with the schedule_id to see current state, phase, and revision.\n",
+                "3. List occurrences: meerkat_schedule_occurrences with the schedule_id to see planned/completed deliveries.\n",
+                "4. Pause: meerkat_schedule_pause to temporarily stop new occurrences from firing.\n",
+                "5. Resume: meerkat_schedule_resume to re-activate a paused schedule.\n",
+                "6. Update: meerkat_schedule_update to change the trigger, target, or policies on a live schedule.\n",
+                "7. Delete: meerkat_schedule_delete to permanently stop the schedule (history is preserved).\n",
+                "\n",
+                "## Failure cases\n",
+                "\n",
+                "- Invalid cron/calendar fields: returns INVALID_ARGUMENTS (-32602). Check that day_of_week uses 0-6 (Sun-Sat) and hour uses 0-23.\n",
+                "- Target session not found at fire time: occurrence transitions to misfired (if missing_target_policy=mark_misfired) or skipped (if skip).\n",
+                "- Scheduler was down when occurrence was due: occurrence transitions to misfired (if misfire_policy=skip and grace exceeded) or delivered late (if catch_up_within window allows).\n",
+                "- Schedule capability not available (no persistent store): returns CAPABILITY_UNAVAILABLE (-32001).\n",
+            ),
             create_schedule_schema(),
         ),
         tool_descriptor(
             "meerkat_schedule_get",
-            "Fetch one persisted schedule by schedule_id.",
+            "Fetch a single schedule by schedule_id. Returns the full schedule object including its current phase (active/paused/deleted), trigger, target, policies, revision number, and timestamps. Use this to inspect a schedule after creation or to confirm an update took effect.",
             schedule_id_schema("The schedule_id to fetch."),
         ),
         tool_descriptor(
             "meerkat_schedule_list",
-            "List persisted schedules in the active realm.",
+            "List all schedules in the active realm. Returns an array of schedule objects. Includes active, paused, and deleted schedules. Use this to discover existing schedules before creating duplicates.",
             empty_schema(),
         ),
         tool_descriptor(
             "meerkat_schedule_update",
-            "Update a persisted schedule by schedule_id. Any provided trigger or target must use the same typed shapes as meerkat_schedule_create.",
+            "Update a live schedule by schedule_id. Only the fields you provide are changed; omitted fields keep their current values. The trigger and target must use the same JSON shapes as meerkat_schedule_create. Updating the trigger replans future occurrences. The schedule revision increments on each successful update.",
             update_schedule_schema(),
         ),
         tool_descriptor(
             "meerkat_schedule_pause",
-            "Pause a persisted schedule by schedule_id.",
+            "Pause an active schedule. While paused, no new occurrences will fire. Already in-flight occurrences continue to completion. Use meerkat_schedule_resume to re-activate. Returns the updated schedule with phase=paused.",
             schedule_id_schema("The schedule_id to pause."),
         ),
         tool_descriptor(
             "meerkat_schedule_resume",
-            "Resume a paused schedule by schedule_id.",
+            "Resume a paused schedule, returning it to active phase. Future occurrences will be planned and fired according to the trigger. Returns the updated schedule with phase=active.",
             schedule_id_schema("The schedule_id to resume."),
         ),
         tool_descriptor(
             "meerkat_schedule_delete",
-            "Delete a schedule by schedule_id while preserving history.",
+            "Permanently delete a schedule. The schedule transitions to phase=deleted and no further occurrences will fire. Historical occurrence records are preserved and can still be queried with meerkat_schedule_occurrences. This is irreversible -- a deleted schedule cannot be resumed.",
             schedule_id_schema("The schedule_id to delete."),
         ),
         tool_descriptor(
             "meerkat_schedule_occurrences",
-            "List persisted occurrences for one schedule_id.",
+            "List all occurrences (planned and historical) for a schedule. Each occurrence has a phase: pending (not yet due), claimed (picked up by driver), dispatching (delivery in progress), awaiting_completion, completed, skipped, misfired, superseded, or delivery_failed. Use this to verify a schedule is firing correctly, diagnose misfires, or check delivery history.",
             schedule_id_schema("The schedule_id whose occurrences should be listed."),
         ),
     ]
@@ -396,7 +475,7 @@ fn date_time_schema(description: &'static str) -> Value {
 
 fn trigger_spec_schema() -> Value {
     json!({
-        "description": "TriggerSpec uses internally tagged JSON with a type field. Example once trigger: {\"type\":\"once\",\"due_at_utc\":\"2026-04-09T12:00:00Z\"}. Example interval trigger: {\"type\":\"interval\",\"start_at_utc\":\"2026-04-09T12:00:00Z\",\"every_seconds\":60}.",
+        "description": "When the schedule fires. Uses internally tagged JSON with a \"type\" field. Three types: \"once\" fires at a single UTC timestamp. \"interval\" fires repeatedly every N seconds from a start time (optional end_at_utc). \"calendar\" fires on cron-style fields in a named IANA timezone. Examples: {\"type\":\"once\",\"due_at_utc\":\"2026-04-10T14:00:00Z\"} | {\"type\":\"interval\",\"start_at_utc\":\"2026-04-10T14:00:00Z\",\"every_seconds\":60} | {\"type\":\"calendar\",\"timezone\":\"UTC\",\"minute\":{\"kind\":\"values\",\"values\":[0]},\"hour\":{\"kind\":\"values\",\"values\":[9,17]}}.",
         "oneOf": [
             {
                 "type": "object",
@@ -472,7 +551,7 @@ fn calendar_field_schema(description: &'static str) -> Value {
 
 fn target_binding_schema() -> Value {
     json!({
-        "description": "TargetBinding selects a session or mob recipient. For a follow-up in the current TUX session, use target_kind=session with type=exact_session or resumable_session and a real session_id. If you need a fresh scheduled session, use materialize_on_demand_session.",
+        "description": "Where the schedule delivers. Uses target_kind to select session or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for long-lived TUX sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: {\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
         "oneOf": [
             {
                 "type": "object",
@@ -710,7 +789,7 @@ fn content_input_schema() -> Value {
 
 fn misfire_policy_schema() -> Value {
     json!({
-        "description": "Misfire policy object. Most schedules should use {\"type\":\"skip\"}.",
+        "description": "What happens when the scheduler misses an occurrence's due time (e.g., downtime or lag). {\"type\":\"skip\"} (recommended): discard overdue occurrences after a ~30s grace window. {\"type\":\"catch_up_within\",\"window_seconds\":N}: deliver the occurrence if it is overdue by less than N seconds, otherwise misfire. Use skip unless you specifically need late delivery.",
         "oneOf": [
             {
                 "type": "object",
@@ -735,7 +814,7 @@ fn overlap_policy_schema() -> Value {
     json!({
         "type": "string",
         "enum": ["allow_concurrent", "skip_if_running"],
-        "description": "How to handle overlapping occurrences for the same schedule."
+        "description": "What happens when a new occurrence fires while a previous one is still running. \"skip_if_running\" (recommended): skip the new occurrence to prevent pile-up. \"allow_concurrent\": deliver both, allowing parallel execution. Use skip_if_running unless the target is designed for concurrent prompts."
     })
 }
 
@@ -743,7 +822,7 @@ fn missing_target_policy_schema() -> Value {
     json!({
         "type": "string",
         "enum": ["skip", "mark_misfired"],
-        "description": "What to do if the target session or mob is missing when the occurrence becomes due."
+        "description": "What happens when the target session or mob does not exist at fire time. \"mark_misfired\" (recommended): record the occurrence as misfired so failures are visible. \"skip\": silently skip the occurrence. Use mark_misfired unless you expect transient target absence and do not want noise."
     })
 }
 
@@ -868,7 +947,7 @@ mod tests {
         assert_eq!(
             trigger_schema["description"].as_str(),
             Some(
-                "TriggerSpec uses internally tagged JSON with a type field. Example once trigger: {\"type\":\"once\",\"due_at_utc\":\"2026-04-09T12:00:00Z\"}. Example interval trigger: {\"type\":\"interval\",\"start_at_utc\":\"2026-04-09T12:00:00Z\",\"every_seconds\":60}."
+                "When the schedule fires. Uses internally tagged JSON with a \"type\" field. Three types: \"once\" fires at a single UTC timestamp. \"interval\" fires repeatedly every N seconds from a start time (optional end_at_utc). \"calendar\" fires on cron-style fields in a named IANA timezone. Examples: {\"type\":\"once\",\"due_at_utc\":\"2026-04-10T14:00:00Z\"} | {\"type\":\"interval\",\"start_at_utc\":\"2026-04-10T14:00:00Z\",\"every_seconds\":60} | {\"type\":\"calendar\",\"timezone\":\"UTC\",\"minute\":{\"kind\":\"values\",\"values\":[0]},\"hour\":{\"kind\":\"values\",\"values\":[9,17]}}."
             )
         );
         assert_eq!(variants[0]["properties"]["type"]["const"], json!("once"));

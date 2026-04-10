@@ -40,7 +40,7 @@ impl BuiltinTool for LoadSkillTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "load_skill".into(),
-            description: "Load a skill's full instructions into the conversation.".into(),
+            description: "Load a skill's full instructions into the conversation.\n\nWhat loading does: The skill's rendered body (instructions, prompts, guidance) is returned as the tool result and becomes part of the conversation context. Once loaded, you should follow the skill's instructions for the remainder of the relevant task. Loaded instructions persist in the conversation history for the current session — you do not need to reload the same skill within a session unless the context has been compacted.\n\nWhen to load vs. use tools directly: Load a skill when you need its specialized guidance, workflow, or domain knowledge. If you already know how to accomplish a task with available tools and no skill-specific instructions are needed, use the tools directly. Skills add context overhead, so only load them when the specialized instructions add value.\n\nThe id must be a canonical skill ID from browse_skills (e.g. \"extraction/email\").\n\nExample:\n  load_skill {\"id\": \"extraction/email\"}\n  Returns: {\"id\": \"extraction/email\", \"name\": \"email\", \"body\": \"<skill>...instructions...</skill>\", \"byte_size\": 2048}".into(),
             input_schema: crate::schema::schema_for::<LoadSkillArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,

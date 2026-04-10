@@ -1105,9 +1105,48 @@ fn build_tool_defs_with_profile_support(
     let mut defs = vec![
         tool_def(
             TOOL_DELEGATE,
-            "Delegate a task to a helper agent. Creates an implicit mob on first use, \
-             spawns a member with auto-wiring to you. Use for quick one-off delegation. \
-             Use 'tooling' to control the helper's model/tools.",
+            "Delegate a task to a helper agent.\n\n\
+             WHAT IT DOES:\n\
+             Creates a disposable helper agent that runs your task autonomously. On first call, \
+             an implicit mob is created behind the scenes to manage helpers. Each subsequent call \
+             spawns a new helper into that same mob. Helpers are auto-wired to you for comms \
+             (messaging) but run independently -- they do not share your session or memory.\n\n\
+             HELPERS ARE DISPOSABLE:\n\
+             Each helper gets its own session that exists only for the delegated task. Helpers \
+             do not persist between your turns. Once a helper completes or is retired, its session \
+             is archived. Use delegate for work you want done and reported back, not for \
+             long-lived collaborators (use mob_create + mob_spawn_member for those).\n\n\
+             WHEN TO USE DELEGATE vs MOB_*:\n\
+             - delegate: Quick one-off tasks. No setup needed. Fire-and-forget or poll for result.\n\
+             - mob_create + mob_spawn_member: Multi-member teams, custom wiring/flows, reusable \
+               profiles, long-lived collaborators, or when you need fine-grained control over \
+               backend, runtime_mode, and topology.\n\n\
+             TOOLING OPTIONS:\n\
+             By default, the helper inherits your current tool set (inherit_parent mode). \
+             Override via the tooling parameter:\n\
+             - {\"mode\":\"inherit_parent\"} -- default. Helper gets your tools. Add \
+               allow_overlay/deny_overlay arrays to narrow the set.\n\
+             - {\"mode\":\"minimal\"} -- comms tools only (send_message, send_request, \
+               send_response, peers). Lightweight helper.\n\
+             - {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"my-profile\"}} \
+               -- use a saved realm profile for model + tool config.\n\
+             - {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"claude-sonnet-4-5\",\
+               \"tools\":{\"builtins\":true,\"shell\":true,\"comms\":true}}} -- inline profile.\n\n\
+             CHECKING STATUS:\n\
+             Helpers run asynchronously in autonomous_host mode. After delegating, continue \
+             your own work. To check if a helper finished:\n\
+             1. Call mob_check_member with the mob_id (returned in the delegate response) and \
+                the member_id you provided (or the auto-generated one from the response).\n\
+             2. Status will be 'running', 'completed', or 'failed'.\n\
+             3. The helper may also send you a message via comms when done.\n\
+             Avoid tight polling loops -- check after meaningful intervals or wait for a comms \
+             message.\n\n\
+             EXAMPLES:\n\
+             1. Quick one-off: {\"task\": \"Summarize the README.md file and send me the result\"}\n\
+             2. Longer task with polling: {\"task\": \"Run the full test suite and report failures\", \
+                \"member_id\": \"test-runner\", \"tooling\": {\"mode\": \"inherit_parent\", \
+                \"deny_overlay\": [\"delegate\"]}} -- then later call mob_check_member to see \
+                the result.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1133,7 +1172,33 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_CREATE,
-            "Create a new explicit mob with full control over profiles, wiring, and flows.",
+            "Create a new explicit mob with full control over profiles, wiring, and flows.\n\n\
+             WHAT IS A MOB:\n\
+             A mob is a managed group of agent members that can communicate, share tasks, and \
+             coordinate via wiring rules. Unlike delegate (which creates a temporary implicit mob), \
+             mob_create gives you full control over the mob's lifecycle, member profiles, \
+             communication topology, and execution flows.\n\n\
+             WHEN TO USE mob_create vs delegate:\n\
+             - Use delegate for quick one-off helpers that run a single task and are discarded.\n\
+             - Use mob_create when you need: multiple coordinated members, custom communication \
+               wiring, flow-based execution (repeat_until loops), named profiles for role-based \
+               spawning, or long-lived teams that persist across interactions.\n\n\
+             KEY DEFINITION FIELDS:\n\
+             - id: Unique mob identifier (string).\n\
+             - profiles: Named role templates (inline or realm profile references) that members \
+               are spawned from. Each profile specifies model, tools, skills, and runtime_mode.\n\
+             - wiring: Rules for automatic peer connections between members (e.g., hub-spoke, \
+               mesh, or custom patterns).\n\
+             - flows: Named flow definitions for structured execution (e.g., repeat_until loops).\n\
+             - backend: Default backend for members. \"session\" (default) runs within the session \
+               runtime. \"external\" delegates to an external process.\n\
+             - topology: Optional role dispatch policy.\n\n\
+             TYPICAL WORKFLOW:\n\
+             1. mob_create with profiles and wiring rules.\n\
+             2. mob_spawn_member for each role (e.g., \"researcher\", \"writer\").\n\
+             3. mob_check_member or mob_list_members to monitor progress.\n\
+             4. mob_retire_member when a member's work is done.\n\
+             5. mob_destroy to clean up the mob and all remaining members.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1147,7 +1212,10 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_DESTROY,
-            "Destroy an explicit mob. Cannot destroy implicit delegation mobs.",
+            "Destroy an explicit mob and archive all its members' sessions.\n\n\
+             Only works on mobs created via mob_create. Cannot destroy implicit mobs created \
+             by delegate (those are cleaned up automatically when your session ends). \
+             Retire individual members first if you need their final output before destroying.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1158,36 +1226,61 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_SPAWN_MEMBER,
-            "Spawn a new member into a mob from a profile. Use 'tooling' to override model/tools.",
+            "Spawn a new member into an explicit mob from a named profile.\n\n\
+             The profile parameter references a role name defined in the mob's definition.profiles \
+             map (set during mob_create). The member inherits the profile's model, tools, skills, \
+             and runtime_mode unless overridden here.\n\n\
+             RUNTIME_MODE:\n\
+             - \"autonomous_host\" (default): The member runs autonomously in a long-lived host \
+               loop. It processes its initial_message and any subsequent comms messages without \
+               further prompting from you. Best for workers that run to completion on their own.\n\
+             - \"turn_driven\": The member only runs when explicitly given a turn. Use for \
+               members you want to control step-by-step.\n\n\
+             BACKEND:\n\
+             - \"session\" (default): Member runs within the session runtime. Supports full \
+               session persistence, compaction, and event streaming.\n\
+             - \"external\": Member delegates execution to an external process.\n\n\
+             AUTO_WIRE_PARENT:\n\
+             When true, the spawned member is automatically wired as a trusted peer of the \
+             mob's orchestrator, enabling bidirectional comms immediately after spawn. When \
+             false (default), you must wire peers manually or rely on the mob's wiring rules.\n\n\
+             TOOLING OVERRIDE:\n\
+             If provided, overrides the profile's model/tool config for this specific member. \
+             Same options as delegate's tooling parameter: inherit_parent, minimal, or profile \
+             (realm_profile or inline). Useful for spawning the same role with different models \
+             or restricted tool sets.\n\n\
+             You can spawn multiple members from the same profile with different member_ids \
+             to create parallel workers (e.g., spawn 3 \"researcher\" members with different tasks).",
             json!({
                 "type": "object",
                 "properties": {
-                    "mob_id": {"type": "string"},
-                    "profile": {"type": "string", "description": "Role name (profile key) in the mob definition"},
-                    "member_id": {"type": "string", "description": "Unique member identifier"},
+                    "mob_id": {"type": "string", "description": "Mob identifier (from mob_create response)"},
+                    "profile": {"type": "string", "description": "Role name (profile key) from the mob definition's profiles map"},
+                    "member_id": {"type": "string", "description": "Unique member identifier within this mob"},
                     "initial_message": {
                         "oneOf": [
                             {"type": "string"},
                             {"type": "array", "items": {"type": "object"}}
                         ],
-                        "description": "Initial message/task for the member"
+                        "description": "Initial message/task for the member. Required for autonomous_host members."
                     },
                     "runtime_mode": {
                         "type": "string",
                         "enum": ["autonomous_host", "turn_driven"],
-                        "description": "Runtime mode (default: autonomous_host)"
+                        "description": "autonomous_host (default): runs autonomously. turn_driven: waits for explicit turns."
                     },
                     "backend": {
                         "type": "string",
-                        "enum": ["session", "external"]
+                        "enum": ["session", "external"],
+                        "description": "session (default): runs in session runtime. external: delegates to external process."
                     },
                     "auto_wire_parent": {
                         "type": "boolean",
-                        "description": "Auto-wire to spawner after spawn"
+                        "description": "If true, auto-wire bidirectional comms with the orchestrator after spawn."
                     },
                     "tooling": {
                         "type": "object",
-                        "description": "Spawn tooling override. Controls the member's model and tool surface instead of using the definition profile. Options: {\"mode\":\"inherit_parent\"} (inherit your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Overlays: allow_overlay/deny_overlay arrays narrow the tool set."
+                        "description": "Override the profile's model/tool config. Options: {\"mode\":\"inherit_parent\"} (your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Add allow_overlay/deny_overlay arrays to narrow the tool set."
                     }
                 },
                 "required": ["mob_id", "profile", "member_id"]
@@ -1195,7 +1288,13 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_RETIRE_MEMBER,
-            "Retire a mob member and archive its session.",
+            "Retire a mob member and archive its session.\n\n\
+             Retirement is graceful: the member's session is archived (preserving its history) \
+             and it is removed from the mob roster. The member can no longer receive messages \
+             or run turns after retirement. Use mob_check_member first if you need the member's \
+             final output before retiring it.\n\n\
+             Retired members cannot be re-spawned. To replace a retired member, spawn a new \
+             one with a different member_id using the same profile.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1207,7 +1306,22 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_CHECK_MEMBER,
-            "Check a member's execution status, output preview, and token usage.",
+            "Check a member's execution status, output preview, and token usage.\n\n\
+             Returns the member's current state: running, completed, or failed, along with \
+             a preview of its latest output and cumulative token usage.\n\n\
+             POLLING GUIDANCE:\n\
+             Members in autonomous_host mode run asynchronously. Rather than polling in a \
+             tight loop, check at reasonable intervals (e.g., after completing your own work \
+             steps). For multi-member mobs, use mob_list_members to get all statuses at once \
+             instead of checking each member individually.\n\n\
+             PUSH vs PULL:\n\
+             Members can proactively send you results via comms (send_message/send_request). \
+             If you gave the member instructions to report back when done, wait for its comms \
+             message rather than polling. Use mob_check_member as a fallback or when you need \
+             token usage information that comms messages do not include.\n\n\
+             COST/PERFORMANCE:\n\
+             This call is lightweight (reads from local state, no LLM calls). Safe to call \
+             frequently, but unnecessary polling wastes your own turns.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1219,7 +1333,10 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_LIST_MEMBERS,
-            "List all members of a mob with their status and session info.",
+            "List all members of a mob with their status and session info.\n\n\
+             Returns each member's id, profile, status (running/completed/failed), runtime_mode, \
+             and session metadata. More efficient than calling mob_check_member on each member \
+             individually when you need a status overview of the whole mob.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1230,7 +1347,10 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_LIST,
-            "List all mobs managed by this agent.",
+            "List all mobs managed by this agent.\n\n\
+             Returns both explicit mobs (created via mob_create) and implicit mobs (created \
+             automatically by delegate). Each entry includes the mob_id, member count, and \
+             creation metadata. Use this to discover mob_ids for mob_list_members or mob_destroy.",
             json!({
                 "type": "object",
                 "properties": {}
@@ -1241,19 +1361,64 @@ fn build_tool_defs_with_profile_support(
     if has_profile_store {
         defs.push(tool_def(
             TOOL_MOB_PROFILE_CREATE,
-            "Create a new realm profile for spawning mob members.",
+            "Create a new realm profile -- a reusable template for spawning mob members.\n\n\
+             WHAT IS A PROFILE:\n\
+             A realm profile defines the model, tool surface, skills, peer description, backend, \
+             and runtime mode for a mob member. Once created, it can be referenced by name when \
+             spawning members via mob_spawn_member or delegate (tooling.source.type = \
+             \"realm_profile\"). This avoids repeating the same configuration across multiple spawns.\n\n\
+             WHEN TO USE PROFILES vs DELEGATE:\n\
+             - delegate with no tooling: Quick one-off, inherits your tools. No profile needed.\n\
+             - delegate with inline tooling: One-off with custom model/tools. No profile needed.\n\
+             - Profiles: When you spawn multiple members with the same config (e.g., 5 workers \
+               all using the same model + tools), or when you want to version and update the \
+               config independently of spawn calls.\n\n\
+             PROFILE FIELDS:\n\
+             - model (required): LLM model name, e.g. \"claude-sonnet-4-5\".\n\
+             - tools: {builtins: bool, shell: bool, comms: bool, memory: bool, mob: bool, \
+               mob_tasks: bool, schedule: bool}. Each defaults to false.\n\
+             - skills: Array of skill names to load.\n\
+             - peer_description: Human-readable role description visible to other members.\n\
+             - runtime_mode: \"autonomous_host\" (default) or \"turn_driven\".\n\
+             - backend: \"session\" (default) or \"external\".\n\
+             - external_addressable: Whether the member can receive turns from external callers.\n\n\
+             EXAMPLE PROFILE:\n\
+             {\"model\": \"claude-sonnet-4-5\", \"tools\": {\"builtins\": true, \"shell\": true, \
+             \"comms\": true}, \"skills\": [\"code-review\"], \"peer_description\": \"Code reviewer \
+             that analyzes PRs\", \"runtime_mode\": \"autonomous_host\"}\n\n\
+             LIFECYCLE:\n\
+             1. mob_profile_create -- creates the profile (returns revision 0).\n\
+             2. mob_profile_get -- read back the profile and its current revision.\n\
+             3. mob_profile_update -- modify the profile (requires expected_revision for safety).\n\
+             4. mob_profile_delete -- remove the profile when no longer needed.\n\n\
+             REUSE ACROSS SPAWNS:\n\
+             After creating a profile named \"researcher\", spawn multiple members from it:\n\
+             - delegate with tooling: {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\
+               \"name\":\"researcher\"}}\n\
+             - mob_spawn_member referencing the profile in the mob definition, or with tooling \
+               override pointing to the realm profile.",
             json!({
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Unique profile name"},
-                    "profile": {"type": "object", "description": "Profile definition (model, skills, tools, etc.)"}
+                    "name": {"type": "string", "description": "Unique profile name. Use descriptive role names like 'researcher', 'code-reviewer', 'test-runner'."},
+                    "profile": {"type": "object", "description": "Profile definition. Required field: model (string). Optional: tools (object), skills (array), peer_description (string), runtime_mode (string), backend (string), external_addressable (bool)."}
                 },
                 "required": ["name", "profile"]
             }),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_GET,
-            "Get a realm profile by name.",
+            "Get a realm profile by name.\n\n\
+             Returns the full profile definition and its current revision number. The revision \
+             is needed for mob_profile_update and mob_profile_delete (they require \
+             expected_revision to prevent concurrent modification).\n\n\
+             INHERITANCE AND OVERRIDES:\n\
+             The returned profile shows the stored configuration. When spawning a member, you \
+             can further narrow the tool set using allow_overlay/deny_overlay in the tooling \
+             parameter without modifying the stored profile. For example, a profile with \
+             {\"tools\": {\"builtins\": true, \"shell\": true, \"comms\": true}} can be spawned \
+             with deny_overlay: [\"shell_exec\"] to create a member that has builtins and comms \
+             but not shell access.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1264,7 +1429,11 @@ fn build_tool_defs_with_profile_support(
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_LIST,
-            "List all realm profiles.",
+            "List all realm profiles.\n\n\
+             Returns the name and revision of each stored profile. Use mob_profile_get to \
+             retrieve the full definition of a specific profile. Useful for discovering \
+             available profiles before spawning members or before creating a new profile \
+             to check for name conflicts.",
             json!({
                 "type": "object",
                 "properties": {}
@@ -1272,25 +1441,45 @@ fn build_tool_defs_with_profile_support(
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_UPDATE,
-            "Update a realm profile with CAS revision check.",
+            "Update a realm profile. Requires expected_revision for safe concurrent updates.\n\n\
+             WHAT IS expected_revision:\n\
+             Every profile has a revision number that increments on each update. You must pass \
+             the current revision (from mob_profile_get or the last create/update response) as \
+             expected_revision. If the stored revision does not match, the update is rejected \
+             with a conflict error -- this prevents you from accidentally overwriting changes \
+             made by another agent or process. On conflict, re-read the profile with \
+             mob_profile_get, merge your changes with the current state, and retry with the \
+             new revision.\n\n\
+             The profile field is a full replacement, not a merge. Include all fields you want \
+             to keep, not just the ones you are changing.\n\n\
+             ALREADY-SPAWNED MEMBERS:\n\
+             Updating a profile does not affect members already spawned from it. Only future \
+             spawns will use the updated configuration.",
             json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Profile name to update"},
-                    "profile": {"type": "object", "description": "Updated profile definition"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                    "profile": {"type": "object", "description": "Complete updated profile definition (full replacement, not merge)"},
+                    "expected_revision": {"type": "integer", "description": "Current revision from mob_profile_get. Prevents accidental overwrites."}
                 },
                 "required": ["name", "profile", "expected_revision"]
             }),
         ));
         defs.push(tool_def(
             TOOL_MOB_PROFILE_DELETE,
-            "Delete a realm profile.",
+            "Delete a realm profile.\n\n\
+             Requires expected_revision (same as mob_profile_update) to prevent deleting a \
+             profile that was modified since you last read it. Get the current revision via \
+             mob_profile_get before deleting.\n\n\
+             Deleting a profile does not affect members already spawned from it -- they continue \
+             running with the configuration they were spawned with. However, future spawn \
+             attempts referencing this profile name will fail until a new profile with the \
+             same name is created.",
             json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Profile name to delete"},
-                    "expected_revision": {"type": "integer", "description": "Expected current revision for CAS"}
+                    "expected_revision": {"type": "integer", "description": "Current revision from mob_profile_get. Prevents accidental deletion of modified profiles."}
                 },
                 "required": ["name", "expected_revision"]
             }),
@@ -1300,7 +1489,13 @@ fn build_tool_defs_with_profile_support(
     if has_profile_store && has_snapshot_provider {
         defs.push(tool_def(
             TOOL_MOB_PROFILE_LIST_SOURCES,
-            "List visible tool sources grouped by provenance (kind and source).",
+            "List visible tool sources grouped by provenance (kind and source).\n\n\
+             Returns all tool sources available to you, organized by where they come from: \
+             built-in tools, MCP servers, mob tools, comms tools, etc. Each group shows the \
+             source kind, source identifier, and the tool names it provides.\n\n\
+             Use this to discover what tools are available before creating profiles. When \
+             building a profile's tools config or setting up allow_overlay/deny_overlay \
+             filters, this tells you the exact tool names you can reference.",
             json!({
                 "type": "object",
                 "properties": {}

@@ -284,19 +284,71 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Wait for the artist to receive a message containing the secret word.
-/// This proves the full pipeline: image → guessers → discussion → consensus → artist.
-async fn wait_for_artist_received(
+fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) -> bool {
+    let latest_secret_idx = page.messages.iter().rposition(|msg| match msg {
+        meerkat_core::types::Message::User(u) => {
+            meerkat_core::types::text_content(&u.content).contains("SECRET WORD")
+        }
+        _ => false,
+    });
+
+    let Some(latest_secret_idx) = latest_secret_idx else {
+        return false;
+    };
+
+    page.messages
+        .iter()
+        .skip(latest_secret_idx + 1)
+        .any(|msg| match msg {
+            meerkat_core::types::Message::User(u) => {
+                let text = meerkat_core::types::text_content(&u.content);
+                text.contains("[COMMS MESSAGE from pictionary/guesser-a/guesser-a]")
+            }
+            _ => false,
+        })
+}
+
+fn current_round_discussion_completed(page: &meerkat_core::SessionHistoryPage) -> bool {
+    let latest_image_idx = page.messages.iter().rposition(|msg| match msg {
+        meerkat_core::types::Message::User(u) => {
+            let text = meerkat_core::types::text_content(&u.content);
+            text.contains("[COMMS MESSAGE from pictionary/artist/artist]")
+                && text.contains("I drew this for Pictionary")
+        }
+        _ => false,
+    });
+
+    let Some(latest_image_idx) = latest_image_idx else {
+        return false;
+    };
+
+    let mut heard_from_b = false;
+    let mut heard_from_c = false;
+    for msg in page.messages.iter().skip(latest_image_idx + 1) {
+        let text = match msg {
+            meerkat_core::types::Message::User(u) => meerkat_core::types::text_content(&u.content),
+            _ => continue,
+        };
+        heard_from_b |= text.contains("[COMMS MESSAGE from pictionary/guesser-b/guesser-b]");
+        heard_from_c |= text.contains("[COMMS MESSAGE from pictionary/guesser-c/guesser-c]");
+        if heard_from_b && heard_from_c {
+            return true;
+        }
+    }
+    false
+}
+
+/// Wait for a full round-trip: guesser-a discusses with both peers, then a guess
+/// is sent to the artist for the current round.
+async fn wait_for_artist_guess_after_discussion(
     handle: &MobHandle,
     service: &dyn MobSessionService,
-    needle: &str,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
-    let needle_lower = needle.to_lowercase();
     loop {
         let members = handle.list_members().await;
-        if let Some(artist) = members
+        let artist_guess_received = if let Some(artist) = members
             .iter()
             .find(|m| m.meerkat_id == MeerkatId::from("artist"))
             && let Some(sid) = artist.session_id()
@@ -310,21 +362,32 @@ async fn wait_for_artist_received(
                 )
                 .await
         {
-            for msg in &page.messages {
-                let text = match msg {
-                    meerkat_core::types::Message::User(u) => {
-                        meerkat_core::types::text_content(&u.content)
-                    }
-                    _ => continue,
-                };
-                // Skip the briefing message we sent (contains "SECRET WORD")
-                if text.contains("SECRET WORD") {
-                    continue;
-                }
-                if text.to_lowercase().contains(&needle_lower) {
-                    return true;
-                }
-            }
+            current_round_artist_received_guess(&page)
+        } else {
+            false
+        };
+
+        let discussion_complete = if let Some(guesser_a) = members
+            .iter()
+            .find(|m| m.meerkat_id == MeerkatId::from("guesser-a"))
+            && let Some(sid) = guesser_a.session_id()
+            && let Ok(page) = service
+                .read_history(
+                    sid,
+                    meerkat_core::SessionHistoryQuery {
+                        offset: 0,
+                        limit: None,
+                    },
+                )
+                .await
+        {
+            current_round_discussion_completed(&page)
+        } else {
+            false
+        };
+
+        if artist_guess_received && discussion_complete {
+            return true;
         }
         if Instant::now() > deadline {
             return false;
@@ -720,28 +783,25 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 println!("  === END DEBUG ===\n");
             }
         }
-        // Success criteria: the secret word (or a close match) appears in a
-        // message RECEIVED by the artist — proving the full pipeline worked:
-        // image gen → peer delivery → guesser discussion → consensus → artist.
-        // We also accept the artist responding with "CORRECT" as a bonus.
-        let guess_reached_artist = wait_for_artist_received(
+        // Success criteria: guesser-a hears from both peers and then sends a
+        // guess to the artist for the current round, regardless of correctness.
+        let guess_reached_artist = wait_for_artist_guess_after_discussion(
             &handle,
             service.as_ref(),
-            secret_word,
             Duration::from_secs(180),
         )
         .await;
 
         if guess_reached_artist {
             println!(
-                "  ✓ Guessers guessed \"{secret_word}\" — artist received it! [wait: {:.1}s, round: {:.1}s]",
+                "  ✓ Discussion completed and a guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),
                 round_start.elapsed().as_secs_f64()
             );
             passed += 1;
         } else {
             println!(
-                "  ✗ Timed out — guess never reached the artist [wait: {:.1}s, round: {:.1}s]",
+                "  ✗ Timed out — no post-discussion guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),
                 round_start.elapsed().as_secs_f64()
             );

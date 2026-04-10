@@ -84,6 +84,28 @@ impl OpenAiCompatibleClient {
         request
     }
 
+    fn map_send_error(error: reqwest::Error) -> LlmError {
+        if error.is_timeout() {
+            LlmError::NetworkTimeout { duration_ms: 30000 }
+        } else if Self::is_connection_error(&error) {
+            LlmError::ConnectionReset
+        } else {
+            LlmError::Unknown {
+                message: error.to_string(),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_connection_error(error: &reqwest::Error) -> bool {
+        error.is_connect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn is_connection_error(_error: &reqwest::Error) -> bool {
+        false
+    }
+
     fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut body = serde_json::json!({
             "model": self.remote_model,
@@ -393,17 +415,7 @@ impl LlmClient for OpenAiCompatibleClient {
                         .json(&body)
                         .send()
                         .await
-                        .map_err(|e| {
-                            if e.is_timeout() {
-                                LlmError::NetworkTimeout { duration_ms: 30000 }
-                            } else if e.is_connect() {
-                                LlmError::ConnectionReset
-                            } else {
-                                LlmError::Unknown {
-                                    message: e.to_string(),
-                                }
-                            }
-                        })?;
+                        .map_err(Self::map_send_error)?;
 
                     let status_code = response.status().as_u16();
                     let stream_result = if (200..=299).contains(&status_code) {

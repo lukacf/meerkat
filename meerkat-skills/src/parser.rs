@@ -1,12 +1,12 @@
 //! SKILL.md frontmatter parser.
 //!
-//! Uses `serde_yml` for robust YAML parsing of the frontmatter block.
+//! Uses `serde_yaml` for robust YAML parsing of the frontmatter block.
 
 use indexmap::IndexMap;
 use meerkat_core::skills::{
     SkillDescriptor, SkillDocument, SkillError, SkillId, SkillName, SkillScope,
 };
-use serde_yml::Value;
+use serde_yaml::Value;
 
 /// Parsed frontmatter from a SKILL.md file.
 #[derive(Debug, serde::Deserialize)]
@@ -43,7 +43,7 @@ pub fn parse_skill_md(
     expected_skill_name: Option<&str>,
 ) -> Result<SkillDocument, SkillError> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
-    let fm: Frontmatter = serde_yml::from_str(&frontmatter_str)
+    let fm: Frontmatter = serde_yaml::from_str(&frontmatter_str)
         .map_err(|e| SkillError::Parse(format!("frontmatter parse error: {e}").into()))?;
     validate_frontmatter(&fm, expected_skill_name)?;
 
@@ -57,7 +57,7 @@ pub fn parse_skill_md(
         let serialized = if let Some(s) = value.as_str() {
             s.to_string()
         } else {
-            serde_yml::to_string(&value)
+            serde_yaml::to_string(&value)
                 .map_err(|e| SkillError::Parse(format!("extension serialize error: {e}").into()))?
                 .trim()
                 .to_string()

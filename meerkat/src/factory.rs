@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use meerkat_client::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
-    LlmClientFactory, LlmProvider, OpenAiCompatibleClient, OpenAiCompatibleMode, ProviderResolver,
+    LlmClientFactory, LlmProvider, ProviderResolver,
 };
+#[cfg(feature = "openai")]
+use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
@@ -1184,45 +1186,57 @@ impl AgentFactory {
         registry: &ModelRegistry,
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn LlmClient>, FactoryError> {
-        let entry = registry.entry(&identity.model).ok_or_else(|| {
-            FactoryError::ClientCreationFailed(format!("unknown model '{}'", identity.model))
-        })?;
-        let self_hosted = entry.self_hosted.as_ref().ok_or_else(|| {
-            FactoryError::ClientCreationFailed(format!(
-                "model '{}' is not self-hosted",
-                identity.model
-            ))
-        })?;
-        if let Some(expected_server_id) = identity.self_hosted_server_id.as_deref()
-            && self_hosted.server_id != expected_server_id
+        #[cfg(not(feature = "openai"))]
         {
-            return Err(FactoryError::ClientCreationFailed(format!(
-                "self-hosted model '{}' is bound to server '{}', but registry resolves to '{}'",
-                identity.model, expected_server_id, self_hosted.server_id
-            )));
-        }
-        if self_hosted.transport != meerkat_core::SelfHostedTransport::OpenAiCompatible {
+            let _ = registry;
+            let _ = identity;
             return Err(FactoryError::UnsupportedProvider(
-                "only openai_compatible transport is supported".to_string(),
+                "self_hosted requires the openai feature".to_string(),
             ));
         }
 
-        let mode = match self_hosted.api_style {
-            meerkat_core::SelfHostedApiStyle::Responses => OpenAiCompatibleMode::Responses,
-            meerkat_core::SelfHostedApiStyle::ChatCompletions => {
-                OpenAiCompatibleMode::ChatCompletions
+        #[cfg(feature = "openai")]
+        {
+            let entry = registry.entry(&identity.model).ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!("unknown model '{}'", identity.model))
+            })?;
+            let self_hosted = entry.self_hosted.as_ref().ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "model '{}' is not self-hosted",
+                    identity.model
+                ))
+            })?;
+            if let Some(expected_server_id) = identity.self_hosted_server_id.as_deref()
+                && self_hosted.server_id != expected_server_id
+            {
+                return Err(FactoryError::ClientCreationFailed(format!(
+                    "self-hosted model '{}' is bound to server '{}', but registry resolves to '{}'",
+                    identity.model, expected_server_id, self_hosted.server_id
+                )));
             }
-        };
+            if self_hosted.transport != meerkat_core::SelfHostedTransport::OpenAiCompatible {
+                return Err(FactoryError::UnsupportedProvider(
+                    "only openai_compatible transport is supported".to_string(),
+                ));
+            }
 
-        Ok(Arc::new(OpenAiCompatibleClient::new(
-            mode,
-            self_hosted.remote_model.clone(),
-            self_hosted.base_url.clone(),
-            self_hosted.resolve_bearer_token(),
-            entry.profile.supports_temperature,
-            entry.profile.supports_thinking,
-            entry.profile.supports_reasoning,
-        )))
+            let mode = match self_hosted.api_style {
+                meerkat_core::SelfHostedApiStyle::Responses => OpenAiCompatibleMode::Responses,
+                meerkat_core::SelfHostedApiStyle::ChatCompletions => {
+                    OpenAiCompatibleMode::ChatCompletions
+                }
+            };
+
+            Ok(Arc::new(OpenAiCompatibleClient::new(
+                mode,
+                self_hosted.remote_model.clone(),
+                self_hosted.base_url.clone(),
+                self_hosted.resolve_bearer_token(),
+                entry.profile.supports_temperature,
+                entry.profile.supports_thinking,
+                entry.profile.supports_reasoning,
+            )))
+        }
     }
 
     fn resolve_provider_credentials(

@@ -571,6 +571,7 @@ pub async fn serve_tcp(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -630,5 +631,595 @@ mod tests {
             classify_long_running_response(&response, request_commits_state_on_success(&request)),
             RequestTerminal::Publish(_)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // TCP integration tests
+    // -----------------------------------------------------------------------
+
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat::AgentFactory;
+    use meerkat_client::{LlmClient, LlmError};
+    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+    use tokio::net::TcpStream;
+
+    /// Mock LLM that immediately returns "Hello from mock" and ends the turn.
+    struct MockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for MockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Hello from mock".to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
+        Arc::new(meerkat_store::MemoryBlobStore::new())
+    }
+
+    /// Build a `SessionRuntime` + `ConfigStore` pair for TCP tests.
+    fn build_test_runtime(
+        temp: &tempfile::TempDir,
+    ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_core::ConfigStore>) {
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
+            crate::router::NotificationSink::noop(),
+        );
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        (Arc::new(runtime), config_store)
+    }
+
+    /// Send a single JSONL line over a TCP stream.
+    async fn send_jsonl(stream: &mut TcpStream, value: &serde_json::Value) {
+        let mut bytes = serde_json::to_vec(value).unwrap();
+        bytes.push(b'\n');
+        stream.write_all(&bytes).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    /// Read a single JSONL line from a buffered reader, with a timeout.
+    async fn read_jsonl_line(
+        reader: &mut TokioBufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> Option<serde_json::Value> {
+        let mut line = String::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await;
+        match result {
+            Ok(Ok(0)) => None, // EOF
+            Ok(Ok(_)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(serde_json::from_str(trimmed).unwrap())
+            }
+            Ok(Err(e)) => panic!("read error: {e}"),
+            Err(elapsed) => panic!("read timed out after 5s: {elapsed}"),
+        }
+    }
+
+    /// Read all JSONL lines until no more arrive within `timeout`.
+    async fn drain_jsonl(
+        reader: &mut TokioBufReader<tokio::net::tcp::OwnedReadHalf>,
+        timeout: std::time::Duration,
+    ) -> Vec<serde_json::Value> {
+        let mut lines = Vec::new();
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(timeout, reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => break, // EOF
+                Ok(Ok(_)) => {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(serde_json::from_str(trimmed).unwrap());
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => break, // timeout — no more data
+            }
+        }
+        lines
+    }
+
+    // -- Test 1: TCP initialize handshake --
+
+    #[tokio::test]
+    async fn tcp_initialize_handshake() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn the server for one connection.
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        // Connect client.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let init_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {},
+            "id": 1
+        });
+        send_jsonl(&mut client, &init_request).await;
+
+        let (read_half, _write_half) = client.into_split();
+        let mut reader = TokioBufReader::new(read_half);
+        let response = read_jsonl_line(&mut reader)
+            .await
+            .expect("expected response");
+
+        // Verify it's a valid JSON-RPC success response.
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 1);
+        assert!(response["error"].is_null(), "expected no error: {response}");
+
+        let result = &response["result"];
+        assert!(
+            result["server_info"]["name"].is_string(),
+            "expected server_info.name in result: {result}"
+        );
+        assert!(
+            result["methods"].is_array(),
+            "expected methods array in result: {result}"
+        );
+
+        // Drop the write half to close the connection -> server exits.
+        drop(_write_half);
+        drop(reader);
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish within timeout")
+            .expect("server task should not panic");
+
+        assert!(
+            server_result.is_ok(),
+            "serve_tcp_connection should return Ok on clean disconnect"
+        );
+    }
+
+    // -- Test 2: Session create + turn over TCP --
+
+    #[tokio::test]
+    async fn tcp_session_create_deferred_then_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = TokioBufReader::new(read_half);
+
+        // 1. Initialize
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1
+        });
+        let mut bytes = serde_json::to_vec(&init).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let resp = read_jsonl_line(&mut reader).await.expect("init response");
+        assert_eq!(resp["id"], 1);
+        assert!(resp["error"].is_null());
+
+        // 2. Create session with deferred initial turn.
+        let create = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/create",
+            "params": {
+                "prompt": "Say hello",
+                "initial_turn": "deferred"
+            },
+            "id": 2
+        });
+        let mut bytes = serde_json::to_vec(&create).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let resp = read_jsonl_line(&mut reader).await.expect("create response");
+        assert_eq!(resp["id"], 2);
+        assert!(resp["error"].is_null(), "session/create error: {resp}");
+
+        let create_result = &resp["result"];
+        let session_id = create_result["session_id"]
+            .as_str()
+            .expect("expected session_id in create response");
+        assert!(!session_id.is_empty());
+
+        // 3. Start a turn on the session.
+        let turn = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Say hello"
+            },
+            "id": 3
+        });
+        let mut bytes = serde_json::to_vec(&turn).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        // Drain all messages (notifications + final response) with a generous timeout.
+        let all_messages = drain_jsonl(&mut reader, std::time::Duration::from_secs(5)).await;
+
+        // There should be at least one message (the turn response).
+        assert!(
+            !all_messages.is_empty(),
+            "expected at least the turn/start response"
+        );
+
+        // The turn response should be present (has id: 3).
+        let turn_response = all_messages
+            .iter()
+            .find(|m| m.get("id").and_then(serde_json::Value::as_i64) == Some(3));
+        assert!(
+            turn_response.is_some(),
+            "expected turn/start response with id=3 among: {all_messages:?}"
+        );
+
+        // Any session/event notifications should have the correct session_id.
+        for msg in &all_messages {
+            if msg.get("method").and_then(|v| v.as_str()) == Some("session/event") {
+                let params = &msg["params"];
+                assert_eq!(
+                    params["session_id"].as_str(),
+                    Some(session_id),
+                    "notification session_id mismatch"
+                );
+            }
+        }
+
+        // Clean up: drop write half to close connection.
+        drop(write_half);
+        drop(reader);
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish")
+            .expect("server task should not panic");
+
+        assert!(server_result.is_ok());
+    }
+
+    // -- Test 3: Client disconnect does not panic --
+
+    #[tokio::test]
+    async fn tcp_client_disconnect_returns_ok() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        // Connect, send initialize, read response, then immediately drop.
+        {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let init = serde_json::json!({
+                "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1
+            });
+            send_jsonl(&mut client, &init).await;
+
+            let (read_half, _write_half) = client.into_split();
+            let mut reader = TokioBufReader::new(read_half);
+            let _resp = read_jsonl_line(&mut reader).await;
+            // Drop everything — simulates client disconnect.
+        }
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish within timeout")
+            .expect("server task should not panic");
+
+        // Server should return Ok, not an error, on a clean TCP close.
+        assert!(
+            server_result.is_ok(),
+            "expected Ok on client disconnect, got: {server_result:?}"
+        );
+    }
+
+    // -- Test 4: Multiple sequential connections via serve_tcp --
+
+    #[tokio::test]
+    async fn tcp_multiple_sequential_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn serve_tcp in a background task (it loops forever).
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let addr_str = addr.to_string();
+        let server_handle = tokio::spawn(async move {
+            // We can't easily pass the pre-bound listener to serve_tcp since it
+            // binds internally, so we use serve_tcp_connection in a manual loop
+            // to simulate the same behavior.
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let _ = serve_tcp_connection(stream, Arc::clone(&rt), Arc::clone(&cs), None).await;
+            }
+        });
+
+        // --- Client 1 ---
+        {
+            let mut client = TcpStream::connect(&addr_str).await.unwrap();
+            let init = serde_json::json!({
+                "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1
+            });
+            send_jsonl(&mut client, &init).await;
+
+            let (read_half, _write) = client.into_split();
+            let mut reader = TokioBufReader::new(read_half);
+            let resp = read_jsonl_line(&mut reader)
+                .await
+                .expect("client 1 init response");
+            assert_eq!(resp["id"], 1);
+            assert!(resp["error"].is_null());
+            // Client 1 disconnects.
+        }
+
+        // Brief pause to let the server complete the first connection teardown.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // --- Client 2 ---
+        {
+            let mut client = TcpStream::connect(&addr_str).await.unwrap();
+            let init = serde_json::json!({
+                "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 42
+            });
+            send_jsonl(&mut client, &init).await;
+
+            let (read_half, _write) = client.into_split();
+            let mut reader = TokioBufReader::new(read_half);
+            let resp = read_jsonl_line(&mut reader)
+                .await
+                .expect("client 2 init response");
+            assert_eq!(resp["id"], 42);
+            assert!(resp["error"].is_null());
+
+            assert!(
+                resp["result"]["server_info"]["name"].is_string(),
+                "client 2 should receive valid capabilities"
+            );
+        }
+
+        // Abort the infinite accept loop.
+        server_handle.abort();
+    }
+
+    // -- Test 5: config/get round-trip over TCP --
+
+    #[tokio::test]
+    async fn tcp_config_get_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = TokioBufReader::new(read_half);
+
+        // Initialize first (required handshake).
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1
+        });
+        let mut bytes = serde_json::to_vec(&init).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let init_resp = read_jsonl_line(&mut reader).await.expect("init response");
+        assert!(init_resp["error"].is_null());
+
+        // Send config/get.
+        let config_get = serde_json::json!({
+            "jsonrpc": "2.0", "method": "config/get", "params": {}, "id": 2
+        });
+        let mut bytes = serde_json::to_vec(&config_get).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let resp = read_jsonl_line(&mut reader)
+            .await
+            .expect("config/get response");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 2);
+        assert!(resp["error"].is_null(), "config/get should succeed: {resp}");
+
+        // The result should contain a "config" key.
+        assert!(
+            resp["result"].get("config").is_some(),
+            "config/get result should contain 'config' key: {}",
+            resp["result"]
+        );
+
+        // Clean up.
+        drop(write_half);
+        drop(reader);
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish")
+            .expect("server task should not panic");
+
+        assert!(server_result.is_ok());
+    }
+
+    // -- Test 6: Bare disconnect (connect then immediately drop) --
+
+    #[tokio::test]
+    async fn tcp_bare_disconnect_no_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        // Connect and immediately drop without sending any data.
+        {
+            let _client = TcpStream::connect(addr).await.unwrap();
+        }
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish within timeout")
+            .expect("server task should not panic");
+
+        assert!(
+            server_result.is_ok(),
+            "bare disconnect (no data) should not error: {server_result:?}"
+        );
+    }
+
+    // -- Test 7: Malformed JSON over TCP produces parse error, server stays alive --
+
+    #[tokio::test]
+    async fn tcp_malformed_json_returns_parse_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_tcp_connection(stream, rt, cs, None).await
+        });
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (read_half, mut write_half) = client.into_split();
+        let mut reader = TokioBufReader::new(read_half);
+
+        // Send garbage.
+        write_half.write_all(b"this is not json\n").await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let resp = read_jsonl_line(&mut reader).await.expect("error response");
+        assert!(
+            resp["error"].is_object(),
+            "should receive a parse error response: {resp}"
+        );
+        assert_eq!(resp["error"]["code"], crate::error::PARSE_ERROR);
+
+        // Server should still be alive — send a valid request.
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 99
+        });
+        let mut bytes = serde_json::to_vec(&init).unwrap();
+        bytes.push(b'\n');
+        write_half.write_all(&bytes).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let resp2 = read_jsonl_line(&mut reader)
+            .await
+            .expect("init response after error");
+        assert_eq!(resp2["id"], 99);
+        assert!(
+            resp2["error"].is_null(),
+            "init should succeed after parse error: {resp2}"
+        );
+
+        drop(write_half);
+        drop(reader);
+
+        let server_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server should finish")
+            .expect("server task should not panic");
+
+        assert!(server_result.is_ok());
     }
 }

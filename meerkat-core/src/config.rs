@@ -230,11 +230,13 @@ impl Config {
         let file_config: Config = toml::from_str(content).map_err(ConfigError::Parse)?;
         let tools_layer = file_config.tools.clone();
         let retry_layer = file_config.retry.clone();
+        let self_hosted_layer = file_config.self_hosted.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
         let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
         self.merge_tools_from_toml_presence(&parsed, &tools_layer);
         self.merge_retry_from_toml_presence(&parsed, &retry_layer);
+        self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
         Ok(())
     }
 
@@ -326,18 +328,6 @@ impl Config {
                 self.hooks.background_max_concurrency = other.hooks.background_max_concurrency;
             }
             self.hooks.entries.extend(other.hooks.entries);
-        }
-        if other.self_hosted != SelfHostedConfig::default() {
-            if !other.self_hosted.servers.is_empty() {
-                self.self_hosted
-                    .servers
-                    .extend(other.self_hosted.servers.clone());
-            }
-            if !other.self_hosted.models.is_empty() {
-                self.self_hosted
-                    .models
-                    .extend(other.self_hosted.models.clone());
-            }
         }
     }
 
@@ -436,6 +426,113 @@ impl Config {
         }
         if retry.contains_key("call_timeout") {
             self.retry.call_timeout_override = layer.call_timeout_override.clone();
+        }
+    }
+
+    fn merge_self_hosted_from_toml_presence(
+        &mut self,
+        parsed: &toml::Value,
+        layer: &SelfHostedConfig,
+    ) {
+        let Some(self_hosted) = parsed.get("self_hosted").and_then(toml::Value::as_table) else {
+            return;
+        };
+
+        if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
+            let mut merged_servers = BTreeMap::new();
+            for (server_id, server_value) in servers {
+                let Some(server_table) = server_value.as_table() else {
+                    continue;
+                };
+                let mut merged = self
+                    .self_hosted
+                    .servers
+                    .get(server_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let Some(server_layer) = layer.servers.get(server_id) else {
+                    continue;
+                };
+                if server_table.contains_key("transport") {
+                    merged.transport = server_layer.transport;
+                }
+                if server_table.contains_key("base_url") {
+                    merged.base_url = server_layer.base_url.clone();
+                }
+                if server_table.contains_key("api_style") {
+                    merged.api_style = server_layer.api_style;
+                }
+                if server_table.contains_key("bearer_token") {
+                    merged.bearer_token = server_layer.bearer_token.clone();
+                }
+                if server_table.contains_key("bearer_token_env") {
+                    merged.bearer_token_env = server_layer.bearer_token_env.clone();
+                }
+                merged_servers.insert(server_id.clone(), merged);
+            }
+            self.self_hosted.servers = merged_servers;
+        }
+
+        if let Some(models) = self_hosted.get("models").and_then(toml::Value::as_table) {
+            let mut merged_models = BTreeMap::new();
+            for (model_id, model_value) in models {
+                let Some(model_table) = model_value.as_table() else {
+                    continue;
+                };
+                let mut merged = self
+                    .self_hosted
+                    .models
+                    .get(model_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let Some(model_layer) = layer.models.get(model_id) else {
+                    continue;
+                };
+                if model_table.contains_key("server") {
+                    merged.server = model_layer.server.clone();
+                }
+                if model_table.contains_key("remote_model") {
+                    merged.remote_model = model_layer.remote_model.clone();
+                }
+                if model_table.contains_key("display_name") {
+                    merged.display_name = model_layer.display_name.clone();
+                }
+                if model_table.contains_key("family") {
+                    merged.family = model_layer.family.clone();
+                }
+                if model_table.contains_key("tier") {
+                    merged.tier = model_layer.tier;
+                }
+                if model_table.contains_key("context_window") {
+                    merged.context_window = model_layer.context_window;
+                }
+                if model_table.contains_key("max_output_tokens") {
+                    merged.max_output_tokens = model_layer.max_output_tokens;
+                }
+                if model_table.contains_key("vision") {
+                    merged.vision = model_layer.vision;
+                }
+                if model_table.contains_key("image_tool_results") {
+                    merged.image_tool_results = model_layer.image_tool_results;
+                }
+                if model_table.contains_key("inline_video") {
+                    merged.inline_video = model_layer.inline_video;
+                }
+                if model_table.contains_key("supports_temperature") {
+                    merged.supports_temperature = model_layer.supports_temperature;
+                }
+                if model_table.contains_key("supports_thinking") {
+                    merged.supports_thinking = model_layer.supports_thinking;
+                }
+                if model_table.contains_key("supports_reasoning") {
+                    merged.supports_reasoning = model_layer.supports_reasoning;
+                }
+                if model_table.contains_key("call_timeout_secs") {
+                    merged.call_timeout_secs = model_layer.call_timeout_secs;
+                }
+                merged_models.insert(model_id.clone(), merged);
+            }
+            self.self_hosted.models = merged_models;
         }
     }
 
@@ -1817,21 +1914,16 @@ base_url = "http://127.0.0.1:11434"
 "#,
         )
         .expect("base self-hosted server");
-
-        let mut overlay = Config::default();
-        overlay
-            .merge_toml_str(
-                r#"
+        base.merge_toml_str(
+            r#"
 [self_hosted.models.gemma-4-e2b]
 server = "local"
 remote_model = "gemma4:e2b"
 display_name = "Gemma 4 E2B"
 family = "gemma-4"
 "#,
-            )
-            .expect("overlay self-hosted model");
-
-        base.merge(overlay);
+        )
+        .expect("overlay self-hosted model");
 
         assert!(base.self_hosted.servers.contains_key("local"));
         assert!(base.self_hosted.models.contains_key("gemma-4-e2b"));
@@ -1843,6 +1935,37 @@ family = "gemma-4"
                 .map(|server| server.server_id.as_str()),
             Some("local")
         );
+    }
+
+    #[test]
+    fn test_merge_self_hosted_partial_server_override_preserves_existing_fields() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+api_style = "responses"
+"#,
+            )
+            .expect("base server");
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+bearer_token_env = "OLLAMA_TOKEN"
+"#,
+            )
+            .expect("overlay server");
+
+        let server = config
+            .self_hosted
+            .servers
+            .get("local")
+            .expect("merged server");
+        assert_eq!(server.base_url, "http://127.0.0.1:11434");
+        assert_eq!(server.api_style, SelfHostedApiStyle::Responses);
+        assert_eq!(server.bearer_token_env.as_deref(), Some("OLLAMA_TOKEN"));
     }
 
     #[test]

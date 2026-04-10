@@ -229,12 +229,16 @@ Use together with:
 ### Recovery fairness
 
 - repairable restore failure eventually clears or is replaced:
-  `RecoveryProgress`, `TargetFairness`
+  `ClearRestoreFailure`, `AdvanceCheckpointVersion`, `RecoveryFairness`,
+  `RecoveryFairSpec`, `RestoreFailureEventuallyClearsProp`
 
 ### History / task fairness
 
 - history/task persistence eventually completes:
   `HistoryTaskProgress`, `TargetFairness`
+- live task lifecycle eventually closes under focused close fairness:
+  `CloseTask`, `TaskFairness`, `TaskFairSpec`,
+  `LiveTaskEventuallyClosesProp`
 
 ## Derived vocabulary coverage
 

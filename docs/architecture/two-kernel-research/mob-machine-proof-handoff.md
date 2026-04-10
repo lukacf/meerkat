@@ -72,6 +72,8 @@ The focused canonical liveness harnesses now pass for:
 
 - lifecycle / destroyed-state absorption
 - provisioning / kickoff progress
+- recovery failure clearance
+- task lifecycle closure
 - work-ledger progress
 - flow-step progress
 

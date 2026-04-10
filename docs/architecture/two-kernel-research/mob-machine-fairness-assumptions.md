@@ -64,10 +64,14 @@ If a restore failure is repairable and repair remains enabled forever, then the
 machine eventually clears the failure or re-records a newer authoritative
 failure.
 
+The focused recovery proof harness now checks the clear path directly.
+
 ### History / task fairness
 
 If durable event or task persistence is enabled forever, then append/update
 effects eventually complete.
+
+The focused task proof harness now checks the close path directly.
 
 ## Non-assumptions
 

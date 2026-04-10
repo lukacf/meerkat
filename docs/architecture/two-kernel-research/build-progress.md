@@ -14501,3 +14501,47 @@ Result:
   - flow-step progress
 - full-`FairSpec` liveness remains useful exploratory search, but no longer
   masquerades as unfinished canonical proof
+
+## Slice 239 - Mob proof phase adds focused recovery and task liveness harnesses
+
+Goal:
+
+- extend the proof surface beyond lifecycle/work/flow only where the target
+  semantics already justify it
+
+What landed:
+
+- added `RecoveryHarnessNext`, `RecoverySpec`, `RecoveryFairness`, and
+  `RecoveryFairSpec` to `tla/MobMachineTarget.tla`
+- added `TaskHarnessNext`, `TaskSpec`, `TaskFairness`, and `TaskFairSpec` to
+  `tla/MobMachineTarget.tla`
+- added:
+  - `RestoreFailureEventuallyClearsProp`
+  - `LiveTaskEventuallyClosesProp`
+- added focused configs:
+  - `tla/MobMachineTargetRecoveryLiveness.cfg`
+  - `tla/MobMachineTargetTaskLiveness.cfg`
+- updated the proof handoff/docs so recovery and task closure are now part of
+  the canonical proof surface instead of living only in prose fairness notes
+
+Why this slice matters:
+
+- before this pass, recovery fairness and task fairness were documented, but
+  they were not exercised by their own executable proof lanes
+- that left an asymmetry between what the package claimed and what TLC had
+  actually checked
+- both new properties were kept only because the model sustained them cleanly;
+  if either had failed, they would have been narrowed or removed instead of
+  papered over
+
+Result:
+
+- `MobMachine` now has six canonical focused temporal lanes:
+  - lifecycle
+  - provisioning/kickoff
+  - recovery
+  - task lifecycle
+  - work ledger
+  - flow-step progress
+- wider full-`FairSpec` liveness remains exploratory and is no longer carrying
+  canonical proof weight by accident

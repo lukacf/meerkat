@@ -63,6 +63,8 @@ The frozen target package now has all of the following:
 - canonical bounded TLC base pass
 - canonical bounded TLC stress pass
 - canonical focused lifecycle liveness pass
+- canonical focused recovery liveness pass
+- canonical focused task-lifecycle liveness pass
 - exploratory widened audit run with no invariant failures observed before
   deliberate termination
 - transition catalog aligned with executable `Next`

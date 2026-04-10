@@ -2293,6 +2293,18 @@ WorkHarnessNext ==
   \/ CancelWork
   \/ CancelAllWork
 
+RecoveryHarnessNext ==
+  \/ RegisterIdentity
+  \/ RecordRestoreFailure
+  \/ ClearRestoreFailure
+  \/ AdvanceCheckpointVersion
+
+TaskHarnessNext ==
+  \/ RegisterIdentity
+  \/ OpenTask
+  \/ UpdateTask
+  \/ CloseTask
+
 LifecycleOperationalNext ==
   \/ RegisterIdentity
   \/ ProvisionIncarnationFresh
@@ -2406,6 +2418,8 @@ HistoryTaskProgress ==
 
 Spec == Init /\ [][Next]_vars
 LifecycleSpec == Init /\ [][LifecycleHarnessNext]_vars
+RecoverySpec == Init /\ [][RecoveryHarnessNext]_vars
+TaskSpec == Init /\ [][TaskHarnessNext]_vars
 WorkSpec == Init /\ [][WorkHarnessNext]_vars
 FlowSpec == Init /\ [][FlowHarnessNext]_vars
 
@@ -2425,6 +2439,15 @@ LifecycleFairness ==
   /\ WF_vars(KickoffProgress)
 
 LifecycleFairSpec == LifecycleSpec /\ LifecycleFairness
+RecoveryFairness ==
+  /\ WF_vars(ClearRestoreFailure)
+  /\ WF_vars(AdvanceCheckpointVersion)
+
+RecoveryFairSpec == RecoverySpec /\ RecoveryFairness
+TaskFairness ==
+  /\ WF_vars(CloseTask)
+
+TaskFairSpec == TaskSpec /\ TaskFairness
 WorkFairness ==
   /\ WF_vars(ProvisionProgress)
   /\ WF_vars(WorkProgress)
@@ -2449,6 +2472,14 @@ PendingSpawnEventuallyClearsProp ==
 KickoffEventuallyClearsProp ==
   \A id \in AgentIdentityValues :
     [](id \in provisioning.kickoff_pending => <>(id \notin provisioning.kickoff_pending))
+
+RestoreFailureEventuallyClearsProp ==
+  \A id \in AgentIdentityValues :
+    [](id \in recovery.restore_failures => <>(id \notin recovery.restore_failures))
+
+LiveTaskEventuallyClosesProp ==
+  \A t \in TaskIdValues :
+    []((HasTask(t) /\ tasks.status[t] \in {"Pending", "InProgress", "Blocked"}) => <>(tasks.status[t] = "Completed"))
 
 AcceptedWorkEventuallyLeavesAcceptedProp ==
   \A w \in WorkRefValues :

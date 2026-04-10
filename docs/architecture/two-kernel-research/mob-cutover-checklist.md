@@ -97,6 +97,8 @@ What is now executably checked:
 - bounded TLC stress run passes
 - focused lifecycle/provisioning liveness passes
 - focused provisioning/kickoff liveness passes
+- focused recovery liveness passes
+- focused task-lifecycle liveness passes
 - focused work-ledger liveness passes
 - focused flow-step liveness passes
 - the target alphabet coverage audit is clean

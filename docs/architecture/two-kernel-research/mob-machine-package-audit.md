@@ -38,6 +38,8 @@ The required target-state package artifacts are present:
 - `tla/MobMachineTarget.cfg`
 - `tla/MobMachineTargetStress.cfg`
 - `tla/MobMachineTargetLifecycleLiveness.cfg`
+- `tla/MobMachineTargetRecoveryLiveness.cfg`
+- `tla/MobMachineTargetTaskLiveness.cfg`
 - `tla/MobMachineTargetAudit.cfg`
 
 ## Canonical Mechanical Checks
@@ -47,6 +49,8 @@ The canonical bounded target checks are green:
 - TLC base on `tla/MobMachineTarget.cfg`
 - TLC stress on `tla/MobMachineTargetStress.cfg`
 - focused lifecycle liveness on `tla/MobMachineTargetLifecycleLiveness.cfg`
+- focused recovery liveness on `tla/MobMachineTargetRecoveryLiveness.cfg`
+- focused task liveness on `tla/MobMachineTargetTaskLiveness.cfg`
 - transition catalog aligned with executable `Next`
 - target alphabet coverage aligned with the executable model
 - `git diff --check` clean

@@ -46,6 +46,8 @@ Files:
   liveness harness
 - `MobMachineTargetProvisionLiveness.cfg`: focused provisioning/kickoff
   liveness harness
+- `MobMachineTargetRecoveryLiveness.cfg`: focused recovery liveness harness
+- `MobMachineTargetTaskLiveness.cfg`: focused task-lifecycle liveness harness
 - `MobMachineTargetWorkLiveness.cfg`: focused work-ledger liveness harness
 - `MobMachineTargetFlowLiveness.cfg`: focused flow-step liveness harness
 - `MobMachineTargetLiveness.cfg`: wider full-`FairSpec` liveness exploration
@@ -67,6 +69,8 @@ Current status:
   temporal checks
 - `MobMachineTargetLifecycleLiveness` passes focused lifecycle/provisioning
   temporal checks
+- `MobMachineTargetRecoveryLiveness` passes focused recovery temporal checks
+- `MobMachineTargetTaskLiveness` passes focused task-lifecycle temporal checks
 - `MobMachineTargetWorkLiveness` passes focused work-ledger temporal checks
 - `MobMachineTargetFlowLiveness` passes focused flow-step temporal checks
 - `MobMachineTargetAudit` has explored significantly beyond the canonical

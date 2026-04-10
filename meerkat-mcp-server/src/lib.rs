@@ -1619,7 +1619,8 @@ async fn handle_meerkat_models_catalog(state: &MeerkatMcpState) -> Result<Value,
         .await
         .map(|snapshot| snapshot.config)
         .unwrap_or_default();
-    let response = meerkat::surface::build_models_catalog_response(&config);
+    let response =
+        meerkat::surface::build_models_catalog_response(&config).map_err(|e| e.to_string())?;
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
 }
 

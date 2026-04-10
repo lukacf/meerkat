@@ -98,57 +98,55 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
 /// compiled into the binary from `meerkat-models`.
 pub fn build_models_catalog_response(
     config: &meerkat_core::Config,
-) -> meerkat_contracts::ModelsCatalogResponse {
-    let providers = match config.model_registry() {
-        Ok(registry) => registry
-            .provider_defaults()
-            .map(|(provider, default_model_id)| {
-                let models = registry
-                    .entries_for_provider(provider)
-                    .map(|entry| {
-                        let profile = Some(meerkat_contracts::WireModelProfile {
-                            model_family: entry.profile.model_family.clone(),
-                            supports_temperature: entry.profile.supports_temperature,
-                            supports_thinking: entry.profile.supports_thinking,
-                            supports_reasoning: entry.profile.supports_reasoning,
-                            inline_video: entry.profile.inline_video,
-                            params_schema: entry.profile.params_schema.clone(),
-                        });
-                        meerkat_contracts::CatalogModelEntry {
-                            id: entry.id.clone(),
-                            display_name: entry.display_name.clone(),
-                            tier: match entry.tier {
-                                meerkat_models::ModelTier::Recommended => {
-                                    meerkat_contracts::WireModelTier::Recommended
-                                }
-                                meerkat_models::ModelTier::Supported => {
-                                    meerkat_contracts::WireModelTier::Supported
-                                }
-                            },
-                            context_window: entry.context_window,
-                            max_output_tokens: entry.max_output_tokens,
-                            server_id: entry
-                                .self_hosted
-                                .as_ref()
-                                .map(|server| server.server_id.clone()),
-                            profile,
-                        }
-                    })
-                    .collect();
-                meerkat_contracts::ProviderCatalog {
-                    provider: provider.as_str().to_string(),
-                    default_model_id: default_model_id.to_string(),
-                    models,
-                }
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+) -> Result<meerkat_contracts::ModelsCatalogResponse, meerkat_core::ConfigError> {
+    let registry = config.model_registry()?;
+    let providers = registry
+        .provider_defaults()
+        .map(|(provider, default_model_id)| {
+            let models = registry
+                .entries_for_provider(provider)
+                .map(|entry| {
+                    let profile = Some(meerkat_contracts::WireModelProfile {
+                        model_family: entry.profile.model_family.clone(),
+                        supports_temperature: entry.profile.supports_temperature,
+                        supports_thinking: entry.profile.supports_thinking,
+                        supports_reasoning: entry.profile.supports_reasoning,
+                        inline_video: entry.profile.inline_video,
+                        params_schema: entry.profile.params_schema.clone(),
+                    });
+                    meerkat_contracts::CatalogModelEntry {
+                        id: entry.id.clone(),
+                        display_name: entry.display_name.clone(),
+                        tier: match entry.tier {
+                            meerkat_models::ModelTier::Recommended => {
+                                meerkat_contracts::WireModelTier::Recommended
+                            }
+                            meerkat_models::ModelTier::Supported => {
+                                meerkat_contracts::WireModelTier::Supported
+                            }
+                        },
+                        context_window: entry.context_window,
+                        max_output_tokens: entry.max_output_tokens,
+                        server_id: entry
+                            .self_hosted
+                            .as_ref()
+                            .map(|server| server.server_id.clone()),
+                        profile,
+                    }
+                })
+                .collect();
+            meerkat_contracts::ProviderCatalog {
+                provider: provider.as_str().to_string(),
+                default_model_id: default_model_id.to_string(),
+                models,
+            }
+        })
+        .collect();
 
-    meerkat_contracts::ModelsCatalogResponse {
+    Ok(meerkat_contracts::ModelsCatalogResponse {
         contract_version: ContractVersion::CURRENT,
         providers,
-    }
+    })
 }
 
 /// Validate whether keep-alive mode can be enabled in the current build.
@@ -401,6 +399,7 @@ pub async fn emit_mcp_lifecycle_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_core::Config;
 
     #[test]
     fn validate_public_peer_meta_rejects_reserved_labels() {
@@ -425,5 +424,29 @@ mod tests {
             result.is_ok(),
             "ordinary peer metadata should stay available"
         );
+    }
+
+    #[test]
+    fn build_models_catalog_response_returns_error_for_invalid_self_hosted_config() {
+        let config: Result<Config, _> = toml::from_str(
+            r#"
+[self_hosted.models.gemma-4-e2b]
+server = "missing"
+remote_model = "gemma4:e2b"
+display_name = "Gemma 4 E2B"
+family = "gemma-4"
+"#,
+        );
+        assert!(config.is_ok(), "config parse failed");
+        let Ok(config) = config else {
+            unreachable!("asserted config parse succeeded above");
+        };
+
+        let result = build_models_catalog_response(&config);
+        assert!(result.is_err(), "invalid catalog config should fail");
+        let Err(err) = result else {
+            unreachable!("asserted invalid catalog config fails above");
+        };
+        assert!(err.to_string().contains("unknown server"));
     }
 }

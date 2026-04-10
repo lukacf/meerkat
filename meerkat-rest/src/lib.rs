@@ -2061,9 +2061,11 @@ async fn get_capabilities(
 /// Get the effective model catalog for the current config.
 async fn get_models_catalog(
     State(state): State<AppState>,
-) -> Json<meerkat_contracts::ModelsCatalogResponse> {
+) -> Result<Json<meerkat_contracts::ModelsCatalogResponse>, ApiError> {
     let config = state.config_store.get().await.unwrap_or_default();
-    Json(meerkat::surface::build_models_catalog_response(&config))
+    let response = meerkat::surface::build_models_catalog_response(&config)
+        .map_err(|e| ApiError::Configuration(e.to_string()))?;
+    Ok(Json(response))
 }
 
 /// Get the current config

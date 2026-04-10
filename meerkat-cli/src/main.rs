@@ -2075,7 +2075,8 @@ async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
 
 async fn handle_models_catalog(scope: &RuntimeScope) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
-    let response = meerkat::surface::build_models_catalog_response(&config);
+    let response = meerkat::surface::build_models_catalog_response(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build model catalog: {e}"))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&response).unwrap_or_else(|_| "{}".to_string())
@@ -2126,12 +2127,7 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             let models_url = format!("{base_url}/models");
             let mut request = http.get(&models_url);
 
-            if let Some(token) = server.bearer_token.clone().or_else(|| {
-                server
-                    .bearer_token_env
-                    .as_deref()
-                    .and_then(|env_key| std::env::var(env_key).ok())
-            }) {
+            if let Some(token) = server.bearer_token.clone() {
                 request = request.bearer_auth(token);
             }
 

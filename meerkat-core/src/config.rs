@@ -441,6 +441,7 @@ impl Config {
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
             if servers.is_empty() {
                 self.self_hosted.servers.clear();
+                self.self_hosted.models.clear();
             } else {
                 let mut merged_servers = self.self_hosted.servers.clone();
                 for (server_id, server_value) in servers {
@@ -992,7 +993,7 @@ pub struct SelfHostedServerConfig {
     pub transport: SelfHostedTransport,
     pub base_url: String,
     pub api_style: SelfHostedApiStyle,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub bearer_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token_env: Option<String>,
@@ -2055,6 +2056,25 @@ family = "gemma-4"
 
         assert!(config.self_hosted.servers.is_empty());
         assert!(config.self_hosted.models.is_empty());
+    }
+
+    #[test]
+    fn test_self_hosted_bearer_token_is_not_serialized() {
+        let config: Config = toml::from_str(
+            r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+bearer_token = "secret-token"
+"#,
+        )
+        .expect("config");
+
+        let value = serde_json::to_value(&config).expect("serialize config");
+        let server = &value["self_hosted"]["servers"]["local"];
+        assert!(
+            server.get("bearer_token").is_none(),
+            "literal bearer tokens must be redacted from serialized config"
+        );
     }
 
     #[test]

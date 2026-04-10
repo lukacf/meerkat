@@ -439,100 +439,108 @@ impl Config {
         };
 
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
-            let mut merged_servers = self.self_hosted.servers.clone();
-            for (server_id, server_value) in servers {
-                let Some(server_table) = server_value.as_table() else {
-                    continue;
-                };
-                let mut merged = self
-                    .self_hosted
-                    .servers
-                    .get(server_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let Some(server_layer) = layer.servers.get(server_id) else {
-                    continue;
-                };
-                if server_table.contains_key("transport") {
-                    merged.transport = server_layer.transport;
+            if servers.is_empty() {
+                self.self_hosted.servers.clear();
+            } else {
+                let mut merged_servers = self.self_hosted.servers.clone();
+                for (server_id, server_value) in servers {
+                    let Some(server_table) = server_value.as_table() else {
+                        continue;
+                    };
+                    let mut merged = self
+                        .self_hosted
+                        .servers
+                        .get(server_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let Some(server_layer) = layer.servers.get(server_id) else {
+                        continue;
+                    };
+                    if server_table.contains_key("transport") {
+                        merged.transport = server_layer.transport;
+                    }
+                    if server_table.contains_key("base_url") {
+                        merged.base_url = server_layer.base_url.clone();
+                    }
+                    if server_table.contains_key("api_style") {
+                        merged.api_style = server_layer.api_style;
+                    }
+                    if server_table.contains_key("bearer_token") {
+                        merged.bearer_token = server_layer.bearer_token.clone();
+                    }
+                    if server_table.contains_key("bearer_token_env") {
+                        merged.bearer_token_env = server_layer.bearer_token_env.clone();
+                    }
+                    merged_servers.insert(server_id.clone(), merged);
                 }
-                if server_table.contains_key("base_url") {
-                    merged.base_url = server_layer.base_url.clone();
-                }
-                if server_table.contains_key("api_style") {
-                    merged.api_style = server_layer.api_style;
-                }
-                if server_table.contains_key("bearer_token") {
-                    merged.bearer_token = server_layer.bearer_token.clone();
-                }
-                if server_table.contains_key("bearer_token_env") {
-                    merged.bearer_token_env = server_layer.bearer_token_env.clone();
-                }
-                merged_servers.insert(server_id.clone(), merged);
+                self.self_hosted.servers = merged_servers;
             }
-            self.self_hosted.servers = merged_servers;
         }
 
         if let Some(models) = self_hosted.get("models").and_then(toml::Value::as_table) {
-            let mut merged_models = self.self_hosted.models.clone();
-            for (model_id, model_value) in models {
-                let Some(model_table) = model_value.as_table() else {
-                    continue;
-                };
-                let mut merged = self
-                    .self_hosted
-                    .models
-                    .get(model_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let Some(model_layer) = layer.models.get(model_id) else {
-                    continue;
-                };
-                if model_table.contains_key("server") {
-                    merged.server = model_layer.server.clone();
+            if models.is_empty() {
+                self.self_hosted.models.clear();
+            } else {
+                let mut merged_models = self.self_hosted.models.clone();
+                for (model_id, model_value) in models {
+                    let Some(model_table) = model_value.as_table() else {
+                        continue;
+                    };
+                    let mut merged = self
+                        .self_hosted
+                        .models
+                        .get(model_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let Some(model_layer) = layer.models.get(model_id) else {
+                        continue;
+                    };
+                    if model_table.contains_key("server") {
+                        merged.server = model_layer.server.clone();
+                    }
+                    if model_table.contains_key("remote_model") {
+                        merged.remote_model = model_layer.remote_model.clone();
+                    }
+                    if model_table.contains_key("display_name") {
+                        merged.display_name = model_layer.display_name.clone();
+                    }
+                    if model_table.contains_key("family") {
+                        merged.family = model_layer.family.clone();
+                    }
+                    if model_table.contains_key("tier") {
+                        merged.tier = model_layer.tier;
+                    }
+                    if model_table.contains_key("context_window") {
+                        merged.context_window = model_layer.context_window;
+                    }
+                    if model_table.contains_key("max_output_tokens") {
+                        merged.max_output_tokens = model_layer.max_output_tokens;
+                    }
+                    if model_table.contains_key("vision") {
+                        merged.vision = model_layer.vision;
+                    }
+                    if model_table.contains_key("image_tool_results") {
+                        merged.image_tool_results = model_layer.image_tool_results;
+                    }
+                    if model_table.contains_key("inline_video") {
+                        merged.inline_video = model_layer.inline_video;
+                    }
+                    if model_table.contains_key("supports_temperature") {
+                        merged.supports_temperature = model_layer.supports_temperature;
+                    }
+                    if model_table.contains_key("supports_thinking") {
+                        merged.supports_thinking = model_layer.supports_thinking;
+                    }
+                    if model_table.contains_key("supports_reasoning") {
+                        merged.supports_reasoning = model_layer.supports_reasoning;
+                    }
+                    if model_table.contains_key("call_timeout_secs") {
+                        merged.call_timeout_secs = model_layer.call_timeout_secs;
+                    }
+                    merged_models.insert(model_id.clone(), merged);
                 }
-                if model_table.contains_key("remote_model") {
-                    merged.remote_model = model_layer.remote_model.clone();
-                }
-                if model_table.contains_key("display_name") {
-                    merged.display_name = model_layer.display_name.clone();
-                }
-                if model_table.contains_key("family") {
-                    merged.family = model_layer.family.clone();
-                }
-                if model_table.contains_key("tier") {
-                    merged.tier = model_layer.tier;
-                }
-                if model_table.contains_key("context_window") {
-                    merged.context_window = model_layer.context_window;
-                }
-                if model_table.contains_key("max_output_tokens") {
-                    merged.max_output_tokens = model_layer.max_output_tokens;
-                }
-                if model_table.contains_key("vision") {
-                    merged.vision = model_layer.vision;
-                }
-                if model_table.contains_key("image_tool_results") {
-                    merged.image_tool_results = model_layer.image_tool_results;
-                }
-                if model_table.contains_key("inline_video") {
-                    merged.inline_video = model_layer.inline_video;
-                }
-                if model_table.contains_key("supports_temperature") {
-                    merged.supports_temperature = model_layer.supports_temperature;
-                }
-                if model_table.contains_key("supports_thinking") {
-                    merged.supports_thinking = model_layer.supports_thinking;
-                }
-                if model_table.contains_key("supports_reasoning") {
-                    merged.supports_reasoning = model_layer.supports_reasoning;
-                }
-                if model_table.contains_key("call_timeout_secs") {
-                    merged.call_timeout_secs = model_layer.call_timeout_secs;
-                }
-                merged_models.insert(model_id.clone(), merged);
+                self.self_hosted.models = merged_models;
             }
-            self.self_hosted.models = merged_models;
         }
     }
 
@@ -2015,6 +2023,38 @@ bearer_token_env = "OLLAMA_TOKEN"
                 .map(|server| server.server_id.as_str()),
             Some("backup")
         );
+    }
+
+    #[test]
+    fn test_merge_self_hosted_empty_table_clears_inherited_entries() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://127.0.0.1:11434"
+
+[self_hosted.models.gemma-4-e2b]
+server = "local"
+remote_model = "gemma4:e2b"
+display_name = "Gemma 4 E2B"
+family = "gemma-4"
+"#,
+            )
+            .expect("base self-hosted config");
+
+        config
+            .merge_toml_str(
+                r"
+[self_hosted.servers]
+
+[self_hosted.models]
+",
+            )
+            .expect("clear self-hosted config");
+
+        assert!(config.self_hosted.servers.is_empty());
+        assert!(config.self_hosted.models.is_empty());
     }
 
     #[test]

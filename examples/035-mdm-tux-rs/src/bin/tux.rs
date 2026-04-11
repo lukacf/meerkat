@@ -845,7 +845,6 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
         "run_completed" | "RunCompleted" => {
             target.flush_streaming();
             target.phase = TargetPhase::Idle;
-            target.push_line(String::new());
         }
         "run_failed" | "RunFailed" => {
             target.flush_streaming();
@@ -856,10 +855,20 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
             target.push_notice("run failed", error);
             target.phase = TargetPhase::Idle;
         }
+        // Silent events — no display needed
+        "turn_started" | "TurnStarted"
+        | "turn_completed" | "TurnCompleted"
+        | "tool_config_changed" | "ToolConfigChanged"
+        | "reasoning_started" | "ReasoningStarted"
+        | "reasoning_complete" | "ReasoningComplete"
+        | "mcp_pending_notice" | "McpPendingNotice"
+        | "system_context_appended" | "SystemContextAppended"
+        | "compaction_started" | "CompactionStarted"
+        | "compaction_completed" | "CompactionCompleted" => {}
         _ => {
-            // Unknown event type — display raw for debugging
+            // Truly unknown event — show only if non-trivial
             if !kind.is_empty() {
-                target.push_notice("event", &format!("{kind}: {event}"));
+                tracing::debug!("unhandled stream event: {kind}");
             }
         }
     }

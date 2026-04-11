@@ -1307,15 +1307,23 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         );
         let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
-        let rpc_runtime = Arc::new(
-            meerkat_rpc::session_runtime::SessionRuntime::new(
-                rpc_factory,
-                rpc_config,
-                10,
-                rpc_persistence,
-                meerkat_rpc::router::NotificationSink::noop(),
-            ),
+        let mut rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
+            rpc_factory,
+            rpc_config,
+            10,
+            rpc_persistence,
+            meerkat_rpc::router::NotificationSink::noop(),
         );
+        // Wire mob tools so delegate/mob_create/mob_profile_* are available
+        let rpc_mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
+            rpc_runtime.session_service(),
+            Some(rpc_runtime.runtime_adapter()),
+        ));
+        rpc_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(
+            Arc::clone(&rpc_mob_state),
+        )));
+        rpc_runtime.set_mob_state(rpc_mob_state);
+        let rpc_runtime = Arc::new(rpc_runtime);
         let rpc_config_store_clone = Arc::clone(&rpc_config_store);
         let rpc_runtime_clone = Arc::clone(&rpc_runtime);
         tokio::spawn(async move {

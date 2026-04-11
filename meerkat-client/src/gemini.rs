@@ -333,15 +333,17 @@ impl GeminiClient {
 
         // Inject provider-native google_search tool from provider_params.
         // google_search is a separate tools array element alongside functionDeclarations.
+        // Bool(false) and Null are treated as explicit disable; only objects are injected.
         if let Some(ref params) = request.provider_params
             && let Some(gs) = params.get("google_search")
+            && gs.is_object()
         {
-            let mut tools_arr = body
-                .get("tools")
-                .and_then(|t| t.as_array().cloned())
-                .unwrap_or_default();
-            tools_arr.push(serde_json::json!({"google_search": gs}));
-            body["tools"] = Value::Array(tools_arr);
+            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                Some(arr) => arr.push(serde_json::json!({"google_search": gs})),
+                None => {
+                    body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})])
+                }
+            }
         }
 
         Ok(body)

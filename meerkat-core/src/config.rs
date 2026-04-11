@@ -787,12 +787,16 @@ pub struct AgentConfig {
     /// and applying relevant parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
-    /// Provider-native tool defaults resolved at build time.
+    /// Provider-native tool defaults resolved at factory build time.
     ///
-    /// NOT persisted in SessionMetadata. Re-derived on every build from
-    /// `Config.provider_tools` + `ModelProfile.supports_web_search`.
-    /// Merged with `provider_params` per-turn in the agent state machine
-    /// via RFC 7396 merge-patch semantics.
+    /// **Intentionally non-persisted** (`#[serde(skip)]`): re-derived on every
+    /// build (including resume) from `Config.provider_tools` +
+    /// `ModelProfile.supports_web_search`. This means config changes (e.g.,
+    /// disabling web search) take effect immediately on resumed sessions without
+    /// requiring session recreation. Explicit per-request overrides live in
+    /// `provider_params` which IS persisted.
+    ///
+    /// Merged with `provider_params` per-turn via RFC 7396 merge-patch.
     #[serde(skip)]
     pub provider_tool_defaults: Option<serde_json::Value>,
     /// Output schema for structured output extraction.

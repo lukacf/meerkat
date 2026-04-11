@@ -26,6 +26,11 @@
           "supports_thinking": {
             "description": "Whether the model supports extended thinking.",
             "type": "boolean"
+          },
+          "supports_web_search": {
+            "default": false,
+            "description": "Whether the model supports provider-native web search tools.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -94,6 +99,13 @@
         ],
         "description": "Model profile with capability flags and parameter schema."
       },
+      "server_id": {
+        "description": "Backing self-hosted server ID for configured aliases.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "tier": {
         "$ref": "#/$defs/WireModelTier",
         "description": "Recommendation tier."
@@ -148,6 +160,13 @@
               }
             ],
             "description": "Model profile with capability flags and parameter schema."
+          },
+          "server_id": {
+            "description": "Backing self-hosted server ID for configured aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tier": {
             "$ref": "#/$defs/WireModelTier",
@@ -237,6 +256,11 @@
           },
           "supports_thinking": {
             "description": "Whether the model supports extended thinking.",
+            "type": "boolean"
+          },
+          "supports_web_search": {
+            "default": false,
+            "description": "Whether the model supports provider-native web search tools.",
             "type": "boolean"
           }
         },
@@ -330,6 +354,13 @@
             ],
             "description": "Model profile with capability flags and parameter schema."
           },
+          "server_id": {
+            "description": "Backing self-hosted server ID for configured aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tier": {
             "$ref": "#/$defs/WireModelTier",
             "description": "Recommendation tier."
@@ -366,6 +397,11 @@
           },
           "supports_thinking": {
             "description": "Whether the model supports extended thinking.",
+            "type": "boolean"
+          },
+          "supports_web_search": {
+            "default": false,
+            "description": "Whether the model supports provider-native web search tools.",
             "type": "boolean"
           }
         },
@@ -447,6 +483,11 @@
       },
       "supports_thinking": {
         "description": "Whether the model supports extended thinking.",
+        "type": "boolean"
+      },
+      "supports_web_search": {
+        "default": false,
+        "description": "Whether the model supports provider-native web search tools.",
         "type": "boolean"
       }
     },

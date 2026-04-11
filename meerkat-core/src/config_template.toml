@@ -34,6 +34,9 @@ default_timeout_ms = 5000
 payload_max_bytes = 131072
 background_max_concurrency = 32
 
+# Provider-native tool defaults. Controls whether provider web search tools
+# are injected by default for models that support them. Set to false to disable.
+# Per-request opt-out: send provider_params: {"web_search": null}.
 [provider_tools.anthropic]
 web_search = true
 

@@ -1656,6 +1656,8 @@ fn completion_outcome_status_str(
 }
 
 /// RFC 7396 JSON Merge Patch: null removes, objects recurse, scalars replace.
+///
+/// Local copy because `config_store::merge_patch` is `#[cfg(not(target_arch = "wasm32"))]`.
 fn json_merge_patch(base: &mut serde_json::Value, patch: serde_json::Value) {
     use serde_json::Value;
     match (base, patch) {

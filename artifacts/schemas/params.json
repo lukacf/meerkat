@@ -61,6 +61,7 @@
           "anthropic",
           "open_a_i",
           "gemini",
+          "self_hosted",
           "other"
         ],
         "type": "string"

@@ -148,15 +148,15 @@ impl OpenAiClient {
         }
 
         // Inject provider-native web search tool from provider_params.
+        // Bool(false) and Null are treated as explicit disable; only objects are injected.
         if let Some(ref params) = request.provider_params
             && let Some(ws) = params.get("web_search")
+            && ws.is_object()
         {
-            let mut tools_arr = body
-                .get("tools")
-                .and_then(|t| t.as_array().cloned())
-                .unwrap_or_default();
-            tools_arr.push(ws.clone());
-            body["tools"] = Value::Array(tools_arr);
+            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                Some(arr) => arr.push(ws.clone()),
+                None => body["tools"] = Value::Array(vec![ws.clone()]),
+            }
         }
 
         // Extract OpenAI-specific parameters from provider_params

@@ -1,20 +1,22 @@
 //! # 035 — MDM TUX: Target Agent (Runtime-Backed Surface)
 //!
-//! Runs on managed machines. Registers with a TUX host automatically,
-//! then serves as a directly-controlled agent with streaming output.
+//! Runs on managed machines. Serves a JSON-RPC TCP server for TUX to
+//! connect to (direct mode) or registers with a kennel for brokered
+//! adoption. Comms is retained for inter-agent traffic (delegate
+//! helpers, mob members).
 //!
 //! This target is a **runtime-backed surface** (same tier as CLI/RPC/REST):
 //! - Agent construction via `AgentFactory::build_agent()`
 //! - Session lifecycle via `PersistentSessionService`
 //! - Input routing via `RuntimeSessionAdapter` with `HandlingMode::Steer`
-//! - Typed `MessageKind` classification (no string prefixes)
+//! - JSON-RPC over TCP for all command/control traffic
 //!
 //! Sessions are persisted to disk. On restart the most recent session
-//! is automatically resumed. TUX can send `/new` to start a fresh
-//! session or `/resume` to pick from past sessions.
+//! is automatically resumed.
 //!
 //! ```text
-//! mdm-target <HOST:PORT> [--name NAME] [--model MODEL]
+//! mdm-target <HOST:PORT> [--name NAME] [--rpc-port PORT] [--model MODEL]
+//! mdm-target --kennel HOST:PORT [--advertise IP] [--rpc-port PORT] [--name NAME]
 //! ```
 //!
 //! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
@@ -25,7 +27,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use futures::StreamExt;
 use meerkat::PersistentSessionService;
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -37,7 +38,6 @@ use meerkat::surface::{
     build_dispatch_from_accepted, schedule_attempt_idempotency_key, schedule_host_supported,
     spawn_schedule_host,
 };
-use meerkat_comms::MessageKind;
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
@@ -48,33 +48,26 @@ use meerkat_core::service::{
     StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_core::types::Message;
 use meerkat_core::mcp_config::McpConfig;
-use meerkat_core::session::SessionLlmIdentity;
-use meerkat_core::{AgentEvent, AgentToolDispatcher, Config, Provider, Session};
+use meerkat_core::{AgentToolDispatcher as _, Config, Session};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_runtime::{
     CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput, RuntimeSessionAdapter,
 };
 use meerkat_runtime::input::{
-    InputDurability, InputHeader, InputVisibility, PeerConvention, PeerInput,
+    InputDurability, InputHeader, InputVisibility,
 };
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    DirectControlPayload, KennelPayload, ProviderKind, RegResponse, auto_detect,
+    DirectControlPayload, KennelPayload, ProviderKind, auto_detect,
     build_signed_envelope, direct_control_request, parse_direct_control_message, read_envelope,
-    register_with_backoff, verify_envelope, write_envelope,
+    verify_envelope, write_envelope,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
-use mdm_tux::machines::target_session_binding::{
-    self, Effect as SessionBindingEffect, Event as SessionBindingEvent,
-    State as SessionBindingState,
-};
 
 const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}' controlled by a human operator via TUX.
@@ -87,8 +80,8 @@ struct TargetRuntimeSurface {
     runtime_adapter: Arc<RuntimeSessionAdapter>,
     jsonl_store: Arc<JsonlStore>,
     mob_state: Arc<MobMcpState>,
-    factory: Arc<AgentFactory>,
-    config: Config,
+    _factory: Arc<AgentFactory>,
+    _config: Config,
     _schedule_host: Option<meerkat::surface::ScheduleHostHandle>,
 }
 
@@ -500,8 +493,8 @@ async fn build_target_runtime_surface(
         runtime_adapter,
         jsonl_store,
         mob_state,
-        factory: shared_factory,
-        config: shared_config,
+        _factory: shared_factory,
+        _config: shared_config,
         _schedule_host: schedule_host,
     })
 }
@@ -598,11 +591,10 @@ async fn main() -> anyhow::Result<()> {
     if find_flag(&args, "--kennel").is_some() {
         return run_kennel_mode(&args).await;
     }
-    let host_addr = &args[0];
     let name = find_flag(&args, "--name")
         .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
     let provider_override = parse_provider_override(&args)?;
-    let (model, provider) = match find_flag(&args, "--model") {
+    let (_model, provider) = match find_flag(&args, "--model") {
         Some(m) => {
             let p = provider_override
                 .context("--model requires --provider in override mode")?
@@ -623,300 +615,66 @@ async fn main() -> anyhow::Result<()> {
                 .join(format!(".rkat/mdm/targets/{name}"))
         });
 
-    // Load MCP servers from ~/.rkat/mcp.toml (user) + <data_dir>/.rkat/mcp.toml (per-target)
-    let mcp_external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>> =
-        match load_mcp_tools(Some(&data_dir)).await {
-            Ok(Some(adapter)) => {
-                let adapter = Arc::new(adapter);
-                eprintln!("[target] MCP tools loaded: {}", adapter.tools().len());
-                Some(adapter)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("[target] MCP load failed (continuing without): {e}");
-                None
-            }
-        };
-
     // ── 1. Create CommsRuntime with target's stable identity ───────────────
     let comms_runtime = create_target_comms_runtime(&name, &data_dir).await?;
 
     // ── 2. Bind TCP listener (0.0.0.0:0 for port discovery) ─────────────────
     let comms_port = spawn_comms_listener(&comms_runtime).await?;
 
-    println!("=== MDM Target: {name} ===");
-    println!("comms     : tcp://0.0.0.0:{comms_port}");
-    println!("provider  : {provider} ({model})");
-
     // ── 3. Build runtime-backed session service ───────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-    let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
-    let _schedule_host_guard = surface._schedule_host.as_ref();
-    let service = Arc::clone(&surface.service);
-    let runtime_adapter = Arc::clone(&surface.runtime_adapter);
-    let jsonl_store = Arc::clone(&surface.jsonl_store);
-    let mob_state = Arc::clone(&surface.mob_state);
+    let _surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
 
-    let system_prompt_template = SYSTEM_PROMPT.replace("{name}", &name);
-
-    // ── 4. Create or auto-resume session ──────────────────────────────────────
-    let mut current_session_id = create_or_resume_session(
-        &service,
-        &runtime_adapter,
-        &jsonl_store,
-        &model,
-        &system_prompt_template,
-        &mob_state,
-        &provider,
-        mcp_external_tools.as_ref().cloned(),
-    )
-    .await?;
-
-    let mut event_forwarder: Option<tokio::task::JoinHandle<()>> = None;
-
-    let (mut session_binding_state, _) = target_session_binding::transition(
-        SessionBindingState::Unbound,
-        SessionBindingEvent::BootResolved {
-            session_id: current_session_id.clone(),
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("session binding bootstrap: {e}"))?;
-
-    // ── 6. Reconnection loop ─────────────────────────────────────────────────
-    let host_comms_port: u16 = host_addr
-        .rsplit(':')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .context("invalid HOST:PORT")?;
-    let host_base = host_addr
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(host_addr);
-    let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
-
-    let explicit_ip = find_flag(&args, "--advertise");
-
-    let pubkey_string = comms_runtime.public_key().to_peer_id();
-
-    loop {
-        // Discover our own IP as seen from the host.
-        let local_ip = match &explicit_ip {
-            Some(ip) => ip.clone(),
-            None => match discover_local_ip(host_base, host_comms_port) {
-                Ok(ip) => ip,
-                Err(e) => {
-                    eprintln!(
-                        "[target] address probe failed: {e} — retrying in 5s \
-                        (use --advertise <IP> to skip)"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            },
-        };
-        let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
-
-        // (Re-)register with TUX (retries with exponential backoff)
-        eprintln!("[target] registering with {reg_addr} ...");
-        let resp =
-            match register_with_backoff(&reg_addr, &name, &pubkey_string, &advertised_addr).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("[target] fatal: {e}");
-                    std::process::exit(1);
-                }
-            };
-        let (resp_name, resp_pubkey) = match resp {
-            RegResponse::Accepted { name, pubkey } => (name, pubkey),
-            RegResponse::Rejected {
-                reason, message, ..
-            } => {
-                bail!("registration rejected ({reason:?}): {message}");
-            }
-        };
-        eprintln!(
-            "[target] paired with host '{}' ({})",
-            resp_name, resp_pubkey
-        );
-
-        let host_pubkey = match meerkat_comms::identity::PubKey::from_peer_id(&resp_pubkey) {
-            Ok(pk) => pk,
-            Err(e) => {
-                eprintln!("[target] bad host pubkey: {e} — retrying registration");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        // Remove stale entries for this peer name before adding fresh one.
-        {
-            let trusted = comms_runtime.trusted_peers_shared();
-            let stale_keys: Vec<_> = trusted
-                .read()
-                .peers
-                .iter()
-                .filter(|p| p.name == resp_name)
-                .map(|p| p.pubkey)
-                .collect();
-            for pk in stale_keys {
-                comms_runtime.router().remove_trusted_peer(&pk);
-            }
-        }
-        comms_runtime.upsert_trusted_peer(TrustedPeer {
-            name: resp_name,
-            pubkey: host_pubkey,
-            addr: format!("tcp://{host_addr}"),
-            meta: PeerMeta::default(),
-        });
-
-        // Disconnect signal: heartbeat + event forwarder can trigger reconnect
-        let (disconnect_tx, disconnect_rx) = tokio::sync::watch::channel(false);
-
-        // Spawn/re-spawn event forwarder for the current session
-        if let Some(old) = event_forwarder.take() {
-            old.abort();
-        }
-        event_forwarder = Some(
-            spawn_event_forwarder(
-                &service,
-                &current_session_id,
-                Arc::clone(&comms_runtime),
-                disconnect_tx.clone(),
-            )
-            .await?,
-        );
-
-        // Spawn heartbeat (pings TUX every 10s via typed Request, triggers disconnect on 3 failures)
-        let hb = spawn_heartbeat(comms_runtime.router_arc(), "tux", disconnect_tx.clone());
-
-        eprintln!("[target] ready — waiting for commands\n");
-
-        // Run inbox loop (exits on disconnect signal or DISMISS command)
-        run_inbox_loop(
-            &comms_runtime,
-            disconnect_rx,
-            disconnect_tx,
-            &service,
-            &runtime_adapter,
-            &jsonl_store,
-            &model,
-            &system_prompt_template,
-            &mob_state,
-            &provider,
-            &mcp_external_tools,
-            &surface.factory,
-            &surface.config,
-            &mut session_binding_state,
-            &mut current_session_id,
-            &mut event_forwarder,
-        )
-        .await;
-
-        hb.abort();
-        eprintln!("[target] disconnected — reconnecting...");
-    }
-}
-
-// ── Inbox loop with select!-based disconnect ─────────────────────────────────
-
-// ── Event forwarder (separate task — no mixed select loop) ─────────────────
-
-/// Spawn a dedicated task that subscribes to session events and forwards them
-/// to TUX via the CommsRuntime. Runs independently of the inbox loop.
-///
-/// On send failure (TUX disconnected) or stream close (session discarded),
-/// fires the disconnect signal so the main loop can reconnect.
-async fn spawn_event_forwarder(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    session_id: &SessionId,
-    comms_runtime: Arc<CommsRuntime>,
-    disconnect_tx: tokio::sync::watch::Sender<bool>,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let mut stream = service
-        .subscribe_session_events(session_id)
+    // ── 4. RPC TCP server (replaces old comms-based command protocol) ────────
+    let rpc_port: u16 = find_flag(&args, "--rpc-port")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4800);
+    let rpc_factory = AgentFactory::new(&session_dir)
+        .shell(true)
+        .builtins(true)
+        .comms(true)
+        .schedule(true)
+        .mob(true)
+        .with_comms_runtime(Arc::clone(&comms_runtime));
+    let home = dirs::home_dir();
+    let rpc_config = Config::load_from(&session_dir, home.as_deref())
         .await
-        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
-    let router = comms_runtime.router_arc();
-    Ok(tokio::spawn(async move {
-        while let Some(envelope) = stream.next().await {
-            let event = &envelope.payload;
-            if should_forward(event) && !forward_stream_event(&router, "tux", event).await {
-                tracing::warn!("event forwarding to TUX failed — triggering disconnect");
-                let _ = disconnect_tx.send(true);
-                return;
-            }
-        }
-        tracing::warn!("session event stream closed — event forwarder exiting");
-    }))
+        .unwrap_or_default();
+    let rpc_schedule_store = Arc::new(SqliteScheduleStore::open(
+        session_dir.join("rpc_schedule.sqlite"),
+    )?) as Arc<dyn meerkat::ScheduleStore>;
+    let rpc_jsonl = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
+    rpc_jsonl.init().await?;
+    let rpc_persistence = PersistenceBundle::new_with_schedule_store(
+        rpc_jsonl as Arc<dyn SessionStore>,
+        None,
+        Arc::new(MemoryBlobStore::new()),
+        rpc_schedule_store,
+    );
+    let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+    let rpc_runtime = Arc::new(
+        meerkat_rpc::session_runtime::SessionRuntime::new(
+            rpc_factory,
+            rpc_config,
+            10,
+            rpc_persistence,
+            meerkat_rpc::router::NotificationSink::noop(),
+        ),
+    );
+
+    println!("=== MDM Target: {name} ===");
+    println!("rpc       : tcp://0.0.0.0:{rpc_port}");
+    println!("comms     : tcp://0.0.0.0:{comms_port}");
+    println!("provider  : {provider}");
+
+    let addr = format!("0.0.0.0:{rpc_port}");
+    eprintln!("[target] ready — serving RPC on {addr}\n");
+    meerkat_rpc::serve_tcp(&addr, rpc_runtime, rpc_config_store, None).await?;
+    Ok(())
 }
 
-// ── Inbox loop — comms messages only, event forwarding is a separate task ──
-
-#[allow(clippy::too_many_arguments)]
-async fn run_inbox_loop(
-    comms_runtime: &Arc<CommsRuntime>,
-    mut disconnect_rx: tokio::sync::watch::Receiver<bool>,
-    disconnect_tx: tokio::sync::watch::Sender<bool>,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: &Option<Arc<dyn AgentToolDispatcher>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    loop {
-        tokio::select! {
-            msg = comms_runtime.recv_message() => {
-                let Some(msg) = msg else { break };
-                match handle_target_message(
-                    &msg,
-                    comms_runtime,
-                    &disconnect_tx,
-                    service,
-                    runtime_adapter,
-                    jsonl_store,
-                    model,
-                    system_prompt,
-                    mob_state,
-                    provider,
-                    external_tools,
-                    factory,
-                    config,
-                    session_binding_state,
-                    current_session_id,
-                    event_forwarder,
-                )
-                .await {
-                    TargetLoopAction::Continue => {}
-                    TargetLoopAction::ExitProcess => std::process::exit(0),
-                }
-            }
-
-            _ = disconnect_rx.changed() => {
-                if *disconnect_rx.borrow() { break; }
-            }
-        }
-    }
-}
-
-enum TargetLoopAction {
-    Continue,
-    ExitProcess,
-}
-
-fn active_session_id(binding_state: &SessionBindingState) -> &SessionId {
-    binding_state
-        .current_session_id()
-        .expect("target session binding must be bound during runtime")
-}
 
 use mdm_tux::machines::target_attachment::{Effect as TaEffect, State as TaState};
 use mdm_tux::machines::target_kennel_control::{
@@ -957,6 +715,47 @@ async fn clear_attachment_hint(path: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).context("remove attachment hint"),
     }
+}
+
+/// Spawn a background heartbeat task that pings the peer every 10 seconds
+/// via comms Request. Used by the attachment protocol to maintain the direct
+/// TUX link. On 3 consecutive failures, triggers the disconnect signal.
+fn spawn_heartbeat(
+    router: Arc<meerkat_comms::Router>,
+    peer: &str,
+    disconnect_tx: tokio::sync::watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let peer = peer.to_owned();
+    tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let send_fut = router.send(
+                &peer,
+                meerkat_comms::MessageKind::Request {
+                    intent: "heartbeat".into(),
+                    params: serde_json::json!(null),
+                    handling_mode: None,
+                },
+            );
+            let failed =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await {
+                    Ok(Ok(_)) => false,
+                    Ok(Err(_)) => true,
+                    Err(_) => true,
+                };
+            if failed {
+                consecutive_failures += 1;
+                eprintln!("[target] heartbeat failed ({consecutive_failures}/3)");
+                if consecutive_failures >= 3 {
+                    let _ = disconnect_tx.send(true);
+                    break;
+                }
+            } else {
+                consecutive_failures = 0;
+            }
+        }
+    })
 }
 
 #[allow(dead_code)] // Will be used when all effect processing is centralized
@@ -1074,486 +873,7 @@ async fn apply_target_control_effects(
     Ok((applied, should_return_to_register))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_target_message(
-    msg: &meerkat_comms::agent::types::CommsMessage,
-    comms_runtime: &Arc<CommsRuntime>,
-    disconnect_tx: &tokio::sync::watch::Sender<bool>,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: &Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
-) -> TargetLoopAction {
-    let sender = msg.from_peer.clone();
-    match &msg.content {
-        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-            if intent.as_str() == "dismiss" =>
-        {
-            eprintln!("[target] received DISMISS — shutting down");
-            return TargetLoopAction::ExitProcess;
-        }
-        meerkat_comms::agent::types::CommsContent::Request { intent, params, .. }
-            if intent.as_str() == "command" =>
-        {
-            let cmd = params.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-            eprintln!("[target] command: {cmd}");
 
-            let response = handle_command(
-                cmd,
-                service,
-                runtime_adapter,
-                jsonl_store,
-                model,
-                system_prompt,
-                mob_state,
-                provider,
-                external_tools.as_ref().cloned(),
-                factory,
-                config,
-                session_binding_state,
-                current_session_id,
-                event_forwarder,
-                comms_runtime,
-                disconnect_tx,
-            )
-            .await;
-
-            // Timeout-guard the reply to prevent a half-open controller from
-            // wedging the inbox loop (same bound as heartbeat/event sends).
-            let router = comms_runtime.router_arc();
-            let reply_fut = router.send(
-                &sender,
-                MessageKind::Message {
-                    body: response,
-                    blocks: None,
-                    handling_mode: None,
-                },
-            );
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reply_fut).await;
-        }
-        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-            if intent.as_str() == "heartbeat" => {}
-        meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
-            eprintln!("[target] received message from '{sender}'");
-
-            let peer_input = Input::Peer(PeerInput {
-                header: InputHeader {
-                    id: meerkat_core::lifecycle::InputId::new(),
-                    timestamp: chrono::Utc::now(),
-                    source: InputOrigin::Peer {
-                        peer_id: sender.clone(),
-                        runtime_id: None,
-                    },
-                    durability: InputDurability::Ephemeral,
-                    visibility: InputVisibility::default(),
-                    idempotency_key: None,
-                    supersession_key: None,
-                    correlation_id: None,
-                },
-                convention: Some(PeerConvention::Message),
-                body: body.clone(),
-                blocks: None,
-                handling_mode: Some(HandlingMode::Steer),
-            });
-
-            match runtime_adapter
-                .accept_input(active_session_id(session_binding_state), peer_input)
-                .await
-            {
-                Ok(outcome) => {
-                    tracing::debug!(?outcome, "input accepted");
-                }
-                Err(e) => {
-                    eprintln!("[target] accept_input error: {e}");
-                    let req = StartTurnRequest {
-                        prompt: ContentInput::Text(body.clone()),
-                        system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: HandlingMode::Queue,
-                        event_tx: None,
-                        skill_references: None,
-                        flow_tool_overlay: None,
-                        additional_instructions: None,
-                        execution_kind: None,
-                    };
-                    if let Err(e) = service
-                        .start_turn(active_session_id(session_binding_state), req)
-                        .await
-                    {
-                        eprintln!("[target] fallback start_turn error: {e}");
-                    }
-                }
-            }
-        }
-        // All other message types (Response from delegate helpers, unrecognized
-        // Request intents, etc.) are injected into the session as peer input so
-        // the LLM can observe them. This replaces the automatic peer ingress
-        // drain, which we intentionally disable to prevent the race between
-        // the manual command-aware loop and the blind drain.
-        other => {
-            let body = match other {
-                meerkat_comms::agent::types::CommsContent::Response {
-                    status, result, ..
-                } => {
-                    format!(
-                        "[COMMS RESPONSE from {sender}]\nStatus: {status:?}\nResult: {}",
-                        serde_json::to_string_pretty(result).unwrap_or_default()
-                    )
-                }
-                meerkat_comms::agent::types::CommsContent::Request {
-                    intent, params, ..
-                } => {
-                    format!(
-                        "[COMMS REQUEST from {sender}]\nIntent: {}\nParams: {}",
-                        intent.as_str(),
-                        serde_json::to_string_pretty(params).unwrap_or_default()
-                    )
-                }
-                _ => return TargetLoopAction::Continue,
-            };
-            let peer_input = Input::Peer(PeerInput {
-                header: InputHeader {
-                    id: meerkat_core::lifecycle::InputId::new(),
-                    timestamp: chrono::Utc::now(),
-                    source: InputOrigin::Peer {
-                        peer_id: sender.clone(),
-                        runtime_id: None,
-                    },
-                    durability: InputDurability::Ephemeral,
-                    visibility: InputVisibility::default(),
-                    idempotency_key: None,
-                    supersession_key: None,
-                    correlation_id: None,
-                },
-                convention: Some(PeerConvention::Message),
-                body,
-                blocks: None,
-                handling_mode: Some(HandlingMode::Queue),
-            });
-            if let Err(e) = runtime_adapter
-                .accept_input(active_session_id(session_binding_state), peer_input)
-                .await
-            {
-                eprintln!("[target] accept_input for peer event: {e}");
-            }
-        }
-    }
-    TargetLoopAction::Continue
-}
-
-async fn forward_stream_event(
-    router: &Arc<meerkat_comms::Router>,
-    peer: &str,
-    event: &AgentEvent,
-) -> bool {
-    let Ok(kind) = direct_control_request(&DirectControlPayload::StreamEvent {
-        event: event.clone(),
-    }) else {
-        return true;
-    };
-    let send_fut = router.send(peer, kind);
-    matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await,
-        Ok(Ok(_))
-    )
-}
-
-// ── Heartbeat ────────────────────────────────────────────────────────────────
-
-/// Spawn a background heartbeat task that pings the peer every 10 seconds.
-/// Uses typed `MessageKind::Request` instead of string prefix.
-/// On 3 consecutive send failures, triggers the disconnect signal.
-fn spawn_heartbeat(
-    router: Arc<meerkat_comms::Router>,
-    peer: &str,
-    disconnect_tx: tokio::sync::watch::Sender<bool>,
-) -> tokio::task::JoinHandle<()> {
-    let peer = peer.to_owned();
-    tokio::spawn(async move {
-        let mut consecutive_failures = 0u32;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            // Timeout prevents a black-holed TUX from blocking the heartbeat
-            // loop indefinitely (TCP connect can hang for minutes). Without
-            // this, the failure counter never advances and reconnect never fires.
-            let send_fut = router.send(
-                &peer,
-                MessageKind::Request {
-                    intent: "heartbeat".into(),
-                    params: serde_json::json!(null),
-                    handling_mode: None,
-                },
-            );
-            let failed =
-                match tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await {
-                    Ok(Ok(_)) => false,
-                    Ok(Err(_)) => true, // send error
-                    Err(_) => true,     // timeout
-                };
-            if failed {
-                consecutive_failures += 1;
-                eprintln!("[target] heartbeat failed ({consecutive_failures}/3)");
-                if consecutive_failures >= 3 {
-                    let _ = disconnect_tx.send(true);
-                    break;
-                }
-            } else {
-                consecutive_failures = 0;
-            }
-        }
-    })
-}
-
-// ── Command handling ──────────────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_command(
-    cmd: &str,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
-    comms_runtime: &Arc<CommsRuntime>,
-    disconnect_tx: &tokio::sync::watch::Sender<bool>,
-) -> String {
-    if cmd == "NEW_SESSION" {
-        match switch_session(
-            service,
-            runtime_adapter,
-            None,
-            model,
-            system_prompt,
-            mob_state,
-            provider,
-            external_tools.clone(),
-            session_binding_state,
-            current_session_id,
-            event_forwarder,
-            comms_runtime,
-            disconnect_tx,
-        )
-        .await
-        {
-            Ok(sid) => format!("New session started: {sid}"),
-            Err(e) => format!("Failed to create session: {e}"),
-        }
-    } else if cmd == "LIST_SESSIONS" {
-        match jsonl_store.list(SessionFilter::default()).await {
-            Ok(mut sessions) => {
-                sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                if sessions.is_empty() {
-                    "No saved sessions.".into()
-                } else {
-                    let current_str = current_session_id.to_string();
-                    let mut out = String::from("**Sessions:**\n");
-                    for (i, s) in sessions.iter().enumerate().take(20) {
-                        let age = s
-                            .updated_at
-                            .elapsed()
-                            .map(format_duration)
-                            .unwrap_or_else(|_| "?".into());
-                        let marker = if s.id.to_string() == current_str {
-                            " ← current"
-                        } else {
-                            ""
-                        };
-                        out.push_str(&format!(
-                            "  **{}.**  {} msgs, {} ago{}\n",
-                            i + 1,
-                            s.message_count,
-                            age,
-                            marker,
-                        ));
-                    }
-                    out.push_str("\nType `/resume <number>` to load a session.");
-                    out
-                }
-            }
-            Err(e) => format!("Error listing sessions: {e}"),
-        }
-    } else if let Some(arg) = cmd.strip_prefix("RESUME ") {
-        let arg = arg.trim();
-        let idx: usize = match arg.parse::<usize>() {
-            Ok(n) if n >= 1 => n - 1,
-            _ => return format!("Invalid session number: {arg}"),
-        };
-        match jsonl_store.list(SessionFilter::default()).await {
-            Ok(mut sessions) => {
-                sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                if idx >= sessions.len() {
-                    return format!("Session {arg} not found (have {})", sessions.len());
-                }
-                let resume_id = sessions[idx].id.clone();
-                match switch_session(
-                    service,
-                    runtime_adapter,
-                    Some(resume_id.clone()),
-                    model,
-                    system_prompt,
-                    mob_state,
-                    provider,
-                    external_tools.clone(),
-                    session_binding_state,
-                    current_session_id,
-                    event_forwarder,
-                    comms_runtime,
-                    disconnect_tx,
-                )
-                .await
-                {
-                    Ok(sid) => {
-                        let history = match jsonl_store.load(&resume_id).await {
-                            Ok(Some(session)) => format_session_history(&session),
-                            _ => String::new(),
-                        };
-                        if history.is_empty() {
-                            format!("Resumed session {sid}")
-                        } else {
-                            format!("Resumed session {sid}\n\n---\n\n{history}")
-                        }
-                    }
-                    Err(e) => format!("Error resuming session: {e}"),
-                }
-            }
-            Err(e) => format!("Error listing sessions: {e}"),
-        }
-    } else if cmd == "LIST_MODELS" {
-        list_models(config)
-    } else if let Some(new_model) = cmd.strip_prefix("MODEL ") {
-        let new_model = new_model.trim();
-        match hot_swap_model(service, factory, config, current_session_id, new_model).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Model switch failed: {e}"),
-        }
-    } else {
-        format!("Unknown command: {cmd}")
-    }
-}
-
-fn list_models(config: &Config) -> String {
-    let registry = match config.model_registry() {
-        Ok(r) => r,
-        Err(e) => return format!("Failed to load model registry: {e}"),
-    };
-    let mut lines = vec!["**Available models:**".to_string()];
-    for (provider, default_model) in registry.provider_defaults() {
-        lines.push(format!("\n*{} (default: {})*", provider.as_str(), default_model));
-        for entry in registry.entries_for_provider(provider) {
-            let self_hosted_tag = if entry.self_hosted.is_some() {
-                " [self-hosted]"
-            } else {
-                ""
-            };
-            lines.push(format!(
-                "  `{}` — {}{}",
-                entry.id, entry.display_name, self_hosted_tag
-            ));
-        }
-    }
-    lines.join("\n")
-}
-
-async fn hot_swap_model(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_id: &SessionId,
-    model_name: &str,
-) -> anyhow::Result<String> {
-    // Resolve provider from model name or registry
-    let registry = config.model_registry().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let (provider, self_hosted_server_id) = if let Some(entry) = registry.entry(model_name) {
-        (
-            entry.provider,
-            entry.self_hosted.as_ref().map(|s| s.server_id.clone()),
-        )
-    } else {
-        let provider = Provider::infer_from_model(model_name)
-            .ok_or_else(|| anyhow::anyhow!("cannot infer provider for '{model_name}'"))?;
-        (provider, None)
-    };
-
-    let identity = SessionLlmIdentity {
-        model: model_name.to_string(),
-        provider,
-        self_hosted_server_id,
-        provider_params: None,
-    };
-
-    let raw_client = factory
-        .build_llm_client_for_identity(config, &identity)
-        .await
-        .map_err(|e| anyhow::anyhow!("build client: {e}"))?;
-    let adapter = Arc::new(factory.build_llm_adapter(raw_client, model_name.to_string()).await);
-
-    service
-        .hot_swap_session_llm_identity(session_id, adapter, identity)
-        .await
-        .map_err(|e| anyhow::anyhow!("hot swap: {e}"))?;
-
-    let provider_name = provider.as_str();
-    eprintln!("[target] model switched to {model_name} ({provider_name})");
-    Ok(format!("Model switched to {model_name} (provider: {provider_name})"))
-}
-
-fn format_session_history(session: &Session) -> String {
-    let mut out = String::new();
-    for msg in session.messages() {
-        match msg {
-            Message::User(u) => {
-                let text = u.text_content();
-                if !text.is_empty() {
-                    out.push_str(&format!("**You:** {text}\n\n"));
-                }
-            }
-            Message::Assistant(a) => {
-                if !a.content.is_empty() {
-                    out.push_str(&format!("**Assistant:** {}\n\n", a.content));
-                }
-            }
-            Message::BlockAssistant(ba) => {
-                let text: String = ba.text_blocks().collect::<Vec<_>>().join("");
-                if !text.is_empty() {
-                    out.push_str(&format!("**Assistant:** {text}\n\n"));
-                }
-            }
-            _ => {}
-        }
-    }
-    out.truncate(out.trim_end().len());
-    out
-}
-
-fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    }
-}
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
 
@@ -1611,191 +931,6 @@ async fn create_or_resume_session(
     .await
 }
 
-/// Switch to a new or resumed session. Drops the old event forwarder,
-/// creates/resumes the session, registers with the runtime adapter,
-/// and spawns a new event forwarder.
-#[allow(clippy::too_many_arguments)]
-async fn switch_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    resume_id: Option<SessionId>,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
-    comms_runtime: &Arc<CommsRuntime>,
-    disconnect_tx: &tokio::sync::watch::Sender<bool>,
-) -> anyhow::Result<SessionId> {
-    let request_event = match resume_id.clone() {
-        Some(session_id) => SessionBindingEvent::ResumeRequested { session_id },
-        None => SessionBindingEvent::CreateNewRequested,
-    };
-    let (next_state, effects) =
-        target_session_binding::transition(session_binding_state.clone(), request_event)
-            .map_err(|e| anyhow::anyhow!("session binding request: {e}"))?;
-    *session_binding_state = next_state;
-
-    let mut new_id: Option<SessionId> = None;
-    for effect in effects {
-        if let SessionBindingEffect::SetupSession { resume_id } = effect {
-            let setup_result = setup_session(
-                service,
-                runtime_adapter,
-                resume_id,
-                model,
-                system_prompt,
-                mob_state,
-                provider,
-                external_tools.clone(),
-            )
-            .await;
-            match setup_result {
-                Ok(session_id) => new_id = Some(session_id),
-                Err(err) => {
-                    let (rolled_back, rollback_effects) = target_session_binding::transition(
-                        session_binding_state.clone(),
-                        SessionBindingEvent::SetupFailed,
-                    )
-                    .map_err(|binding_err| {
-                        anyhow::anyhow!("session binding setup failure rollback: {binding_err}")
-                    })?;
-                    debug_assert!(rollback_effects.is_empty());
-                    *session_binding_state = rolled_back;
-                    return Err(err);
-                }
-            }
-        }
-    }
-    let Some(new_id) = new_id else {
-        *current_session_id = active_session_id(session_binding_state).clone();
-        return Ok(current_session_id.clone());
-    };
-
-    let (next_state, effects) = target_session_binding::transition(
-        session_binding_state.clone(),
-        SessionBindingEvent::SetupSucceeded {
-            session_id: new_id.clone(),
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("session binding setup succeeded: {e}"))?;
-    *session_binding_state = next_state;
-
-    let mut new_forwarder = None;
-    for effect in effects {
-        match effect {
-            SessionBindingEffect::SubscribeSessionEvents { session_id } => {
-                // Abort the old forwarder BEFORE spawning the replacement so
-                // there is no window where both tasks emit StreamEvents.
-                if let Some(old) = event_forwarder.take() {
-                    old.abort();
-                }
-                match spawn_event_forwarder(
-                    service,
-                    &session_id,
-                    Arc::clone(comms_runtime),
-                    disconnect_tx.clone(),
-                )
-                .await
-                {
-                    Ok(handle) => new_forwarder = Some(handle),
-                    Err(e) => {
-                        let (rolled_back, cleanup_effects) = target_session_binding::transition(
-                            session_binding_state.clone(),
-                            SessionBindingEvent::SubscriptionFailed,
-                        )
-                        .map_err(|binding_err| {
-                            anyhow::anyhow!(
-                                "session binding subscription failure rollback: {binding_err}"
-                            )
-                        })?;
-                        *session_binding_state = rolled_back;
-                        for cleanup in cleanup_effects {
-                            match cleanup {
-                                SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                                    runtime_adapter.unregister_session(&session_id).await;
-                                }
-                                SessionBindingEffect::DiscardLiveSession { session_id } => {
-                                    if let Err(discard_err) = discard_live_session_with_mob_cleanup(
-                                        service,
-                                        mob_state,
-                                        &session_id,
-                                    )
-                                    .await
-                                        && !matches!(discard_err, SessionError::NotFound { .. })
-                                    {
-                                        eprintln!(
-                                            "[target] warning: discard failed rollback session {session_id}: {discard_err}"
-                                        );
-                                    }
-                                }
-                                SessionBindingEffect::SetupSession { .. }
-                                | SessionBindingEffect::SubscribeSessionEvents { .. } => {}
-                            }
-                        }
-                        return Err(anyhow::anyhow!("subscribe session events: {e}"));
-                    }
-                }
-            }
-            SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                runtime_adapter.unregister_session(&session_id).await;
-            }
-            SessionBindingEffect::DiscardLiveSession { session_id } => {
-                if let Err(e) =
-                    discard_live_session_with_mob_cleanup(service, mob_state, &session_id).await
-                    && !matches!(e, SessionError::NotFound { .. })
-                {
-                    eprintln!("[target] warning: discard old session {session_id}: {e}");
-                }
-            }
-            SessionBindingEffect::SetupSession { .. } => {}
-        }
-    }
-
-    let (next_state, effects) = target_session_binding::transition(
-        session_binding_state.clone(),
-        SessionBindingEvent::SubscriptionEstablished,
-    )
-    .map_err(|e| anyhow::anyhow!("session binding subscription established: {e}"))?;
-    *session_binding_state = next_state;
-    for effect in effects {
-        match effect {
-            SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
-                runtime_adapter.unregister_session(&session_id).await;
-            }
-            SessionBindingEffect::DiscardLiveSession { session_id } => {
-                if let Err(e) =
-                    discard_live_session_with_mob_cleanup(service, mob_state, &session_id).await
-                    && !matches!(e, SessionError::NotFound { .. })
-                {
-                    eprintln!("[target] warning: discard old session {session_id}: {e}");
-                }
-            }
-            SessionBindingEffect::SetupSession { .. }
-            | SessionBindingEffect::SubscribeSessionEvents { .. } => {}
-        }
-    }
-
-    let (next_state, effects) = target_session_binding::transition(
-        session_binding_state.clone(),
-        SessionBindingEvent::TeardownCompleted,
-    )
-    .map_err(|e| anyhow::anyhow!("session binding teardown completed: {e}"))?;
-    debug_assert!(effects.is_empty());
-    *session_binding_state = next_state;
-
-    if let Some(handle) = new_forwarder {
-        // Old forwarder was already aborted before spawning the replacement
-        // (in the SubscribeSessionEvents effect handler above).
-        *event_forwarder = Some(handle);
-    }
-    *current_session_id = active_session_id(session_binding_state).clone();
-
-    Ok(new_id)
-}
 
 /// Create or resume a session and register it with the runtime adapter.
 async fn setup_session(
@@ -1878,12 +1013,10 @@ async fn setup_session(
         .ensure_session_with_executor(session_id.clone(), executor)
         .await;
 
-    // NOTE: Do NOT enable peer ingress here. The kennel adopted loop and the
-    // direct-mode inbox loop manually drain comms_runtime.recv_message() and
-    // route messages through handle_target_message — which distinguishes
-    // control commands (Request intent "command") from regular peer messages.
-    // Enabling peer ingress would create a second consumer racing the manual
-    // loop, causing commands to be misrouted to the LLM as plain text prompts.
+    // NOTE: Peer ingress is NOT enabled here. The RPC server handles all
+    // command traffic natively. Inter-agent comms messages (delegate helpers,
+    // mob members) are drained by the kennel adopted loop or the comms
+    // listener and routed through the runtime adapter.
 
     Ok(session_id)
 }
@@ -2130,7 +1263,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let jsonl_store = Arc::clone(&surface.jsonl_store);
     let mob_state = Arc::clone(&surface.mob_state);
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
-    let mut current_session_id = create_or_resume_session(
+    let _current_session_id = create_or_resume_session(
         &service,
         &runtime_adapter,
         &jsonl_store,
@@ -2141,14 +1274,6 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         mcp_external_tools.as_ref().cloned(),
     )
     .await?;
-    let mut event_forwarder: Option<tokio::task::JoinHandle<()>> = None;
-    let (mut session_binding_state, _) = target_session_binding::transition(
-        SessionBindingState::Unbound,
-        SessionBindingEvent::BootResolved {
-            session_id: current_session_id.clone(),
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("session binding bootstrap: {e}"))?;
 
     let explicit_ip = find_flag(args, "--advertise");
     let attachment_hint_path = data_dir.join("attachment_hint.json");
@@ -2358,19 +1483,6 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut write_half,
                                 adoption,
                                 true,
-                                &service,
-                                &runtime_adapter,
-                                &jsonl_store,
-                                &model,
-                                &system_prompt,
-                                &mob_state,
-                                &provider,
-                                &mcp_external_tools,
-                                &surface.factory,
-                                &surface.config,
-                                &mut session_binding_state,
-                                &mut current_session_id,
-                                &mut event_forwarder,
                                 &mut attached_tux_hint,
                                 &attachment_hint_path,
                             ).await?;
@@ -2430,19 +1542,6 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut write_half,
                                 adoption,
                                 false,
-                                &service,
-                                &runtime_adapter,
-                                &jsonl_store,
-                                &model,
-                                &system_prompt,
-                                &mob_state,
-                                &provider,
-                                &mcp_external_tools,
-                                &surface.factory,
-                                &surface.config,
-                                &mut session_binding_state,
-                                &mut current_session_id,
-                                &mut event_forwarder,
                                 &mut attached_tux_hint,
                                 &attachment_hint_path,
                             ).await?;
@@ -2510,74 +1609,23 @@ async fn run_adopted_loop(
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: &Option<Arc<dyn AgentToolDispatcher>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
     attachment_hint: &mut Option<PersistedAttachmentHint>,
     attachment_hint_path: &Path,
 ) -> anyhow::Result<TkcState> {
     let (disconnect_tx, mut disconnect_rx) = tokio::sync::watch::channel::<bool>(false);
-    // Spawn event forwarder for this adopted session
-    if let Some(old) = event_forwarder.take() {
-        old.abort();
-    }
-    if let Ok(handle) = spawn_event_forwarder(
-        service,
-        active_session_id(session_binding_state),
-        Arc::clone(comms_runtime),
-        disconnect_tx.clone(),
-    )
-    .await
-    {
-        *event_forwarder = Some(handle);
-    }
 
-    // Ensure the forwarder is aborted on ANY exit from the adopted loop
-    // (release, link-lost, attach-send-failed, kennel disconnect, error).
-    // Without this, late AgentEvents leak to a stale TUX peer while the
-    // target is back in re-registration.
-    let result = run_adopted_loop_inner(
+    run_adopted_loop_inner(
         comms_runtime,
         reader,
         write_half,
         adoption,
         attach_required,
-        service,
-        runtime_adapter,
-        jsonl_store,
-        model,
-        system_prompt,
-        mob_state,
-        provider,
-        external_tools,
-        factory,
-        config,
-        session_binding_state,
-        current_session_id,
-        event_forwarder,
         attachment_hint,
         attachment_hint_path,
         &disconnect_tx,
         &mut disconnect_rx,
     )
-    .await;
-
-    // Unconditional cleanup: abort the forwarder on every exit path.
-    if let Some(fwd) = event_forwarder.take() {
-        fwd.abort();
-    }
-
-    result
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2587,19 +1635,6 @@ async fn run_adopted_loop_inner(
     write_half: &mut tokio::net::tcp::OwnedWriteHalf,
     adoption: ActiveAdoption,
     attach_required: bool,
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: &Option<Arc<dyn AgentToolDispatcher>>,
-    factory: &Arc<AgentFactory>,
-    config: &Config,
-    session_binding_state: &mut SessionBindingState,
-    current_session_id: &mut SessionId,
-    event_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
     attachment_hint: &mut Option<PersistedAttachmentHint>,
     attachment_hint_path: &Path,
     disconnect_tx: &tokio::sync::watch::Sender<bool>,
@@ -2680,11 +1715,9 @@ async fn run_adopted_loop_inner(
                         attachment_hint_path,
                     )
                     .await?;
-                    if let Some(fwd) = event_forwarder.take() {
-                        fwd.abort();
-                    }
                     return Ok(s);
                 };
+                // Handle attach-ack from TUX (kennel protocol).
                 if let Some(payload) = parse_direct_control_message(&msg)?
                     && let DirectControlPayload::AttachAck { lease_id } = payload
                     && matches!(machine_state.attachment, TaState::Attaching { .. })
@@ -2706,18 +1739,11 @@ async fn run_adopted_loop_inner(
                     .await?;
                     continue;
                 }
-                match handle_target_message(
-                    &msg, comms_runtime, disconnect_tx, service, runtime_adapter,
-                    jsonl_store, model, system_prompt, mob_state, provider,
-                    external_tools, factory, config,
-                    session_binding_state, current_session_id, event_forwarder,
-                ).await {
-                    TargetLoopAction::Continue => {}
-                    TargetLoopAction::ExitProcess => std::process::exit(0),
-                }
+                // All other comms messages (inter-agent traffic from delegate
+                // helpers, mob members, etc.) are handled by the runtime
+                // adapter's peer ingress — no manual routing needed here.
+                tracing::debug!(from = %msg.from_peer, "ignoring comms message in adopted loop (handled by peer ingress)");
             }
-            // Event forwarding is handled by the dedicated event_forwarder task.
-            // No event_stream arm needed here.
             _ = kennel_heartbeat.tick(), if poll_kennel => {
                 let kennel_hb = build_signed_envelope(
                     comms_runtime.router_arc().keypair_arc().as_ref(), &adoption.target_id,
@@ -2797,9 +1823,6 @@ async fn run_adopted_loop_inner(
                                     attachment_hint_path,
                                 )
                                 .await?;
-                                if let Some(fwd) = event_forwarder.take() {
-                                    fwd.abort();
-                                }
                                 return Ok(s);
                             }
                             KennelPayload::LeaseRebound {
@@ -2887,21 +1910,6 @@ async fn run_adopted_loop_inner(
     }
 }
 
-fn should_forward(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::RunStarted { .. }
-            | AgentEvent::RunCompleted { .. }
-            | AgentEvent::RunFailed { .. }
-            | AgentEvent::TextDelta { .. }
-            | AgentEvent::TextComplete { .. }
-            | AgentEvent::ToolCallRequested { .. }
-            | AgentEvent::ToolExecutionStarted { .. }
-            | AgentEvent::ToolExecutionCompleted { .. }
-            | AgentEvent::TurnStarted { .. }
-            | AgentEvent::TurnCompleted { .. }
-    )
-}
 
 /// Probe our outbound IP toward a host via a non-sending UDP "connect".
 fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
@@ -3120,8 +2128,8 @@ mod tests {
             runtime_adapter,
             jsonl_store,
             mob_state,
-            factory: Arc::new(AgentFactory::new(session_dir)),
-            config: Config::default(),
+            _factory: Arc::new(AgentFactory::new(session_dir)),
+            _config: Config::default(),
             _schedule_host: schedule_host,
         })
     }

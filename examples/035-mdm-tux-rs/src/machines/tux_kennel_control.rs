@@ -1,12 +1,13 @@
 //! TUX-side kennel control composition.
 //!
-//! Owns reconnect/rebind/release/list-reconcile semantics above the
-//! per-target claim leaf machine.
+//! Owns reconnect/release/list-reconcile semantics above the
+//! per-target claim leaf machine. Simplified for RPC-only TUX:
+//! no comms attach flow, no rebind targets, no target-lost handling.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::{ClaimGrant, LeaseRef, TargetListEntry};
+use crate::{ClaimGrant, TargetListEntry};
 
 use super::tux_claim;
 
@@ -55,21 +56,6 @@ pub enum Event {
     },
     ClaimReleased {
         target_id: String,
-        lease_ref: LeaseRef,
-    },
-    TargetLost {
-        target_id: String,
-        lease_ref: LeaseRef,
-    },
-    LeaseRebound {
-        target_id: String,
-        new_lease_id: String,
-        target_pubkey: String,
-        target_direct_addr: String,
-    },
-    AttachConfirmed {
-        target_id: String,
-        lease_id: String,
     },
 }
 
@@ -78,9 +64,6 @@ pub enum Effect {
     Claim {
         target_id: String,
         effect: tux_claim::Effect,
-    },
-    RebindTargets {
-        target_ids: Vec<String>,
     },
 }
 
@@ -184,7 +167,6 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
             });
         }
         Event::SeenMineList { targets } => {
-            let mut needs_rebind = Vec::new();
             for target in &targets {
                 if !state.claims.contains_key(&target.target_id) {
                     state.claims.insert(
@@ -203,23 +185,6 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
                         &mut out,
                     )?;
                 }
-                if state.kennel_connected
-                    && !matches!(target.state, crate::KennelTargetState::Available)
-                    && state
-                        .claims
-                        .get(&target.target_id)
-                        .map(|claim_state| claim_state.target_pubkey().is_none())
-                        .unwrap_or(false)
-                {
-                    needs_rebind.push(target.target_id.clone());
-                }
-            }
-            if !needs_rebind.is_empty() {
-                needs_rebind.sort();
-                needs_rebind.dedup();
-                out.push(Effect::RebindTargets {
-                    target_ids: needs_rebind,
-                });
             }
         }
         Event::UserClaimTarget { target_id } => {
@@ -258,8 +223,7 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
                     current,
                     tux_claim::Event::ClaimGranted {
                         lease_id: claim.lease_id.clone(),
-                        target_pubkey: claim.target_pubkey.clone(),
-                        target_direct_addr: claim.target_direct_addr.clone(),
+                        rpc_addr: claim.rpc_addr.clone(),
                         now_ms,
                     },
                 )
@@ -281,44 +245,6 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
                 )?;
             }
         }
-        Event::TargetLost { target_id, .. } => {
-            if state.claims.contains_key(&target_id) {
-                apply_claim_event(
-                    &mut state.claims,
-                    &target_id,
-                    tux_claim::Event::TargetLost,
-                    &mut out,
-                )?;
-            }
-        }
-        Event::LeaseRebound {
-            target_id,
-            new_lease_id,
-            target_pubkey,
-            target_direct_addr,
-        } => {
-            apply_claim_event(
-                &mut state.claims,
-                &target_id,
-                tux_claim::Event::LeaseRebound {
-                    new_lease_id,
-                    target_pubkey,
-                    target_direct_addr,
-                },
-                &mut out,
-            )?;
-        }
-        Event::AttachConfirmed {
-            target_id,
-            lease_id,
-        } => {
-            apply_claim_event(
-                &mut state.claims,
-                &target_id,
-                tux_claim::Event::AttachConfirmed { lease_id },
-                &mut out,
-            )?;
-        }
     }
     Ok((state, out))
 }
@@ -329,7 +255,7 @@ mod tests {
     use crate::{KennelTargetState, TargetListEntry};
 
     #[test]
-    fn mine_list_without_lease_seeds_target_for_later_rebound() {
+    fn mine_list_without_lease_seeds_target() {
         let (state, effects) = transition(
             State::default(),
             Event::SeenMineList {
@@ -349,28 +275,11 @@ mod tests {
             state.claims.get("t1"),
             Some(tux_claim::State::Available { .. })
         ));
-
-        let (state, effects) = transition(
-            state,
-            Event::LeaseRebound {
-                target_id: "t1".into(),
-                new_lease_id: "lease-new".into(),
-                target_pubkey: "ed25519:t".into(),
-                target_direct_addr: "tcp://1.2.3.4:10".into(),
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(
-            state.claims.get("t1"),
-            Some(tux_claim::State::Claimed { lease_id, .. }) if lease_id == "lease-new"
-        ));
-        assert!(matches!(effects.as_slice(), [Effect::Claim { .. }]));
     }
 
     #[test]
-    fn mine_list_with_missing_route_requests_rebind() {
-        let (state, effects) = transition(
+    fn mine_list_with_lease_transitions_to_claimed() {
+        let (state, _effects) = transition(
             State {
                 kennel_connected: true,
                 claims: HashMap::new(),
@@ -391,14 +300,9 @@ mod tests {
             state.claims.get("t1"),
             Some(tux_claim::State::Claimed {
                 lease_id,
-                route: tux_claim::TargetRoute::AwaitingRebind,
                 ..
             }) if lease_id == "lease-1"
         ));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::RebindTargets { target_ids } if target_ids == &vec!["t1".to_string()]
-        )));
     }
 
     #[test]
@@ -406,19 +310,8 @@ mod tests {
         let claimed = tux_claim::State::Claimed {
             target_id: "t1".into(),
             target_name: "target-1".into(),
-            route: tux_claim::TargetRoute::Known {
-                target_pubkey: "ed25519:t1".into(),
-                target_direct_addr: "tcp://1.2.3.4:10".into(),
-            },
             lease_id: "lease-1".into(),
-        };
-        let attaching = tux_claim::State::Attaching {
-            target_id: "t2".into(),
-            target_name: "target-2".into(),
-            target_pubkey: "ed25519:t2".into(),
-            target_direct_addr: "tcp://1.2.3.4:11".into(),
-            lease_id: "lease-2".into(),
-            started_at_ms: 10,
+            rpc_addr: None,
         };
         let requested = tux_claim::State::ClaimRequested {
             target_id: "t3".into(),
@@ -427,7 +320,6 @@ mod tests {
 
         let mut claims = HashMap::new();
         claims.insert("t1".into(), claimed.clone());
-        claims.insert("t2".into(), attaching.clone());
         claims.insert("t3".into(), requested.clone());
 
         let (state, effects) = transition(
@@ -441,7 +333,6 @@ mod tests {
 
         assert!(effects.is_empty());
         assert_eq!(state.claims.get("t1"), Some(&claimed));
-        assert_eq!(state.claims.get("t2"), Some(&attaching));
         assert_eq!(state.claims.get("t3"), Some(&requested));
     }
 }

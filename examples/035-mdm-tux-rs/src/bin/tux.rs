@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use crossterm::event::{
@@ -159,9 +159,7 @@ enum TransportMode {
 #[allow(dead_code)]
 enum KennelUiState {
     Available,
-    Attaching,
     ClaimedByMe,
-    ClaimUncertain,
 }
 
 type ClaimRegistry = parking_lot::RwLock<TuxKennelState>;
@@ -181,7 +179,6 @@ struct App {
     /// Kennel-mode target states (keyed by target_id).
     target_states: HashMap<String, KennelUiState>,
     target_leases: HashMap<String, String>,
-    attaching_since: HashMap<String, Instant>,
 }
 
 impl App {
@@ -199,10 +196,6 @@ impl App {
 
     fn find_target_by_id(&self, target_id: &str) -> Option<usize> {
         self.targets.iter().position(|t| t.target_id == target_id)
-    }
-
-    fn find_target_by_name(&self, name: &str) -> Option<usize> {
-        self.targets.iter().position(|t| t.name == name)
     }
 
     fn input_label(&self) -> String {
@@ -265,10 +258,6 @@ enum TuiEvent {
         target_id: String,
         lease_ref: LeaseRef,
         reason: LeaseTerminationReason,
-    },
-    KennelAttached {
-        target_name: String,
-        lease_id: String,
     },
     KennelError(String),
     /// Kennel gave us a new target with RPC addr.
@@ -335,9 +324,7 @@ enum RpcCommand {
 enum KennelClientCommand {
     ClaimTarget { target_id: String },
     ClaimAck { lease_id: String },
-    RebindTargets { target_ids: Vec<String> },
     ReleaseTarget { lease_id: String },
-    AttachConfirmed { lease_id: String },
     Shutdown { reply: tokio::sync::oneshot::Sender<()> },
 }
 
@@ -1060,16 +1047,6 @@ fn apply_claim_effects(
                 }
             }
             TkcEffect::Claim {
-                effect: tux_claim::Effect::SendAttachConfirmed { lease_id },
-                ..
-            } => {
-                if let Some(kennel_tx) = kennel_tx {
-                    let _ = kennel_tx.send(KennelClientCommand::AttachConfirmed {
-                        lease_id: lease_id.clone(),
-                    });
-                }
-            }
-            TkcEffect::Claim {
                 effect: tux_claim::Effect::SendReleaseToKennel { lease_id },
                 ..
             } => {
@@ -1079,17 +1056,14 @@ fn apply_claim_effects(
                     });
                 }
             }
-            TkcEffect::RebindTargets { target_ids } => {
-                if let Some(kennel_tx) = kennel_tx
-                    && !target_ids.is_empty()
-                {
-                    let _ = kennel_tx.send(KennelClientCommand::RebindTargets {
-                        target_ids: target_ids.clone(),
-                    });
-                }
+            TkcEffect::Claim {
+                effect: tux_claim::Effect::RpcConnect { .. },
+                ..
+            } => {
+                // RPC connect is handled by the TUI event loop via
+                // KennelTargetDiscovered, not via the kennel client command
+                // channel.
             }
-            // EnsureTrustedPeer / RemoveTrustedPeer: not needed in RPC mode (no comms)
-            _ => {}
         }
     }
 }
@@ -1140,7 +1114,7 @@ async fn spawn_kennel_client(
     claims: Arc<ClaimRegistry>,
     kennel_addr: String,
     tux_id: String,
-    direct_addr: String,
+    _direct_addr: String,
 ) {
     'outer: loop {
         let stream =
@@ -1172,7 +1146,6 @@ async fn spawn_kennel_client(
             KennelPayload::TuxRegister {
                 tux_id: tux_id.clone(),
                 pubkey: tux_id.clone(),
-                direct_addr: direct_addr.clone(),
                 attached_target_ids: current_attached_target_ids(&claims),
             },
         )
@@ -1210,28 +1183,6 @@ async fn spawn_kennel_client(
             TkcEvent::KennelConnected,
             |_| (),
         );
-
-        let rebound_targets = current_attached_target_ids(&claims);
-        if !rebound_targets.is_empty()
-            && !send_kennel_message(
-                &mut write_half,
-                &keypair,
-                &tux_id,
-                KennelPayload::RebindTargets {
-                    target_ids: rebound_targets,
-                },
-            )
-            .await
-        {
-            let _ = apply_tkc_event(
-                &claims,
-                Some(&kennel_cmd_tx),
-                TkcEvent::KennelDisconnected,
-                |_| (),
-            );
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         let mut refresh = tokio::time::interval(Duration::from_secs(5));
@@ -1315,7 +1266,6 @@ async fn spawn_kennel_client(
                                 Some(&kennel_cmd_tx),
                                 TkcEvent::ClaimReleased {
                                     target_id: target_id.clone(),
-                                    lease_ref: lease_ref.clone(),
                                 },
                                 |_| (),
                             );
@@ -1326,42 +1276,6 @@ async fn spawn_kennel_client(
                                     reason,
                                 })
                                 .await;
-                        }
-                        KennelPayload::TargetLost {
-                            target_id,
-                            lease_ref,
-                        } => {
-                            let _ = apply_tkc_event(
-                                &claims,
-                                Some(&kennel_cmd_tx),
-                                TkcEvent::TargetLost {
-                                    target_id: target_id.clone(),
-                                    lease_ref: lease_ref.clone(),
-                                },
-                                |_| (),
-                            );
-                        }
-                        KennelPayload::LeaseRebound { lease_id, target_id, target_pubkey, target_direct_addr, .. } => {
-                            let target_name = apply_tkc_event(
-                                &claims,
-                                Some(&kennel_cmd_tx),
-                                TkcEvent::LeaseRebound {
-                                    target_id: target_id.clone(),
-                                    new_lease_id: lease_id.clone(),
-                                    target_pubkey,
-                                    target_direct_addr,
-                                },
-                                |new_state| {
-                                    new_state
-                                        .claims
-                                        .get(&target_id)
-                                        .map(|state| state.target_name().to_string())
-                                },
-                            )
-                            .flatten();
-                            if let Some(target_name) = target_name {
-                                let _ = event_tx.send(TuiEvent::KennelAttached { target_name, lease_id }).await;
-                            }
                         }
                         _ => {}
                     }
@@ -1397,18 +1311,6 @@ async fn spawn_kennel_client(
                                 break;
                             }
                         }
-                        KennelClientCommand::RebindTargets { target_ids } => {
-                            if !send_kennel_message(
-                                &mut write_half,
-                                &keypair,
-                                &tux_id,
-                                KennelPayload::RebindTargets { target_ids },
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
                         KennelClientCommand::ReleaseTarget { lease_id } => {
                             if !send_kennel_message(
                                 &mut write_half,
@@ -1418,11 +1320,6 @@ async fn spawn_kennel_client(
                             )
                             .await
                             {
-                                break;
-                            }
-                        }
-                        KennelClientCommand::AttachConfirmed { lease_id } => {
-                            if !send_kennel_message(&mut write_half, &keypair, &tux_id, KennelPayload::AttachConfirmed { lease_id }).await {
                                 break;
                             }
                         }
@@ -1533,7 +1430,6 @@ async fn main() -> anyhow::Result<()> {
         pending_model: None,
         target_states: HashMap::new(),
         target_leases: HashMap::new(),
-        attaching_since: HashMap::new(),
     };
 
     tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, None))
@@ -1634,7 +1530,6 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
         pending_model: None,
         target_states: HashMap::new(),
         target_leases: HashMap::new(),
-        attaching_since: HashMap::new(),
     };
 
     let claims_for_tui = Some(claims.clone());
@@ -1849,11 +1744,9 @@ fn process_event(
         TuiEvent::KennelClaimGranted(grants) => {
             for grant in &grants {
                 app.target_states
-                    .insert(grant.target_id.clone(), KennelUiState::Attaching);
+                    .insert(grant.target_id.clone(), KennelUiState::ClaimedByMe);
                 app.target_leases
                     .insert(grant.target_id.clone(), grant.lease_id.clone());
-                app.attaching_since
-                    .insert(grant.target_id.clone(), Instant::now());
                 // Add target if not already present
                 if app.find_target_by_id(&grant.target_id).is_none() {
                     let rpc_addr = grant.rpc_addr.clone().unwrap_or_default();
@@ -1862,6 +1755,18 @@ fn process_event(
                         grant.target_id.clone(),
                         rpc_addr,
                     ));
+                }
+                // Connect RPC immediately (no attach step)
+                if let Some(rpc_addr) = &grant.rpc_addr {
+                    if let Some(idx) = app.find_target_by_id(&grant.target_id) {
+                        if !rpc_addr.is_empty() {
+                            let _ = rpc_tx.send(RpcCommand::Connect {
+                                target_id: grant.target_id.clone(),
+                                rpc_addr: rpc_addr.clone(),
+                            });
+                            app.targets[idx].push_notice("claimed", &grant.target_name);
+                        }
+                    }
                 }
             }
         }
@@ -1873,7 +1778,6 @@ fn process_event(
             app.target_states
                 .insert(target_id.clone(), KennelUiState::Available);
             app.target_leases.remove(&target_id);
-            app.attaching_since.remove(&target_id);
             if let Some(idx) = app.find_target_by_id(&target_id) {
                 app.targets[idx].flush_streaming();
                 app.targets[idx].phase = TargetPhase::Disconnected;
@@ -1885,26 +1789,6 @@ fn process_event(
                     "kennel released claim",
                     &format!("({lease_text}): {reason}"),
                 );
-            }
-        }
-        TuiEvent::KennelAttached {
-            target_name,
-            lease_id,
-        } => {
-            if let Some(idx) = app.find_target_by_name(&target_name) {
-                let target_id = app.targets[idx].target_id.clone();
-                app.target_states
-                    .insert(target_id.clone(), KennelUiState::ClaimedByMe);
-                app.target_leases.insert(target_id.clone(), lease_id);
-                app.attaching_since.remove(&target_id);
-                app.targets[idx].push_notice("attached", &target_name);
-                // Connect RPC if we have an address
-                if !app.targets[idx].rpc_addr.is_empty() {
-                    let _ = rpc_tx.send(RpcCommand::Connect {
-                        target_id,
-                        rpc_addr: app.targets[idx].rpc_addr.clone(),
-                    });
-                }
             }
         }
         TuiEvent::KennelTargetDiscovered {
@@ -2069,7 +1953,7 @@ fn handle_key(
                     let tid = &target.target_id;
                     if !matches!(
                         app.target_states.get(tid),
-                        Some(KennelUiState::ClaimedByMe | KennelUiState::ClaimUncertain)
+                        Some(KennelUiState::ClaimedByMe)
                     ) {
                         app.targets[idx].push_notice("error", "use /claim first");
                         return;
@@ -2380,8 +2264,6 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
                     if app.transport == TransportMode::Kennel {
                         match app.target_states.get(&t.target_id).copied() {
                             Some(KennelUiState::ClaimedByMe) => ("o", " mine"),
-                            Some(KennelUiState::Attaching) => ("~", " attaching"),
-                            Some(KennelUiState::ClaimUncertain) => ("?", " claim?"),
                             _ => ("o", ""),
                         }
                     } else {
@@ -2674,7 +2556,6 @@ mod tests {
             pending_model: None,
             target_states: HashMap::new(),
             target_leases: HashMap::new(),
-            attaching_since: HashMap::new(),
         };
         scroll_timeline_up(&mut app, 5);
         assert!(!app.auto_scroll);

@@ -5,8 +5,5 @@ pub mod target_attachment;
 pub mod target_kennel_control;
 pub mod target_kennel_session;
 pub mod target_session_binding;
-pub mod tux_attach;
 pub mod tux_claim;
 pub mod tux_kennel_control;
-pub mod tux_runtime;
-pub mod tux_runtime_registry;

@@ -17,7 +17,6 @@ pub enum ListScope {
 #[serde(rename_all = "snake_case")]
 pub enum KennelTargetState {
     Available,
-    PendingAttach,
     Claimed,
     RecoveringClaim,
 }
@@ -72,7 +71,6 @@ pub enum TargetRegistrationRejectReason {
 pub enum LeaseTerminationReason {
     ReleasedByTux,
     ClaimAckTimeout,
-    AttachTimeout,
     RecoveryExpired,
     TuxDisconnected,
 }
@@ -104,7 +102,6 @@ pub enum KennelPayload {
     TuxRegister {
         tux_id: String,
         pubkey: String,
-        direct_addr: String,
         #[serde(default)]
         attached_target_ids: Vec<String>,
     },
@@ -127,6 +124,7 @@ pub enum KennelPayload {
     ClaimAck {
         lease_ids: Vec<String>,
     },
+    /// Kennel tells target about its new TUX owner (legacy: kept for target compat).
     Adopted {
         lease_id: String,
         target_id: String,
@@ -135,8 +133,16 @@ pub enum KennelPayload {
         tux_direct_addr: String,
         expires_at_ms: i64,
     },
-    AttachConfirmed {
+    /// Kennel tells target about TUX reconnection with new address (recovery).
+    LeaseRebound {
         lease_id: String,
+        target_id: String,
+        tux_id: String,
+        tux_pubkey: String,
+        tux_direct_addr: String,
+        target_pubkey: String,
+        target_direct_addr: String,
+        expires_at_ms: i64,
     },
     RenewLeases {
         lease_ids: Vec<String>,
@@ -158,23 +164,9 @@ pub enum KennelPayload {
         target_id: String,
         reason: LeaseTerminationReason,
     },
-    TargetLost {
-        target_id: String,
-        lease_ref: LeaseRef,
-    },
     TuxHeartbeat,
     RebindTargets {
         target_ids: Vec<String>,
-    },
-    LeaseRebound {
-        lease_id: String,
-        target_id: String,
-        tux_id: String,
-        tux_pubkey: String,
-        tux_direct_addr: String,
-        target_pubkey: String,
-        target_direct_addr: String,
-        expires_at_ms: i64,
     },
     Error {
         message: String,
@@ -186,7 +178,6 @@ impl std::fmt::Display for LeaseTerminationReason {
         let text = match self {
             LeaseTerminationReason::ReleasedByTux => "released_by_tux",
             LeaseTerminationReason::ClaimAckTimeout => "claim_ack_timeout",
-            LeaseTerminationReason::AttachTimeout => "attach_timeout",
             LeaseTerminationReason::RecoveryExpired => "recovery_expired",
             LeaseTerminationReason::TuxDisconnected => "tux_disconnected",
         };

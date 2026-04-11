@@ -32,7 +32,6 @@ impl State {
         match &self.lease {
             kennel_lease::State::Available { target_id }
             | kennel_lease::State::AwaitingAck { target_id, .. }
-            | kennel_lease::State::AwaitingAttach { target_id, .. }
             | kennel_lease::State::Claimed { target_id, .. }
             | kennel_lease::State::RecoveringClaim { target_id, .. } => target_id,
         }
@@ -54,11 +53,6 @@ pub enum Event {
         ack_deadline_ms: i64,
     },
     ClaimAcked {
-        lease_id: String,
-        tux_id: String,
-        attach_deadline_ms: i64,
-    },
-    AttachConfirmed {
         lease_id: String,
         tux_id: String,
     },
@@ -146,7 +140,6 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 let target_id = match &lease {
                     kennel_lease::State::Available { target_id }
                     | kennel_lease::State::AwaitingAck { target_id, .. }
-                    | kennel_lease::State::AwaitingAttach { target_id, .. }
                     | kennel_lease::State::Claimed { target_id, .. }
                     | kennel_lease::State::RecoveringClaim { target_id, .. } => target_id.clone(),
                 };
@@ -188,25 +181,15 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         Event::ClaimAcked {
             lease_id,
             tux_id,
-            attach_deadline_ms,
         } => {
             let (next, effects) = kennel_lease::transition(
                 lease,
                 kennel_lease::Event::ClaimAcked {
                     lease_id,
                     tux_id,
-                    attach_deadline_ms,
                 },
             )
             .map_err(|e| err("State", "ClaimAcked", &e.reason))?;
-            Ok(lift(next, connected, effects))
-        }
-        Event::AttachConfirmed { lease_id, tux_id } => {
-            let (next, effects) = kennel_lease::transition(
-                lease,
-                kennel_lease::Event::AttachConfirmed { lease_id, tux_id },
-            )
-            .map_err(|e| err("State", "AttachConfirmed", &e.reason))?;
             Ok(lift(next, connected, effects))
         }
         Event::LeaseRenewed {

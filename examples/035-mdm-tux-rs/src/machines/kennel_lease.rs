@@ -1,4 +1,7 @@
 //! Kennel lease state machine — per-target lifecycle on the kennel side.
+//!
+//! Simplified: no AwaitingAttach state, no AttachConfirmed event.
+//! After ClaimAck the lease goes directly to Claimed.
 
 use std::fmt;
 
@@ -33,13 +36,6 @@ pub enum State {
         expires_at_ms: i64,
         ack_deadline_ms: i64,
     },
-    AwaitingAttach {
-        target_id: String,
-        lease_id: String,
-        tux_id: String,
-        expires_at_ms: i64,
-        attach_deadline_ms: i64,
-    },
     Claimed {
         target_id: String,
         lease_id: String,
@@ -66,11 +62,6 @@ pub enum Event {
         ack_deadline_ms: i64,
     },
     ClaimAcked {
-        lease_id: String,
-        tux_id: String,
-        attach_deadline_ms: i64,
-    },
-    AttachConfirmed {
         lease_id: String,
         tux_id: String,
     },
@@ -110,12 +101,6 @@ pub enum Event {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    SendAdoptedToTarget {
-        target_id: String,
-        lease_id: String,
-        tux_id: String,
-        expires_at_ms: i64,
-    },
     SendTargetReleased {
         target_id: String,
         lease_ref: LeaseRef,
@@ -233,10 +218,6 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             ))
         }
         (State::Available { target_id }, Event::TargetDisconnected { .. }) => {
-            // An idle target that disconnects must be removed from the
-            // registry immediately. Without DropTargetRecord, the dead
-            // record stays in Available and can be claimed by a TUX,
-            // leading to phantom targets and attach timeouts.
             Ok((
                 State::Available {
                     target_id: target_id.clone(),
@@ -288,6 +269,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             ))
         }
 
+        // AwaitingAck -> Claimed (directly, no attach window)
         (
             State::AwaitingAck {
                 target_id,
@@ -299,7 +281,6 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             Event::ClaimAcked {
                 lease_id: ack_lid,
                 tux_id: ack_tid,
-                attach_deadline_ms,
             },
         ) => {
             if ack_lid != lease_id {
@@ -309,19 +290,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 return Err(err("AwaitingAck", "ClaimAcked", "tux_id mismatch"));
             }
             Ok((
-                State::AwaitingAttach {
-                    target_id: target_id.clone(),
-                    lease_id: lease_id.clone(),
-                    tux_id: tux_id.clone(),
-                    expires_at_ms,
-                    attach_deadline_ms,
-                },
-                vec![Effect::SendAdoptedToTarget {
+                State::Claimed {
                     target_id,
                     lease_id,
                     tux_id,
                     expires_at_ms,
-                }],
+                },
+                vec![],
             ))
         }
         (
@@ -437,182 +412,6 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         }
         (
             State::AwaitingAck {
-                target_id,
-                lease_id,
-                tux_id,
-                ..
-            },
-            Event::TargetDisconnected { .. },
-        ) => Ok((
-            State::Available {
-                target_id: target_id.clone(),
-            },
-            vec![
-                Effect::SendTargetLostToTux {
-                    target_id: target_id.clone(),
-                    tux_id,
-                    lease_ref: LeaseRef::Known {
-                        lease_id: lease_id.clone(),
-                    },
-                },
-                Effect::RemoveLease { lease_id },
-                Effect::DropTargetRecord { target_id },
-            ],
-        )),
-
-        (
-            State::AwaitingAttach {
-                target_id,
-                lease_id,
-                tux_id,
-                expires_at_ms,
-                ..
-            },
-            Event::AttachConfirmed {
-                lease_id: cf_lid,
-                tux_id: cf_tid,
-            },
-        ) => {
-            if cf_lid != lease_id {
-                return Err(err(
-                    "AwaitingAttach",
-                    "AttachConfirmed",
-                    "lease_id mismatch",
-                ));
-            }
-            if cf_tid != tux_id {
-                return Err(err("AwaitingAttach", "AttachConfirmed", "tux_id mismatch"));
-            }
-            Ok((
-                State::Claimed {
-                    target_id,
-                    lease_id,
-                    tux_id,
-                    expires_at_ms,
-                },
-                vec![],
-            ))
-        }
-        (
-            State::AwaitingAttach {
-                target_id,
-                lease_id,
-                tux_id,
-                ..
-            },
-            Event::Released { reason },
-        ) => Ok((
-            State::Available {
-                target_id: target_id.clone(),
-            },
-            vec![
-                Effect::SendTargetReleased {
-                    target_id: target_id.clone(),
-                    lease_ref: LeaseRef::Known {
-                        lease_id: lease_id.clone(),
-                    },
-                    reason,
-                },
-                Effect::SendClaimReleasedToTux {
-                    target_id,
-                    lease_ref: LeaseRef::Known {
-                        lease_id: lease_id.clone(),
-                    },
-                    tux_id,
-                    reason,
-                },
-                Effect::RemoveLease { lease_id },
-            ],
-        )),
-        (
-            State::AwaitingAttach {
-                target_id,
-                lease_id,
-                tux_id,
-                expires_at_ms,
-                attach_deadline_ms,
-            },
-            Event::Tick { now_ms },
-        ) => {
-            if now_ms >= attach_deadline_ms {
-                Ok((
-                    State::Available {
-                        target_id: target_id.clone(),
-                    },
-                    vec![
-                        Effect::SendTargetReleased {
-                            target_id: target_id.clone(),
-                            lease_ref: LeaseRef::Known {
-                                lease_id: lease_id.clone(),
-                            },
-                            reason: LeaseTerminationReason::AttachTimeout,
-                        },
-                        Effect::SendClaimReleasedToTux {
-                            target_id,
-                            lease_ref: LeaseRef::Known {
-                                lease_id: lease_id.clone(),
-                            },
-                            tux_id,
-                            reason: LeaseTerminationReason::AttachTimeout,
-                        },
-                        Effect::RemoveLease { lease_id },
-                    ],
-                ))
-            } else {
-                Ok((
-                    State::AwaitingAttach {
-                        target_id,
-                        lease_id,
-                        tux_id,
-                        expires_at_ms,
-                        attach_deadline_ms,
-                    },
-                    vec![],
-                ))
-            }
-        }
-        (
-            State::AwaitingAttach {
-                target_id,
-                lease_id,
-                tux_id,
-                expires_at_ms,
-                attach_deadline_ms,
-            },
-            Event::TuxDisconnected {
-                tux_id: disc_tid, ..
-            },
-        ) => {
-            if disc_tid != tux_id {
-                return Ok((
-                    State::AwaitingAttach {
-                        target_id,
-                        lease_id,
-                        tux_id,
-                        expires_at_ms,
-                        attach_deadline_ms,
-                    },
-                    vec![],
-                ));
-            }
-            Ok((
-                State::Available {
-                    target_id: target_id.clone(),
-                },
-                vec![
-                    Effect::SendTargetReleased {
-                        target_id,
-                        lease_ref: LeaseRef::Known {
-                            lease_id: lease_id.clone(),
-                        },
-                        reason: LeaseTerminationReason::TuxDisconnected,
-                    },
-                    Effect::RemoveLease { lease_id },
-                ],
-            ))
-        }
-        (
-            State::AwaitingAttach {
                 target_id,
                 lease_id,
                 tux_id,
@@ -762,6 +561,23 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 tux_id,
                 lease_ref: LeaseRef::Known { lease_id },
             }],
+        )),
+        (
+            State::Claimed {
+                target_id,
+                lease_id,
+                tux_id,
+                expires_at_ms,
+            },
+            Event::Tick { .. },
+        ) => Ok((
+            State::Claimed {
+                target_id,
+                lease_id,
+                tux_id,
+                expires_at_ms,
+            },
+            vec![],
         )),
 
         (
@@ -998,7 +814,6 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             let state_name = match &state {
                 State::Available { .. } => "Available",
                 State::AwaitingAck { .. } => "AwaitingAck",
-                State::AwaitingAttach { .. } => "AwaitingAttach",
                 State::Claimed { .. } => "Claimed",
                 State::RecoveringClaim { .. } => "RecoveringClaim",
             };
@@ -1014,6 +829,35 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_ack_goes_directly_to_claimed() {
+        let state = State::AwaitingAck {
+            target_id: "t".into(),
+            lease_id: "l".into(),
+            tux_id: "u".into(),
+            expires_at_ms: 10_000,
+            ack_deadline_ms: 5_000,
+        };
+        let (state, effects) = transition(
+            state,
+            Event::ClaimAcked {
+                lease_id: "l".into(),
+                tux_id: "u".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state,
+            State::Claimed {
+                target_id,
+                lease_id,
+                tux_id,
+                expires_at_ms: 10_000,
+            } if target_id == "t" && lease_id == "l" && tux_id == "u"
+        ));
+        assert!(effects.is_empty());
+    }
 
     #[test]
     fn recovery_deadline_is_bounded_by_ttl() {

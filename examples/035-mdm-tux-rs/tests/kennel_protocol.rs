@@ -167,7 +167,6 @@ async fn kennel_target_register_and_list() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
@@ -191,7 +190,7 @@ async fn kennel_target_register_and_list() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn kennel_full_claim_attach_release_cycle() {
+async fn kennel_full_claim_release_cycle() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
     // Register target
@@ -218,7 +217,6 @@ async fn kennel_full_claim_attach_release_cycle() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
@@ -239,27 +237,9 @@ async fn kennel_full_claim_attach_release_cycle() {
     assert_eq!(claims.len(), 1);
     let lease_id = claims[0].lease_id.clone();
 
-    // Ack the claim
+    // Ack the claim -- goes directly to Claimed (no attach step)
     tux.send(KennelPayload::ClaimAck {
         lease_ids: vec![lease_id.clone()],
-    })
-    .await
-    .unwrap();
-
-    // Target should receive Adopted
-    let resp = target.recv().await.unwrap();
-    let KennelPayload::Adopted {
-        lease_id: adopted_lid,
-        ..
-    } = resp
-    else {
-        panic!("expected Adopted, got {resp:?}");
-    };
-    assert_eq!(adopted_lid, lease_id);
-
-    // Confirm attach
-    tux.send(KennelPayload::AttachConfirmed {
-        lease_id: lease_id.clone(),
     })
     .await
     .unwrap();
@@ -331,7 +311,7 @@ async fn kennel_full_claim_attach_release_cycle() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn kennel_target_disconnect_notifies_tux() {
+async fn kennel_target_disconnect_releases_claim() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
     // Register + claim
@@ -357,7 +337,6 @@ async fn kennel_target_disconnect_notifies_tux() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
@@ -366,7 +345,7 @@ async fn kennel_target_disconnect_notifies_tux() {
 
     tux.send(KennelPayload::ClaimTargets {
         target_ids: vec![target.id().to_string()],
-        lease_ttl_sec: Some(30),
+        lease_ttl_sec: Some(5), // short TTL so recovery expires quickly
     })
     .await
     .unwrap();
@@ -380,27 +359,42 @@ async fn kennel_target_disconnect_notifies_tux() {
     })
     .await
     .unwrap();
-    let _ = target.recv().await.unwrap(); // Adopted
-    tux.send(KennelPayload::AttachConfirmed {
-        lease_id: lease_id.clone(),
+
+    // Verify the claim is in Claimed state before disconnecting the target
+    tux.send(KennelPayload::ListTargets {
+        scope: ListScope::Mine,
     })
     .await
     .unwrap();
-
-    // Drop the target connection
-    drop(target);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // TUX should receive TargetLost
     let resp = tux.recv().await.unwrap();
-    let KennelPayload::TargetLost {
-        target_id: _,
-        lease_ref,
-    } = resp
-    else {
-        panic!("expected TargetLost, got {resp:?}");
+    let KennelPayload::TargetList { targets, .. } = resp else {
+        panic!("expected TargetList, got {resp:?}");
     };
-    assert_eq!(lease_ref, mdm_tux::LeaseRef::Known { lease_id });
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].state, KennelTargetState::Claimed);
+
+    // Drop the target connection -- enters RecoveringClaim
+    drop(target);
+
+    // The lease TTL is 5s, so recovery expires at most ~5s from claim.
+    // The kennel janitor ticks every 1s. We should get ClaimReleased
+    // within ~7s.
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tux.recv(),
+    )
+    .await;
+    match resp {
+        Ok(Ok(KennelPayload::ClaimReleased { .. })) => {
+            // Expected: the claim was released after recovery expired
+        }
+        Ok(Ok(other)) => {
+            // Some other message first -- that's ok
+            eprintln!("got intermediate message: {other:?}");
+        }
+        Ok(Err(e)) => panic!("recv error: {e}"),
+        Err(_) => panic!("timed out waiting for ClaimReleased"),
+    }
 }
 
 #[tokio::test]
@@ -447,7 +441,6 @@ async fn kennel_claim_ack_subset() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
@@ -466,16 +459,12 @@ async fn kennel_claim_ack_subset() {
     };
     assert_eq!(claims.len(), 2);
 
-    // Ack only the first lease
+    // Ack only the first lease -- goes directly to Claimed
     tux.send(KennelPayload::ClaimAck {
         lease_ids: vec![claims[0].lease_id.clone()],
     })
     .await
     .unwrap();
-
-    // Only the acked target should receive Adopted
-    let resp = t1.recv().await.unwrap();
-    assert!(matches!(resp, KennelPayload::Adopted { .. }));
 
     // The un-acked claim should timeout (5s) and release
     // Wait for the ack deadline
@@ -493,7 +482,7 @@ async fn kennel_claim_ack_subset() {
     // So drain messages until we get our TargetList
     let targets = match resp {
         KennelPayload::ClaimReleased { .. } => {
-            // Good — the un-acked claim was released. Read the actual list.
+            // Good -- the un-acked claim was released. Read the actual list.
             tux.send(KennelPayload::ListTargets {
                 scope: ListScope::Mine,
             })
@@ -551,7 +540,6 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
@@ -569,7 +557,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
     };
     assert_eq!(targets.len(), 1, "target should be listed");
 
-    // Drop target — it should disappear from the available list
+    // Drop target -- it should disappear from the available list
     drop(target);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -591,7 +579,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
 #[serial_test::serial]
 async fn kennel_release_sends_claim_released_to_tux() {
     // Regression: verifies the TUX receives ClaimReleased on release, which
-    // is the signal it needs to remove the target from its trusted peer set.
+    // is the signal it needs to clean up the target.
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
     let target_kp = Keypair::generate();
@@ -616,14 +604,13 @@ async fn kennel_release_sends_claim_released_to_tux() {
     tux.send(KennelPayload::TuxRegister {
         tux_id: tux.id().to_string(),
         pubkey: tux.id().to_string(),
-        direct_addr: "tcp://127.0.0.1:8888".into(),
         attached_target_ids: vec![],
     })
     .await
     .unwrap();
     let _ = tux.recv().await.unwrap();
 
-    // Full claim+ack+attach cycle
+    // Claim + ack (goes directly to Claimed)
     tux.send(KennelPayload::ClaimTargets {
         target_ids: vec![target.id().to_string()],
         lease_ttl_sec: Some(30),
@@ -640,12 +627,6 @@ async fn kennel_release_sends_claim_released_to_tux() {
     })
     .await
     .unwrap();
-    let _ = target.recv().await.unwrap(); // Adopted
-    tux.send(KennelPayload::AttachConfirmed {
-        lease_id: lease_id.clone(),
-    })
-    .await
-    .unwrap();
 
     // Release
     tux.send(KennelPayload::ReleaseTargets {
@@ -654,7 +635,7 @@ async fn kennel_release_sends_claim_released_to_tux() {
     .await
     .unwrap();
 
-    // TUX MUST receive ClaimReleased (the signal to remove trusted peer)
+    // TUX MUST receive ClaimReleased
     let resp = tux.recv().await.unwrap();
     match resp {
         KennelPayload::ClaimReleased {

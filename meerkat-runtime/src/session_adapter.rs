@@ -891,7 +891,7 @@ impl RuntimeSessionAdapter {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)
-            .map(|entry| entry.has_attachment())
+            .map(RuntimeSessionEntry::has_attachment)
             .unwrap_or(false)
     }
 

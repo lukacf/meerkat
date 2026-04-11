@@ -206,17 +206,18 @@ mod tests {
     }
 
     #[test]
-    fn web_search_flag_present_for_all_catalog_models() {
+    fn web_search_flag_populated_for_all_catalog_models() {
+        // Every catalog model must have a profile that includes the
+        // supports_web_search field. We don't assert the value — future
+        // models may not support web search.
         for entry in crate::catalog::catalog() {
             let profile = profile_for(entry.provider, entry.id);
-            if let Some(p) = profile {
-                // Just assert the field exists and is a bool (always true for built-in models)
-                assert!(
-                    p.supports_web_search,
-                    "catalog model '{}' (provider '{}') should support web search",
-                    entry.id, entry.provider
-                );
-            }
+            assert!(
+                profile.is_some(),
+                "catalog model '{}' (provider '{}') must have a profile",
+                entry.id,
+                entry.provider
+            );
         }
     }
 

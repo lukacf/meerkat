@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Default-on provider web search
+- Web search enabled by default for all verified catalog models: Anthropic (`web_search_20250305`), OpenAI (`web_search`), Gemini (`google_search`).
+- New `[provider_tools]` config section with per-provider `web_search`/`google_search` toggle (presence-aware TOML merge).
+- `ModelProfile.supports_web_search` capability flag gates injection per model family.
+- `SelfHostedModelConfig.supports_web_search` (default `false`) for self-hosted model opt-in.
+- Non-persisted `AgentConfig.provider_tool_defaults` re-derived on every build (including resume) from current config + profile.
+- Per-turn merge via RFC 7396 merge-patch in `state.rs`; extraction turns strip tool keys.
+- Opt-out: `provider_tools.*.web_search = false` in config, or `provider_params: {"web_search": null}` per-request.
+
 #### Realm-scoped mob profiles
 - `RealmProfileStore` with `InMemoryRealmProfileStore` and `SqliteRealmProfileStore` for realm-local reusable profile definitions.
 - Profile CRUD tools: `mob_profile_create`, `mob_profile_get`, `mob_profile_list`, `mob_profile_update`, `mob_profile_delete`, `mob_profile_list_sources`.

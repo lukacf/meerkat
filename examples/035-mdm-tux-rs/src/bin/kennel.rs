@@ -414,7 +414,7 @@ async fn handle_connection(
                         // Spawn target as external mob member in the hive fleet.
                         if let Some(mob_id) = &hive_mob_id {
                             let member_id =
-                                MeerkatId::from(format!("hive-fleet/target/{name}"));
+                                MeerkatId::from(name.clone());
                             match hive_mob_state
                                 .mob_spawn(
                                     mob_id,
@@ -643,7 +643,7 @@ async fn handle_connection(
         if let (SessionKind::Target(_), Some(mob_id), Some(name)) =
             (&kind, &hive_mob_id, target_name_for_retire)
         {
-            let member_id = MeerkatId::from(format!("hive-fleet/target/{name}"));
+            let member_id = MeerkatId::from(name.clone());
             match hive_mob_state.mob_retire(mob_id, member_id).await {
                 Ok(()) => eprintln!("[kennel] retired {name} from hive mob"),
                 Err(e) => eprintln!("[kennel] failed to retire {name} from hive mob: {e}"),

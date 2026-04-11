@@ -61,7 +61,7 @@ class WireToolCall:
 class WireToolResult:
     """Tool result transcript item."""
     tool_use_id: str = ''
-    content: str = ''
+    content: Optional[WireToolResultContent] = None
     is_error: Optional[bool] = None
 
 
@@ -69,9 +69,9 @@ class WireToolResult:
 class WireSessionMessage:
     """Canonical transcript message."""
     role: str = ''
-    content: Optional[Any] = None
+    content: Optional[WireContentInput] = None
     tool_calls: Optional[list[WireToolCall]] = None
-    stop_reason: Optional[str] = None
+    stop_reason: Optional[WireStopReason] = None
     blocks: Optional[list[WireAssistantBlock]] = None
     results: Optional[list[WireToolResult]] = None
 
@@ -158,7 +158,7 @@ class MobWireParams:
     """Request payload for `mob/wire`."""
     member: str = ''
     mob_id: str = ''
-    peer: MobPeerTarget = None
+    peer: dict[str, str] | dict[str, WireTrustedPeerSpec] = None
 
 
 @dataclass
@@ -166,7 +166,7 @@ class MobUnwireParams:
     """Request payload for `mob/unwire`."""
     member: str = ''
     mob_id: str = ''
-    peer: MobPeerTarget = None
+    peer: dict[str, str] | dict[str, WireTrustedPeerSpec] = None
 
 
 @dataclass
@@ -208,21 +208,59 @@ class InputListParams:
 
 
 @dataclass
+class ScheduleIdParams:
+    """Request payload for schedule id lookups."""
+    schedule_id: str = ''
+
+
+@dataclass
+class ListSchedulesParams:
+    """Request payload for schedule/list."""
+    labels: Optional[dict[str, Any]] = None
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+
+
+@dataclass
+class ScheduleOccurrencesParams:
+    """Request payload for schedule/occurrences."""
+    include_terminal: Optional[bool] = None
+    schedule_id: str = ''
+
+
+@dataclass
+class UpdateScheduleParams:
+    """Request payload for schedule/update."""
+    description: Optional[str] = None
+    expected_revision: Optional[int] = None
+    labels: Optional[dict[str, Any]] = None
+    misfire_policy: Optional[dict[str, Any]] = None
+    missing_target_policy: Optional[Literal['skip', 'mark_misfired']] = None
+    name: Optional[str] = None
+    overlap_policy: Optional[Literal['allow_concurrent', 'skip_if_running']] = None
+    planning_horizon_days: Optional[int] = None
+    planning_horizon_occurrences: Optional[int] = None
+    schedule_id: str = ''
+    target: Optional[dict[str, Any]] = None
+    trigger: Optional[dict[str, Any]] = None
+
+
+@dataclass
 class McpLiveOpResponse:
     """Response payload for live MCP operations."""
     applied_at_turn: Optional[int] = None
-    operation: McpLiveOperation = None
+    operation: Literal['add', 'remove', 'reload'] = None
     persisted: bool = False
     server_name: Optional[str] = None
     session_id: str = ''
-    status: McpLiveOpStatus = None
+    status: Literal['staged', 'applied', 'rejected'] = None
 
 
 @dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
-    class_: WireRenderClass = None
-    salience: Optional[WireRenderSalience] = None
+    class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress'] = None
+    salience: Optional[Literal['background', 'normal', 'important', 'urgent']] = None
 
 
 @dataclass
@@ -248,7 +286,7 @@ class MobUnwireResult:
 @dataclass
 class RuntimeStateResult:
     """Response payload for `runtime/state`."""
-    state: WireRuntimeState = None
+    state: Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed'] = None
 
 
 @dataclass
@@ -256,10 +294,10 @@ class RuntimeAcceptResult:
     """Response payload for `runtime/accept`."""
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
-    outcome_type: RuntimeAcceptOutcomeType = None
+    outcome_type: Literal['accepted', 'deduplicated', 'rejected'] = None
     policy: Any = None
     reason: Optional[str] = None
-    state: Optional[WireInputState] = None
+    state: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -278,10 +316,10 @@ class RuntimeResetResult:
 @dataclass
 class WireInputStateHistoryEntry:
     """Input transition history entry for RPC-facing snapshots."""
-    from_: WireInputLifecycleState = None
+    from_: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
     reason: Optional[str] = None
     timestamp: str = ''
-    to: WireInputLifecycleState = None
+    to: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
 
 
 @dataclass
@@ -289,9 +327,9 @@ class WireInputState:
     """RPC-facing input state snapshot."""
     attempt_count: int = 0
     created_at: str = ''
-    current_state: WireInputLifecycleState = None
+    current_state: Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned'] = None
     durability: Any = None
-    history: list[WireInputStateHistoryEntry] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
     idempotency_key: Optional[str] = None
     input_id: str = ''
     last_boundary_sequence: Optional[int] = None
@@ -310,11 +348,94 @@ class InputListResult:
     input_ids: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ScheduleListResult:
+    """Response payload for schedule/list."""
+    schedules: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ScheduleOccurrencesResult:
+    """Response payload for schedule/occurrences."""
+    occurrences: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class WireSessionInfo:
+    """Canonical session info for wire protocol."""
+    created_at: int = 0
+    is_active: bool = False
+    labels: dict[str, Any] = field(default_factory=dict)
+    last_assistant_text: Optional[str] = None
+    message_count: int = 0
+    model: str = ''
+    provider: str = ''
+    session_id: str = ''
+    session_ref: Optional[str] = None
+    updated_at: int = 0
+
+
+@dataclass
+class WireSessionSummary:
+    """Canonical session summary for wire protocol."""
+    created_at: int = 0
+    is_active: bool = False
+    labels: dict[str, Any] = field(default_factory=dict)
+    message_count: int = 0
+    session_id: str = ''
+    session_ref: Optional[str] = None
+    total_tokens: int = 0
+    updated_at: int = 0
+
+
+@dataclass
+class ContractVersion:
+    """Semantic contract version triple."""
+
+
+@dataclass
+class CatalogModelEntry:
+    """A single model entry in the catalog response."""
+    context_window: Optional[int] = None
+    display_name: str = ''
+    id: str = ''
+    max_output_tokens: Optional[int] = None
+    profile: Optional[dict[str, Any]] = None
+    server_id: Optional[str] = None
+    tier: str = ''
+
+
+@dataclass
+class ProviderCatalog:
+    """Provider-level grouping in the catalog response."""
+    default_model_id: str = ''
+    models: list[dict[str, Any]] = field(default_factory=list)
+    provider: str = ''
+
+
+@dataclass
+class ModelsCatalogResponse:
+    """Response for `models/catalog` — the compiled-in model catalog."""
+    contract_version: dict[str, Any] = field(default_factory=dict)
+    providers: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class WireModelProfile:
+    """Runtime profile for a model — capabilities and parameter schema."""
+    inline_video: bool = False
+    model_family: str = ''
+    params_schema: Any = None
+    supports_reasoning: bool = False
+    supports_temperature: bool = False
+    supports_thinking: bool = False
+
+
 # Wire-safe content block (no `source_path` — internal only).
 WireContentBlock = dict[str, Any]
 
 # Wire-safe content input (mirrors `ContentInput`).
-WireContentInput = str | list[WireContentBlock]
+WireContentInput = str | list[dict[str, Any]]
 
 # Shared operation kind for live MCP operations.
 McpLiveOperation = Literal['add', 'remove', 'reload']
@@ -342,6 +463,15 @@ RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
 
 # Public input lifecycle state projection used by RPC surfaces.
 WireInputLifecycleState = Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
+
+# Canonical stop reason for transcript messages.
+WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']
+
+# Wire-safe tool result content that handles both legacy string and array formats.
+WireToolResultContent = str | list[dict[str, Any]]
+
+# Model recommendation tier.
+WireModelTier = str
 
 # Response payload for `input/state`.
 InputStateResult = Optional[WireInputState]

@@ -84,7 +84,7 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Summarize this repo",
         hooks_override={
             "entries": [{
@@ -100,8 +100,7 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Summarize this repo",
+    const result = await client.createSession("Summarize this repo", {
       hooksOverride: {
         entries: [{
           id: "audit-log",
@@ -194,7 +193,7 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Delete old logs",
         hooks_override={
             "entries": [{
@@ -210,8 +209,7 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Delete old logs",
+    const result = await client.createSession("Delete old logs", {
       hooksOverride: {
         entries: [{
           id: "safety-gate",
@@ -331,7 +329,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Analyze quarterly data",
         hooks_override={
             "entries": [{
@@ -347,8 +345,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Analyze quarterly data",
+    const result = await client.createSession("Analyze quarterly data", {
       hooksOverride: {
         entries: [{
           id: "policy-server",
@@ -434,7 +431,7 @@ Use the `disable` list to turn off hooks defined in the realm config without rem
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Quick test",
         hooks_override={
             "disable": ["safety-gate", "audit-log"]
@@ -444,8 +441,7 @@ Use the `disable` list to turn off hooks defined in the realm config without rem
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Quick test",
+    const result = await client.createSession("Quick test", {
       hooksOverride: {
         disable: ["safety-gate", "audit-log"],
       },

@@ -42,8 +42,8 @@ pub use runtime::{
     WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,
 };
 pub use schedule::{
-    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesResult,
-    UpdateScheduleParams,
+    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
+    ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 pub use session::{
     WireAssistantBlock, WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory,

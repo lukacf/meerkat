@@ -75,6 +75,13 @@ impl ScheduleService {
             .map_err(Into::into)
     }
 
+    pub async fn list_filtered(
+        &self,
+        filter: ScheduleFilter,
+    ) -> Result<Vec<Schedule>, ScheduleDomainError> {
+        self.store.list_schedules(filter).await.map_err(Into::into)
+    }
+
     pub async fn update(
         &self,
         schedule_id: &ScheduleId,
@@ -171,10 +178,18 @@ impl ScheduleService {
         &self,
         schedule_id: &ScheduleId,
     ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
+        self.list_occurrences_filtered(schedule_id, true).await
+    }
+
+    pub async fn list_occurrences_filtered(
+        &self,
+        schedule_id: &ScheduleId,
+        include_terminal: bool,
+    ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
         self.store
             .list_occurrences(OccurrenceFilter {
                 schedule_id: Some(schedule_id.clone()),
-                include_terminal: true,
+                include_terminal,
                 ..OccurrenceFilter::default()
             })
             .await

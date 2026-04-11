@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Meerkat contracts — canonical wire types, capability model, and error contracts.
 //!
 //! This crate is the single source of truth for all wire-facing types.
@@ -42,12 +44,12 @@ pub use wire::{
     ProviderCatalog, RuntimeAcceptOutcomeType, RuntimeAcceptParams, RuntimeAcceptResult,
     RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams, RuntimeRetireResult,
     RuntimeStateParams, RuntimeStateResult, ScheduleIdParams, ScheduleListResult,
-    ScheduleOccurrencesResult, SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams,
-    StructuredOutputParams, UpdateScheduleParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireEvent, WireHandlingMode, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireMobBackendKind, WireMobRuntimeMode, WireModelProfile,
-    WireModelTier, WireProviderMeta, WireRenderClass, WireRenderMetadata, WireRenderSalience,
-    WireRunResult, WireRuntimeState, WireSessionHistory, WireSessionInfo, WireSessionMessage,
-    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult, WireToolResultContent,
-    WireTrustedPeerSpec, WireUsage,
+    ScheduleOccurrencesParams, ScheduleOccurrencesResult, SkillEntry, SkillInspectResponse,
+    SkillListResponse, SkillsParams, StructuredOutputParams, UpdateScheduleParams,
+    WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent, WireHandlingMode,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireMobBackendKind,
+    WireMobRuntimeMode, WireModelProfile, WireModelTier, WireProviderMeta, WireRenderClass,
+    WireRenderMetadata, WireRenderSalience, WireRunResult, WireRuntimeState, WireSessionHistory,
+    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
+    WireToolResult, WireToolResultContent, WireTrustedPeerSpec, WireUsage,
 };

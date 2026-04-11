@@ -140,14 +140,9 @@ if include_scenario(38):
                 provider="anthropic",
             )
 
-            injected = await raw_request(
-                client,
-                "session/inject_context",
-                {
-                    "session_id": session.id,
-                    "text": "Always include the marker [PY-CTX-38] in your replies.",
-                    "source": "python-sdk-live-smoke",
-                },
+            injected = await session.inject_context(
+                "Always include the marker [PY-CTX-38] in your replies.",
+                source="python-sdk-live-smoke",
             )
             assert injected["status"] in {"applied", "staged", "duplicate"}
 
@@ -192,12 +187,8 @@ if include_scenario(39):
             assert read_back.session_id == session_id
             assert read_back.message_count >= 2
 
-            runtime_state = await raw_request(
-                client_b,
-                "runtime/state",
-                {"session_id": session_id},
-            )
-            assert runtime_state["state"] in {
+            runtime_state = await client_b.runtime_state(session_id)
+            assert runtime_state.state in {
                 "attached",
                 "idle",
                 "running",
@@ -205,35 +196,29 @@ if include_scenario(39):
                 "recovering",
             }
 
-            accepted = await raw_request(
-                client_b,
-                "runtime/accept",
-                {
-                    "session_id": session_id,
-                    "input": make_prompt_input(
-                        f"Reply with PY-RUNTIME-39 and the marker {marker}.",
-                        turn_metadata={
-                            "additional_instructions": [
-                                "Always include the marker [PY-RUNTIME-OK].",
-                            ],
-                        },
-                    ),
-                },
+            accepted = await client_b.runtime_accept(
+                session_id,
+                make_prompt_input(
+                    f"Reply with PY-RUNTIME-39 and the marker {marker}.",
+                    turn_metadata={
+                        "additional_instructions": [
+                            "Always include the marker [PY-RUNTIME-OK].",
+                        ],
+                    },
+                ),
             )
-            assert accepted["outcome_type"] == "accepted"
-            input_id = accepted["input_id"]
+            assert accepted.outcome_type == "accepted"
+            assert accepted.input_id is not None
+            input_id = accepted.input_id
 
             input_state = await wait_for(
                 "runtime input to be consumed",
-                lambda: raw_request(
-                    client_b,
-                    "input/state",
-                    {"session_id": session_id, "input_id": input_id},
-                ),
-                lambda state: state.get("current_state") == "consumed",
+                lambda: client_b.input_state(session_id, input_id),
+                lambda state: state is not None and state.current_state == "consumed",
                 timeout_secs=120.0,
             )
-            assert input_state["current_state"] == "consumed"
+            assert input_state is not None
+            assert input_state.current_state == "consumed"
 
             after_runtime = await wait_for(
                 "runtime-authored assistant reply",
@@ -350,12 +335,8 @@ if include_scenario(40):
 
             await wait_for(
                 "reviewer runtime to become idle/attached",
-                lambda: raw_request(
-                    client,
-                    "runtime/state",
-                    {"session_id": reviewer_session_id},
-                ),
-                lambda payload: payload.get("state") in ("idle", "attached"),
+                lambda: client.runtime_state(reviewer_session_id),
+                lambda payload: payload.state in ("idle", "attached"),
                 timeout_secs=120.0,
             )
 
@@ -405,12 +386,8 @@ if include_scenario(40):
             assert respawned_session_id
             await wait_for(
                 "reviewer runtime idle/attached after respawn",
-                lambda: raw_request(
-                    client,
-                    "runtime/state",
-                    {"session_id": respawned_session_id},
-                ),
-                lambda payload: payload.get("state") in ("idle", "attached"),
+                lambda: client.runtime_state(respawned_session_id),
+                lambda payload: payload.state in ("idle", "attached"),
                 timeout_secs=120.0,
             )
             respawn_receipt = await mob.member("reviewer-1").send(

@@ -188,6 +188,17 @@ class Mob:
     ) -> list[dict[str, Any]]:
         return await self._client.spawn_mob_members(self.id, specs)
 
+    async def read_events(
+        self,
+        *,
+        after_cursor: int = 0,
+        limit: int = 100,
+    ) -> dict[str, list[dict[str, Any]]]:
+        return await self._client.read_mob_events(
+            self.id,
+            after_cursor=after_cursor,
+            limit=limit,
+        )
 
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)
@@ -222,12 +233,14 @@ class Mob:
         prompt: str,
         *,
         meerkat_id: str | None = None,
+        role_name: str | None = None,
         profile_name: str | None = None,
     ) -> MobHelperResult:
         return await self._client.spawn_mob_helper(
             self.id,
             prompt,
             meerkat_id=meerkat_id,
+            role_name=role_name,
             profile_name=profile_name,
         )
 
@@ -237,6 +250,7 @@ class Mob:
         prompt: str,
         *,
         meerkat_id: str | None = None,
+        role_name: str | None = None,
         profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
     ) -> MobHelperResult:
@@ -245,6 +259,7 @@ class Mob:
             source_member_id,
             prompt,
             meerkat_id=meerkat_id,
+            role_name=role_name,
             profile_name=profile_name,
             fork_context=fork_context,
         )

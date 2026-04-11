@@ -21,11 +21,13 @@
 
 import type {
   AgentEventEnvelope,
+  CommsSendReceipt,
   ContentBlock,
   RunResult,
   SessionHistory,
+  SessionIngressOptions,
   SkillRef,
-  TurnToolOverlay,
+  TurnOptions,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
 import type { EventStream } from "./streaming.js";
@@ -81,11 +83,7 @@ export class Session {
 
   async turn(
     prompt: string | ContentBlock[],
-    options?: {
-      skillRefs?: SkillRef[];
-      skillReferences?: string[];
-      flowToolOverlay?: TurnToolOverlay;
-    },
+    options?: TurnOptions,
   ): Promise<RunResult> {
     const result = await this._client._startTurn(this._id, prompt, options);
     this._lastResult = result;
@@ -94,11 +92,7 @@ export class Session {
 
   stream(
     prompt: string | ContentBlock[],
-    options?: {
-      skillRefs?: SkillRef[];
-      skillReferences?: string[];
-      flowToolOverlay?: TurnToolOverlay;
-    },
+    options?: TurnOptions,
   ): EventStream {
     return this._client._startTurnStreaming(this._id, prompt, options, this);
   }
@@ -117,6 +111,13 @@ export class Session {
     return this._client.readSessionHistory(this._id, options);
   }
 
+  async injectContext(
+    text: string,
+    options?: SessionIngressOptions,
+  ): Promise<{ status: string }> {
+    return this._client.injectContext(this._id, text, options);
+  }
+
   async subscribeEvents(): Promise<EventSubscription<AgentEventEnvelope>> {
     return this._client.subscribeSessionEvents(this._id);
   }
@@ -126,7 +127,7 @@ export class Session {
     return this.turn(prompt, { skillRefs: [skillRef] });
   }
 
-  async send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async send(command: Record<string, unknown>): Promise<CommsSendReceipt> {
     const { session_id: _ignored, ...rest } = command;
     return this._client._send(this._id, rest);
   }
@@ -146,15 +147,16 @@ export class Session {
 export interface DeferredTurnOptions {
   skillRefs?: SkillRef[];
   skillReferences?: string[];
-  flowToolOverlay?: TurnToolOverlay;
-  keepAlive?: boolean;
-  model?: string;
-  provider?: string;
-  maxTokens?: number;
-  systemPrompt?: string;
-  outputSchema?: Record<string, unknown>;
-  structuredOutputRetries?: number;
-  providerParams?: Record<string, unknown>;
+  flowToolOverlay?: TurnOptions["flowToolOverlay"];
+  additionalInstructions?: TurnOptions["additionalInstructions"];
+  keepAlive?: TurnOptions["keepAlive"];
+  model?: TurnOptions["model"];
+  provider?: TurnOptions["provider"];
+  maxTokens?: TurnOptions["maxTokens"];
+  systemPrompt?: TurnOptions["systemPrompt"];
+  outputSchema?: TurnOptions["outputSchema"];
+  structuredOutputRetries?: TurnOptions["structuredOutputRetries"];
+  providerParams?: TurnOptions["providerParams"];
 }
 
 /**
@@ -200,6 +202,13 @@ export class DeferredSession {
     return this._client._startTurn(this._id, prompt, options);
   }
 
+  stream(
+    prompt: string | ContentBlock[],
+    options?: DeferredTurnOptions,
+  ): EventStream {
+    return this._client._startTurnStreaming(this._id, prompt, options);
+  }
+
   async interrupt(): Promise<void> {
     await this._client._interrupt(this._id);
   }
@@ -212,6 +221,13 @@ export class DeferredSession {
     options?: { offset?: number; limit?: number },
   ): Promise<SessionHistory> {
     return this._client.readSessionHistory(this._id, options);
+  }
+
+  async injectContext(
+    text: string,
+    options?: SessionIngressOptions,
+  ): Promise<{ status: string }> {
+    return this._client.injectContext(this._id, text, options);
   }
 
   toString(): string {

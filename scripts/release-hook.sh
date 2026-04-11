@@ -53,6 +53,12 @@ python3 "$ROOT/tools/sdk-codegen/generate.py"
 echo "==> Verifying version parity..."
 "$ROOT/scripts/verify-version-parity.sh"
 
+echo "==> Verifying RPC surface alignment..."
+"$ROOT/scripts/verify-rpc-surface-alignment.sh"
+
+echo "==> Verifying SDK wrapper freshness..."
+"$ROOT/scripts/verify-sdk-wrapper-freshness.sh"
+
 # 4. Stage SDK and artifact files for the release commit
 git add \
     "$ROOT/meerkat-contracts/src/version.rs" \

@@ -69,8 +69,12 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `createSession(prompt, options?)` | Create a session, run the first turn, return a `Session` |
 | `createSessionStreaming(prompt, options?)` | Create a session and stream typed events from the first turn |
 | `listSessions()` | List active sessions |
-| `readSession(sessionId)` | Read raw session state |
+| `readSession(sessionId)` | Read typed session metadata (`SessionInfo`) |
 | `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
+| `sendExternalEvent(sessionId, payload, options?)` | Inject a canonical external event into a session |
+| `injectContext(sessionId, text, options?)` | Append runtime system context |
+| `getModelsCatalog()` | Read config-backed model catalog |
+| `createSchedule/getSchedule/listSchedules/updateSchedule/pauseSchedule/resumeSchedule/deleteSchedule/listScheduleOccurrences/listScheduleTools/callScheduleTool` | Schedule API wrappers |
 | `createMob(options?)` | Create a mob, return a `Mob` |
 | `createDeferredSession(prompt, options?)` | Create a session without running the first turn; returns a `DeferredSession` |
 | `listMobs()` | List mobs |
@@ -93,6 +97,7 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `session.turn(prompt, options?)` | Run another turn (non-streaming), returns `RunResult` |
 | `session.stream(prompt, options?)` | Run another turn with streaming, returns `EventStream` |
 | `session.history(options?)` | Read committed transcript history for this session |
+| `session.injectContext(text, options?)` | Append runtime system context |
 | `session.interrupt()` | Cancel the currently running turn |
 | `session.archive()` | Remove the session from the server |
 | `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
@@ -108,12 +113,14 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `mob.status()` | Get mob status |
 | `mob.lifecycle(action)` | Stop, resume, complete, destroy, or reset the mob |
 | `mob.spawn(spec)` | Spawn a member |
+| `mob.spawnMany(specs)` | Batch-spawn members |
 | `mob.retire(meerkatId)` | Retire a member |
 | `mob.respawn(meerkatId)` | Respawn a member |
 | `mob.wire(a, b)` | Wire two members |
 | `mob.unwire(a, b)` | Remove wiring |
 | `mob.listMembers()` | List mob members |
 | `mob.member(meerkatId).send(content, handlingMode?)` | Send work to a member |
+| `mob.readEvents(options?)` | Read mob event history (`mob/events`) |
 | `mob.listFlows()` | List available flows |
 | `mob.runFlow(flowId, params)` | Start a flow run |
 | `mob.flowStatus(runId)` | Get flow run status |
@@ -225,6 +232,11 @@ interface SessionOptions {
   preloadSkills?: string[];
   skillRefs?: SkillRef[];
   skillReferences?: string[];
+  labels?: Record<string, string>;
+  additionalInstructions?: string[];
+  appContext?: unknown;
+  shellEnv?: Record<string, string>;
+  externalTools?: Record<string, unknown>[];
 }
 ```
 
@@ -259,7 +271,20 @@ session.lastResult      // the full RunResult object
 ```typescript
 async turn(
   prompt: string | ContentBlock[],
-  options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+  options?: {
+    skillRefs?: SkillRef[];
+    skillReferences?: string[];
+    flowToolOverlay?: TurnToolOverlay;
+    additionalInstructions?: string[];
+    keepAlive?: boolean;
+    model?: string;
+    provider?: string;
+    maxTokens?: number;
+    systemPrompt?: string;
+    outputSchema?: Record<string, unknown>;
+    structuredOutputRetries?: number;
+    providerParams?: Record<string, unknown>;
+  },
 ): Promise<RunResult>
 ```
 
@@ -275,7 +300,20 @@ console.log(result.text);
 ```typescript
 stream(
   prompt: string | ContentBlock[],
-  options?: { skillRefs?: SkillRef[]; skillReferences?: string[] },
+  options?: {
+    skillRefs?: SkillRef[];
+    skillReferences?: string[];
+    flowToolOverlay?: TurnToolOverlay;
+    additionalInstructions?: string[];
+    keepAlive?: boolean;
+    model?: string;
+    provider?: string;
+    maxTokens?: number;
+    systemPrompt?: string;
+    outputSchema?: Record<string, unknown>;
+    structuredOutputRetries?: number;
+    providerParams?: Record<string, unknown>;
+  },
 ): EventStream
 ```
 
@@ -328,7 +366,7 @@ const result = await session.invokeSkill("/abc123/code-review", "Review this fun
 ### send() and peers()
 
 ```typescript
-async send(command: Record<string, unknown>): Promise<Record<string, unknown>>
+async send(command: Record<string, unknown>): Promise<CommsSendReceipt>
 async peers(): Promise<Array<Record<string, unknown>>>
 ```
 
@@ -407,8 +445,9 @@ client.requireCapability("skills");  // throws CapabilityUnavailableError if not
 
 ```typescript
 const config = await client.getConfig();
-await client.setConfig({ ...config, model: "claude-opus-4-6" });
-const updated = await client.patchConfig({ maxTokens: 8192 });
+await client.setConfig({ ...config.config, model: "claude-opus-4-6" });
+const updated = await client.patchConfig({ max_tokens: 8192 });
+console.log(updated.config.max_tokens);
 ```
 
 ---
@@ -520,7 +559,7 @@ const imageData = readFileSync("screenshot.png").toString("base64");
 
 const session = await client.createSession([
   { type: "text", text: "What do you see in this image?" },
-  { type: "image", mediaType: "image/png", data: imageData },
+  { type: "image", media_type: "image/png", data: imageData },
 ]);
 
 console.log(session.text);

@@ -91,7 +91,7 @@
     {
       "description": "List schedule occurrences",
       "name": "schedule/occurrences",
-      "params_type": "ScheduleIdParams",
+      "params_type": "ScheduleOccurrencesParams",
       "result_type": "ScheduleOccurrencesResult"
     },
     {
@@ -130,7 +130,7 @@
       "name": "capabilities/get"
     },
     {
-      "description": "Get the compiled-in model catalog",
+      "description": "Get the effective model catalog (built-in plus config-backed entries)",
       "name": "models/catalog",
       "result_type": "ModelsCatalogResponse"
     },
@@ -141,10 +141,6 @@
     {
       "description": "Inspect one skill",
       "name": "skills/inspect"
-    },
-    {
-      "description": "Register an external tool",
-      "name": "tools/register"
     },
     {
       "description": "Get a session runtime's current state",
@@ -277,6 +273,30 @@
     {
       "description": "Get live status for a mob member",
       "name": "mob/member_status"
+    },
+    {
+      "description": "Wait for kickoff completion for a member",
+      "name": "mob/wait_kickoff"
+    },
+    {
+      "description": "Create a realm-scoped mob profile",
+      "name": "mob/profile/create"
+    },
+    {
+      "description": "Read a realm-scoped mob profile",
+      "name": "mob/profile/get"
+    },
+    {
+      "description": "List realm-scoped mob profiles",
+      "name": "mob/profile/list"
+    },
+    {
+      "description": "Update a realm-scoped mob profile",
+      "name": "mob/profile/update"
+    },
+    {
+      "description": "Delete a realm-scoped mob profile",
+      "name": "mob/profile/delete"
     },
     {
       "description": "Open a mob event stream",

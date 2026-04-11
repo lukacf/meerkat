@@ -69,18 +69,36 @@ import type {
   AttributedMobEvent,
   BlobPayload,
   Capability,
+  CommsSendReceipt,
+  ConfigEnvelope,
   ContentInput,
   ContentBlock,
+  CreateScheduleRequest,
+  ModelsCatalog,
+  MobEventsOptions,
+  MobEventsResult,
   MobCreateOptions,
   MobFlowStatus,
   MobMember,
+  MobProfile,
+  MobProfileDeleteResult,
+  MobProfileLookupResult,
+  MobSpawnManyResultEntry,
   MobStatus,
   MobSummary,
   RunResult,
+  Schedule,
+  ScheduleListOptions,
+  ScheduleOccurrencesOptions,
+  ScheduleOccurrencesResult,
+  ScheduleToolCallRequest,
+  ScheduleToolsResult,
   SchemaWarning,
   SessionAssistantBlock,
   SessionHistory,
+  SessionIngressOptions,
   SessionInfo,
+  SessionListOptions,
   SessionMessage,
   SessionOptions,
   SessionToolCall,
@@ -88,7 +106,9 @@ import type {
   SkillKey,
   SkillRef,
   SkillRuntimeDiagnostics,
-  TurnToolOverlay,
+  SpawnSpec,
+  UpdateScheduleRequest,
+  TurnOptions,
   Usage,
 } from "./types.js";
 
@@ -408,24 +428,47 @@ export class MeerkatClient {
 
   // -- Session queries ----------------------------------------------------
 
-  async listSessions(): Promise<SessionInfo[]> {
-    const result = await this.request("session/list", {});
+  async listSessions(options?: SessionListOptions): Promise<SessionInfo[]> {
+    const params: Record<string, unknown> = {};
+    if (options?.labels) params.labels = options.labels;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    if (options?.offset !== undefined) params.offset = options.offset;
+    const result = await this.request("session/list", params);
     const sessions = (result.sessions as Array<Record<string, unknown>>) ?? [];
-    return sessions.map(
-      (s): SessionInfo => ({
-        sessionId: String(s.session_id ?? ""),
-        sessionRef: s.session_ref != null ? String(s.session_ref) : undefined,
-        createdAt: String(s.created_at ?? ""),
-        updatedAt: String(s.updated_at ?? ""),
-        messageCount: Number(s.message_count ?? 0),
-        totalTokens: Number(s.total_tokens ?? 0),
-        isActive: Boolean(s.is_active),
-      }),
-    );
+    return sessions.map((s) => MeerkatClient.parseSessionInfo(s));
   }
 
-  async readSession(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request("session/read", { session_id: sessionId });
+  async readSession(sessionId: string): Promise<SessionInfo> {
+    const raw = await this.request("session/read", { session_id: sessionId });
+    return MeerkatClient.parseSessionInfo(raw);
+  }
+
+  async sendExternalEvent(
+    sessionId: string,
+    payload: unknown,
+    options?: { source?: string },
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { session_id: sessionId, payload };
+    if (options?.source !== undefined) {
+      params.source = options.source;
+    }
+    return this.request("session/external_event", params);
+  }
+
+  async injectContext(
+    sessionId: string,
+    text: string,
+    options?: SessionIngressOptions,
+  ): Promise<{ status: string }> {
+    const params: Record<string, unknown> = { session_id: sessionId, text };
+    if (options?.source !== undefined) {
+      params.source = options.source;
+    }
+    if (options?.idempotencyKey !== undefined) {
+      params.idempotency_key = options.idempotencyKey;
+    }
+    const result = await this.request("session/inject_context", params);
+    return { status: String(result.status ?? "") };
   }
 
   async readSessionHistory(
@@ -472,30 +515,33 @@ export class MeerkatClient {
 
   // -- Config -------------------------------------------------------------
 
-  async getConfig(): Promise<Record<string, unknown>> {
-    return this.request("config/get", {});
+  async getConfig(): Promise<ConfigEnvelope> {
+    const raw = await this.request("config/get", {});
+    return MeerkatClient.parseConfigEnvelope(raw);
   }
 
   async setConfig(
     config: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<ConfigEnvelope> {
     const params: Record<string, unknown> = { config };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    return this.request("config/set", params);
+    const raw = await this.request("config/set", params);
+    return MeerkatClient.parseConfigEnvelope(raw);
   }
 
   async patchConfig(
     patch: Record<string, unknown>,
     options?: { expectedGeneration?: number },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<ConfigEnvelope> {
     const params: Record<string, unknown> = { patch };
     if (options?.expectedGeneration !== undefined) {
       params.expected_generation = options.expectedGeneration;
     }
-    return this.request("config/patch", params);
+    const raw = await this.request("config/patch", params);
+    return MeerkatClient.parseConfigEnvelope(raw);
   }
 
   async mcpAdd(params: McpAddParams): Promise<McpLiveOpResponse> {
@@ -554,6 +600,89 @@ export class MeerkatClient {
       mediaType: String(result.media_type ?? ""),
       dataBase64: String(result.data ?? ""),
     };
+  }
+
+  async getModelsCatalog(): Promise<ModelsCatalog> {
+    const result = await this.request("models/catalog", {});
+    return MeerkatClient.parseModelsCatalog(result);
+  }
+
+  async createSchedule(request: CreateScheduleRequest): Promise<Schedule> {
+    const result = await this.request("schedule/create", MeerkatClient.toWireCreateScheduleRequest(request));
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async getSchedule(scheduleId: string): Promise<Schedule> {
+    const result = await this.request("schedule/get", { schedule_id: scheduleId });
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async listSchedules(_options?: ScheduleListOptions): Promise<Schedule[]> {
+    const params: Record<string, unknown> = {};
+    if (_options?.labels) params.labels = _options.labels;
+    if (_options?.limit !== undefined) params.limit = _options.limit;
+    if (_options?.offset !== undefined) params.offset = _options.offset;
+    const result = await this.request("schedule/list", params);
+    const schedules = Array.isArray(result.schedules)
+      ? (result.schedules as Array<Record<string, unknown>>)
+      : [];
+    return schedules.map((schedule) => MeerkatClient.parseSchedule(schedule));
+  }
+
+  async updateSchedule(request: UpdateScheduleRequest): Promise<Schedule> {
+    const params = {
+      schedule_id: request.scheduleId,
+      ...MeerkatClient.toWireUpdateSchedulePatch(request.update),
+    };
+    const result = await this.request("schedule/update", params);
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async pauseSchedule(scheduleId: string): Promise<Schedule> {
+    const result = await this.request("schedule/pause", { schedule_id: scheduleId });
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async resumeSchedule(scheduleId: string): Promise<Schedule> {
+    const result = await this.request("schedule/resume", { schedule_id: scheduleId });
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async deleteSchedule(scheduleId: string): Promise<Schedule> {
+    const result = await this.request("schedule/delete", { schedule_id: scheduleId });
+    return MeerkatClient.parseSchedule(result);
+  }
+
+  async listScheduleOccurrences(
+    scheduleId: string,
+    options?: ScheduleOccurrencesOptions,
+  ): Promise<ScheduleOccurrencesResult> {
+    const params: Record<string, unknown> = { schedule_id: scheduleId };
+    if (options?.includeTerminal !== undefined) {
+      params.include_terminal = options.includeTerminal;
+    }
+    const result = await this.request("schedule/occurrences", params);
+    const occurrences = Array.isArray(result.occurrences)
+      ? (result.occurrences as Array<Record<string, unknown>>).map(
+          (occurrence) => MeerkatClient.parseScheduleOccurrence(occurrence),
+        )
+      : [];
+    return { occurrences };
+  }
+
+  async listScheduleTools(): Promise<ScheduleToolsResult> {
+    const result = await this.request("schedule/tools", {});
+    const tools = Array.isArray(result.tools)
+      ? (result.tools as Array<Record<string, unknown>>)
+      : [];
+    return { tools };
+  }
+
+  async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string, unknown>> {
+    return this.request("schedule/call", {
+      name: request.name,
+      arguments: request.arguments ?? {},
+    });
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -668,17 +797,7 @@ export class MeerkatClient {
 
   async spawnMobMember(
     mobId: string,
-    options: {
-      profile: string;
-      meerkatId: string;
-      initialMessage?: string | ContentBlock[];
-      runtimeMode?: string;
-      backend?: string;
-      resumeSessionId?: string;
-      labels?: Record<string, string>;
-      context?: Record<string, unknown>;
-      additionalInstructions?: string[];
-    },
+    options: SpawnSpec,
   ): Promise<Record<string, unknown>> {
     return this.request("mob/spawn", {
       mob_id: mobId,
@@ -692,6 +811,38 @@ export class MeerkatClient {
       context: options.context,
       additional_instructions: options.additionalInstructions,
     });
+  }
+
+  async spawnMobMembers(
+    mobId: string,
+    specs: SpawnSpec[],
+  ): Promise<MobSpawnManyResultEntry[]> {
+    const result = await this.request("mob/spawn_many", {
+      mob_id: mobId,
+      specs: specs.map((spec) => ({
+        profile: spec.profile,
+        meerkat_id: spec.meerkatId,
+        initial_message: spec.initialMessage,
+        runtime_mode: spec.runtimeMode,
+        backend: spec.backend,
+        resume_session_id: spec.resumeSessionId,
+        labels: spec.labels,
+        context: spec.context,
+        additional_instructions: spec.additionalInstructions,
+      })),
+    });
+    const entries = Array.isArray(result.results)
+      ? (result.results as Array<Record<string, unknown>>)
+      : [];
+    return entries.map((entry) => ({
+      ok: Boolean(entry.ok),
+      memberRef:
+        entry.member_ref && typeof entry.member_ref === "object"
+          ? (entry.member_ref as Record<string, unknown>)
+          : undefined,
+      sessionId: entry.session_id != null ? String(entry.session_id) : undefined,
+      error: entry.error != null ? String(entry.error) : undefined,
+    }));
   }
 
   async retireMobMember(mobId: string, meerkatId: string): Promise<void> {
@@ -852,13 +1003,20 @@ export class MeerkatClient {
   async spawnMobHelper(
     mobId: string,
     prompt: string,
-    options?: { meerkatId?: string; profileName?: string; runtimeMode?: string; backend?: string },
+    options?: {
+      meerkatId?: string;
+      roleName?: string;
+      profileName?: string;
+      runtimeMode?: string;
+      backend?: string;
+    },
   ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+    const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/spawn_helper", {
       mob_id: mobId,
       prompt,
       meerkat_id: options?.meerkatId,
-      profile_name: options?.profileName,
+      role_name: roleName,
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
@@ -875,18 +1033,20 @@ export class MeerkatClient {
     prompt: string,
     options?: {
       meerkatId?: string;
+      roleName?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
       backend?: string;
     },
   ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+    const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/fork_helper", {
       mob_id: mobId,
       source_member_id: sourceMemberId,
       prompt,
       meerkat_id: options?.meerkatId,
-      profile_name: options?.profileName,
+      role_name: roleName,
       fork_context: options?.forkContext,
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
@@ -931,6 +1091,72 @@ export class MeerkatClient {
       source: options?.source,
       idempotency_key: options?.idempotencyKey,
     });
+  }
+
+  async readMobEvents(
+    mobId: string,
+    options?: MobEventsOptions,
+  ): Promise<MobEventsResult> {
+    const params: Record<string, unknown> = { mob_id: mobId };
+    if (options?.afterCursor !== undefined) {
+      params.after_cursor = options.afterCursor;
+    }
+    if (options?.limit !== undefined) {
+      params.limit = options.limit;
+    }
+    const result = await this.request("mob/events", params);
+    const events = Array.isArray(result.events)
+      ? (result.events as Array<Record<string, unknown>>)
+      : [];
+    return { events };
+  }
+
+  async createMobProfile(name: string, profile: MobProfile): Promise<MobProfileLookupResult> {
+    const raw = await this.request("mob/profile/create", {
+      name,
+      profile,
+    });
+    return MeerkatClient.parseMobProfileLookup(raw);
+  }
+
+  async getMobProfile(name: string): Promise<MobProfileLookupResult> {
+    const raw = await this.request("mob/profile/get", { name });
+    return MeerkatClient.parseMobProfileLookup(raw);
+  }
+
+  async listMobProfiles(): Promise<MobProfileLookupResult[]> {
+    const raw = await this.request("mob/profile/list", {});
+    const profiles = Array.isArray(raw.profiles)
+      ? (raw.profiles as Array<Record<string, unknown>>)
+      : [];
+    return profiles.map((profile) => MeerkatClient.parseMobProfileLookup(profile));
+  }
+
+  async updateMobProfile(
+    name: string,
+    profile: MobProfile,
+    expectedRevision: number,
+  ): Promise<MobProfileLookupResult> {
+    const raw = await this.request("mob/profile/update", {
+      name,
+      profile,
+      expected_revision: expectedRevision,
+    });
+    return MeerkatClient.parseMobProfileLookup(raw);
+  }
+
+  async deleteMobProfile(
+    name: string,
+    expectedRevision: number,
+  ): Promise<MobProfileDeleteResult> {
+    const raw = await this.request("mob/profile/delete", {
+      name,
+      expected_revision: expectedRevision,
+    });
+    return {
+      name: String(raw.name ?? name),
+      deletedRevision: Number(raw.deleted_revision ?? expectedRevision),
+    };
   }
 
   async listMobFlows(mobId: string): Promise<string[]> {
@@ -1036,19 +1262,7 @@ export class MeerkatClient {
   async _startTurn(
     sessionId: string,
     prompt: string | ContentBlock[],
-    options?: {
-      skillRefs?: SkillRef[];
-      skillReferences?: string[];
-      flowToolOverlay?: TurnToolOverlay;
-      keepAlive?: boolean;
-      model?: string;
-      provider?: string;
-      maxTokens?: number;
-      systemPrompt?: string;
-      outputSchema?: Record<string, unknown>;
-      structuredOutputRetries?: number;
-      providerParams?: Record<string, unknown>;
-    },
+    options?: TurnOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
     const wireRefs = skillRefsToWire(options?.skillRefs);
@@ -1063,6 +1277,9 @@ export class MeerkatClient {
         allowed_tools: options.flowToolOverlay.allowedTools,
         blocked_tools: options.flowToolOverlay.blockedTools,
       };
+    }
+    if (options?.additionalInstructions != null) {
+      params.additional_instructions = options.additionalInstructions;
     }
     if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options?.model) params.model = options.model;
@@ -1082,11 +1299,7 @@ export class MeerkatClient {
   _startTurnStreaming(
     sessionId: string,
     prompt: string | ContentBlock[],
-    options?: {
-      skillRefs?: SkillRef[];
-      skillReferences?: string[];
-      flowToolOverlay?: TurnToolOverlay;
-    },
+    options?: TurnOptions,
     session?: Session,
   ): EventStream {
     if (!this.process?.stdin) {
@@ -1114,6 +1327,19 @@ export class MeerkatClient {
         blocked_tools: options.flowToolOverlay.blockedTools,
       };
     }
+    if (options?.additionalInstructions != null) {
+      params.additional_instructions = options.additionalInstructions;
+    }
+    if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
+    if (options?.model) params.model = options.model;
+    if (options?.provider) params.provider = options.provider;
+    if (options?.maxTokens) params.max_tokens = options.maxTokens;
+    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
+    if (options?.outputSchema) params.output_schema = options.outputSchema;
+    if (options?.structuredOutputRetries != null) {
+      params.structured_output_retries = options.structuredOutputRetries;
+    }
+    if (options?.providerParams) params.provider_params = options.providerParams;
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };
     this.process.stdin!.write(JSON.stringify(rpcRequest) + "\n");
@@ -1141,7 +1367,7 @@ export class MeerkatClient {
   async _send(
     sessionId: string,
     command: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<CommsSendReceipt> {
     return this.send(sessionId, command);
   }
 
@@ -1155,8 +1381,9 @@ export class MeerkatClient {
   async send(
     sessionId: string,
     command: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("comms/send", { session_id: sessionId, ...command });
+  ): Promise<CommsSendReceipt> {
+    const result = await this.request("comms/send", { session_id: sessionId, ...command });
+    return MeerkatClient.parseCommsSendReceipt(result);
   }
 
   async peers(
@@ -1467,6 +1694,282 @@ export class MeerkatClient {
     };
   }
 
+  static parseSessionInfo(data: Record<string, unknown>): SessionInfo {
+    const labelsRaw =
+      data.labels && typeof data.labels === "object"
+        ? (data.labels as Record<string, unknown>)
+        : {};
+    const labels = Object.fromEntries(
+      Object.entries(labelsRaw).map(([key, value]) => [key, String(value)]),
+    );
+    return {
+      sessionId: String(data.session_id ?? ""),
+      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
+      createdAt: Number(data.created_at ?? 0),
+      updatedAt: Number(data.updated_at ?? 0),
+      messageCount: Number(data.message_count ?? 0),
+      isActive: Boolean(data.is_active),
+      totalTokens: data.total_tokens != null ? Number(data.total_tokens) : undefined,
+      model: data.model != null ? String(data.model) : undefined,
+      provider: data.provider != null ? String(data.provider) : undefined,
+      lastAssistantText:
+        data.last_assistant_text != null ? String(data.last_assistant_text) : undefined,
+      labels,
+    };
+  }
+
+  static parseConfigEnvelope(data: Record<string, unknown>): ConfigEnvelope {
+    const rawConfig =
+      data.config && typeof data.config === "object"
+        ? (data.config as Record<string, unknown>)
+        : {};
+    const metadata =
+      data.metadata && typeof data.metadata === "object"
+        ? (data.metadata as Record<string, unknown>)
+        : undefined;
+    return {
+      config: rawConfig,
+      generation: Number(data.generation ?? 0),
+      metadata,
+    };
+  }
+
+  static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendReceipt {
+    return {
+      ...data,
+      requestId: data.request_id != null ? String(data.request_id) : undefined,
+      interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
+      inputId: data.input_id != null ? String(data.input_id) : undefined,
+    };
+  }
+
+  static parseModelsCatalog(data: Record<string, unknown>): ModelsCatalog {
+    const providersRaw = Array.isArray(data.providers)
+      ? (data.providers as Array<Record<string, unknown>>)
+      : [];
+    let contractVersion = { major: 0, minor: 0, patch: 0 };
+    if (data.contract_version && typeof data.contract_version === "object") {
+      const contractVersionRaw = data.contract_version as Record<string, unknown>;
+      contractVersion = {
+        major: Number(contractVersionRaw.major ?? 0),
+        minor: Number(contractVersionRaw.minor ?? 0),
+        patch: Number(contractVersionRaw.patch ?? 0),
+      };
+    } else if (typeof data.contract_version === "string") {
+      const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(data.contract_version);
+      if (match) {
+        contractVersion = {
+          major: Number(match[1]),
+          minor: Number(match[2]),
+          patch: Number(match[3]),
+        };
+      }
+    }
+    return {
+      contractVersion,
+      providers: providersRaw.map((provider) => ({
+        provider: String(provider.provider ?? ""),
+        defaultModelId: String(provider.default_model_id ?? ""),
+        models: Array.isArray(provider.models)
+          ? (provider.models as Array<Record<string, unknown>>).map((model) => ({
+              id: String(model.id ?? ""),
+              displayName: String(model.display_name ?? ""),
+              tier:
+                String(model.tier ?? "supported") === "recommended"
+                  ? "recommended"
+                  : "supported",
+              contextWindow:
+                model.context_window != null ? Number(model.context_window) : undefined,
+              maxOutputTokens:
+                model.max_output_tokens != null ? Number(model.max_output_tokens) : undefined,
+              serverId: model.server_id != null ? String(model.server_id) : undefined,
+              profile:
+                model.profile && typeof model.profile === "object"
+                  ? {
+                      modelFamily: String(
+                        (model.profile as Record<string, unknown>).model_family ?? "",
+                      ),
+                      supportsTemperature: Boolean(
+                        (model.profile as Record<string, unknown>).supports_temperature,
+                      ),
+                      supportsThinking: Boolean(
+                        (model.profile as Record<string, unknown>).supports_thinking,
+                      ),
+                      supportsReasoning: Boolean(
+                        (model.profile as Record<string, unknown>).supports_reasoning,
+                      ),
+                      inlineVideo: Boolean(
+                        (model.profile as Record<string, unknown>).inline_video,
+                      ),
+                      paramsSchema: (model.profile as Record<string, unknown>).params_schema,
+                    }
+                  : undefined,
+            }))
+          : [],
+      })),
+    };
+  }
+
+  static parseSchedule(data: Record<string, unknown>): Schedule {
+    const labelsRaw =
+      data.labels && typeof data.labels === "object"
+        ? (data.labels as Record<string, unknown>)
+        : {};
+    return {
+      scheduleId: String(data.schedule_id ?? ""),
+      phase: String(data.phase ?? ""),
+      revision:
+        typeof data.revision === "object" && data.revision !== null
+          ? Number((data.revision as Record<string, unknown>)["0"] ?? 0)
+          : Number(data.revision ?? 0),
+      name: data.name != null ? String(data.name) : undefined,
+      description: data.description != null ? String(data.description) : undefined,
+      trigger:
+        data.trigger && typeof data.trigger === "object"
+          ? (data.trigger as Record<string, unknown>)
+          : {},
+      target:
+        data.target && typeof data.target === "object"
+          ? (data.target as Record<string, unknown>)
+          : {},
+      misfirePolicy:
+        data.misfire_policy != null
+          ? (data.misfire_policy as Record<string, unknown> | string)
+          : undefined,
+      overlapPolicy: data.overlap_policy != null ? String(data.overlap_policy) : undefined,
+      missingTargetPolicy:
+        data.missing_target_policy != null ? String(data.missing_target_policy) : undefined,
+      planningHorizonDays:
+        data.planning_horizon_days != null ? Number(data.planning_horizon_days) : undefined,
+      planningHorizonOccurrences:
+        data.planning_horizon_occurrences != null
+          ? Number(data.planning_horizon_occurrences)
+          : undefined,
+      nextOccurrenceOrdinal:
+        typeof data.next_occurrence_ordinal === "object"
+          ? Number((data.next_occurrence_ordinal as Record<string, unknown>)["0"] ?? 0)
+          : data.next_occurrence_ordinal != null
+            ? Number(data.next_occurrence_ordinal)
+            : undefined,
+      planningCursorUtc:
+        data.planning_cursor_utc != null ? String(data.planning_cursor_utc) : undefined,
+      createdAtUtc: data.created_at_utc != null ? String(data.created_at_utc) : undefined,
+      updatedAtUtc: data.updated_at_utc != null ? String(data.updated_at_utc) : undefined,
+      deletedAtUtc: data.deleted_at_utc != null ? String(data.deleted_at_utc) : undefined,
+      labels: Object.fromEntries(
+        Object.entries(labelsRaw).map(([key, value]) => [key, String(value)]),
+      ),
+    };
+  }
+
+  static parseScheduleOccurrence(data: Record<string, unknown>): ScheduleOccurrencesResult["occurrences"][number] {
+    return {
+      occurrenceId: String(data.occurrence_id ?? ""),
+      scheduleId: String(data.schedule_id ?? ""),
+      scheduleRevision:
+        typeof data.schedule_revision === "object" && data.schedule_revision !== null
+          ? Number((data.schedule_revision as Record<string, unknown>)["0"] ?? 0)
+          : Number(data.schedule_revision ?? 0),
+      occurrenceOrdinal:
+        typeof data.occurrence_ordinal === "object" && data.occurrence_ordinal !== null
+          ? Number((data.occurrence_ordinal as Record<string, unknown>)["0"] ?? 0)
+          : Number(data.occurrence_ordinal ?? 0),
+      phase: String(data.phase ?? ""),
+      dueAtUtc: String(data.due_at_utc ?? ""),
+      triggerSnapshot:
+        data.trigger_snapshot && typeof data.trigger_snapshot === "object"
+          ? (data.trigger_snapshot as Record<string, unknown>)
+          : {},
+      targetSnapshot:
+        data.target_snapshot && typeof data.target_snapshot === "object"
+          ? (data.target_snapshot as Record<string, unknown>)
+          : {},
+      misfirePolicy:
+        data.misfire_policy != null
+          ? (data.misfire_policy as Record<string, unknown> | string)
+          : undefined,
+      overlapPolicy: data.overlap_policy != null ? String(data.overlap_policy) : undefined,
+      missingTargetPolicy:
+        data.missing_target_policy != null ? String(data.missing_target_policy) : undefined,
+      claimedBy: data.claimed_by != null ? String(data.claimed_by) : undefined,
+      leaseExpiresAtUtc:
+        data.lease_expires_at_utc != null ? String(data.lease_expires_at_utc) : undefined,
+      deliveryCorrelationId:
+        data.delivery_correlation_id != null ? String(data.delivery_correlation_id) : undefined,
+      lastReceipt:
+        data.last_receipt && typeof data.last_receipt === "object"
+          ? (data.last_receipt as Record<string, unknown>)
+          : undefined,
+      failureClass: data.failure_class != null ? String(data.failure_class) : undefined,
+      failureDetail: data.failure_detail != null ? String(data.failure_detail) : undefined,
+      attemptCount: data.attempt_count != null ? Number(data.attempt_count) : undefined,
+      createdAtUtc: data.created_at_utc != null ? String(data.created_at_utc) : undefined,
+      claimedAtUtc: data.claimed_at_utc != null ? String(data.claimed_at_utc) : undefined,
+      dispatchedAtUtc:
+        data.dispatched_at_utc != null ? String(data.dispatched_at_utc) : undefined,
+      completedAtUtc: data.completed_at_utc != null ? String(data.completed_at_utc) : undefined,
+      supersededByRevision:
+        typeof data.superseded_by_revision === "object" && data.superseded_by_revision !== null
+          ? Number((data.superseded_by_revision as Record<string, unknown>)["0"] ?? 0)
+          : data.superseded_by_revision != null
+            ? Number(data.superseded_by_revision)
+            : undefined,
+    };
+  }
+
+  static parseMobProfileLookup(data: Record<string, unknown>): MobProfileLookupResult {
+    if (Boolean(data.not_found)) {
+      return {
+        notFound: true,
+        name: String(data.name ?? ""),
+      };
+    }
+    return {
+      notFound: false,
+      name: String(data.name ?? ""),
+      profile:
+        data.profile && typeof data.profile === "object"
+          ? (data.profile as MobProfile)
+          : undefined,
+      revision: data.revision != null ? Number(data.revision) : undefined,
+      createdAt: data.created_at != null ? String(data.created_at) : undefined,
+      updatedAt: data.updated_at != null ? String(data.updated_at) : undefined,
+    };
+  }
+
+  private static toWireCreateScheduleRequest(request: CreateScheduleRequest): Record<string, unknown> {
+    return {
+      name: request.name,
+      description: request.description,
+      trigger: request.trigger,
+      target: request.target,
+      misfire_policy: request.misfirePolicy,
+      overlap_policy: request.overlapPolicy,
+      missing_target_policy: request.missingTargetPolicy,
+      labels: request.labels,
+      planning_horizon_days: request.planningHorizonDays,
+      planning_horizon_occurrences: request.planningHorizonOccurrences,
+    };
+  }
+
+  private static toWireUpdateSchedulePatch(
+    update: UpdateScheduleRequest["update"],
+  ): Record<string, unknown> {
+    return {
+      expected_revision: update.expectedRevision,
+      name: update.name,
+      description: update.description,
+      trigger: update.trigger,
+      target: update.target,
+      misfire_policy: update.misfirePolicy,
+      overlap_policy: update.overlapPolicy,
+      missing_target_policy: update.missingTargetPolicy,
+      planning_horizon_days: update.planningHorizonDays,
+      planning_horizon_occurrences: update.planningHorizonOccurrences,
+      labels: update.labels,
+    };
+  }
+
   static parseSessionHistory(data: Record<string, unknown>): SessionHistory {
     const rawMessages = Array.isArray(data.messages)
       ? (data.messages as Array<Record<string, unknown>>)
@@ -1483,6 +1986,11 @@ export class MeerkatClient {
   }
 
   static parseSessionMessage(data: Record<string, unknown>): SessionMessage {
+    const role = String(data.role ?? "");
+    const contentValue =
+      role === "system_notice" && data.content == null && data.body != null
+        ? String(data.body)
+        : data.content;
     const rawToolCalls = Array.isArray(data.tool_calls)
       ? (data.tool_calls as Array<Record<string, unknown>>)
       : [];
@@ -1493,8 +2001,9 @@ export class MeerkatClient {
       ? (data.results as Array<Record<string, unknown>>)
       : [];
     return {
-      role: String(data.role ?? ""),
-      content: data.content != null ? MeerkatClient.parseContentInput(data.content) : undefined,
+      role,
+      content:
+        contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
       toolCalls: rawToolCalls.map(
         (toolCall): SessionToolCall => ({
           id: String(toolCall.id ?? ""),
@@ -1679,6 +2188,13 @@ export class MeerkatClient {
     const wireRefs = skillRefsToWire(options.skillRefs);
     if (wireRefs) params.skill_refs = wireRefs;
     if (options.skillReferences != null) params.skill_references = options.skillReferences;
+    if (options.labels != null) params.labels = options.labels;
+    if (options.additionalInstructions != null) {
+      params.additional_instructions = options.additionalInstructions;
+    }
+    if (options.appContext !== undefined) params.app_context = options.appContext;
+    if (options.shellEnv != null) params.shell_env = options.shellEnv;
+    if (options.externalTools != null) params.external_tools = options.externalTools;
     return params;
   }
 

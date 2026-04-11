@@ -474,6 +474,169 @@ describe("Session wrappers", () => {
       { prompt: "Hold until first turn", initial_turn: "deferred" },
     ]]);
   });
+
+  it("createSession forwards extended creation options", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push({ method, params });
+      return {
+        session_id: "sess-extended",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    };
+
+    await client.createSession("Hello", {
+      labels: { team: "sdk" },
+      additionalInstructions: ["be terse"],
+      appContext: { tenant: "acme" },
+      shellEnv: { FOO: "bar" },
+      externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
+    });
+
+    assert.deepEqual(seen[0], {
+      method: "session/create",
+      params: {
+        prompt: "Hello",
+        labels: { team: "sdk" },
+        additional_instructions: ["be terse"],
+        app_context: { tenant: "acme" },
+        shell_env: { FOO: "bar" },
+        external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
+      },
+    });
+  });
+
+  it("listSessions and readSession parse typed metadata", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method) => {
+      if (method === "session/list") {
+        return {
+          sessions: [
+            {
+              session_id: "s1",
+              created_at: 10,
+              updated_at: 20,
+              message_count: 2,
+              total_tokens: 9,
+              is_active: true,
+              labels: { team: "infra" },
+            },
+          ],
+        };
+      }
+      return {
+        session_id: "s1",
+        created_at: 10,
+        updated_at: 20,
+        message_count: 2,
+        is_active: false,
+        model: "claude-sonnet-4-6",
+        provider: "anthropic",
+        last_assistant_text: "hello",
+        labels: { team: "infra" },
+      };
+    };
+
+    const sessions = await client.listSessions({ labels: { team: "infra" }, limit: 5, offset: 1 });
+    const details = await client.readSession("s1");
+
+    assert.equal(sessions[0].sessionId, "s1");
+    assert.equal(sessions[0].totalTokens, 9);
+    assert.equal(sessions[0].labels.team, "infra");
+    assert.equal(details.model, "claude-sonnet-4-6");
+    assert.equal(details.provider, "anthropic");
+    assert.equal(details.lastAssistantText, "hello");
+  });
+
+  it("session/deferred injectContext call public wrapper", async () => {
+    const calls = [];
+    const client = new MeerkatClient();
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { status: "staged" };
+    };
+    const session = new Session(
+      client,
+      {
+        sessionId: "s1",
+        text: "ok",
+        turns: 1,
+        toolCalls: 0,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    );
+    const deferred = new DeferredSession(client, "s2");
+
+    const a = await session.injectContext("ctx", { source: "test", idempotencyKey: "k1" });
+    const b = await deferred.injectContext("ctx2");
+
+    assert.equal(a.status, "staged");
+    assert.equal(b.status, "staged");
+    assert.deepEqual(calls, [
+      {
+        method: "session/inject_context",
+        params: { session_id: "s1", text: "ctx", source: "test", idempotency_key: "k1" },
+      },
+      {
+        method: "session/inject_context",
+        params: { session_id: "s2", text: "ctx2" },
+      },
+    ]);
+  });
+
+  it("turn/start wrappers include per-turn overrides on streaming and non-streaming calls", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    };
+    client.process = { stdin: { write: () => {} } };
+    client.registerRequest = async () => ({
+      session_id: "s1",
+      text: "ok",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    await client._startTurn("s1", "hello", {
+      additionalInstructions: ["a"],
+      keepAlive: true,
+      model: "m",
+      provider: "p",
+      maxTokens: 42,
+      systemPrompt: "sys",
+      outputSchema: { type: "object" },
+      structuredOutputRetries: 3,
+      providerParams: { x: 1 },
+    });
+    client._startTurnStreaming("s1", "hello", {
+      additionalInstructions: ["a"],
+      keepAlive: true,
+      model: "m",
+      provider: "p",
+      maxTokens: 42,
+      systemPrompt: "sys",
+      outputSchema: { type: "object" },
+      structuredOutputRetries: 3,
+      providerParams: { x: 1 },
+    });
+
+    assert.equal(calls[0].method, "turn/start");
+    assert.equal(calls[0].params.additional_instructions[0], "a");
+    assert.equal(calls[0].params.keep_alive, true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -725,6 +888,191 @@ describe("Comms methods", () => {
       () => client.mcpAdd({ session_id: "s1", server_name: "fs", server_config: {} }),
       /persisted must be boolean/,
     );
+  });
+});
+
+describe("Parity wrappers", () => {
+  it("adds wrappers for session external events and model catalog", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "models/catalog") {
+        return {
+          contract_version: { major: 0, minor: 5, patch: 1 },
+          providers: [
+            {
+              provider: "anthropic",
+              default_model_id: "claude-sonnet-4-6",
+              models: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", tier: "recommended" }],
+            },
+          ],
+        };
+      }
+      return { status: "accepted" };
+    };
+
+    const external = await client.sendExternalEvent("s1", { type: "webhook" }, { source: "test" });
+    const catalog = await client.getModelsCatalog();
+
+    assert.equal(external.status, "accepted");
+    assert.equal(catalog.providers[0].defaultModelId, "claude-sonnet-4-6");
+    assert.deepEqual(catalog.contractVersion, { major: 0, minor: 5, patch: 1 });
+    assert.deepEqual(calls.map((c) => c.method), ["session/external_event", "models/catalog"]);
+    assert.equal(calls[0].params.session_id, "s1");
+  });
+
+  it("adds wrappers for schedule APIs", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "schedule/list") {
+        return {
+          schedules: [
+            {
+              schedule_id: "sch-1",
+              phase: "active",
+              revision: 1,
+              trigger: {},
+              target: {},
+              labels: {},
+            },
+          ],
+        };
+      }
+      if (method === "schedule/occurrences") {
+        return { occurrences: [] };
+      }
+      if (method === "schedule/tools") {
+        return { tools: [{ name: "schedule.create" }] };
+      }
+      return {
+        schedule_id: "sch-1",
+        phase: "active",
+        revision: 1,
+        trigger: {},
+        target: {},
+        labels: {},
+      };
+    };
+
+    const created = await client.createSchedule({ trigger: {}, target: {} });
+    const fetched = await client.getSchedule("sch-1");
+    const listed = await client.listSchedules({ labels: { env: "prod" }, limit: 5, offset: 2 });
+    const updated = await client.updateSchedule({ scheduleId: "sch-1", update: { name: "new" } });
+    await client.pauseSchedule("sch-1");
+    await client.resumeSchedule("sch-1");
+    await client.deleteSchedule("sch-1");
+    const occurrences = await client.listScheduleOccurrences("sch-1", { includeTerminal: false });
+    const tools = await client.listScheduleTools();
+    await client.callScheduleTool({ name: "schedule.create", arguments: { a: 1 } });
+
+    assert.equal(created.scheduleId, "sch-1");
+    assert.equal(fetched.scheduleId, "sch-1");
+    assert.equal(listed[0].scheduleId, "sch-1");
+    assert.equal(updated.scheduleId, "sch-1");
+    assert.equal(occurrences.occurrences.length, 0);
+    assert.equal(tools.tools.length, 1);
+    assert.deepEqual(calls.map((c) => c.method), [
+      "schedule/create",
+      "schedule/get",
+      "schedule/list",
+      "schedule/update",
+      "schedule/pause",
+      "schedule/resume",
+      "schedule/delete",
+      "schedule/occurrences",
+      "schedule/tools",
+      "schedule/call",
+    ]);
+    assert.deepEqual(calls[2].params, { labels: { env: "prod" }, limit: 5, offset: 2 });
+    assert.deepEqual(calls[7].params, { schedule_id: "sch-1", include_terminal: false });
+  });
+
+  it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "mob/spawn_many") {
+        return { results: [{ ok: true, session_id: "s1", member_ref: { session_id: "s1" } }] };
+      }
+      if (method === "mob/events") {
+        return { events: [{ cursor: 1 }] };
+      }
+      if (method === "mob/profile/list") {
+        return {
+          profiles: [
+            {
+              name: "worker",
+              revision: 1,
+              profile: { model: "claude-sonnet-4-6", tools: { comms: true } },
+            },
+          ],
+        };
+      }
+      if (method === "mob/profile/delete") {
+        return { name: "worker", deleted_revision: 2 };
+      }
+      if (method === "mob/profile/get") {
+        return { not_found: true, name: "missing" };
+      }
+      return {
+        name: "worker",
+        revision: 1,
+        profile: { model: "claude-sonnet-4-6", tools: { comms: true } },
+      };
+    };
+
+    const spawned = await client.spawnMobMembers("mob-1", [{
+      profile: "worker",
+      meerkatId: "worker-1",
+    }]);
+    const events = await client.readMobEvents("mob-1", { afterCursor: 10, limit: 5 });
+    const created = await client.createMobProfile("worker", { model: "claude-sonnet-4-6" });
+    const got = await client.getMobProfile("missing");
+    const listed = await client.listMobProfiles();
+    const updated = await client.updateMobProfile("worker", { model: "claude-opus-4-6" }, 1);
+    const deleted = await client.deleteMobProfile("worker", 2);
+
+    assert.equal(spawned[0].ok, true);
+    assert.equal(events.events.length, 1);
+    assert.equal(created.notFound, false);
+    assert.equal(got.notFound, true);
+    assert.equal(listed.length, 1);
+    assert.equal(updated.notFound, false);
+    assert.equal(deleted.deletedRevision, 2);
+    assert.deepEqual(calls.map((c) => c.method), [
+      "mob/spawn_many",
+      "mob/events",
+      "mob/profile/create",
+      "mob/profile/get",
+      "mob/profile/list",
+      "mob/profile/update",
+      "mob/profile/delete",
+    ]);
+    assert.equal(calls[1].params.after_cursor, 10);
+    assert.equal(calls[1].params.limit, 5);
+  });
+
+  it("uses canonical role_name for helper APIs while accepting profileName alias", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { output: "ok", tokens_used: 1, session_id: "s1" };
+    };
+
+    await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
+    await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
+    await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
+    await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
+
+    assert.equal(calls[0].params.role_name, "worker");
+    assert.equal(calls[1].params.role_name, "legacy-worker");
+    assert.equal(calls[2].params.role_name, "worker");
+    assert.equal(calls[3].params.role_name, "legacy-worker");
   });
 });
 

@@ -661,7 +661,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.5.0",
+  "contract_version": "0.5.1",
   "providers": [
     {
       "provider": "anthropic",
@@ -687,7 +687,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 }
 ```
 
-The catalog is compiled from `meerkat-models` at build time. Each provider entry includes the default model and a list of models with their capabilities and parameter schemas.
+The catalog is resolved from built-in model metadata plus config-backed provider/server entries. Each provider entry includes the default model and a list of models with their capabilities and parameter schemas.
 
 ### GET /capabilities
 
@@ -695,7 +695,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 4, "patch": 1},
+  "contract_version": {"major": 0, "minor": 5, "patch": 1},
   "capabilities": [
     {
       "id": "sessions",

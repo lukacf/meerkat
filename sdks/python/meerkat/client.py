@@ -51,15 +51,27 @@ from .types import (
     AttributedEvent,
     BlobPayload,
     Capability,
+    ConfigEnvelope,
+    DeletedMobProfile,
+    ExternalEventOutcome,
     ContentBlock,
     ContentInput,
+    ModelsCatalogResponse,
+    MobEventsResult,
+    MobProfile,
+    ScheduleListResult,
+    ScheduleOccurrencesResult,
+    ScheduleRecord,
+    ScheduleToolsResult,
+    ScheduleToolCall,
     EventEnvelope,
     McpLiveOpResponse,
     RunResult,
     SchemaWarning,
+    SessionDetails,
     SessionAssistantBlock,
     SessionHistory,
-    SessionInfo,
+    SessionSummary,
     SessionMessage,
     SessionToolCall,
     SessionToolResult,
@@ -68,6 +80,7 @@ from .types import (
     SkillRef,
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
+    StoredMobProfile,
 )
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
@@ -309,6 +322,10 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
+        additional_instructions: list[str] | None = None,
+        app_context: dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        external_tools: list[dict[str, Any]] | None = None,
     ) -> Session:
         """Create a new session, run the first turn, and return a :class:`Session`.
 
@@ -333,6 +350,10 @@ class MeerkatClient:
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
             labels=labels,
+            additional_instructions=additional_instructions,
+            app_context=app_context,
+            shell_env=shell_env,
+            external_tools=external_tools,
         )
         raw = await self._request("session/create", params)
         result = self._parse_run_result(raw)
@@ -362,6 +383,10 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
+        additional_instructions: list[str] | None = None,
+        app_context: dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        external_tools: list[dict[str, Any]] | None = None,
     ) -> EventStream:
         """Create a new session and stream typed events from the first turn.
 
@@ -390,6 +415,10 @@ class MeerkatClient:
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
             labels=labels,
+            additional_instructions=additional_instructions,
+            app_context=app_context,
+            shell_env=shell_env,
+            external_tools=external_tools,
         )
         self._request_id += 1
         request_id = self._request_id
@@ -430,6 +459,10 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
+        additional_instructions: list[str] | None = None,
+        app_context: dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        external_tools: list[dict[str, Any]] | None = None,
     ) -> DeferredSession:
         """Create a new session without running the first turn.
 
@@ -458,6 +491,10 @@ class MeerkatClient:
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
             labels=labels,
+            additional_instructions=additional_instructions,
+            app_context=app_context,
+            shell_env=shell_env,
+            external_tools=external_tools,
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
@@ -469,18 +506,44 @@ class MeerkatClient:
 
     # -- Session queries ---------------------------------------------------
 
-    async def list_sessions(self) -> list[SessionInfo]:
+    async def list_sessions(
+        self,
+        *,
+        labels: dict[str, str] | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[SessionSummary]:
         """List active sessions."""
-        result = await self._request("session/list", {})
+        params: dict[str, Any] = {}
+        if labels is not None:
+            params["labels"] = labels
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        result = await self._request("session/list", params)
         return [
-            self._parse_session_info(s)
+            self._parse_session_summary(s)
             for s in result.get("sessions", [])
         ]
 
-    async def read_session(self, session_id: str) -> SessionInfo:
+    async def read_session(self, session_id: str) -> SessionDetails:
         """Read detailed session state."""
         result = await self._request("session/read", {"session_id": session_id})
-        return self._parse_session_info(result)
+        return self._parse_session_details(result)
+
+    async def send_external_event(
+        self,
+        session_id: str,
+        payload: Any,
+        *,
+        source: str | None = None,
+    ) -> ExternalEventOutcome:
+        """Append a durable external event input to a session runtime."""
+        params: dict[str, Any] = {"session_id": session_id, "payload": payload}
+        if source is not None:
+            params["source"] = source
+        return await self._request("session/external_event", params)
 
 
     async def inject_context(
@@ -550,7 +613,7 @@ class MeerkatClient:
 
     # -- Config ------------------------------------------------------------
 
-    async def get_config(self) -> dict[str, Any]:
+    async def get_config(self) -> ConfigEnvelope:
         return await self._request("config/get", {})
 
     async def set_config(
@@ -558,7 +621,7 @@ class MeerkatClient:
         config: dict[str, Any],
         *,
         expected_generation: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> ConfigEnvelope:
         params: dict[str, Any] = {"config": config}
         if expected_generation is not None:
             params["expected_generation"] = expected_generation
@@ -569,11 +632,76 @@ class MeerkatClient:
         patch: dict[str, Any],
         *,
         expected_generation: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> ConfigEnvelope:
         params: dict[str, Any] = {"patch": patch}
         if expected_generation is not None:
             params["expected_generation"] = expected_generation
         return await self._request("config/patch", params)
+
+    async def get_models_catalog(self) -> ModelsCatalogResponse:
+        raw = await self._request("models/catalog", {})
+        return self._parse_models_catalog(raw)
+
+    async def create_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
+        return await self._request("schedule/create", request)
+
+    async def get_schedule(self, schedule_id: str) -> ScheduleRecord:
+        return await self._request("schedule/get", {"schedule_id": schedule_id})
+
+    async def list_schedules(
+        self,
+        *,
+        labels: dict[str, str] | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> ScheduleListResult:
+        params: dict[str, Any] = {}
+        if labels is not None:
+            params["labels"] = labels
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        raw = await self._request("schedule/list", params)
+        schedules = raw.get("schedules", [])
+        return {
+            "schedules": schedules if isinstance(schedules, list) else [],
+        }
+
+    async def update_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
+        return await self._request("schedule/update", request)
+
+    async def pause_schedule(self, schedule_id: str) -> ScheduleRecord:
+        return await self._request("schedule/pause", {"schedule_id": schedule_id})
+
+    async def resume_schedule(self, schedule_id: str) -> ScheduleRecord:
+        return await self._request("schedule/resume", {"schedule_id": schedule_id})
+
+    async def delete_schedule(self, schedule_id: str) -> ScheduleRecord:
+        return await self._request("schedule/delete", {"schedule_id": schedule_id})
+
+    async def list_schedule_occurrences(
+        self,
+        schedule_id: str,
+        *,
+        include_terminal: bool | None = None,
+    ) -> ScheduleOccurrencesResult:
+        params: dict[str, Any] = {"schedule_id": schedule_id}
+        if include_terminal is not None:
+            params["include_terminal"] = include_terminal
+        raw = await self._request("schedule/occurrences", params)
+        occurrences = raw.get("occurrences", [])
+        return {
+            "occurrences": occurrences if isinstance(occurrences, list) else [],
+        }
+
+    async def list_schedule_tools(self) -> ScheduleToolsResult:
+        raw = await self._request("schedule/tools", {})
+        tools = raw.get("tools", [])
+        return {"tools": tools if isinstance(tools, list) else []}
+
+    async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
+        return await self._request("schedule/call", dict(request))
 
     async def mcp_add(
         self,
@@ -773,6 +901,24 @@ class MeerkatClient:
             "specs": specs,
         })
 
+    async def read_mob_events(
+        self,
+        mob_id: str,
+        *,
+        after_cursor: int = 0,
+        limit: int = 100,
+    ) -> MobEventsResult:
+        raw = await self._request(
+            "mob/events",
+            {
+                "mob_id": mob_id,
+                "after_cursor": after_cursor,
+                "limit": limit,
+            },
+        )
+        events = raw.get("events", [])
+        return {"events": events if isinstance(events, list) else []}
+
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
@@ -815,15 +961,17 @@ class MeerkatClient:
         prompt: str,
         *,
         meerkat_id: str | None = None,
+        role_name: str | None = None,
         profile_name: str | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
+        canonical_role_name = role_name if role_name is not None else profile_name
         return await self._request("mob/spawn_helper", {
             "mob_id": mob_id,
             "prompt": prompt,
             "meerkat_id": meerkat_id,
-            "profile_name": profile_name,
+            "role_name": canonical_role_name,
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
@@ -835,21 +983,62 @@ class MeerkatClient:
         prompt: str,
         *,
         meerkat_id: str | None = None,
+        role_name: str | None = None,
         profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
+        canonical_role_name = role_name if role_name is not None else profile_name
         return await self._request("mob/fork_helper", {
             "mob_id": mob_id,
             "source_member_id": source_member_id,
             "prompt": prompt,
             "meerkat_id": meerkat_id,
-            "profile_name": profile_name,
+            "role_name": canonical_role_name,
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
+
+    async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
+        return await self._request("mob/profile/create", {"name": name, "profile": profile})
+
+    async def get_mob_profile(self, name: str) -> StoredMobProfile | None:
+        raw = await self._request("mob/profile/get", {"name": name})
+        if raw.get("not_found") is True:
+            return None
+        return raw
+
+    async def list_mob_profiles(self) -> list[StoredMobProfile]:
+        raw = await self._request("mob/profile/list", {})
+        profiles = raw.get("profiles", [])
+        return profiles if isinstance(profiles, list) else []
+
+    async def update_mob_profile(
+        self,
+        name: str,
+        profile: MobProfile,
+        expected_revision: int,
+    ) -> StoredMobProfile:
+        return await self._request(
+            "mob/profile/update",
+            {
+                "name": name,
+                "profile": profile,
+                "expected_revision": expected_revision,
+            },
+        )
+
+    async def delete_mob_profile(
+        self,
+        name: str,
+        expected_revision: int,
+    ) -> DeletedMobProfile:
+        return await self._request(
+            "mob/profile/delete",
+            {"name": name, "expected_revision": expected_revision},
+        )
 
     async def wire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
         payload = (
@@ -975,6 +1164,7 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -992,6 +1182,8 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
+        if additional_instructions is not None:
+            params["additional_instructions"] = additional_instructions
         if keep_alive is not None:
             params["keep_alive"] = keep_alive
         if model is not None:
@@ -1019,6 +1211,15 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
+        keep_alive: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
@@ -1035,6 +1236,24 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
+        if additional_instructions is not None:
+            params["additional_instructions"] = additional_instructions
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
+        if model is not None:
+            params["model"] = model
+        if provider is not None:
+            params["provider"] = provider
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if system_prompt is not None:
+            params["system_prompt"] = system_prompt
+        if output_schema is not None:
+            params["output_schema"] = output_schema
+        if structured_output_retries is not None:
+            params["structured_output_retries"] = structured_output_retries
+        if provider_params is not None:
+            params["provider_params"] = provider_params
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start", "params": params}
         data = (json.dumps(request) + "\n").encode()
         return EventStream(
@@ -1324,6 +1543,10 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         labels: dict[str, str] | None = None,
+        additional_instructions: list[str] | None = None,
+        app_context: dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        external_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
         if model:
@@ -1367,6 +1590,14 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if labels is not None:
             params["labels"] = labels
+        if additional_instructions is not None:
+            params["additional_instructions"] = additional_instructions
+        if app_context is not None:
+            params["app_context"] = app_context
+        if shell_env is not None:
+            params["shell_env"] = shell_env
+        if external_tools is not None:
+            params["external_tools"] = external_tools
         return params
 
     @staticmethod
@@ -1562,17 +1793,81 @@ class MeerkatClient:
         )
 
     @staticmethod
-    def _parse_session_info(s: dict[str, Any]) -> SessionInfo:
-        return SessionInfo(
-            session_id=s.get("session_id", ""),
+    def _parse_int(raw: Any, default: int = 0) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_string_map(raw: Any) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key, value in raw.items():
+            result[str(key)] = str(value)
+        return result
+
+    @staticmethod
+    def _parse_session_summary(s: dict[str, Any]) -> SessionSummary:
+        return SessionSummary(
+            session_id=str(s.get("session_id", "")),
             session_ref=s.get("session_ref"),
-            created_at=s.get("created_at", ""),
-            updated_at=s.get("updated_at", ""),
-            message_count=s.get("message_count", 0),
-            total_tokens=s.get("total_tokens", 0),
-            labels=s.get("labels", {}),
-            is_active=s.get("is_active", False),
-            model=s.get("model", ""),
-            provider=s.get("provider", ""),
-            last_assistant_text=s.get("last_assistant_text"),
+            created_at=MeerkatClient._parse_int(s.get("created_at"), 0),
+            updated_at=MeerkatClient._parse_int(s.get("updated_at"), 0),
+            message_count=MeerkatClient._parse_int(s.get("message_count"), 0),
+            total_tokens=MeerkatClient._parse_int(s.get("total_tokens"), 0),
+            labels=MeerkatClient._parse_string_map(s.get("labels")),
+            is_active=bool(s.get("is_active", False)),
         )
+
+    @staticmethod
+    def _parse_session_details(s: dict[str, Any]) -> SessionDetails:
+        return SessionDetails(
+            session_id=str(s.get("session_id", "")),
+            session_ref=s.get("session_ref"),
+            created_at=MeerkatClient._parse_int(s.get("created_at"), 0),
+            updated_at=MeerkatClient._parse_int(s.get("updated_at"), 0),
+            message_count=MeerkatClient._parse_int(s.get("message_count"), 0),
+            labels=MeerkatClient._parse_string_map(s.get("labels")),
+            is_active=bool(s.get("is_active", False)),
+            model=str(s.get("model", "")),
+            provider=str(s.get("provider", "")),
+            last_assistant_text=(
+                str(s["last_assistant_text"])
+                if s.get("last_assistant_text") is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _parse_models_catalog(data: dict[str, Any]) -> ModelsCatalogResponse:
+        providers_raw = data.get("providers", [])
+        providers: list[dict[str, Any]] = []
+        if isinstance(providers_raw, list):
+            for provider in providers_raw:
+                if isinstance(provider, dict):
+                    providers.append(provider)
+        contract_version_raw = data.get("contract_version")
+        if isinstance(contract_version_raw, dict):
+            contract_version = {
+                "major": MeerkatClient._parse_int(contract_version_raw.get("major"), 0),
+                "minor": MeerkatClient._parse_int(contract_version_raw.get("minor"), 0),
+                "patch": MeerkatClient._parse_int(contract_version_raw.get("patch"), 0),
+            }
+        elif isinstance(contract_version_raw, str):
+            try:
+                major, minor, patch = contract_version_raw.split(".", 2)
+                contract_version = {
+                    "major": MeerkatClient._parse_int(major, 0),
+                    "minor": MeerkatClient._parse_int(minor, 0),
+                    "patch": MeerkatClient._parse_int(patch, 0),
+                }
+            except ValueError:
+                contract_version = {"major": 0, "minor": 0, "patch": 0}
+        else:
+            contract_version = {"major": 0, "minor": 0, "patch": 0}
+        return {
+            "contract_version": contract_version,
+            "providers": providers,
+        }

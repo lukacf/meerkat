@@ -136,7 +136,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::typed(
             "schedule/occurrences",
             "List schedule occurrences",
-            "ScheduleIdParams",
+            "ScheduleOccurrencesParams",
             "ScheduleOccurrencesResult",
         ),
         RpcMethodDescriptor::result_only(
@@ -158,12 +158,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::basic("capabilities/get", "Get runtime capabilities"),
         RpcMethodDescriptor::result_only(
             "models/catalog",
-            "Get the compiled-in model catalog",
+            "Get the effective model catalog (built-in plus config-backed entries)",
             "ModelsCatalogResponse",
         ),
         RpcMethodDescriptor::basic("skills/list", "List available skills"),
         RpcMethodDescriptor::basic("skills/inspect", "Inspect one skill"),
-        RpcMethodDescriptor::basic("tools/register", "Register an external tool"),
     ];
 
     if options.runtime_available {
@@ -260,6 +259,15 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
+            RpcMethodDescriptor::basic(
+                "mob/wait_kickoff",
+                "Wait for kickoff completion for a member",
+            ),
+            RpcMethodDescriptor::basic("mob/profile/create", "Create a realm-scoped mob profile"),
+            RpcMethodDescriptor::basic("mob/profile/get", "Read a realm-scoped mob profile"),
+            RpcMethodDescriptor::basic("mob/profile/list", "List realm-scoped mob profiles"),
+            RpcMethodDescriptor::basic("mob/profile/update", "Update a realm-scoped mob profile"),
+            RpcMethodDescriptor::basic("mob/profile/delete", "Delete a realm-scoped mob profile"),
             RpcMethodDescriptor::basic("mob/stream_open", "Open a mob event stream"),
             RpcMethodDescriptor::basic("mob/stream_close", "Close a mob event stream"),
         ]);
@@ -367,6 +375,8 @@ mod tests {
         assert!(methods.iter().any(|m| m == "session/inject_context"));
         assert!(methods.iter().any(|m| m == "mob/events"));
         assert!(methods.iter().any(|m| m == "mob/member_send"));
+        assert!(methods.iter().any(|m| m == "mob/wait_kickoff"));
+        assert!(methods.iter().any(|m| m == "mob/profile/create"));
         assert!(methods.iter().any(|m| m == "schedule/list"));
         assert!(methods.iter().any(|m| m == "schedule/occurrences"));
         assert!(methods.iter().any(|m| m == "schedule/call"));

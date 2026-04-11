@@ -40,15 +40,15 @@ export interface WireToolCall {
 
 export interface WireToolResult {
   tool_use_id: string;
-  content: string;
+  content: WireToolResultContent;
   is_error?: boolean;
 }
 
 export interface WireSessionMessage {
   role: string;
-  content?: string;
+  content?: WireContentInput;
   tool_calls?: WireToolCall[];
-  stop_reason?: string;
+  stop_reason?: WireStopReason;
   blocks?: WireAssistantBlock[];
   results?: WireToolResult[];
 }
@@ -114,13 +114,13 @@ export interface McpReloadParams {
 export interface MobWireParams {
   member: string;
   mob_id: string;
-  peer: MobPeerTarget;
+  peer: { local: string } | { external: WireTrustedPeerSpec };
 }
 
 export interface MobUnwireParams {
   member: string;
   mob_id: string;
-  peer: MobPeerTarget;
+  peer: { local: string } | { external: WireTrustedPeerSpec };
 }
 
 export interface RuntimeStateParams {
@@ -149,20 +149,50 @@ export interface InputListParams {
   session_id: string;
 }
 
+export interface ScheduleIdParams {
+  schedule_id: string;
+}
+
+export interface ListSchedulesParams {
+  labels?: Record<string, unknown>;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ScheduleOccurrencesParams {
+  include_terminal?: boolean;
+  schedule_id: string;
+}
+
+export interface UpdateScheduleParams {
+  description?: string;
+  expected_revision?: number;
+  labels?: Record<string, unknown>;
+  misfire_policy?: Record<string, unknown>;
+  missing_target_policy?: "skip" | "mark_misfired";
+  name?: string;
+  overlap_policy?: "allow_concurrent" | "skip_if_running";
+  planning_horizon_days?: number;
+  planning_horizon_occurrences?: number;
+  schedule_id: string;
+  target?: Record<string, unknown>;
+  trigger?: Record<string, unknown>;
+}
+
 export interface McpLiveOpResponse {
   applied_at_turn?: number;
-  operation: McpLiveOperation;
+  operation: "add" | "remove" | "reload";
   persisted: boolean;
   server_name?: string;
   session_id: string;
-  status: McpLiveOpStatus;
+  status: "staged" | "applied" | "rejected";
 }
 
 export type InputStateResult = WireInputState | null;
 
 export type WireContentBlock = Record<string, unknown>;
 
-export type WireContentInput = string | WireContentBlock[];
+export type WireContentInput = string | Record<string, unknown>[];
 
 export type McpLiveOperation = "add" | "remove" | "reload";
 
@@ -182,9 +212,15 @@ export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
 export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
 
+export type WireStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+
+export type WireToolResultContent = string | Record<string, unknown>[];
+
+export type WireModelTier = string;
+
 export interface WireRenderMetadata {
-  class: WireRenderClass;
-  salience?: WireRenderSalience;
+  class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
+  salience?: "background" | "normal" | "important" | "urgent";
 }
 
 export interface WireTrustedPeerSpec {
@@ -202,16 +238,16 @@ export interface MobUnwireResult {
 }
 
 export interface RuntimeStateResult {
-  state: WireRuntimeState;
+  state: "initializing" | "idle" | "attached" | "running" | "recovering" | "retired" | "stopped" | "destroyed";
 }
 
 export interface RuntimeAcceptResult {
   existing_id?: string;
   input_id?: string;
-  outcome_type: RuntimeAcceptOutcomeType;
+  outcome_type: "accepted" | "deduplicated" | "rejected";
   policy?: unknown;
   reason?: string;
-  state?: WireInputState;
+  state?: Record<string, unknown>;
 }
 
 export interface RuntimeRetireResult {
@@ -224,18 +260,18 @@ export interface RuntimeResetResult {
 }
 
 export interface WireInputStateHistoryEntry {
-  from: WireInputLifecycleState;
+  from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
   reason?: string;
   timestamp: string;
-  to: WireInputLifecycleState;
+  to: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
 }
 
 export interface WireInputState {
   attempt_count?: number;
   created_at: string;
-  current_state: WireInputLifecycleState;
+  current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
   durability?: unknown;
-  history?: WireInputStateHistoryEntry[];
+  history?: Record<string, unknown>[];
   idempotency_key?: string;
   input_id: string;
   last_boundary_sequence?: number;
@@ -250,4 +286,69 @@ export interface WireInputState {
 
 export interface InputListResult {
   input_ids: string[];
+}
+
+export interface ScheduleListResult {
+  schedules: Record<string, unknown>[];
+}
+
+export interface ScheduleOccurrencesResult {
+  occurrences: Record<string, unknown>[];
+}
+
+export interface WireSessionInfo {
+  created_at: number;
+  is_active: boolean;
+  labels?: Record<string, unknown>;
+  last_assistant_text?: string;
+  message_count: number;
+  model: string;
+  provider: string;
+  session_id: string;
+  session_ref?: string;
+  updated_at: number;
+}
+
+export interface WireSessionSummary {
+  created_at: number;
+  is_active: boolean;
+  labels?: Record<string, unknown>;
+  message_count: number;
+  session_id: string;
+  session_ref?: string;
+  total_tokens: number;
+  updated_at: number;
+}
+
+export interface ContractVersion {
+}
+
+export interface CatalogModelEntry {
+  context_window?: number;
+  display_name: string;
+  id: string;
+  max_output_tokens?: number;
+  profile?: Record<string, unknown>;
+  server_id?: string;
+  tier: string;
+}
+
+export interface ProviderCatalog {
+  default_model_id: string;
+  models: Record<string, unknown>[];
+  provider: string;
+}
+
+export interface ModelsCatalogResponse {
+  contract_version: Record<string, unknown>;
+  providers: Record<string, unknown>[];
+}
+
+export interface WireModelProfile {
+  inline_video: boolean;
+  model_family: string;
+  params_schema: unknown;
+  supports_reasoning: boolean;
+  supports_temperature: boolean;
+  supports_thinking: boolean;
 }

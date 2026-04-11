@@ -78,6 +78,15 @@ class _MockClient:
         skill_refs=None,
         skill_references=None,
         flow_tool_overlay=None,
+        additional_instructions=None,
+        keep_alive=None,
+        model=None,
+        provider=None,
+        max_tokens=None,
+        system_prompt=None,
+        output_schema=None,
+        structured_output_retries=None,
+        provider_params=None,
     ):
         self._calls.append({
             "session_id": session_id,
@@ -85,6 +94,15 @@ class _MockClient:
             "skill_refs": skill_refs,
             "skill_references": skill_references,
             "flow_tool_overlay": flow_tool_overlay,
+            "additional_instructions": additional_instructions,
+            "keep_alive": keep_alive,
+            "model": model,
+            "provider": provider,
+            "max_tokens": max_tokens,
+            "system_prompt": system_prompt,
+            "output_schema": output_schema,
+            "structured_output_retries": structured_output_retries,
+            "provider_params": provider_params,
         })
         return RunResult(
             session_id=session_id,

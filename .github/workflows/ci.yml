@@ -39,6 +39,12 @@ jobs:
       - name: Verify version parity
         run: make verify-version-parity
 
+      - name: Verify RPC surface alignment
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify SDK wrapper freshness
+        run: make verify-sdk-wrapper-freshness
+
       - name: Clippy (all features)
         run: make lint
 
@@ -50,6 +56,43 @@ jobs:
 
       - name: Check for unused dependencies
         run: cargo machete --with-metadata
+
+  sdk-suites:
+    name: SDK suites + parity gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: sdk-suites
+
+      - name: Build rkat-rpc for SDK smoke tests
+        run: cargo build -p meerkat-rpc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Python SDK suite
+        run: make test-sdk-python
+
+      - name: Run TypeScript SDK suite
+        run: make test-sdk-typescript
+
+      - name: Verify SDK wrapper freshness
+        run: make verify-sdk-wrapper-freshness
 
   rust-release-packaging:
     name: Rust release packaging
@@ -327,7 +370,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [fmt-lint, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
+    needs: [fmt-lint, sdk-suites, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal, test-feature-matrix-lib, test-feature-matrix-surface-checks, wasm-check, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -335,6 +378,7 @@ jobs:
           failed=""
           for job in \
             fmt-lint \
+            sdk-suites \
             test-unit \
             integration-fast \
             e2e-fast \
@@ -347,6 +391,7 @@ jobs:
           do
             case "$job" in
               fmt-lint) result="${{ needs.fmt-lint.result }}" ;;
+              sdk-suites) result="${{ needs.sdk-suites.result }}" ;;
               test-unit) result="${{ needs.test-unit.result }}" ;;
               integration-fast) result="${{ needs.integration-fast.result }}" ;;
               e2e-fast) result="${{ needs.e2e-fast.result }}" ;;

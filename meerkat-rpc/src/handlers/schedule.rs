@@ -7,8 +7,8 @@ use meerkat::{
     handle_schedule_tools_call, schedule_tools_list,
 };
 use meerkat_contracts::{
-    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesResult,
-    UpdateScheduleParams,
+    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
+    ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -110,8 +110,8 @@ pub async fn handle_list(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    if let Some(raw) = params {
-        let _: ListSchedulesParams = match serde_json::from_str(raw.get()) {
+    let params: ListSchedulesParams = match params {
+        Some(raw) => match serde_json::from_str(raw.get()) {
             Ok(params) => params,
             Err(error) => {
                 return RpcResponse::error(
@@ -120,11 +120,30 @@ pub async fn handle_list(
                     format!("invalid params: {error}"),
                 );
             }
-        };
-    }
+        },
+        None => ListSchedulesParams::default(),
+    };
 
     match schedule_service(&runtime).list().await {
-        Ok(schedules) => RpcResponse::success(id, ScheduleListResult { schedules }),
+        Ok(mut schedules) => {
+            if let Some(labels) = params.labels {
+                schedules.retain(|schedule| {
+                    labels
+                        .iter()
+                        .all(|(key, value)| schedule.labels.get(key) == Some(value))
+                });
+            }
+
+            let offset = params.offset.unwrap_or(0);
+            if offset > 0 {
+                schedules = schedules.into_iter().skip(offset).collect();
+            }
+            if let Some(limit) = params.limit {
+                schedules.truncate(limit);
+            }
+
+            RpcResponse::success(id, ScheduleListResult { schedules })
+        }
         Err(error) => map_schedule_error(id, error),
     }
 }
@@ -229,7 +248,7 @@ pub async fn handle_occurrences(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let params: ScheduleIdParams = match parse_params(params) {
+    let params: ScheduleOccurrencesParams = match parse_params(params) {
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
@@ -239,7 +258,7 @@ pub async fn handle_occurrences(
     };
 
     match schedule_service(&runtime)
-        .list_occurrences(&schedule_id)
+        .list_occurrences_filtered(&schedule_id, params.include_terminal.unwrap_or(true))
         .await
     {
         Ok(occurrences) => RpcResponse::success(id, ScheduleOccurrencesResult { occurrences }),
@@ -279,6 +298,7 @@ pub async fn handle_call(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -371,6 +391,25 @@ mod tests {
     ) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
         serde_json::value::RawValue::from_string(
             json!({ "schedule_id": schedule_id.to_string() }).to_string(),
+        )
+    }
+
+    fn schedule_list_raw(
+        value: Value,
+    ) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
+        serde_json::value::RawValue::from_string(value.to_string())
+    }
+
+    fn schedule_occurrences_raw(
+        schedule_id: &ScheduleId,
+        include_terminal: bool,
+    ) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
+        serde_json::value::RawValue::from_string(
+            json!({
+                "schedule_id": schedule_id.to_string(),
+                "include_terminal": include_terminal
+            })
+            .to_string(),
         )
     }
 
@@ -537,6 +576,109 @@ mod tests {
             return;
         };
         assert_eq!(resumed.phase, meerkat::SchedulePhase::Active);
+    }
+
+    #[tokio::test]
+    async fn schedule_list_supports_label_filter_and_pagination() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime = test_runtime(&temp);
+
+        let mut prod = missing_target_schedule_request().expect("valid schedule");
+        prod.name = Some("prod".to_string());
+        prod.labels.insert("env".to_string(), "prod".to_string());
+        runtime
+            .schedule_service()
+            .create(prod)
+            .await
+            .expect("create prod schedule");
+
+        let mut dev = missing_target_schedule_request().expect("valid schedule");
+        dev.name = Some("dev".to_string());
+        dev.labels.insert("env".to_string(), "dev".to_string());
+        runtime
+            .schedule_service()
+            .create(dev)
+            .await
+            .expect("create dev schedule");
+
+        let raw = schedule_list_raw(json!({
+            "labels": { "env": "prod" },
+            "limit": 1,
+            "offset": 0
+        }))
+        .expect("raw list params");
+
+        let response = handle_list(Some(RpcId::Num(1)), Some(raw.as_ref()), runtime.clone()).await;
+        assert!(response.error.is_none(), "schedule/list should succeed");
+        let result = response.result.expect("schedule/list result");
+        let value: Value = serde_json::from_str(result.get()).expect("valid json");
+        let schedules = value["schedules"].as_array().expect("schedules array");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0]["name"], "prod");
+    }
+
+    #[tokio::test]
+    async fn schedule_occurrences_honors_include_terminal_flag() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime = test_runtime(&temp);
+        let request = missing_target_schedule_request().expect("valid schedule request");
+        let schedule = runtime
+            .schedule_service()
+            .create(request)
+            .await
+            .expect("create schedule");
+        runtime
+            .ensure_schedule_host_started()
+            .await
+            .expect("start schedule host");
+
+        let occurrence = wait_for_missing_target_misfire(&runtime, &schedule.schedule_id).await;
+        assert!(
+            occurrence.is_some(),
+            "expected terminal occurrence to be created"
+        );
+
+        let exclude_raw =
+            schedule_occurrences_raw(&schedule.schedule_id, false).expect("occurrence params");
+        let exclude_response = handle_occurrences(
+            Some(RpcId::Num(1)),
+            Some(exclude_raw.as_ref()),
+            runtime.clone(),
+        )
+        .await;
+        assert!(
+            exclude_response.error.is_none(),
+            "schedule/occurrences exclude-terminal should succeed"
+        );
+        let exclude_result = exclude_response.result.expect("exclude result");
+        let exclude_value: Value =
+            serde_json::from_str(exclude_result.get()).expect("valid exclude json");
+        assert_eq!(
+            exclude_value["occurrences"]
+                .as_array()
+                .expect("occurrence array")
+                .len(),
+            0
+        );
+
+        let include_raw =
+            schedule_occurrences_raw(&schedule.schedule_id, true).expect("occurrence params");
+        let include_response =
+            handle_occurrences(Some(RpcId::Num(1)), Some(include_raw.as_ref()), runtime).await;
+        assert!(
+            include_response.error.is_none(),
+            "schedule/occurrences include-terminal should succeed"
+        );
+        let include_result = include_response.result.expect("include result");
+        let include_value: Value =
+            serde_json::from_str(include_result.get()).expect("valid include json");
+        assert_eq!(
+            include_value["occurrences"]
+                .as_array()
+                .expect("occurrence array")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

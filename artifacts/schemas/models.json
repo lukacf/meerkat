@@ -94,6 +94,13 @@
         ],
         "description": "Model profile with capability flags and parameter schema."
       },
+      "server_id": {
+        "description": "Backing self-hosted server ID for configured aliases.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "tier": {
         "$ref": "#/$defs/WireModelTier",
         "description": "Recommendation tier."
@@ -148,6 +155,13 @@
               }
             ],
             "description": "Model profile with capability flags and parameter schema."
+          },
+          "server_id": {
+            "description": "Backing self-hosted server ID for configured aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tier": {
             "$ref": "#/$defs/WireModelTier",
@@ -329,6 +343,13 @@
               }
             ],
             "description": "Model profile with capability flags and parameter schema."
+          },
+          "server_id": {
+            "description": "Backing self-hosted server ID for configured aliases.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tier": {
             "$ref": "#/$defs/WireModelTier",

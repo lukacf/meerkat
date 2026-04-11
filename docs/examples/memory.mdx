@@ -56,7 +56,7 @@ When memory is enabled, discarded conversation turns are indexed into a semantic
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Analyze the full codebase",
         enable_memory=True,
         enable_builtins=True,
@@ -65,8 +65,7 @@ When memory is enabled, discarded conversation turns are indexed into a semantic
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Analyze the full codebase",
+    const result = await client.createSession("Analyze the full codebase", {
       enableMemory: true,
       enableBuiltins: true,
     });
@@ -225,7 +224,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Research this topic",
         budget_limits={
             "max_total_tokens": 10000,
@@ -237,8 +236,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Research this topic",
+    const result = await client.createSession("Research this topic", {
       budgetLimits: {
         maxTotalTokens: 10000,
         maxDurationMs: 30000,

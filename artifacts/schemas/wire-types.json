@@ -2042,6 +2042,2551 @@
     "title": "RuntimeStateResult",
     "type": "object"
   },
+  "ScheduleListResult": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "CalendarFieldSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "values",
+                "type": "string"
+              },
+              "values": {
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "values"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CalendarTriggerSpec": {
+        "properties": {
+          "day_of_month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "day_of_week": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "hour": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "minute": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CalendarFieldSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "ForkContextSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HelperOptionsSpec": {
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role_name": {
+            "description": "Role name (profile key) for the helper in the mob roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "IntervalTriggerSpec": {
+        "properties": {
+          "end_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "every_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_at_utc",
+          "every_seconds"
+        ],
+        "type": "object"
+      },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "MisfirePolicy": {
+        "oneOf": [
+          {
+            "description": "Skip materially late pending occurrences instead of catching them up.\n\nThe scheduler applies a small internal grace window so normal tick\njitter does not immediately misfire on-time work.",
+            "properties": {
+              "type": {
+                "const": "skip",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Catch up overdue pending occurrences only while they remain within the\nconfigured lateness window.",
+            "properties": {
+              "type": {
+                "const": "catch_up_within",
+                "type": "string"
+              },
+              "window_seconds": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "window_seconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MissingTargetPolicy": {
+        "enum": [
+          "skip",
+          "mark_misfired"
+        ],
+        "type": "string"
+      },
+      "MobTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledMobAction"
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "flow_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "params": true,
+              "type": {
+                "const": "flow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "flow_id",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "type": {
+                "const": "spawn_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fork_context": {
+                "$ref": "#/$defs/ForkContextSpec",
+                "default": {
+                  "type": "full_history"
+                }
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "source_member_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "fork_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "source_member_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OverlapPolicy": {
+        "enum": [
+          "allow_concurrent",
+          "skip_if_running"
+        ],
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RenderClass": {
+        "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "RenderMetadata": {
+        "description": "Optional rendering metadata carried alongside ordinary work content.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/RenderClass"
+          },
+          "salience": {
+            "$ref": "#/$defs/RenderSalience",
+            "default": "normal"
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "RenderSalience": {
+        "description": "Constrained salience metadata for injected ordinary work.\n\nThis is intentionally a small closed enum so call sites do not invent\narbitrary free-text urgency language.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      },
+      "Schedule": {
+        "properties": {
+          "created_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "misfire_policy": {
+            "$ref": "#/$defs/MisfirePolicy",
+            "default": {
+              "type": "skip"
+            }
+          },
+          "missing_target_policy": {
+            "$ref": "#/$defs/MissingTargetPolicy",
+            "default": "mark_misfired"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/$defs/OverlapPolicy",
+            "default": "skip_if_running"
+          },
+          "phase": {
+            "$ref": "#/$defs/SchedulePhase"
+          },
+          "planning_cursor_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planning_horizon_days": {
+            "default": 30,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "planning_horizon_occurrences": {
+            "default": 64,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schedule_id": {
+            "$ref": "#/$defs/ScheduleId"
+          },
+          "target": {
+            "$ref": "#/$defs/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/$defs/TriggerSpec"
+          },
+          "updated_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "phase",
+          "revision",
+          "trigger",
+          "target",
+          "next_occurrence_ordinal",
+          "created_at_utc",
+          "updated_at_utc"
+        ],
+        "type": "object"
+      },
+      "ScheduleId": {
+        "description": "Opaque identifier for a persisted schedule.",
+        "type": "string"
+      },
+      "SchedulePhase": {
+        "enum": [
+          "active",
+          "paused",
+          "deleted"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScheduledMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "ScheduledSessionAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "additional_instructions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill_references": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "system_prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "prompt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event_type",
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SessionMaterializationSpec": {
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "app_context": true,
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comms_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "config_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keep_alive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preload_skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "structured_output_retries": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "SessionTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "exact_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "resumable_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "bound_session_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "create": {
+                "$ref": "#/$defs/SessionMaterializationSpec"
+              },
+              "type": {
+                "const": "materialize_on_demand_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "create",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TargetBinding": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SessionTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/MobTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TriggerSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "due_at_utc": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "type": {
+                "const": "once",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "due_at_utc"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/IntervalTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "interval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/CalendarTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "calendar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "schedules": {
+        "items": {
+          "$ref": "#/$defs/Schedule"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "schedules"
+    ],
+    "title": "ScheduleListResult",
+    "type": "object"
+  },
+  "ScheduleOccurrencesResult": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "CalendarFieldSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "values",
+                "type": "string"
+              },
+              "values": {
+                "items": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "values"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CalendarTriggerSpec": {
+        "properties": {
+          "day_of_month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "day_of_week": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "hour": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "minute": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "month": {
+            "$ref": "#/$defs/CalendarFieldSpec",
+            "default": {
+              "kind": "any"
+            }
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CalendarFieldSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContentInput": {
+        "anyOf": [
+          {
+            "description": "Plain text input.",
+            "type": "string"
+          },
+          {
+            "description": "Multimodal content blocks (text + images).",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
+      },
+      "DeliveryReceipt": {
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OccurrenceFailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "materialized_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "occurrence_id": {
+            "$ref": "#/$defs/OccurrenceId"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "recorded_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "stage": {
+            "$ref": "#/$defs/DeliveryReceiptStage"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "occurrence_id",
+          "attempt",
+          "stage",
+          "recorded_at_utc"
+        ],
+        "type": "object"
+      },
+      "DeliveryReceiptStage": {
+        "enum": [
+          "planned",
+          "claimed",
+          "dispatch_started",
+          "dispatch_accepted",
+          "awaiting_completion",
+          "completed",
+          "skipped",
+          "misfired",
+          "superseded",
+          "delivery_failed",
+          "lease_expired"
+        ],
+        "type": "string"
+      },
+      "ForkContextSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HelperOptionsSpec": {
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role_name": {
+            "description": "Role name (profile key) for the helper in the mob roster.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScheduledMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "IntervalTriggerSpec": {
+        "properties": {
+          "end_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "every_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_at_utc",
+          "every_seconds"
+        ],
+        "type": "object"
+      },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "MisfirePolicy": {
+        "oneOf": [
+          {
+            "description": "Skip materially late pending occurrences instead of catching them up.\n\nThe scheduler applies a small internal grace window so normal tick\njitter does not immediately misfire on-time work.",
+            "properties": {
+              "type": {
+                "const": "skip",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Catch up overdue pending occurrences only while they remain within the\nconfigured lateness window.",
+            "properties": {
+              "type": {
+                "const": "catch_up_within",
+                "type": "string"
+              },
+              "window_seconds": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "window_seconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MissingTargetPolicy": {
+        "enum": [
+          "skip",
+          "mark_misfired"
+        ],
+        "type": "string"
+      },
+      "MobTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledMobAction"
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "flow_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "params": true,
+              "type": {
+                "const": "flow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "flow_id",
+              "params"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "type": {
+                "const": "spawn_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fork_context": {
+                "$ref": "#/$defs/ForkContextSpec",
+                "default": {
+                  "type": "full_history"
+                }
+              },
+              "member_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "options": {
+                "$ref": "#/$defs/HelperOptionsSpec",
+                "default": {}
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "source_member_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "fork_helper",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "source_member_id",
+              "member_id",
+              "prompt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Occurrence": {
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "claimed_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "claimed_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delivery_correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatched_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_at_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "failure_class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OccurrenceFailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DeliveryReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lease_expires_at_utc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "misfire_policy": {
+            "$ref": "#/$defs/MisfirePolicy"
+          },
+          "missing_target_policy": {
+            "$ref": "#/$defs/MissingTargetPolicy"
+          },
+          "occurrence_id": {
+            "$ref": "#/$defs/OccurrenceId"
+          },
+          "occurrence_ordinal": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overlap_policy": {
+            "$ref": "#/$defs/OverlapPolicy"
+          },
+          "phase": {
+            "$ref": "#/$defs/OccurrencePhase"
+          },
+          "schedule_id": {
+            "$ref": "#/$defs/ScheduleId"
+          },
+          "schedule_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "superseded_by_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target_snapshot": {
+            "$ref": "#/$defs/TargetBinding"
+          },
+          "trigger_snapshot": {
+            "$ref": "#/$defs/TriggerSpec"
+          }
+        },
+        "required": [
+          "occurrence_id",
+          "schedule_id",
+          "schedule_revision",
+          "occurrence_ordinal",
+          "phase",
+          "due_at_utc",
+          "trigger_snapshot",
+          "target_snapshot",
+          "misfire_policy",
+          "overlap_policy",
+          "missing_target_policy",
+          "created_at_utc"
+        ],
+        "type": "object"
+      },
+      "OccurrenceFailureClass": {
+        "enum": [
+          "target_materialization_failed",
+          "target_missing",
+          "target_busy",
+          "runtime_rejected",
+          "mob_rejected",
+          "lease_lost",
+          "transport_error",
+          "internal_error"
+        ],
+        "type": "string"
+      },
+      "OccurrenceId": {
+        "description": "Opaque identifier for a persisted occurrence.",
+        "type": "string"
+      },
+      "OccurrencePhase": {
+        "enum": [
+          "pending",
+          "claimed",
+          "dispatching",
+          "awaiting_completion",
+          "completed",
+          "skipped",
+          "misfired",
+          "superseded",
+          "delivery_failed"
+        ],
+        "type": "string"
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OverlapPolicy": {
+        "enum": [
+          "allow_concurrent",
+          "skip_if_running"
+        ],
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RenderClass": {
+        "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "RenderMetadata": {
+        "description": "Optional rendering metadata carried alongside ordinary work content.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/RenderClass"
+          },
+          "salience": {
+            "$ref": "#/$defs/RenderSalience",
+            "default": "normal"
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "RenderSalience": {
+        "description": "Constrained salience metadata for injected ordinary work.\n\nThis is intentionally a small closed enum so call sites do not invent\narbitrary free-text urgency language.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      },
+      "ScheduleId": {
+        "description": "Opaque identifier for a persisted schedule.",
+        "type": "string"
+      },
+      "ScheduledMobAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScheduledMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "ScheduledMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "ScheduledSessionAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "additional_instructions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "$ref": "#/$defs/ContentInput"
+              },
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill_references": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "system_prompt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "prompt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "render_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RenderMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "event_type",
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SessionMaterializationSpec": {
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "app_context": true,
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "comms_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "config_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keep_alive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preload_skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "structured_output_retries": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "SessionTargetBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "exact_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "resumable_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ScheduledSessionAction"
+              },
+              "bound_session_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "create": {
+                "$ref": "#/$defs/SessionMaterializationSpec"
+              },
+              "type": {
+                "const": "materialize_on_demand_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "create",
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TargetBinding": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SessionTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/MobTargetBinding",
+            "properties": {
+              "target_kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "target_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
+        "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "description": "Inherit all tools from parent",
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only allow specific tools",
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Block specific tools",
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TriggerSpec": {
+        "oneOf": [
+          {
+            "properties": {
+              "due_at_utc": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "type": {
+                "const": "once",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "due_at_utc"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/IntervalTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "interval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/CalendarTriggerSpec",
+            "properties": {
+              "type": {
+                "const": "calendar",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "occurrences": {
+        "items": {
+          "$ref": "#/$defs/Occurrence"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "occurrences"
+    ],
+    "title": "ScheduleOccurrencesResult",
+    "type": "object"
+  },
   "WireAssistantBlock": {
     "$defs": {
       "WireProviderMeta": {

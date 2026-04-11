@@ -1,8 +1,7 @@
 /**
  * Public domain types for the Meerkat TypeScript SDK.
  *
- * These replace the `Wire*` prefixed generated types.  All fields use
- * idiomatic camelCase.
+ * These replace the `Wire*` prefixed generated types.
  */
 
 import type { Usage } from "./events.js";
@@ -114,15 +113,19 @@ export interface RunResult {
   readonly skillDiagnostics?: SkillRuntimeDiagnostics;
 }
 
-/** Summary of an active session. */
+/** Session metadata shape used by `listSessions()` and `readSession()`. */
 export interface SessionInfo {
   readonly sessionId: string;
   readonly sessionRef?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
   readonly messageCount: number;
-  readonly totalTokens: number;
+  readonly totalTokens?: number;
   readonly isActive: boolean;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly lastAssistantText?: string;
+  readonly labels: Readonly<Record<string, string>>;
 }
 
 export interface SessionToolCall {
@@ -165,8 +168,34 @@ export interface SessionHistory {
   readonly messages: readonly SessionMessage[];
 }
 
-/** A runtime capability and its availability status. */
+/** Session listing filters for `session/list`. */
+export interface SessionListOptions {
+  readonly labels?: Readonly<Record<string, string>>;
+  readonly limit?: number;
+  readonly offset?: number;
+}
 
+/** Shared source/idempotency options used by runtime context/event APIs. */
+export interface SessionIngressOptions {
+  readonly source?: string;
+  readonly idempotencyKey?: string;
+}
+
+/** Per-turn options for normal turns and deferred first turns. */
+export interface TurnOptions {
+  readonly skillRefs?: SkillRef[];
+  readonly skillReferences?: string[];
+  readonly flowToolOverlay?: TurnToolOverlay;
+  readonly additionalInstructions?: string[];
+  readonly keepAlive?: boolean;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly maxTokens?: number;
+  readonly systemPrompt?: string;
+  readonly outputSchema?: Record<string, unknown>;
+  readonly structuredOutputRetries?: number;
+  readonly providerParams?: Record<string, unknown>;
+}
 
 export interface EventEnvelope<T = unknown> {
   readonly timestamp_ms: number;
@@ -183,15 +212,46 @@ export interface AttributedEvent {
 }
 
 /** Public mob definition input for host-side `mob/create`. */
+export interface MobToolConfig {
+  readonly builtins?: boolean;
+  readonly shell?: boolean;
+  readonly comms?: boolean;
+  readonly memory?: boolean;
+  readonly mob?: boolean;
+  readonly mob_tasks?: boolean;
+  readonly schedule?: boolean;
+  readonly mcp?: readonly string[];
+}
+
+export interface MobProfile {
+  readonly model: string;
+  readonly skills?: readonly string[];
+  readonly tools?: MobToolConfig;
+  readonly peer_description?: string;
+  readonly external_addressable?: boolean;
+  readonly backend?: "session" | "external";
+  readonly runtime_mode?: "autonomous_host" | "turn_driven";
+  readonly max_inline_peer_notifications?: number;
+  readonly output_schema?: Record<string, unknown>;
+  readonly provider_params?: Record<string, unknown>;
+}
+
+export type MobProfileBinding = MobProfile | { readonly realm_profile: string };
+
 export interface MobDefinition {
   readonly id: string;
-  readonly profiles: Record<string, unknown>;
+  readonly orchestrator?: { readonly profile: string };
+  readonly profiles: Readonly<Record<string, MobProfileBinding>>;
+  readonly mcp_servers?: Readonly<Record<string, Record<string, unknown>>>;
   readonly wiring?: Record<string, unknown>;
   readonly flows?: Record<string, unknown>;
-  readonly mcp_servers?: Record<string, unknown>;
   readonly skills?: Record<string, unknown>;
-  readonly orchestrator?: unknown;
-  readonly backend?: unknown;
+  readonly backend?: Record<string, unknown>;
+  readonly topology?: Record<string, unknown>;
+  readonly supervisor?: Record<string, unknown>;
+  readonly limits?: Record<string, unknown>;
+  readonly spawn_policy?: Record<string, unknown>;
+  readonly event_router?: Record<string, unknown>;
 }
 
 export interface SpawnSpec {
@@ -238,10 +298,202 @@ export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "r
 export interface MobFlowStatus {
   readonly run?: Record<string, unknown> | null;
 }
+
+export interface MobSpawnManyResultEntry {
+  readonly ok: boolean;
+  readonly memberRef?: Record<string, unknown>;
+  readonly sessionId?: string;
+  readonly error?: string;
+}
+
+export interface MobEventsOptions {
+  readonly afterCursor?: number;
+  readonly limit?: number;
+}
+
+export interface MobEventsResult {
+  readonly events: readonly Record<string, unknown>[];
+}
+
+export interface MobStoredProfile {
+  readonly name: string;
+  readonly profile: MobProfile;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface MobProfileLookupResult {
+  readonly notFound: boolean;
+  readonly name: string;
+  readonly profile?: MobProfile;
+  readonly revision?: number;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+export interface MobProfileDeleteResult {
+  readonly name: string;
+  readonly deletedRevision: number;
+}
+
 export interface Capability {
   readonly id: string;
   readonly description: string;
   readonly status: string;
+}
+
+export interface ConfigEnvelope {
+  readonly config: Record<string, unknown>;
+  readonly generation: number;
+  readonly metadata?: Record<string, unknown>;
+}
+
+export interface CommsSendReceipt extends Record<string, unknown> {
+  readonly kind?: string;
+  readonly requestId?: string;
+  readonly interactionId?: string;
+  readonly inputId?: string;
+}
+
+export type ModelTier = "recommended" | "supported";
+
+export interface ModelProfile {
+  readonly modelFamily: string;
+  readonly supportsTemperature: boolean;
+  readonly supportsThinking: boolean;
+  readonly supportsReasoning: boolean;
+  readonly inlineVideo: boolean;
+  readonly paramsSchema: unknown;
+}
+
+export interface CatalogModel {
+  readonly id: string;
+  readonly displayName: string;
+  readonly tier: ModelTier;
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+  readonly serverId?: string;
+  readonly profile?: ModelProfile;
+}
+
+export interface ProviderModelCatalog {
+  readonly provider: string;
+  readonly defaultModelId: string;
+  readonly models: readonly CatalogModel[];
+}
+
+export interface ContractVersion {
+  readonly major: number;
+  readonly minor: number;
+  readonly patch: number;
+}
+
+export interface ModelsCatalog {
+  readonly contractVersion: ContractVersion;
+  readonly providers: readonly ProviderModelCatalog[];
+}
+
+export interface Schedule {
+  readonly scheduleId: string;
+  readonly phase: string;
+  readonly revision: number;
+  readonly name?: string;
+  readonly description?: string;
+  readonly trigger: Record<string, unknown>;
+  readonly target: Record<string, unknown>;
+  readonly misfirePolicy?: Record<string, unknown> | string;
+  readonly overlapPolicy?: string;
+  readonly missingTargetPolicy?: string;
+  readonly planningHorizonDays?: number;
+  readonly planningHorizonOccurrences?: number;
+  readonly nextOccurrenceOrdinal?: number;
+  readonly planningCursorUtc?: string;
+  readonly createdAtUtc?: string;
+  readonly updatedAtUtc?: string;
+  readonly deletedAtUtc?: string;
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+export interface ScheduleOccurrence {
+  readonly occurrenceId: string;
+  readonly scheduleId: string;
+  readonly scheduleRevision: number;
+  readonly occurrenceOrdinal: number;
+  readonly phase: string;
+  readonly dueAtUtc: string;
+  readonly triggerSnapshot: Record<string, unknown>;
+  readonly targetSnapshot: Record<string, unknown>;
+  readonly misfirePolicy?: Record<string, unknown> | string;
+  readonly overlapPolicy?: string;
+  readonly missingTargetPolicy?: string;
+  readonly claimedBy?: string;
+  readonly leaseExpiresAtUtc?: string;
+  readonly deliveryCorrelationId?: string;
+  readonly lastReceipt?: Record<string, unknown>;
+  readonly failureClass?: string;
+  readonly failureDetail?: string;
+  readonly attemptCount?: number;
+  readonly createdAtUtc?: string;
+  readonly claimedAtUtc?: string;
+  readonly dispatchedAtUtc?: string;
+  readonly completedAtUtc?: string;
+  readonly supersededByRevision?: number;
+}
+
+export interface CreateScheduleRequest {
+  readonly name?: string;
+  readonly description?: string;
+  readonly trigger: Record<string, unknown>;
+  readonly target: Record<string, unknown>;
+  readonly misfirePolicy?: Record<string, unknown> | string;
+  readonly overlapPolicy?: string;
+  readonly missingTargetPolicy?: string;
+  readonly labels?: Readonly<Record<string, string>>;
+  readonly planningHorizonDays?: number;
+  readonly planningHorizonOccurrences?: number;
+}
+
+export interface UpdateSchedulePatch {
+  readonly expectedRevision?: number;
+  readonly name?: string;
+  readonly description?: string;
+  readonly trigger?: Record<string, unknown>;
+  readonly target?: Record<string, unknown>;
+  readonly misfirePolicy?: Record<string, unknown> | string;
+  readonly overlapPolicy?: string;
+  readonly missingTargetPolicy?: string;
+  readonly planningHorizonDays?: number;
+  readonly planningHorizonOccurrences?: number;
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
+export interface UpdateScheduleRequest {
+  readonly scheduleId: string;
+  readonly update: UpdateSchedulePatch;
+}
+
+export interface ScheduleOccurrencesResult {
+  readonly occurrences: readonly ScheduleOccurrence[];
+}
+
+export interface ScheduleToolsResult {
+  readonly tools: readonly Record<string, unknown>[];
+}
+
+export interface ScheduleListOptions {
+  readonly labels?: Readonly<Record<string, string>>;
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+export interface ScheduleOccurrencesOptions {
+  readonly includeTerminal?: boolean;
+}
+
+export interface ScheduleToolCallRequest {
+  readonly name: string;
+  readonly arguments?: unknown;
 }
 
 /** Options for creating a new session. */
@@ -265,6 +517,11 @@ export interface SessionOptions {
   preloadSkills?: string[];
   skillRefs?: SkillRef[];
   skillReferences?: string[];
+  labels?: Readonly<Record<string, string>>;
+  additionalInstructions?: readonly string[];
+  appContext?: unknown;
+  shellEnv?: Readonly<Record<string, string>>;
+  externalTools?: readonly Record<string, unknown>[];
 }
 
 

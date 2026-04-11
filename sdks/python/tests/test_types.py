@@ -21,7 +21,9 @@ from meerkat import (
     SessionAssistantBlock,
     SessionHistory,
     SessionInfo,
+    SessionDetails,
     SessionMessage,
+    SessionSummary,
     SessionToolCall,
     SessionToolResult,
     SkillKey,
@@ -211,6 +213,34 @@ def test_session_info():
     assert info.session_id == "abc"
     assert info.is_active is True
     assert info.message_count == 5
+
+
+def test_session_summary_and_details_types():
+    summary = SessionSummary(
+        session_id="summary-id",
+        created_at=1700000000,
+        updated_at=1700000100,
+        message_count=4,
+        total_tokens=128,
+        labels={"env": "dev"},
+        is_active=False,
+    )
+    details = SessionDetails(
+        session_id="details-id",
+        created_at=1700000001,
+        updated_at=1700000111,
+        message_count=6,
+        labels={"team": "sdk"},
+        is_active=True,
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        last_assistant_text="ready",
+    )
+    assert summary.total_tokens == 128
+    assert summary.created_at == 1700000000
+    assert details.model == "claude-sonnet-4-6"
+    assert details.provider == "anthropic"
+    assert details.last_assistant_text == "ready"
 
 
 def test_session_history_types():
@@ -667,6 +697,174 @@ async def test_client_read_session_history_calls_expected_rpc_method():
     assert [m for m, _ in calls] == ["session/history"]
     assert calls[0][1] == {"session_id": "s1", "offset": 1, "limit": 2}
     assert history.messages[1].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_client_list_sessions_parses_summary_shape():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "session/list"
+        assert params == {"labels": {"team": "sdk"}, "limit": 2, "offset": 1}
+        return {
+            "sessions": [
+                {
+                    "session_id": "s1",
+                    "session_ref": "realm/s1",
+                    "created_at": 1711111111,
+                    "updated_at": 1711111222,
+                    "message_count": 3,
+                    "total_tokens": 77,
+                    "labels": {"team": "sdk"},
+                    "is_active": False,
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    sessions = await client.list_sessions(labels={"team": "sdk"}, limit=2, offset=1)
+    assert len(sessions) == 1
+    assert isinstance(sessions[0], SessionSummary)
+    assert sessions[0].session_id == "s1"
+    assert sessions[0].total_tokens == 77
+    assert sessions[0].created_at == 1711111111
+
+
+@pytest.mark.asyncio
+async def test_client_read_session_parses_details_shape():
+    client = MeerkatClient()
+
+    async def fake_request(method, params):
+        assert method == "session/read"
+        assert params == {"session_id": "s1"}
+        return {
+            "session_id": "s1",
+            "session_ref": "realm/s1",
+            "created_at": 1711111111,
+            "updated_at": 1711111222,
+            "message_count": 5,
+            "labels": {"team": "sdk"},
+            "is_active": True,
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "last_assistant_text": "hello",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    details = await client.read_session("s1")
+    assert isinstance(details, SessionDetails)
+    assert details.session_id == "s1"
+    assert details.model == "claude-sonnet-4-6"
+    assert details.provider == "anthropic"
+    assert details.last_assistant_text == "hello"
+
+
+@pytest.mark.asyncio
+async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_methods():
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        if method == "models/catalog":
+            return {
+                "contract_version": {"major": 0, "minor": 5, "patch": 1},
+                "providers": [],
+            }
+        if method == "schedule/list":
+            return {"schedules": []}
+        if method == "schedule/occurrences":
+            return {"occurrences": []}
+        if method == "schedule/tools":
+            return {"tools": [{"name": "meerkat_schedule_list"}]}
+        return {"ok": True}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    models = await client.get_models_catalog()
+    assert models["contract_version"] == {"major": 0, "minor": 5, "patch": 1}
+
+    await client.create_schedule({"name": "test"})
+    await client.get_schedule("sch_1")
+    await client.list_schedules(labels={"env": "test"}, limit=5, offset=2)
+    await client.update_schedule({"schedule_id": "sch_1", "name": "updated"})
+    await client.pause_schedule("sch_1")
+    await client.resume_schedule("sch_1")
+    await client.delete_schedule("sch_1")
+    await client.list_schedule_occurrences("sch_1")
+    tools = await client.list_schedule_tools()
+    assert tools["tools"][0]["name"] == "meerkat_schedule_list"
+    await client.call_schedule_tool({"name": "meerkat_schedule_list"})
+
+    assert [method for method, _ in calls] == [
+        "models/catalog",
+        "schedule/create",
+        "schedule/get",
+        "schedule/list",
+        "schedule/update",
+        "schedule/pause",
+        "schedule/resume",
+        "schedule/delete",
+        "schedule/occurrences",
+        "schedule/tools",
+        "schedule/call",
+    ]
+    assert calls[3][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
+
+
+@pytest.mark.asyncio
+async def test_session_turn_and_stream_support_full_turn_overrides():
+    session_calls = []
+
+    class StubClient:
+        async def _start_turn(self, session_id, prompt, **kwargs):
+            session_calls.append(("turn", session_id, prompt, kwargs))
+            return RunResult(session_id=session_id, text="ok", usage=Usage())
+
+        def _start_turn_streaming(self, session_id, prompt, **kwargs):
+            session_calls.append(("stream", session_id, prompt, kwargs))
+            return "stream-handle"
+
+    session = Session(
+        StubClient(),  # type: ignore[arg-type]
+        RunResult(session_id="s1", text="ready", usage=Usage()),
+    )
+
+    result = await session.turn(
+        "next",
+        additional_instructions=["Follow policy A."],
+        keep_alive=True,
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        max_tokens=512,
+        system_prompt="System",
+        output_schema={"type": "object"},
+        structured_output_retries=3,
+        provider_params={"reasoning_effort": "low"},
+    )
+    assert result.text == "ok"
+
+    stream_handle = session.stream(
+        "stream it",
+        additional_instructions=["Follow policy B."],
+        keep_alive=False,
+        model="gpt-5.4",
+        provider="openai",
+        max_tokens=256,
+        system_prompt="Stream system",
+        output_schema={"type": "object"},
+        structured_output_retries=2,
+        provider_params={"foo": "bar"},
+    )
+    assert stream_handle == "stream-handle"
+    assert session_calls[0][0] == "turn"
+    assert session_calls[0][3]["additional_instructions"] == ["Follow policy A."]
+    assert session_calls[0][3]["keep_alive"] is True
+    assert session_calls[1][0] == "stream"
+    assert session_calls[1][3]["additional_instructions"] == ["Follow policy B."]
+    assert session_calls[1][3]["model"] == "gpt-5.4"
 
 
 @pytest.mark.asyncio

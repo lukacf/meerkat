@@ -3,9 +3,12 @@ import type {
   AgentEventEnvelope,
   AttributedMobEvent,
   ContentBlock,
+  MobEventsOptions,
+  MobEventsResult,
   MobFlowStatus,
   MobLifecycleAction,
   MobMember,
+  MobSpawnManyResultEntry,
   MobStatus,
   SpawnSpec,
 } from "./types.js";
@@ -140,6 +143,10 @@ export class Mob {
     return this.client.spawnMobMember(this.mobId, spec);
   }
 
+  async spawnMany(specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]> {
+    return this.client.spawnMobMembers(this.mobId, specs);
+  }
+
   async retire(meerkatId: string): Promise<void> {
     await this.client.retireMobMember(this.mobId, meerkatId);
   }
@@ -167,7 +174,7 @@ export class Mob {
 
   async spawnHelper(
     prompt: string,
-    options?: { meerkatId?: string; profileName?: string },
+    options?: { meerkatId?: string; roleName?: string; profileName?: string },
   ): Promise<MobHelperResult> {
     return this.client.spawnMobHelper(this.mobId, prompt, options);
   }
@@ -175,7 +182,12 @@ export class Mob {
   async forkHelper(
     sourceMemberId: string,
     prompt: string,
-    options?: { meerkatId?: string; profileName?: string; forkContext?: Record<string, unknown> },
+    options?: {
+      meerkatId?: string;
+      roleName?: string;
+      profileName?: string;
+      forkContext?: Record<string, unknown>;
+    },
   ): Promise<MobHelperResult> {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
   }
@@ -226,5 +238,9 @@ export class Mob {
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {
     return this.client.subscribeMobEvents(this.mobId);
+  }
+
+  async readEvents(options?: MobEventsOptions): Promise<MobEventsResult> {
+    return this.client.readMobEvents(this.mobId, options);
   }
 }

@@ -53,7 +53,11 @@ def _pascal_case(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
-def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
+def _python_type_from_schema(
+    root: dict[str, Any],
+    field_schema: Any,
+    local_defs: set[str] | None = None,
+) -> tuple[str, bool]:
     """Return (python_type, optional)."""
     if field_schema is True:
         return ("Any", False)
@@ -69,11 +73,11 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
             ]
             optional = len(non_null) != len(variants)
             if len(non_null) == 1:
-                inner_type, inner_optional = _python_type_from_schema(root, non_null[0])
+                inner_type, inner_optional = _python_type_from_schema(root, non_null[0], local_defs)
                 return (inner_type, optional or inner_optional)
             variant_types: list[str] = []
             for variant in non_null:
-                inner_type, _ = _python_type_from_schema(root, variant)
+                inner_type, _ = _python_type_from_schema(root, variant, local_defs)
                 if inner_type not in variant_types:
                     variant_types.append(inner_type)
             if variant_types:
@@ -83,9 +87,9 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
         if not resolved and ref_name:
             resolved = _lookup_named_schema(root, ref_name)
-        if ref_name and resolved:
+        if ref_name and resolved and ref_name not in (local_defs or set()):
             return (ref_name, False)
-        return _python_type_from_schema(root, resolved)
+        return _python_type_from_schema(root, resolved, local_defs)
 
     schema_type = field_schema.get("type")
     optional = False
@@ -108,7 +112,7 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
             return ("float", optional)
         case "array":
             item_schema = field_schema.get("items")
-            item_type, _ = _python_type_from_schema(root, item_schema)
+            item_type, _ = _python_type_from_schema(root, item_schema, local_defs)
             if item_type == "Any":
                 return ("list[Any]", optional)
             return (f"list[{item_type}]", optional)
@@ -124,7 +128,11 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
             return ("Any", optional)
 
 
-def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
+def _typescript_type_from_schema(
+    root: dict[str, Any],
+    field_schema: Any,
+    local_defs: set[str] | None = None,
+) -> tuple[str, bool]:
     """Return (typescript_type, optional)."""
     if field_schema is True:
         return ("unknown", False)
@@ -140,11 +148,11 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
             ]
             optional = len(non_null) != len(variants)
             if len(non_null) == 1:
-                inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0])
+                inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0], local_defs)
                 return (inner_type, optional or inner_optional)
             variant_types: list[str] = []
             for variant in non_null:
-                inner_type, _ = _typescript_type_from_schema(root, variant)
+                inner_type, _ = _typescript_type_from_schema(root, variant, local_defs)
                 if inner_type not in variant_types:
                     variant_types.append(inner_type)
             if variant_types:
@@ -154,9 +162,9 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
         if not resolved and ref_name:
             resolved = _lookup_named_schema(root, ref_name)
-        if ref_name and resolved:
+        if ref_name and resolved and ref_name not in (local_defs or set()):
             return (ref_name, False)
-        return _typescript_type_from_schema(root, resolved)
+        return _typescript_type_from_schema(root, resolved, local_defs)
 
     schema_type = field_schema.get("type")
     optional = False
@@ -179,7 +187,7 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
             return ("number", optional)
         case "array":
             item_schema = field_schema.get("items")
-            item_type, _ = _typescript_type_from_schema(root, item_schema)
+            item_type, _ = _typescript_type_from_schema(root, item_schema, local_defs)
             if item_type == "unknown":
                 return ("unknown[]", optional)
             return (f"{item_type}[]", optional)
@@ -255,15 +263,15 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
     types_content += "    tool_use_id: str = ''\n"
-    types_content += "    content: str = ''\n"
+    types_content += "    content: Optional[WireToolResultContent] = None\n"
     types_content += "    is_error: Optional[bool] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireSessionMessage:\n"
     types_content += '    """Canonical transcript message."""\n'
     types_content += "    role: str = ''\n"
-    types_content += "    content: Optional[Any] = None\n"
+    types_content += "    content: Optional[WireContentInput] = None\n"
     types_content += "    tool_calls: Optional[list[WireToolCall]] = None\n"
-    types_content += "    stop_reason: Optional[str] = None\n"
+    types_content += "    stop_reason: Optional[WireStopReason] = None\n"
     types_content += "    blocks: Optional[list[WireAssistantBlock]] = None\n"
     types_content += "    results: Optional[list[WireToolResult]] = None\n\n\n"
 
@@ -316,15 +324,25 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
 
     def append_python_dataclass(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
         nonlocal types_content
-        schema = root_schema.get(name, {})
+        schema = _lookup_named_schema(root_schema, name)
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = dict(root_schema)
+        schema_root["$defs"] = {
+            **root_schema.get("$defs", {}),
+            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
         types_content += f"\n@dataclass\nclass {name}:\n"
         types_content += f'    """{doc}"""\n'
         for field_name, field_schema in properties.items():
             python_field_name = _python_identifier(field_name)
-            field_type, is_optional_type = _python_type_from_schema(schema, field_schema)
+            field_type, is_optional_type = _python_type_from_schema(
+                schema_root,
+                field_schema,
+                local_defs,
+            )
             is_required = field_name in required
             annotation = field_type
             if is_optional_type and not is_required:
@@ -349,7 +367,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     def append_python_alias(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
         nonlocal types_content
         schema = _lookup_named_schema(root_schema, name)
-        alias_type, _ = _python_type_from_schema(root_schema, schema)
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = dict(root_schema)
+        schema_root["$defs"] = {
+            **root_schema.get("$defs", {}),
+            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        alias_type, _ = _python_type_from_schema(schema_root, schema, local_defs)
         doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
         types_content += f"\n# {doc}\n{name} = {alias_type}\n"
 
@@ -364,6 +388,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RuntimeResetParams", params_schema, "Request payload for runtime/reset.")
     append_python_dataclass("InputStateParams", params_schema, "Request payload for input/state.")
     append_python_dataclass("InputListParams", params_schema, "Request payload for input/list.")
+    append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
+    append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
+    append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
+    append_python_dataclass("UpdateScheduleParams", params_schema, "Request payload for schedule/update.")
     append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
     append_python_dataclass("WireRenderMetadata", wire_schema, "Render metadata for mob member delivery.")
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
@@ -376,6 +404,15 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireInputStateHistoryEntry", wire_schema, "Input transition history entry.")
     append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
     append_python_dataclass("InputListResult", wire_schema, "Response payload for input/list.")
+    append_python_dataclass("ScheduleListResult", wire_schema, "Response payload for schedule/list.")
+    append_python_dataclass("ScheduleOccurrencesResult", wire_schema, "Response payload for schedule/occurrences.")
+    append_python_dataclass("WireSessionInfo", wire_schema, "Detailed session metadata payload.")
+    append_python_dataclass("WireSessionSummary", wire_schema, "Session summary payload returned by session/list.")
+    append_python_dataclass("ContractVersion", schemas.get("models", {}), "Semantic contract version triple.")
+    append_python_dataclass("CatalogModelEntry", schemas.get("models", {}), "Catalog model entry.")
+    append_python_dataclass("ProviderCatalog", schemas.get("models", {}), "Provider grouping in the model catalog.")
+    append_python_dataclass("ModelsCatalogResponse", schemas.get("models", {}), "Response payload for models/catalog.")
+    append_python_dataclass("WireModelProfile", schemas.get("models", {}), "Wire-level model capability profile.")
 
     # Keep aliases after the dataclasses they reference. Unlike annotations, alias
     # assignments are evaluated eagerly at import time.
@@ -390,6 +427,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireRuntimeState", wire_schema, "Public runtime state projection used by RPC surfaces.")
     append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for runtime/accept responses.")
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
+    append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
+    append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
+    append_python_alias("WireModelTier", schemas.get("models", {}), "Wire-level model recommendation tier.")
     types_content += "\n# Response payload for `input/state`.\nInputStateResult = Optional[WireInputState]\n"
 
     (output_dir / "types.py").write_text(types_content)
@@ -468,15 +508,15 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     types_content += "export interface WireToolResult {\n"
     types_content += "  tool_use_id: string;\n"
-    types_content += "  content: string;\n"
+    types_content += "  content: WireToolResultContent;\n"
     types_content += "  is_error?: boolean;\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireSessionMessage {\n"
     types_content += "  role: string;\n"
-    types_content += "  content?: string;\n"
+    types_content += "  content?: WireContentInput;\n"
     types_content += "  tool_calls?: WireToolCall[];\n"
-    types_content += "  stop_reason?: string;\n"
+    types_content += "  stop_reason?: WireStopReason;\n"
     types_content += "  blocks?: WireAssistantBlock[];\n"
     types_content += "  results?: WireToolResult[];\n"
     types_content += "}\n\n"
@@ -528,12 +568,22 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     def append_typescript_interface(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
-        schema = root_schema.get(name, {})
+        schema = _lookup_named_schema(root_schema, name)
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         required = set(schema.get("required", [])) if isinstance(schema, dict) else set()
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = dict(root_schema)
+        schema_root["$defs"] = {
+            **root_schema.get("$defs", {}),
+            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
         types_content += f"\nexport interface {name} {{\n"
         for field_name, field_schema in properties.items():
-            field_type, optional_by_type = _typescript_type_from_schema(schema, field_schema)
+            field_type, optional_by_type = _typescript_type_from_schema(
+                schema_root,
+                field_schema,
+                local_defs,
+            )
             optional = "?" if (field_name not in required or optional_by_type) else ""
             types_content += f"  {field_name}{optional}: {field_type};\n"
         types_content += "}\n"
@@ -541,7 +591,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     def append_typescript_alias(name: str, root_schema: dict[str, Any]) -> None:
         nonlocal types_content
         schema = _lookup_named_schema(root_schema, name)
-        alias_type, _ = _typescript_type_from_schema(root_schema, schema)
+        local_defs = set(schema.get("$defs", {}).keys()) if isinstance(schema, dict) else set()
+        schema_root = dict(root_schema)
+        schema_root["$defs"] = {
+            **root_schema.get("$defs", {}),
+            **(schema.get("$defs", {}) if isinstance(schema, dict) else {}),
+        }
+        alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
 
     append_typescript_interface("McpAddParams", params_schema)
@@ -555,6 +611,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("RuntimeResetParams", params_schema)
     append_typescript_interface("InputStateParams", params_schema)
     append_typescript_interface("InputListParams", params_schema)
+    append_typescript_interface("ScheduleIdParams", params_schema)
+    append_typescript_interface("ListSchedulesParams", params_schema)
+    append_typescript_interface("ScheduleOccurrencesParams", params_schema)
+    append_typescript_interface("UpdateScheduleParams", params_schema)
     append_typescript_interface("McpLiveOpResponse", wire_schema)
     types_content += "\nexport type InputStateResult = WireInputState | null;\n"
     append_typescript_alias("WireContentBlock", wire_schema)
@@ -568,6 +628,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireRuntimeState", wire_schema)
     append_typescript_alias("RuntimeAcceptOutcomeType", wire_schema)
     append_typescript_alias("WireInputLifecycleState", wire_schema)
+    append_typescript_alias("WireStopReason", wire_schema)
+    append_typescript_alias("WireToolResultContent", wire_schema)
+    append_typescript_alias("WireModelTier", schemas.get("models", {}))
     append_typescript_interface("WireRenderMetadata", wire_schema)
     append_typescript_interface("WireTrustedPeerSpec", wire_schema)
     append_typescript_interface("MobWireResult", wire_schema)
@@ -579,6 +642,15 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireInputStateHistoryEntry", wire_schema)
     append_typescript_interface("WireInputState", wire_schema)
     append_typescript_interface("InputListResult", wire_schema)
+    append_typescript_interface("ScheduleListResult", wire_schema)
+    append_typescript_interface("ScheduleOccurrencesResult", wire_schema)
+    append_typescript_interface("WireSessionInfo", wire_schema)
+    append_typescript_interface("WireSessionSummary", wire_schema)
+    append_typescript_interface("ContractVersion", schemas.get("models", {}))
+    append_typescript_interface("CatalogModelEntry", schemas.get("models", {}))
+    append_typescript_interface("ProviderCatalog", schemas.get("models", {}))
+    append_typescript_interface("ModelsCatalogResponse", schemas.get("models", {}))
+    append_typescript_interface("WireModelProfile", schemas.get("models", {}))
 
     (output_dir / "types.ts").write_text(types_content)
 

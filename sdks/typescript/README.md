@@ -2,7 +2,7 @@
 
 TypeScript client for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
-Current contract version: `0.5.0`.
+Current contract version: `0.5.1`.
 
 ## Installation
 
@@ -125,6 +125,11 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.preloadSkills` | `string[]` | `undefined` | Skill source UUIDs to load before the run. |
 | `options.skillRefs` | `SkillRef[]` | `undefined` | Canonical structured skill references. |
 | `options.skillReferences` | `string[]` | `undefined` | Legacy string skill references; prefer `skillRefs`. |
+| `options.labels` | `Record<string, string>` | `undefined` | Session labels used for filtering and metadata. |
+| `options.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
+| `options.appContext` | `unknown` | `undefined` | Opaque app context passed to custom builders. |
+| `options.shellEnv` | `Record<string, string>` | `undefined` | Per-session shell environment variables. |
+| `options.externalTools` | `Record<string, unknown>[]` | `undefined` | Inline callback tool definitions for this session. |
 
 ### createDeferredSession(prompt, options?)
 
@@ -140,18 +145,57 @@ Creates a session identity without running the first turn yet. Use `await deferr
 ### listSessions()
 
 ```ts
-async listSessions(): Promise<SessionInfo[]>
+async listSessions(options?: {
+  labels?: Record<string, string>;
+  limit?: number;
+  offset?: number;
+}): Promise<SessionInfo[]>
 ```
 
-Returns an array of `SessionInfo` objects with camelCase fields such as `sessionId`, `sessionRef`, `messageCount`, and `isActive`.
+Returns an array of typed `SessionInfo` objects with camelCase fields such as `sessionId`, `sessionRef`, `messageCount`, `isActive`, and `labels`.
 
 ### readSession(sessionId)
 
 ```ts
-async readSession(sessionId: string): Promise<Record<string, unknown>>
+async readSession(sessionId: string): Promise<SessionInfo>
 ```
 
-Returns the current state payload for a session.
+Returns typed session details including `model`, `provider`, `lastAssistantText`, and `labels`.
+
+### Session ingress helpers
+
+```ts
+async sendExternalEvent(sessionId: string, payload: unknown, options?: { source?: string }): Promise<Record<string, unknown>>
+async injectContext(sessionId: string, text: string, options?: { source?: string; idempotencyKey?: string }): Promise<{ status: string }>
+```
+
+These expose `session/external_event` and `session/inject_context` as first-class public APIs.
+
+### Schedules, Models, and Mob profile APIs
+
+```ts
+async getModelsCatalog(): Promise<ModelsCatalog>
+
+async createSchedule(request: CreateScheduleRequest): Promise<Schedule>
+async getSchedule(scheduleId: string): Promise<Schedule>
+async listSchedules(options?: ScheduleListOptions): Promise<Schedule[]>
+async updateSchedule(request: UpdateScheduleRequest): Promise<Schedule>
+async pauseSchedule(scheduleId: string): Promise<Schedule>
+async resumeSchedule(scheduleId: string): Promise<Schedule>
+async deleteSchedule(scheduleId: string): Promise<Schedule>
+async listScheduleOccurrences(scheduleId: string, options?: ScheduleOccurrencesOptions): Promise<ScheduleOccurrencesResult>
+async listScheduleTools(): Promise<ScheduleToolsResult>
+async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string, unknown>>
+
+async readMobEvents(mobId: string, options?: MobEventsOptions): Promise<MobEventsResult>
+async spawnMobMembers(mobId: string, specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]>
+
+async createMobProfile(name: string, profile: MobProfile): Promise<MobProfileLookupResult>
+async getMobProfile(name: string): Promise<MobProfileLookupResult>
+async listMobProfiles(): Promise<MobProfileLookupResult[]>
+async updateMobProfile(name: string, profile: MobProfile, expectedRevision: number): Promise<MobProfileLookupResult>
+async deleteMobProfile(name: string, expectedRevision: number): Promise<MobProfileDeleteResult>
+```
 
 ### Session lifecycle on wrappers
 
@@ -204,26 +248,26 @@ Throws `MeerkatError` with code `"CAPABILITY_UNAVAILABLE"` if the capability is 
 ### getConfig()
 
 ```ts
-async getConfig(): Promise<Record<string, unknown>>
+async getConfig(): Promise<ConfigEnvelope>
 ```
 
-Returns the current Meerkat configuration as a JSON object.
+Returns a config envelope: `{ config, generation, metadata? }`.
 
 ### setConfig(config)
 
 ```ts
-async setConfig(config: Record<string, unknown>): Promise<void>
+async setConfig(config: Record<string, unknown>): Promise<ConfigEnvelope>
 ```
 
-Replaces the entire runtime configuration.
+Replaces the entire runtime configuration and returns the updated envelope.
 
 ### patchConfig(patch)
 
 ```ts
-async patchConfig(patch: Record<string, unknown>): Promise<Record<string, unknown>>
+async patchConfig(patch: Record<string, unknown>): Promise<ConfigEnvelope>
 ```
 
-Merge-patches the runtime configuration and returns the resulting config.
+Merge-patches the runtime configuration and returns the updated envelope.
 
 ## Public Types
 
@@ -333,14 +377,14 @@ try {
 
 ## Version Compatibility
 
-The SDK exports `CONTRACT_VERSION` (currently `"0.4.11"`). During `connect()`, the SDK checks that the server's contract version is compatible:
+The SDK exports `CONTRACT_VERSION` (currently `"0.5.1"`). During `connect()`, the SDK checks that the server's contract version is compatible:
 
 - While the major version is `0`, minor versions must match exactly (e.g. SDK `0.1.x` requires server `0.1.x`).
 - Once `1.0.0` is reached, major versions must match (standard semver).
 
 ```ts
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.4.11"
+console.log(CONTRACT_VERSION);  // "0.5.1"
 ```
 
 If the versions are incompatible, `connect()` throws a `MeerkatError` with code `"VERSION_MISMATCH"`.
@@ -353,14 +397,14 @@ await client.connect();
 
 // Read the current config.
 const config = await client.getConfig();
-console.log(config);
+console.log(config.generation, config.config);
 
 // Replace the entire config.
-await client.setConfig({ ...config, max_tokens: 4096 });
+await client.setConfig({ ...config.config, max_tokens: 4096 });
 
 // Or merge-patch specific fields.
 const updated = await client.patchConfig({ max_tokens: 8192 });
-console.log(updated.max_tokens);  // 8192
+console.log(updated.config.max_tokens);  // 8192
 
 await client.close();
 ```
@@ -382,16 +426,16 @@ const session = await client.createSession("List three European capitals", {
     },
     required: ["capitals"],
   },
-  structured_output_retries: 3,
+  structuredOutputRetries: 3,
 });
 
 // Parsed structured output (matches the schema).
-console.log(result.structured_output);
+console.log(session.structuredOutput);
 // { capitals: ["Paris", "Berlin", "Madrid"] }
 
 // Schema warnings from provider-specific validation issues.
-if (result.schema_warnings) {
-  for (const w of result.schema_warnings) {
+if (session.lastResult.schemaWarnings) {
+  for (const w of session.lastResult.schemaWarnings) {
     console.warn(`[${w.provider}] ${w.path}: ${w.message}`);
   }
 }

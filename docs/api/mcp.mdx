@@ -575,7 +575,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 4, "patch": 1},
+  "contract_version": {"major": 0, "minor": 5, "patch": 1},
   "capabilities": [
     {
       "id": "sessions",
@@ -642,7 +642,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": "0.5.0",
+  "contract_version": "0.5.1",
   "providers": [
     {
       "provider": "anthropic",
@@ -669,7 +669,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 ```
 </CodeGroup>
 
-No parameters required. The catalog is compiled from `meerkat-models` at build time.
+No parameters required. The catalog is resolved from built-in model metadata plus config-backed provider/server entries.
 
 ### meerkat_skills
 

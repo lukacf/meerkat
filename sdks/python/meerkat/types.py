@@ -160,23 +160,177 @@ class RunResult:
 
 @dataclass(frozen=True, slots=True)
 class SessionInfo:
-    """Summary of an active session.
+    """Session identity and shared metadata.
 
-    Returned by :meth:`~meerkat.MeerkatClient.list_sessions` and
-    :meth:`~meerkat.MeerkatClient.read_session`.
+    Shared base for session summary/detail responses.
     """
 
     session_id: str = ""
     session_ref: str | None = None
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: int = 0
+    updated_at: int = 0
     message_count: int = 0
-    total_tokens: int = 0
     labels: dict[str, str] = field(default_factory=dict)
     is_active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary(SessionInfo):
+    """Summary returned by :meth:`~meerkat.MeerkatClient.list_sessions`."""
+
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDetails(SessionInfo):
+    """Details returned by :meth:`~meerkat.MeerkatClient.read_session`."""
+
     model: str = ""
     provider: str = ""
     last_assistant_text: str | None = None
+
+
+class ConfigEnvelope(TypedDict, total=False):
+    """Config envelope returned by config APIs."""
+
+    config: dict[str, Any]
+    generation: int
+    realm_id: str | None
+    instance_id: str | None
+    backend: str | None
+    resolved_paths: dict[str, str] | None
+
+
+class ExternalEventOutcome(TypedDict, total=False):
+    """Outcome payload returned by `session/external_event`."""
+
+    outcome_type: str
+    input_id: str
+    existing_id: str
+    reason: str
+    state: dict[str, Any] | None
+
+
+class ScheduleRecord(TypedDict, total=False):
+    """Canonical schedule payload."""
+
+    schedule_id: str
+    phase: str
+    revision: int
+    name: str | None
+    description: str | None
+    trigger: dict[str, Any]
+    target: dict[str, Any]
+    labels: dict[str, str]
+
+
+class ScheduleOccurrenceRecord(TypedDict, total=False):
+    """Canonical schedule occurrence payload."""
+
+    occurrence_id: str
+    schedule_id: str
+    phase: str
+    due_at_utc: str
+    attempt_count: int
+
+
+class ScheduleListResult(TypedDict):
+    schedules: list[ScheduleRecord]
+
+
+class ScheduleOccurrencesResult(TypedDict):
+    occurrences: list[ScheduleOccurrenceRecord]
+
+
+class ScheduleToolsResult(TypedDict):
+    tools: list[dict[str, Any]]
+
+
+class ScheduleToolCall(TypedDict, total=False):
+    name: str
+    arguments: Any
+
+
+class MobEventCursorEntry(TypedDict, total=False):
+    cursor: int
+    event: dict[str, Any]
+
+
+class MobEventsResult(TypedDict):
+    events: list[MobEventCursorEntry]
+
+
+class MobProfileTools(TypedDict, total=False):
+    builtins: bool
+    shell: bool
+    comms: bool
+    memory: bool
+    mob: bool
+    mob_tasks: bool
+    schedule: bool
+    mcp: list[str]
+
+
+class MobProfile(TypedDict, total=False):
+    model: str
+    skills: list[str]
+    tools: MobProfileTools
+    peer_description: str
+    external_addressable: bool
+    backend: str | None
+    runtime_mode: str
+    max_inline_peer_notifications: int | None
+    output_schema: dict[str, Any] | None
+    provider_params: dict[str, Any] | None
+
+
+class StoredMobProfile(TypedDict):
+    name: str
+    profile: MobProfile
+    revision: int
+    created_at: str
+    updated_at: str
+
+
+class DeletedMobProfile(TypedDict):
+    name: str
+    deleted_revision: int
+
+
+class ModelProfile(TypedDict):
+    model_family: str
+    supports_temperature: bool
+    supports_thinking: bool
+    supports_reasoning: bool
+    inline_video: bool
+    params_schema: dict[str, Any]
+
+
+class CatalogModelEntry(TypedDict, total=False):
+    id: str
+    display_name: str
+    tier: str
+    context_window: int | None
+    max_output_tokens: int | None
+    server_id: str | None
+    profile: ModelProfile | None
+
+
+class ProviderCatalog(TypedDict):
+    provider: str
+    default_model_id: str
+    models: list[CatalogModelEntry]
+
+
+class ContractVersion(TypedDict):
+    major: int
+    minor: int
+    patch: int
+
+
+class ModelsCatalogResponse(TypedDict):
+    contract_version: ContractVersion
+    providers: list[ProviderCatalog]
 
 
 @dataclass(frozen=True, slots=True)

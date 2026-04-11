@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 
-FAKE_RPC = Path(__file__).resolve().parents[2] / "test-fixtures" / "fake_stream_rpc.mjs"
+FAKE_RPC = Path(__file__).resolve().parent / "fixtures" / "fake_stream_rpc.mjs"
 
 
 @pytest.mark.asyncio

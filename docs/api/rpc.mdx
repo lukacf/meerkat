@@ -59,6 +59,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `session/list` | Session | List active sessions |
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
+| `blob/get` | Session | Fetch a blob payload by id |
 | `session/archive` | Session | Remove session from runtime |
 | `session/external_event` | Session | Queue a runtime-backed external event |
 | `session/inject_context` | Session | Append runtime-backed system context to the next turn |
@@ -96,6 +97,12 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
+| `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
+| `mob/profile/create` | Mob | Create a realm-scoped mob profile (mob feature) |
+| `mob/profile/get` | Mob | Read a realm-scoped mob profile (mob feature) |
+| `mob/profile/list` | Mob | List realm-scoped mob profiles (mob feature) |
+| `mob/profile/update` | Mob | Update a realm-scoped mob profile (mob feature) |
+| `mob/profile/delete` | Mob | Delete a realm-scoped mob profile (mob feature) |
 | `schedule/create` | Schedule | Create a new schedule (schedule feature) |
 | `schedule/get` | Schedule | Get a schedule by ID (schedule feature) |
 | `schedule/list` | Schedule | List schedules (schedule feature) |
@@ -110,7 +117,6 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
 | `skills/inspect` | Skills | Inspect a skill's full content |
-| `tools/register` | Tools | Register additional callable tools with the runtime |
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
 | `mcp/reload` | MCP | Reload one or all MCP servers (mcp feature) |
@@ -179,17 +185,18 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.5.0"
+      "version": "0.5.1"
     },
-    "contract_version": "0.5.0",
+    "contract_version": "0.5.1",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read", "session/history",
       "session/archive", "session/external_event", "session/inject_context",
+      "blob/get",
       "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
       "capabilities/get", "models/catalog",
-      "skills/list", "skills/inspect", "tools/register",
+      "skills/list", "skills/inspect",
       "runtime/state", "runtime/accept", "runtime/retire", "runtime/reset",
       "input/state", "input/list",
       "session/stream_open", "session/stream_close",
@@ -201,6 +208,9 @@ Handshake. Returns server capabilities.
       "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
       "mob/flow_status", "mob/flow_cancel",
       "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
+      "mob/wait_kickoff",
+      "mob/profile/create", "mob/profile/get", "mob/profile/list",
+      "mob/profile/update", "mob/profile/delete",
       "mcp/add", "mcp/remove", "mcp/reload",
       "comms/send", "comms/peers",
     ]
@@ -891,7 +901,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.5.0",
+    "contract_version": "0.5.1",
     "providers": [
       {
         "provider": "anthropic",
@@ -919,7 +929,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 ```
 </CodeGroup>
 
-The catalog is compiled from `meerkat-models` at build time. No parameters are required.
+No parameters are required. The catalog is resolved from built-in model metadata plus config-backed provider/server entries; invalid provider config can yield `INVALID_PARAMS`.
 
 <ResponseField name="contract_version" type="string">
   Contract version for the catalog response.
@@ -949,7 +959,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 4, "patch": 1},
+    "contract_version": {"major": 0, "minor": 5, "patch": 1},
     "capabilities": [
       {
         "id": "sessions",

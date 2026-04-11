@@ -46,10 +46,34 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      # CI already ran fmt, lint, tests, and audit on the PR.
-      # Release validation only checks release-specific invariants.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build rkat-rpc for SDK smoke tests
+        run: cargo build -p meerkat-rpc
+
+      # Release validation re-checks release-specific invariants plus SDK parity gates.
       - name: Verify version parity
         run: make verify-version-parity
+
+      - name: Verify RPC surface alignment
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify SDK wrapper freshness
+        run: make verify-sdk-wrapper-freshness
+
+      - name: Run Python SDK suite
+        run: make test-sdk-python
+
+      - name: Run TypeScript SDK suite
+        run: make test-sdk-typescript
 
       - name: Verify schema freshness
         run: make verify-schema-freshness
@@ -409,6 +433,12 @@ jobs:
           rm -rf dist
           python -m build
           python -m twine check dist/*
+          VENV_DIR="$(mktemp -d)"
+          python -m venv "$VENV_DIR"
+          "$VENV_DIR/bin/python" -m pip install --upgrade pip
+          "$VENV_DIR/bin/python" -m pip install dist/*.whl
+          "$VENV_DIR/bin/python" -c "from meerkat import CONTRACT_VERSION, MeerkatClient; print(CONTRACT_VERSION); print(MeerkatClient.__name__)"
+          rm -rf "$VENV_DIR"
           if [[ "$DRY_RUN" == "true" ]]; then
             echo "Python SDK dry-run: skipping upload"
           else
@@ -425,6 +455,14 @@ jobs:
           npm install --ignore-scripts
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
           npm run build
+          PACKFILE="$(npm pack | tail -n 1)"
+          SMOKE_DIR="$(mktemp -d)"
+          cd "$SMOKE_DIR"
+          npm init -y >/dev/null 2>&1
+          npm install "${GITHUB_WORKSPACE}/sdks/typescript/${PACKFILE}" >/dev/null 2>&1
+          node --input-type=module -e "const sdk = await import('@rkat/sdk'); if (!sdk.MeerkatClient || !sdk.CONTRACT_VERSION) throw new Error('missing expected exports');"
+          cd "${GITHUB_WORKSPACE}/sdks/typescript"
+          rm -rf "$SMOKE_DIR" "$PACKFILE"
           if [[ "$DRY_RUN" == "true" ]]; then
             npm publish --access public --dry-run
           else

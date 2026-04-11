@@ -5,7 +5,7 @@ icon: "book"
 ---
 
 <Note>
-All public types use camelCase field names. The SDK translates to and from the snake_case JSON-RPC wire format internally.
+Public SDK interfaces use camelCase by default. Protocol-bound multimodal content keys (`media_type`, `blob_id`, `duration_ms`) intentionally remain wire-shaped.
 </Note>
 
 ## Imports
@@ -141,11 +141,15 @@ Summary returned by `client.listSessions()`.
 interface SessionInfo {
   readonly sessionId: string;
   readonly sessionRef?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
   readonly messageCount: number;
-  readonly totalTokens: number;
+  readonly totalTokens?: number;
   readonly isActive: boolean;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly lastAssistantText?: string;
+  readonly labels: Readonly<Record<string, string>>;
 }
 ```
 
@@ -170,7 +174,9 @@ Content blocks are used in multimodal prompts and tool results. Both `createSess
 ```typescript
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; media_type: string; data: string };
+  | { type: "image"; media_type: string; data: string; source?: "inline" }
+  | { type: "image"; media_type: string; source: "blob"; blob_id: string }
+  | { type: "video"; media_type: string; duration_ms: number; data: string; source?: "inline" };
 ```
 
 | Variant | Fields | Description |
@@ -566,7 +572,7 @@ const result2 = await session.invokeSkill(
 
 ```typescript
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // e.g. "0.5.0"
+console.log(CONTRACT_VERSION);  // e.g. "0.5.1"
 ```
 
 - While the major version is `0`, minor versions must match exactly between SDK and server.

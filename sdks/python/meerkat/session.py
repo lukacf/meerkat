@@ -136,6 +136,15 @@ class Session:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
+        keep_alive: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
     ) -> RunResult:
         """Run another turn on this session (non-streaming).
 
@@ -148,6 +157,15 @@ class Session:
             skill_refs=skill_refs,
             skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
+            additional_instructions=additional_instructions,
+            keep_alive=keep_alive,
+            model=model,
+            provider=provider,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+            output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
+            provider_params=provider_params,
         )
         self._last_result = result
         return result
@@ -159,6 +177,15 @@ class Session:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
+        keep_alive: bool | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        structured_output_retries: int | None = None,
+        provider_params: dict[str, Any] | None = None,
     ) -> EventStream:
         """Run another turn on this session with streaming events.
 
@@ -177,6 +204,15 @@ class Session:
             skill_refs=skill_refs,
             skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
+            additional_instructions=additional_instructions,
+            keep_alive=keep_alive,
+            model=model,
+            provider=provider,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+            output_schema=output_schema,
+            structured_output_retries=structured_output_retries,
+            provider_params=provider_params,
             _session=self,
         )
 
@@ -204,6 +240,19 @@ class Session:
             text,
             source=source,
             idempotency_key=idempotency_key,
+        )
+
+    async def send_external_event(
+        self,
+        payload: Any,
+        *,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a durable external event input into this session runtime."""
+        return await self._client.send_external_event(
+            self._id,
+            payload,
+            source=source,
         )
 
     async def history(
@@ -306,6 +355,7 @@ class DeferredSession:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
+        additional_instructions: list[str] | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -326,6 +376,7 @@ class DeferredSession:
             skill_refs=skill_refs,
             skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
+            additional_instructions=additional_instructions,
             keep_alive=keep_alive,
             model=model,
             provider=provider,
@@ -358,6 +409,19 @@ class DeferredSession:
             text,
             source=source,
             idempotency_key=idempotency_key,
+        )
+
+    async def send_external_event(
+        self,
+        payload: Any,
+        *,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a durable external event input into this deferred session."""
+        return await self._client.send_external_event(
+            self._id,
+            payload,
+            source=source,
         )
 
     async def history(

@@ -171,8 +171,7 @@ planes instead:
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession({
-      prompt: "Create a coding swarm, spawn all members, wire them.",
+    const session = await client.createSession("Create a coding swarm, spawn all members, wire them.", {
       enableBuiltins: true,
       enableMob: true,
     });
@@ -577,8 +576,7 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession({
-      prompt: "Create a research team and run the synthesis flow",
+    const session = await client.createSession("Create a research team and run the synthesis flow", {
       enableBuiltins: true,
       enableMob: true,
     });

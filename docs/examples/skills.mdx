@@ -44,7 +44,7 @@ Discover all skills from every source (project, user, git, HTTP, embedded) with 
   </Tab>
   <Tab title="Python">
     ```python
-    skills = client.list_skills()
+    skills = await client.list_skills()
     for s in skills:
         print(f"{s.id}: {s.name} (source={s.source})")
     ```
@@ -118,7 +118,7 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
   </Tab>
   <Tab title="Python">
     ```python
-    skill = client.inspect_skill("task-workflow", source="company")
+    skill = await client.inspect_skill("task-workflow", source="company")
     print(skill.body)
     ```
   </Tab>
@@ -185,7 +185,7 @@ Pass `skill_references` to resolve and inject skill content into the system prom
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Extract emails",
         skill_refs=["/email-extractor", "/formatting/markdown"],
     )
@@ -193,8 +193,7 @@ Pass `skill_references` to resolve and inject skill content into the system prom
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Extract emails",
+    const result = await client.createSession("Extract emails", {
       skillRefs: ["/email-extractor", "/formatting/markdown"],
     });
     ```
@@ -265,7 +264,7 @@ Preloaded skills are resolved and injected into the system prompt before the fir
   </Tab>
   <Tab title="Python">
     ```python
-    result = client.create_session(
+    result = await client.create_session(
         "Help me deploy",
         preload_skills=["deployment-guide", "shell-patterns"],
     )
@@ -273,8 +272,7 @@ Preloaded skills are resolved and injected into the system prompt before the fir
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const result = await client.createSession({
-      prompt: "Help me deploy",
+    const result = await client.createSession("Help me deploy", {
       preloadSkills: ["deployment-guide", "shell-patterns"],
     });
     ```

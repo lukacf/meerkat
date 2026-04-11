@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -75,6 +75,25 @@ test-e2e:
 test-all:
 	@echo "$(GREEN)Running full test suite...$(NC)"
 	$(CARGO) nextest run --workspace --all-features
+
+# Python SDK test suite
+test-sdk-python:
+	@echo "$(GREEN)Running Python SDK tests...$(NC)"
+	@(cd sdks/python && \
+		python3 -m pip install --upgrade pip && \
+		python3 -m pip install -e ".[dev]" && \
+		python3 -m pytest -q tests)
+
+# TypeScript SDK test suite
+test-sdk-typescript:
+	@echo "$(GREEN)Running TypeScript SDK tests...$(NC)"
+	@(cd sdks/typescript && \
+		npm install --ignore-scripts && \
+		npm run build && \
+		npm test)
+
+# Combined SDK test suites
+test-sdk-suites: test-sdk-python test-sdk-typescript
 
 # Minimal builds without optional features
 test-minimal:
@@ -169,12 +188,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -299,6 +318,14 @@ verify-version-parity:
 verify-schema-freshness:
 	@scripts/verify-schema-freshness.sh
 
+# Verify router/catalog/docs method discoverability alignment
+verify-rpc-surface-alignment:
+	@scripts/verify-rpc-surface-alignment.sh
+
+# Verify both SDK source trees cover canonical app-facing RPC wrappers
+verify-sdk-wrapper-freshness:
+	@scripts/verify-sdk-wrapper-freshness.sh
+
 # Verify the publishable Rust workspace surface matches the release list and
 # every released crate packages cleanly before we ever talk to crates.io.
 check-rust-release-packaging:
@@ -378,12 +405,41 @@ publish-dry-run-web:
 		npm publish --access public --dry-run && \
 		rm -rf dist)
 
+smoke-sdk-python-artifact:
+	@echo "$(GREEN)Running Python SDK artifact smoke test...$(NC)"
+	@(cd sdks/python && \
+		python3 -m pip install --upgrade build twine && \
+		rm -rf dist *.egg-info build && \
+		python3 -m build && \
+		python3 -m twine check dist/* && \
+		VENV_DIR=$$(mktemp -d) && \
+		python3 -m venv "$$VENV_DIR" && \
+		"$$VENV_DIR/bin/python" -m pip install --upgrade pip && \
+		"$$VENV_DIR/bin/python" -m pip install dist/*.whl && \
+		"$$VENV_DIR/bin/python" -c "from meerkat import CONTRACT_VERSION, MeerkatClient; print(CONTRACT_VERSION); print(MeerkatClient.__name__)" && \
+		rm -rf "$$VENV_DIR")
+
+smoke-sdk-typescript-artifact:
+	@echo "$(GREEN)Running TypeScript SDK artifact smoke test...$(NC)"
+	@(cd sdks/typescript && \
+		npm install --ignore-scripts && \
+		npm run build && \
+		PACKFILE=$$(npm pack | tail -n 1) && \
+		SMOKE_DIR=$$(mktemp -d) && \
+		cd "$$SMOKE_DIR" && \
+		npm init -y >/dev/null 2>&1 && \
+		npm install "$$OLDPWD/$$PACKFILE" >/dev/null 2>&1 && \
+		node --input-type=module -e "const sdk = await import('@rkat/sdk'); if (!sdk.MeerkatClient || !sdk.CONTRACT_VERSION) throw new Error('missing expected exports');" && \
+		rm -rf "$$SMOKE_DIR" "$$OLDPWD/$$PACKFILE")
+
 # Full dry-run release path: all validation + dry-run publish checks (no actual uploads)
 release-dry-run: release-preflight
 	@echo "$(GREEN)Running full registry dry-run (no uploads)...$(NC)"
 	@$(MAKE) publish-dry-run
 	@$(MAKE) publish-dry-run-python
 	@$(MAKE) publish-dry-run-typescript
+	@$(MAKE) smoke-sdk-python-artifact
+	@$(MAKE) smoke-sdk-typescript-artifact
 	@$(MAKE) publish-dry-run-web
 
 # Smoke dry-run path for local iteration.
@@ -392,6 +448,8 @@ release-dry-run-smoke: release-preflight-smoke
 	@$(MAKE) publish-dry-run
 	@$(MAKE) publish-dry-run-python
 	@$(MAKE) publish-dry-run-typescript
+	@$(MAKE) smoke-sdk-python-artifact
+	@$(MAKE) smoke-sdk-typescript-artifact
 	@$(MAKE) publish-dry-run-web
 
 # Dry-run cargo publish for all publishable crates
@@ -428,6 +486,9 @@ help:
 	@echo "  $(GREEN)test-int-real$(NC) - Legacy alias for e2e-system"
 	@echo "  $(GREEN)test-e2e$(NC)      - Legacy alias for e2e-live + e2e-smoke"
 	@echo "  $(GREEN)test-all$(NC)      - Run full test suite (CI)"
+	@echo "  $(GREEN)test-sdk-python$(NC)- Run Python SDK test suite"
+	@echo "  $(GREEN)test-sdk-typescript$(NC)- Run TypeScript SDK test suite"
+	@echo "  $(GREEN)test-sdk-suites$(NC)- Run both SDK suites"
 	@echo "  $(GREEN)test-surface-modularity$(NC) - Minimal surface build + binary smoke checks"
 	@echo "  $(GREEN)lint$(NC)          - Run clippy linter"
 	@echo "  $(GREEN)lint-feature-matrix$(NC)- Run clippy across key feature combinations"
@@ -449,6 +510,8 @@ help:
 	@echo "Release targets:"
 	@echo "  $(GREEN)verify-version-parity$(NC) - Check Rust/Python/TS version + contract parity"
 	@echo "  $(GREEN)verify-schema-freshness$(NC)- Check committed schemas match Rust source"
+	@echo "  $(GREEN)verify-rpc-surface-alignment$(NC)- Check router/catalog/docs method parity"
+	@echo "  $(GREEN)verify-sdk-wrapper-freshness$(NC)- Check SDK wrapper coverage for catalog methods"
 	@echo "  $(GREEN)check-rust-release-packaging$(NC)- Verify release Rust crates package cleanly"
 	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"
 	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"
@@ -457,6 +520,8 @@ help:
 	@echo "  $(GREEN)publish-dry-run$(NC)       - Dry-run cargo publish for all crates"
 	@echo "  $(GREEN)publish-dry-run-python$(NC) - Dry-run Python SDK publish check (build + twine check)"
 	@echo "  $(GREEN)publish-dry-run-typescript$(NC)- Dry-run TypeScript SDK publish check (npm publish --dry-run)"
+	@echo "  $(GREEN)smoke-sdk-python-artifact$(NC)- Build + install Python wheel smoke test"
+	@echo "  $(GREEN)smoke-sdk-typescript-artifact$(NC)- Pack + install npm tarball smoke test"
 	@echo "  $(GREEN)release-dry-run$(NC)       - Full preflight + dry-run registry checks (no uploads)"
 	@echo "  $(GREEN)release-dry-run-smoke$(NC)  - Smoke preflight + registry dry-run checks (no uploads)"
 	@echo "  $(GREEN)help$(NC)          - Show this help message"

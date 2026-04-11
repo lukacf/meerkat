@@ -133,9 +133,9 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(textLower.includes("teal"));
 
       const details = await client.readSession(session.id);
-      assert.equal(details.session_id, session.id);
-      assert.ok(Number(details.message_count) >= 4);
-      assert.equal(details.is_active, false);
+      assert.equal(details.sessionId, session.id);
+      assert.ok(Number(details.messageCount) >= 4);
+      assert.equal(details.isActive, false);
 
       const history = await client.readSessionHistory(session.id);
       assert.equal(history.sessionId, session.id);
@@ -171,11 +171,11 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         },
       );
 
-      const injected = await client.request("session/inject_context", {
-        session_id: deferred.id,
-        text: "Always include the marker [TS-SDK-CTX] in your replies.",
-        source: "typescript-smoke",
-      });
+      const injected = await client.injectContext(
+        deferred.id,
+        "Always include the marker [TS-SDK-CTX] in your replies.",
+        { source: "typescript-smoke" },
+      );
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(injected.status)));
 
       const first = await deferred.startTurn(
@@ -185,8 +185,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(firstTextLower.includes("orbit-7") || firstTextLower.includes("orbit 7"));
       assert.ok(firstTextLower.includes("ts-sdk-ctx"));
 
-      const stream = client._startTurnStreaming(
-        deferred.id,
+      const stream = deferred.stream(
         "Repeat the codeword and marker in two short clauses.",
       );
       let streamedText = "";
@@ -239,8 +238,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         realmBackend: "sqlite",
       });
       const details = await clientB.readSession(sessionId);
-      assert.equal(details.session_id, sessionId);
-      assert.ok(Number(details.message_count) >= 2);
+      assert.equal(details.sessionId, sessionId);
+      assert.ok(Number(details.messageCount) >= 2);
 
       const resumed = await clientB._startTurn(
         sessionId,
@@ -369,7 +368,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       );
       await waitFor(
         async () => client.readSession(respawnedReviewer.sessionId),
-        (state) => String(state.last_assistant_text ?? "").toLowerCase().includes("reviewer_respawn_44"),
+        (state) => String(state.lastAssistantText ?? "").toLowerCase().includes("reviewer_respawn_44"),
         { timeoutMs: 120000, intervalMs: 200 },
       );
 
@@ -394,7 +393,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           ),
         );
         const brokenState = await client.readSession(broken.session_id);
-        assert.equal(String(brokenState.last_assistant_text ?? "").trim(), "");
+        assert.equal(String(brokenState.lastAssistantText ?? "").trim(), "");
       } catch (error) {
         assert.match(String(error), /definitely-invalid-live-smoke-model/);
       }

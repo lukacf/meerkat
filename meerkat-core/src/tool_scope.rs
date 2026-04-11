@@ -1,6 +1,7 @@
 //! Tool visibility scope and external filter staging.
 
 use crate::session::{SessionToolVisibilityState, ToolVisibilityWitness};
+use crate::tool_catalog::stable_owner_key_for_tool;
 use crate::types::ToolDef;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -78,7 +79,7 @@ pub struct ComposedToolFilter {
 }
 
 impl ComposedToolFilter {
-    fn allows(&self, name: &str) -> bool {
+    pub fn allows(&self, name: &str) -> bool {
         let allowed = self.allow.as_ref().is_none_or(|set| set.contains(name));
         allowed && !self.deny.contains(name)
     }
@@ -181,7 +182,7 @@ impl ToolScope {
             .iter()
             .filter(|tool| {
                 state.control_tool_names.contains(tool.name.as_str())
-                    || (Self::is_requested_session_tool_visible(&state, tool.name.as_str())
+                    || (Self::is_requested_session_tool_visible(&state, tool.as_ref())
                         && composed.allows(tool.name.as_str()))
             })
             .map(Arc::clone)
@@ -208,6 +209,26 @@ impl ToolScope {
         &self,
         new_base_tools: Arc<[Arc<ToolDef>]>,
     ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        let (control_tool_names, deferred_tool_names) = self
+            .state
+            .read()
+            .map(|state| {
+                (
+                    state.control_tool_names.clone(),
+                    state.deferred_tool_names.clone(),
+                )
+            })
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        self.apply_staged_projection(new_base_tools, control_tool_names, deferred_tool_names)
+    }
+
+    /// Atomically apply staged state and refresh the live projection names.
+    pub fn apply_staged_projection(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: HashSet<String>,
+        deferred_tool_names: HashSet<String>,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
         if self
             .fail_next_boundary_apply
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -225,6 +246,8 @@ impl ToolScope {
         let previous_active_revision = ToolScopeRevision(state.durable_state.active_revision);
 
         state.base_tools = new_base_tools;
+        state.control_tool_names = control_tool_names;
+        state.deferred_tool_names = deferred_tool_names;
         state.known_base_names = state
             .base_tools
             .iter()
@@ -307,7 +330,7 @@ impl ToolScope {
             .iter()
             .filter(|tool| {
                 state.control_tool_names.contains(tool.name.as_str())
-                    || (Self::is_requested_session_tool_visible(state, tool.name.as_str())
+                    || (Self::is_requested_session_tool_visible(state, tool.as_ref())
                         && composed.allows(tool.name.as_str()))
             })
             .map(Arc::clone)
@@ -317,8 +340,14 @@ impl ToolScope {
 
     fn compose_state_filters(state: &ToolScopeState) -> ComposedToolFilter {
         let mut filters = vec![
-            state.durable_state.inherited_base_filter.clone(),
-            state.durable_state.active_filter.clone(),
+            Self::effective_filter_for_current_projection(
+                state,
+                &state.durable_state.inherited_base_filter,
+            ),
+            Self::effective_filter_for_current_projection(
+                state,
+                &state.durable_state.active_filter,
+            ),
         ];
         if let Some(allow) = &state.active_turn_allow {
             filters.push(ToolFilter::Allow(allow.clone()));
@@ -329,12 +358,75 @@ impl ToolScope {
         Self::compose(&filters)
     }
 
-    fn is_requested_session_tool_visible(state: &ToolScopeState, name: &str) -> bool {
-        !state.deferred_tool_names.contains(name)
-            || state
-                .durable_state
-                .active_requested_deferred_names
-                .contains(name)
+    fn current_projection_tool<'a>(state: &'a ToolScopeState, name: &str) -> Option<&'a ToolDef> {
+        state
+            .base_tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(Arc::as_ref)
+    }
+
+    fn witness_matches_tool(witness: Option<&ToolVisibilityWitness>, tool: &ToolDef) -> bool {
+        let Some(witness) = witness else {
+            return true;
+        };
+        if let Some(expected_owner) = witness.stable_owner_key.as_deref()
+            && stable_owner_key_for_tool(tool).as_deref() != Some(expected_owner)
+        {
+            return false;
+        }
+        if let Some(expected_provenance) = witness.last_seen_provenance.as_ref()
+            && tool.provenance.as_ref() != Some(expected_provenance)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn filter_name_applies(state: &ToolScopeState, name: &str) -> bool {
+        Self::current_projection_tool(state, name).is_none_or(|tool| {
+            Self::witness_matches_tool(state.durable_state.filter_witnesses.get(name), tool)
+        })
+    }
+
+    fn effective_filter_for_current_projection(
+        state: &ToolScopeState,
+        filter: &ToolFilter,
+    ) -> ToolFilter {
+        match filter {
+            ToolFilter::All => ToolFilter::All,
+            ToolFilter::Allow(names) => ToolFilter::Allow(
+                names
+                    .iter()
+                    .filter(|name| Self::filter_name_applies(state, name))
+                    .cloned()
+                    .collect(),
+            ),
+            ToolFilter::Deny(names) => ToolFilter::Deny(
+                names
+                    .iter()
+                    .filter(|name| Self::filter_name_applies(state, name))
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    fn is_requested_session_tool_visible(state: &ToolScopeState, tool: &ToolDef) -> bool {
+        if !state.deferred_tool_names.contains(tool.name.as_str()) {
+            return true;
+        }
+        state
+            .durable_state
+            .active_requested_deferred_names
+            .contains(tool.name.as_str())
+            && Self::witness_matches_tool(
+                state
+                    .durable_state
+                    .requested_witnesses
+                    .get(tool.name.as_str()),
+                tool,
+            )
     }
 
     /// Set the base filter for this scope.
@@ -348,6 +440,7 @@ impl ToolScope {
             .state
             .write()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        record_filter_witnesses(&mut state, &filter);
         state.durable_state.inherited_base_filter = filter;
         Ok(())
     }
@@ -385,6 +478,30 @@ impl ToolScope {
                 .map(|tool| tool.name.clone())
                 .collect::<BTreeSet<_>>()
         })
+    }
+
+    /// Return whether the staged durable session filters would allow a session-plane tool name
+    /// to become visible after the next boundary.
+    pub fn staged_session_filters_allow_name(
+        &self,
+        name: &str,
+    ) -> Result<bool, ToolScopeApplyError> {
+        self.state
+            .read()
+            .map(|state| {
+                Self::compose(&[
+                    Self::effective_filter_for_current_projection(
+                        &state,
+                        &state.durable_state.inherited_base_filter,
+                    ),
+                    Self::effective_filter_for_current_projection(
+                        &state,
+                        &state.durable_state.staged_filter,
+                    ),
+                ])
+                .allows(name)
+            })
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)
     }
 
     /// Return the current base tool snapshot.
@@ -607,12 +724,6 @@ fn durable_filter_names(state: &SessionToolVisibilityState) -> HashSet<String> {
     names
 }
 
-fn stable_owner_key(tool: &ToolDef) -> Option<String> {
-    tool.provenance
-        .as_ref()
-        .map(|provenance| format!("{:?}:{}", provenance.kind, provenance.source_id))
-}
-
 fn record_filter_witnesses(state: &mut ToolScopeState, filter: &ToolFilter) {
     let Some(filter_names) = filter.names() else {
         return;
@@ -623,7 +734,7 @@ fn record_filter_witnesses(state: &mut ToolScopeState, filter: &ToolFilter) {
             state.durable_state.filter_witnesses.insert(
                 name.clone(),
                 ToolVisibilityWitness {
-                    stable_owner_key: stable_owner_key(tool),
+                    stable_owner_key: stable_owner_key_for_tool(tool),
                     last_seen_provenance: tool.provenance.clone(),
                 },
             );
@@ -635,7 +746,7 @@ fn record_filter_witnesses(state: &mut ToolScopeState, filter: &ToolFilter) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{ToolFilter, ToolScope, ToolScopeStageError};
-    use crate::types::ToolDef;
+    use crate::types::{ToolDef, ToolProvenance, ToolSourceKind};
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -656,6 +767,18 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .into()
+    }
+
+    fn tool_with_provenance(name: &str, source_id: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            input_schema: serde_json::json!({ "type": "object" }),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Callback,
+                source_id: source_id.to_string(),
+            }),
+        })
     }
 
     #[test]
@@ -755,6 +878,22 @@ mod tests {
             applied.visible_names,
             vec!["visible".to_string(), "deferred".to_string()],
             "the next boundary should promote requested deferred tools into the visible set"
+        );
+    }
+
+    #[test]
+    fn late_deferred_names_stay_hidden_until_requested_after_projection_refresh() {
+        let scope = ToolScope::new(tools(&["visible"]));
+
+        let late_deferred = tools(&["visible", "late_deferred"]);
+        let applied = scope
+            .apply_staged_projection(late_deferred, HashSet::new(), set(&["late_deferred"]))
+            .expect("projection refresh should succeed");
+
+        assert_eq!(
+            applied.visible_names,
+            vec!["visible".to_string()],
+            "late deferred additions should stay hidden until explicitly requested"
         );
     }
 
@@ -876,6 +1015,86 @@ mod tests {
             visibility_state.staged_filter,
             ToolFilter::Allow(set(&["b", "c"])),
             "missing names should remain in durable staged filter state"
+        );
+    }
+
+    #[test]
+    fn requested_witness_mismatch_prevents_rebinding_a_dormant_deferred_name() {
+        let requested = tool_with_provenance("deferred", "owner-a");
+        let rebound = tool_with_provenance("deferred", "owner-b");
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&requested)].into(),
+            HashSet::new(),
+            set(&["deferred"]),
+        );
+
+        scope
+            .add_requested_deferred_names(
+                &["deferred".to_string()].into_iter().collect(),
+                &[(
+                    "deferred".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:owner-a".to_string()),
+                        last_seen_provenance: requested.provenance.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .unwrap();
+        scope
+            .apply_staged_projection(
+                vec![Arc::clone(&requested)].into(),
+                HashSet::new(),
+                set(&["deferred"]),
+            )
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            ["deferred".to_string()].into_iter().collect(),
+            "the matching owner should remain visible"
+        );
+
+        scope
+            .apply_staged_projection(
+                vec![Arc::clone(&rebound)].into(),
+                HashSet::new(),
+                set(&["deferred"]),
+            )
+            .unwrap();
+        assert!(
+            scope.visible_tool_names().unwrap().is_empty(),
+            "a different owner must not inherit prior deferred visibility intent"
+        );
+    }
+
+    #[test]
+    fn filter_witness_mismatch_prevents_rebinding_a_dormant_filter_name() {
+        let original = tool_with_provenance("a", "owner-a");
+        let rebound = tool_with_provenance("a", "owner-b");
+        let visible = tool_with_provenance("b", "owner-b");
+        let scope = ToolScope::new(vec![Arc::clone(&original), Arc::clone(&visible)].into());
+        let handle = scope.handle();
+
+        handle
+            .stage_external_filter(ToolFilter::Deny(set(&["a"])))
+            .unwrap();
+        scope
+            .apply_staged(vec![Arc::clone(&original), Arc::clone(&visible)].into())
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            ["b".to_string()].into_iter().collect(),
+            "the original owner should be hidden by the deny filter"
+        );
+
+        scope
+            .apply_staged(vec![Arc::clone(&rebound), Arc::clone(&visible)].into())
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            ["a".to_string(), "b".to_string()].into_iter().collect(),
+            "a different owner must not inherit the dormant filter intent"
         );
     }
 

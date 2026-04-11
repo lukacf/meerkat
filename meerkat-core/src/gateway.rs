@@ -415,6 +415,15 @@ impl AgentToolDispatcher for ToolGateway {
         }
     }
 
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        let mut pending = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            let sources = entry.dispatcher.pending_catalog_sources();
+            pending.extend(sources.iter().cloned());
+        }
+        pending.into_iter().collect::<Vec<_>>().into()
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let entry_available: Vec<bool> = self
             .entries
@@ -662,6 +671,15 @@ impl AgentToolDispatcher for DynamicToolComposite {
                 .iter()
                 .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog),
         }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        let mut pending = std::collections::BTreeSet::new();
+        for dispatcher in &self.dispatchers {
+            let sources = dispatcher.pending_catalog_sources();
+            pending.extend(sources.iter().cloned());
+        }
+        pending.into_iter().collect::<Vec<_>>().into()
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {

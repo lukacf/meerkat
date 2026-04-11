@@ -1,7 +1,10 @@
 //! Agent state machine internals.
 
 use crate::error::AgentError;
-use crate::event::{AgentEvent, BudgetType, ToolConfigChangeOperation, ToolConfigChangedPayload};
+use crate::event::{
+    AgentEvent, BudgetType, DeferredCatalogDelta, ToolConfigChangeDomain,
+    ToolConfigChangeOperation, ToolConfigChangedPayload,
+};
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
@@ -11,6 +14,7 @@ use crate::lifecycle::RunId;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionMutator,
     TurnExecutionTransition,
@@ -21,10 +25,14 @@ use crate::types::{
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult};
+use super::{
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
+    select_tool_catalog_mode,
+};
 
 /// Pre-selected timeout source — determined before the LLM await, not inferred after.
 ///
@@ -43,6 +51,24 @@ fn synthetic_notice_message(kind: SystemNoticeKind, body: impl Into<String>) -> 
 
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
+}
+
+fn hidden_deferred_catalog_names(
+    catalog: &[crate::ToolCatalogEntry],
+    visible_names: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    catalog
+        .iter()
+        .filter(|entry| entry.plane == ToolPlaneClass::Session)
+        .filter(|entry| {
+            matches!(
+                entry.deferred_eligibility,
+                ToolCatalogDeferredEligibility::DeferredEligible { .. }
+            )
+        })
+        .map(|entry| entry.tool.name.clone())
+        .filter(|name| !visible_names.contains(name))
+        .collect()
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -571,7 +597,47 @@ where
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
                         let dispatcher_tools = self.tools.tools();
-                        match self.tool_scope.apply_staged(dispatcher_tools.clone()) {
+                        let exact_catalog = self.tools.tool_catalog_capabilities().exact_catalog;
+                        let catalog_mode = select_tool_catalog_mode(self.tools.as_ref());
+                        let current_catalog = exact_catalog.then(|| self.tools.tool_catalog());
+                        let current_pending_catalog_sources = if exact_catalog {
+                            self.tools.pending_catalog_sources()
+                        } else {
+                            Arc::from([])
+                        };
+                        let (control_tool_names, deferred_tool_names) =
+                            if exact_catalog && matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                                let catalog = current_catalog
+                                    .as_ref()
+                                    .expect("exact catalog should be captured above");
+                                let control_names = catalog
+                                    .iter()
+                                    .filter(|entry| entry.plane == ToolPlaneClass::Control)
+                                    .map(|entry| entry.tool.name.clone())
+                                    .collect();
+                                let deferred_names = catalog
+                                    .iter()
+                                    .filter(|entry| entry.plane == ToolPlaneClass::Session)
+                                    .filter(|entry| {
+                                        matches!(
+                                            entry.deferred_eligibility,
+                                            ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                                        )
+                                    })
+                                    .map(|entry| entry.tool.name.clone())
+                                    .collect();
+                                (control_names, deferred_names)
+                            } else {
+                                (
+                                    std::collections::HashSet::new(),
+                                    std::collections::HashSet::new(),
+                                )
+                            };
+                        match self.tool_scope.apply_staged_projection(
+                            dispatcher_tools.clone(),
+                            control_tool_names,
+                            deferred_tool_names,
+                        ) {
                             Ok(applied) => {
                                 if let Ok(visibility_state) = self.tool_scope.visibility_state()
                                     && let Err(err) =
@@ -596,6 +662,8 @@ where
                                             status: status.clone(),
                                             persisted: false,
                                             applied_at_turn: Some(turn_count),
+                                            domain: Some(ToolConfigChangeDomain::ToolScope),
+                                            deferred_catalog_delta: None,
                                         },
                                     });
                                     // Represent runtime notices as user-scoped synthetic context
@@ -608,6 +676,103 @@ where
                                         ),
                                     ));
                                 }
+                                let visible_names_set = applied
+                                    .visible_names
+                                    .iter()
+                                    .cloned()
+                                    .collect::<BTreeSet<_>>();
+                                let hidden_deferred_names =
+                                    if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                                        current_catalog
+                                            .as_ref()
+                                            .map(|catalog| {
+                                                hidden_deferred_catalog_names(
+                                                    catalog.as_ref(),
+                                                    &visible_names_set,
+                                                )
+                                            })
+                                            .unwrap_or_default()
+                                    } else {
+                                        BTreeSet::new()
+                                    };
+                                let pending_catalog_sources =
+                                    if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                                        current_pending_catalog_sources
+                                            .iter()
+                                            .cloned()
+                                            .collect::<BTreeSet<_>>()
+                                    } else {
+                                        BTreeSet::new()
+                                    };
+                                let added_hidden_names = hidden_deferred_names
+                                    .difference(&self.last_hidden_deferred_catalog_names)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let removed_hidden_names = self
+                                    .last_hidden_deferred_catalog_names
+                                    .difference(&hidden_deferred_names)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let pending_sources_changed =
+                                    pending_catalog_sources != self.last_pending_catalog_sources;
+                                if !added_hidden_names.is_empty()
+                                    || !removed_hidden_names.is_empty()
+                                    || pending_sources_changed
+                                {
+                                    let pending_sources =
+                                        pending_catalog_sources.iter().cloned().collect::<Vec<_>>();
+                                    let status = format!(
+                                        "deferred_catalog_delta(added_hidden={},removed_hidden={},pending_sources={})",
+                                        added_hidden_names.len(),
+                                        removed_hidden_names.len(),
+                                        pending_sources.len()
+                                    );
+                                    emit_event!(AgentEvent::ToolConfigChanged {
+                                        payload: ToolConfigChangedPayload {
+                                            operation: ToolConfigChangeOperation::Reload,
+                                            target: "deferred_catalog".to_string(),
+                                            status: status.clone(),
+                                            persisted: false,
+                                            applied_at_turn: Some(turn_count),
+                                            domain: Some(ToolConfigChangeDomain::DeferredCatalog,),
+                                            deferred_catalog_delta: Some(DeferredCatalogDelta {
+                                                added_hidden_names: added_hidden_names.clone(),
+                                                removed_hidden_names: removed_hidden_names.clone(),
+                                                pending_sources: pending_sources.clone(),
+                                            },),
+                                        },
+                                    });
+                                    let mut notice_parts = Vec::new();
+                                    if !added_hidden_names.is_empty() {
+                                        notice_parts.push(format!(
+                                            "new deferred tools available: {}",
+                                            added_hidden_names.join(", ")
+                                        ));
+                                    }
+                                    if !removed_hidden_names.is_empty() {
+                                        notice_parts.push(format!(
+                                            "deferred tools removed: {}",
+                                            removed_hidden_names.join(", ")
+                                        ));
+                                    }
+                                    if !pending_sources.is_empty() {
+                                        notice_parts.push(format!(
+                                            "sources still connecting: {}",
+                                            pending_sources.join(", ")
+                                        ));
+                                    }
+                                    if !notice_parts.is_empty() {
+                                        self.session.push(synthetic_notice_message(
+                                            SystemNoticeKind::ToolScope,
+                                            format!(
+                                                "Deferred catalog changed at turn boundary: {}",
+                                                notice_parts.join("; ")
+                                            ),
+                                        ));
+                                    }
+                                }
+                                self.last_hidden_deferred_catalog_names = hidden_deferred_names;
+                                self.last_pending_catalog_sources = pending_catalog_sources;
                                 applied.tools
                             }
                             Err(err) => {
@@ -623,6 +788,8 @@ where
                                         status: status.clone(),
                                         persisted: false,
                                         applied_at_turn: Some(turn_count),
+                                        domain: Some(ToolConfigChangeDomain::ToolScope),
+                                        deferred_catalog_delta: None,
                                     },
                                 });
                                 self.session.push(synthetic_notice_message(
@@ -2341,9 +2508,25 @@ mod tests {
         fn new() -> Self {
             let deferred = Arc::new(ToolDef {
                 name: "deferred_tool".to_string(),
-                description: "deferred tool".to_string(),
+                description:
+                    "deferred tool that must stay hidden until tool_catalog_load reaches the next boundary."
+                        .to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
-                provenance: None,
+                provenance: Some(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "test".to_string(),
+                }),
+            });
+            let deferred_two = Arc::new(ToolDef {
+                name: "deferred_tool_two".to_string(),
+                description:
+                    "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
+                        .to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                provenance: Some(crate::ToolProvenance {
+                    kind: crate::ToolSourceKind::Callback,
+                    source_id: "test".to_string(),
+                }),
             });
             let control = Arc::new(ToolDef {
                 name: "tool_catalog_load".to_string(),
@@ -2352,10 +2535,20 @@ mod tests {
                 provenance: None,
             });
             Self {
-                tools: vec![Arc::clone(&deferred), Arc::clone(&control)].into(),
+                tools: vec![
+                    Arc::clone(&deferred),
+                    Arc::clone(&deferred_two),
+                    Arc::clone(&control),
+                ]
+                .into(),
                 catalog: vec![
                     crate::ToolCatalogEntry::session_deferred(
                         deferred,
+                        true,
+                        "callback:test".to_string(),
+                    ),
+                    crate::ToolCatalogEntry::session_deferred(
+                        deferred_two,
                         true,
                         "callback:test".to_string(),
                     ),
@@ -2400,7 +2593,10 @@ mod tests {
                             "deferred_tool".to_string(),
                             crate::ToolVisibilityWitness {
                                 stable_owner_key: Some("callback:test".to_string()),
-                                last_seen_provenance: None,
+                                last_seen_provenance: Some(crate::ToolProvenance {
+                                    kind: crate::ToolSourceKind::Callback,
+                                    source_id: "test".to_string(),
+                                }),
                             },
                         )]
                         .into_iter()
@@ -3296,6 +3492,48 @@ mod tests {
             seen[1],
             vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
             "the next boundary should reveal the requested deferred tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_catalog_delta_events_track_hidden_catalog_changes_across_boundaries() {
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let tools = Arc::new(DeferredLoadDispatcher::new());
+        let mut agent = AgentBuilder::new()
+            .build(client, tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .unwrap();
+        assert_eq!(result.text, "done");
+
+        let mut added_hidden_batches = Vec::new();
+        let mut removed_hidden_batches = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
+                && payload.domain == Some(crate::event::ToolConfigChangeDomain::DeferredCatalog)
+                && let Some(delta) = payload.deferred_catalog_delta
+            {
+                added_hidden_batches.push(delta.added_hidden_names);
+                removed_hidden_batches.push(delta.removed_hidden_names);
+            }
+        }
+
+        assert!(
+            added_hidden_batches
+                .iter()
+                .any(|names| names.iter().any(|name| name == "deferred_tool")),
+            "expected a deferred catalog delta that advertises deferred_tool as newly hidden"
+        );
+        assert!(
+            removed_hidden_batches
+                .iter()
+                .any(|names| names.iter().any(|name| name == "deferred_tool")),
+            "expected a deferred catalog delta that removes deferred_tool after it is loaded"
         );
     }
 

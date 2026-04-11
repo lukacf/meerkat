@@ -28,7 +28,9 @@ use crate::session::Session;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry};
+use crate::tool_catalog::{
+    ToolCatalogCapabilities, ToolCatalogEntry, ToolCatalogMode, select_catalog_mode_from_snapshot,
+};
 use crate::tool_scope::ToolScope;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
@@ -37,7 +39,7 @@ use crate::types::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 pub use builder::AgentBuilder;
@@ -237,6 +239,14 @@ pub trait AgentToolDispatcher: Send + Sync {
             .into()
     }
 
+    /// Return non-draining pending source names for exact-catalog discovery.
+    ///
+    /// Pending sources are catalog-level discovery metadata rather than
+    /// provider-visible tools. The default implementation reports none.
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        Arc::from([])
+    }
+
     /// Execute a tool call, returning the transcript result and any async operations.
     ///
     /// The `ToolDispatchOutcome` separates transcript data (`result`) from
@@ -282,6 +292,24 @@ pub trait AgentToolDispatcher: Send + Sync {
     ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
         None
     }
+}
+
+/// Compute whether the current exact catalog should stay inline or switch to deferred mode.
+pub fn select_tool_catalog_mode<T>(dispatcher: &T) -> ToolCatalogMode
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    let capabilities = dispatcher.tool_catalog_capabilities();
+    if !capabilities.exact_catalog {
+        return ToolCatalogMode::Inline;
+    }
+    let pending_sources = dispatcher.pending_catalog_sources();
+    let catalog = dispatcher.tool_catalog();
+    select_catalog_mode_from_snapshot(
+        capabilities.exact_catalog,
+        catalog.as_ref(),
+        pending_sources.as_ref(),
+    )
 }
 
 /// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].
@@ -663,6 +691,10 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
+    /// Last published hidden deferred-catalog names.
+    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
+    /// Last published pending catalog sources.
+    pub(crate) last_pending_catalog_sources: BTreeSet<String>,
 }
 
 #[cfg(test)]

@@ -34,6 +34,8 @@ mod tests {
                     status: "staged".to_string(),
                     persisted: false,
                     applied_at_turn: Some(3),
+                    domain: None,
+                    deferred_catalog_delta: None,
                 },
             },
             contract_version: ContractVersion::CURRENT,

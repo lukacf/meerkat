@@ -69,7 +69,7 @@ pub mod types;
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult,
+    FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
@@ -199,7 +199,9 @@ pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;
 pub use tool_catalog::{
     ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
-    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolPlaneClass,
+    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
+    deferred_session_entry_count, deferred_session_schema_volume,
+    select_catalog_mode_from_snapshot,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,

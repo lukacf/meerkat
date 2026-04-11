@@ -314,6 +314,16 @@ async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_t
                         },
                         "required": ["key"]
                     }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value through the same deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
                 }]
             }
         }),

@@ -2024,7 +2024,7 @@ impl AgentFactory {
             "tool composition: final dispatcher"
         );
 
-        if tools.tool_catalog_capabilities().exact_catalog {
+        if CatalogControlDispatcher::should_enable_for(tools.as_ref()) {
             if !tool_usage_instructions.is_empty() {
                 tool_usage_instructions.push_str("\n\n");
             }
@@ -2395,7 +2395,7 @@ impl AgentFactory {
 
         let mut hoisted_control_visibility_provider: Option<Arc<CatalogControlVisibilityProvider>> =
             None;
-        if tools.tool_catalog_capabilities().exact_catalog {
+        if CatalogControlDispatcher::should_enable_for(tools.as_ref()) {
             let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
             let control_dispatcher = Arc::new(CatalogControlDispatcher::new(
                 Arc::clone(&tools),
@@ -2674,7 +2674,7 @@ impl AgentFactory {
 }
 
 fn render_tool_usage_instructions(dispatcher: &dyn AgentToolDispatcher) -> String {
-    if dispatcher.tool_catalog_capabilities().exact_catalog {
+    if CatalogControlDispatcher::should_enable_for(dispatcher) {
         return String::new();
     }
 
@@ -2715,6 +2715,7 @@ mod prompt_tests {
     struct UsageTestDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         exact_catalog: bool,
+        pending_sources: Arc<[String]>,
     }
 
     #[async_trait]
@@ -2735,7 +2736,7 @@ mod prompt_tests {
                 .map(|tool| {
                     if tool.name == "tool_catalog_search" {
                         ToolCatalogEntry::control_inline(Arc::clone(tool), true)
-                    } else if tool.name == "secret_lookup" {
+                    } else if tool.name.starts_with("secret_") {
                         ToolCatalogEntry::session_deferred(
                             Arc::clone(tool),
                             true,
@@ -2752,6 +2753,10 @@ mod prompt_tests {
                 })
                 .collect::<Vec<_>>()
                 .into()
+        }
+
+        fn pending_catalog_sources(&self) -> Arc<[String]> {
+            Arc::clone(&self.pending_sources)
         }
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -2803,6 +2808,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: tools(&["visible", "secret"]),
             exact_catalog: false,
+            pending_sources: Arc::from([]),
         };
 
         let usage = render_tool_usage_instructions(&dispatcher);
@@ -2814,14 +2820,29 @@ mod prompt_tests {
     #[test]
     fn render_tool_usage_instructions_omits_inventory_for_exact_dispatchers() {
         let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible", "tool_catalog_search"]),
+            tools: tools(&["visible", "secret_lookup", "secret_audit"]),
             exact_catalog: true,
+            pending_sources: Arc::from([]),
         };
 
         let usage = render_tool_usage_instructions(&dispatcher);
         assert!(usage.is_empty());
         assert!(deferred_catalog_guidance().contains("tool_catalog_search"));
         assert!(deferred_catalog_guidance().contains("tool_catalog_load"));
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_keeps_inventory_for_exact_dispatchers_without_deferred_entries()
+     {
+        let dispatcher = UsageTestDispatcher {
+            tools: tools(&["visible"]),
+            exact_catalog: true,
+            pending_sources: Arc::from([]),
+        };
+
+        let usage = render_tool_usage_instructions(&dispatcher);
+        assert!(usage.contains("# Available Tools"));
+        assert!(usage.contains("visible tool"));
     }
 
     #[tokio::test]
@@ -2834,9 +2855,16 @@ mod prompt_tests {
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
         });
+        let secret_audit = Arc::new(ToolDef {
+            name: "secret_audit".to_string(),
+            description: "Audit a secret value".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
         let dispatcher = UsageTestDispatcher {
-            tools: vec![Arc::clone(&secret)].into(),
+            tools: vec![Arc::clone(&secret), Arc::clone(&secret_audit)].into(),
             exact_catalog: true,
+            pending_sources: Arc::from([]),
         };
         let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
         build_config.llm_client_override = Some(Arc::new(PromptTestClient));
@@ -2859,6 +2887,61 @@ mod prompt_tests {
         assert!(
             system_prompt.contains("tool_catalog_load"),
             "exact external sessions should advertise deferred catalog loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_inline_only_sessions_do_not_inject_deferred_catalog_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let visible = Arc::new(ToolDef {
+            name: "visible".to_string(),
+            description: "Always-inline tool".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let dispatcher = UsageTestDispatcher {
+            tools: vec![Arc::clone(&visible)].into(),
+            exact_catalog: true,
+            pending_sources: Arc::from([]),
+        };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
+        };
+        let system_prompt = &message.content;
+
+        assert!(
+            !system_prompt.contains("tool_catalog_search"),
+            "inline-only exact sessions should not advertise deferred catalog discovery"
+        );
+        assert!(
+            !system_prompt.contains("tool_catalog_load"),
+            "inline-only exact sessions should not advertise deferred catalog loading"
+        );
+        assert!(
+            agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains("visible"),
+            "inline session tool should remain visible"
+        );
+        assert!(
+            !agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains("tool_catalog_search"),
+            "control-plane tools should not be injected when there is no deferred catalog"
         );
     }
 }

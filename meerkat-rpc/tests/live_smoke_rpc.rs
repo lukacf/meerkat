@@ -1111,6 +1111,16 @@ async fn e2e_scenario_21_mob_callback_tools() {
                         },
                         "required": ["key"]
                     }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value without returning the final code directly.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
+                        },
+                        "required": ["key"]
+                    }
                 }]
             }
         }),
@@ -1494,6 +1504,16 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                         },
                         "required": ["key"]
                     }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value without returning the final code directly.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
+                        },
+                        "required": ["key"]
+                    }
                 }]
             }
         }),
@@ -1621,6 +1641,16 @@ async fn e2e_direct_session_deferred_callback_tool_flow() {
                         "type": "object",
                         "properties": {
                             "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value. This second deferred tool keeps the smoke session in catalog mode.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
                         },
                         "required": ["key"]
                     }

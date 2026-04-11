@@ -25,6 +25,7 @@ use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
+use meerkat_core::tool_catalog::stable_owner_key_for_tool;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 
@@ -274,11 +275,8 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 }
 
 fn callback_catalog_entry(tool: ToolDef) -> ToolCatalogEntry {
-    let stable_owner_key = tool
-        .provenance
-        .as_ref()
-        .map(|provenance| format!("{:?}:{}", provenance.kind, provenance.source_id))
-        .unwrap_or_else(|| "Callback:registered".to_string());
+    let stable_owner_key =
+        stable_owner_key_for_tool(&tool).unwrap_or_else(|| "callback:registered".to_string());
 
     ToolCatalogEntry::session_deferred(Arc::new(tool), true, stable_owner_key)
 }

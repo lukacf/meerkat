@@ -775,11 +775,7 @@ impl McpRouter {
     /// Drain pending results and return queued external update notices.
     pub fn take_external_updates(&mut self) -> ExternalToolUpdate {
         self.drain_pending();
-        let pending = self
-            .auth()
-            .pending_surfaces()
-            .map(|surface_id| surface_id.0.clone())
-            .collect();
+        let pending = self.pending_sources_snapshot();
 
         ExternalToolUpdate {
             notices: self
@@ -795,6 +791,14 @@ impl McpRouter {
     /// Returns true if there are pending background operations or undelivered notices.
     pub fn has_pending_or_notices(&self) -> bool {
         self.auth().pending_count() > 0 || !self.completed_updates.is_empty()
+    }
+
+    /// Snapshot the names of tool sources still connecting/loading.
+    pub fn pending_sources_snapshot(&self) -> Vec<String> {
+        self.auth()
+            .pending_surfaces()
+            .map(|surface_id| surface_id.0.clone())
+            .collect()
     }
 
     /// Backward-compatible immediate install path. Bypasses staged/boundary

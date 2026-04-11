@@ -12,7 +12,7 @@ use crate::session::{SESSION_TOOL_VISIBILITY_STATE_KEY, Session, SessionToolVisi
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolPlaneClass};
+use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope,
 };
@@ -21,7 +21,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
+use super::{
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
+    select_tool_catalog_mode,
+};
 
 /// Builder for creating an Agent
 #[derive(Default)]
@@ -228,8 +231,11 @@ impl AgentBuilder {
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
+        let catalog_mode = select_tool_catalog_mode(tools.as_ref());
         let (control_tool_names, deferred_tool_names) =
-            if tools.tool_catalog_capabilities().exact_catalog {
+            if tools.tool_catalog_capabilities().exact_catalog
+                && matches!(catalog_mode, ToolCatalogMode::Deferred)
+            {
                 let catalog = tools.tool_catalog();
                 let control_names = catalog
                     .iter()
@@ -313,6 +319,8 @@ impl AgentBuilder {
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
+            last_hidden_deferred_catalog_names: Default::default(),
+            last_pending_catalog_sources: Default::default(),
         };
 
         let mut visibility_state = agent.session.tool_visibility_state().unwrap_or_default();

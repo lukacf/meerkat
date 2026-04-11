@@ -341,6 +341,13 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
     }
 
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.external
+            .as_ref()
+            .map(|dispatcher| dispatcher.pending_catalog_sources())
+            .unwrap_or_else(|| Arc::from([]))
+    }
+
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
         let mut catalog = Vec::new();
         let mut seen_names = HashSet::new();

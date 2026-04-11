@@ -25,16 +25,19 @@ pub struct McpRouterAdapter {
     router: AsyncRwLock<Option<McpRouter>>,
     has_pending: AtomicBool,
     tools_cache: StdRwLock<Arc<[Arc<ToolDef>]>>,
+    pending_sources_cache: StdRwLock<Arc<[String]>>,
 }
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         let has_pending = router.has_pending_or_notices();
         let tools = AgentToolDispatcher::tools(&router);
+        let pending_sources: Arc<[String]> = router.pending_sources_snapshot().into();
         Self {
             router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
             tools_cache: StdRwLock::new(tools),
+            pending_sources_cache: StdRwLock::new(pending_sources),
         }
     }
 
@@ -55,8 +58,26 @@ impl McpRouterAdapter {
         }
     }
 
+    fn set_pending_sources_cache(&self, pending_sources: Arc<[String]>) {
+        match self.pending_sources_cache.write() {
+            Ok(mut guard) => *guard = pending_sources,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = pending_sources;
+            }
+        }
+    }
+
+    fn cached_pending_sources(&self) -> Arc<[String]> {
+        match self.pending_sources_cache.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     fn sync_router_projection(&self, router: &McpRouter) {
         self.set_tools_cache(AgentToolDispatcher::tools(router));
+        self.set_pending_sources_cache(router.pending_sources_snapshot().into());
         self.has_pending
             .store(router.has_pending_or_notices(), Ordering::Release);
     }
@@ -81,6 +102,7 @@ impl McpRouterAdapter {
         }
         self.has_pending.store(false, Ordering::Release);
         self.set_tools_cache(Arc::from([]));
+        self.set_pending_sources_cache(Arc::from([]));
     }
 
     /// Stage an MCP server add operation.
@@ -277,11 +299,14 @@ impl AgentToolDispatcher for McpRouterAdapter {
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-        let has_pending = self.has_pending.load(Ordering::Acquire);
         let is_empty = self.cached_tools().is_empty();
         ToolCatalogCapabilities {
-            exact_catalog: !has_pending && is_empty,
+            exact_catalog: is_empty,
         }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.cached_pending_sources()
     }
 }
 
@@ -342,13 +367,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staging_server_disables_exact_catalog_support() {
+    async fn pending_empty_adapter_keeps_exact_catalog_support_and_reports_pending_sources() {
         let adapter = McpRouterAdapter::new(McpRouter::new());
         adapter.has_pending.store(true, Ordering::Release);
+        adapter.set_pending_sources_cache(Arc::from(["pending-mcp".to_string()]));
 
         assert!(
-            !adapter.tool_catalog_capabilities().exact_catalog,
-            "pending MCP state should force the adapter back to non-exact mode"
+            adapter.tool_catalog_capabilities().exact_catalog,
+            "empty pending MCP adapters should preserve exact catalog support on sibling planes"
+        );
+        assert_eq!(
+            adapter.pending_catalog_sources().as_ref(),
+            ["pending-mcp".to_string()].as_slice()
         );
     }
 

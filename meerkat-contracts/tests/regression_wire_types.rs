@@ -462,6 +462,8 @@ fn agent_event_all_variants_roundtrip() {
                 status: "applied".to_string(),
                 persisted: true,
                 applied_at_turn: Some(5),
+                domain: None,
+                deferred_catalog_delta: None,
             },
         },
     ];
@@ -703,6 +705,8 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 status: "applied".to_string(),
                 persisted: true,
                 applied_at_turn: Some(1),
+                domain: None,
+                deferred_catalog_delta: None,
             },
         },
     ];

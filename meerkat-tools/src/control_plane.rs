@@ -5,7 +5,8 @@ use meerkat_core::session::{SessionToolVisibilityState, ToolVisibilityWitness};
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{
     AgentToolDispatcher, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
-    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolPlaneClass, ToolScope,
+    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
+    ToolScope, select_tool_catalog_mode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -42,6 +43,30 @@ impl CatalogControlVisibilityProvider {
             .and_then(|scope| scope.visibility_state().ok())
             .unwrap_or_default()
     }
+
+    fn visible_tool_names(&self) -> Option<BTreeSet<String>> {
+        self.scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|scope| scope.visible_tool_names().ok())
+    }
+
+    fn staged_session_filters_allow_name(&self, name: &str) -> bool {
+        self.scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|scope| scope.staged_session_filters_allow_name(name).ok())
+            .unwrap_or_else(|| {
+                let visibility_state = self.visibility_state();
+                ToolScope::compose(&[
+                    visibility_state.inherited_base_filter,
+                    visibility_state.staged_filter,
+                ])
+                .allows(name)
+            })
+    }
 }
 
 pub struct CatalogControlDispatcher {
@@ -51,6 +76,17 @@ pub struct CatalogControlDispatcher {
 }
 
 impl CatalogControlDispatcher {
+    pub fn mode_for(session_dispatcher: &dyn AgentToolDispatcher) -> ToolCatalogMode {
+        select_tool_catalog_mode(session_dispatcher)
+    }
+
+    pub fn should_enable_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        matches!(
+            Self::mode_for(session_dispatcher),
+            ToolCatalogMode::Deferred
+        )
+    }
+
     pub fn new(
         session_dispatcher: Arc<dyn AgentToolDispatcher>,
         visibility_provider: Arc<CatalogControlVisibilityProvider>,
@@ -79,11 +115,15 @@ impl CatalogControlDispatcher {
                 catalog_exact: false,
                 total_matches: 0,
                 results: Vec::new(),
+                pending_sources: Vec::new(),
+                empty_result_status: None,
             };
         };
 
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let query = args.query.unwrap_or_default().to_lowercase();
+        let pending_sources = self.session_dispatcher.pending_catalog_sources();
+        let visible_tool_names = self.visibility_provider.visible_tool_names();
 
         let results = catalog
             .iter()
@@ -95,17 +135,44 @@ impl CatalogControlDispatcher {
                 )
             })
             .filter(|entry| matches_query(entry, &query))
-            .map(|entry| SearchResultItem {
-                name: entry.tool.name.clone(),
-                description: entry.tool.description.clone(),
-                currently_callable: entry.currently_callable,
+            .map(|entry| {
+                let currently_loaded = visible_tool_names
+                    .as_ref()
+                    .is_some_and(|names| names.contains(entry.tool.name.as_str()));
+                let visibility_status = if currently_loaded {
+                    SearchVisibilityStatus::Loaded
+                } else if !self
+                    .visibility_provider
+                    .staged_session_filters_allow_name(&entry.tool.name)
+                {
+                    SearchVisibilityStatus::BlockedByFilter
+                } else if !entry.currently_callable {
+                    SearchVisibilityStatus::TemporarilyUnavailable
+                } else {
+                    SearchVisibilityStatus::Deferred
+                };
+
+                SearchResultItem {
+                    name: entry.tool.name.clone(),
+                    description: entry.tool.description.clone(),
+                    currently_callable: currently_loaded,
+                    visibility_status,
+                }
             })
             .collect::<Vec<_>>();
+
+        let empty_result_status = if results.is_empty() && !pending_sources.is_empty() {
+            Some(SearchVisibilityStatus::PendingSource)
+        } else {
+            None
+        };
 
         SearchResponse {
             catalog_exact: true,
             total_matches: results.len(),
             results: results.into_iter().take(limit).collect(),
+            pending_sources: pending_sources.iter().cloned().collect(),
+            empty_result_status,
         }
     }
 
@@ -117,6 +184,7 @@ impl CatalogControlDispatcher {
                 .map(|name| ToolCatalogLoadResolution {
                     name,
                     accepted: false,
+                    accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
                 })
                 .collect();
@@ -124,6 +192,7 @@ impl CatalogControlDispatcher {
                 LoadResponse {
                     catalog_exact: false,
                     accepted_names: Vec::new(),
+                    noop_names: Vec::new(),
                     resolutions,
                 },
                 None,
@@ -131,7 +200,12 @@ impl CatalogControlDispatcher {
         };
 
         let visibility_state = self.visibility_provider.visibility_state();
+        let visible_tool_names = self
+            .visibility_provider
+            .visible_tool_names()
+            .unwrap_or_default();
         let mut accepted_names = BTreeSet::new();
+        let mut noop_names = BTreeSet::new();
         let mut witnesses = BTreeMap::new();
         let mut resolutions = Vec::new();
 
@@ -143,6 +217,7 @@ impl CatalogControlDispatcher {
                 resolutions.push(ToolCatalogLoadResolution {
                     name,
                     accepted: false,
+                    accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
                 });
                 continue;
@@ -153,6 +228,7 @@ impl CatalogControlDispatcher {
                     resolutions.push(ToolCatalogLoadResolution {
                         name,
                         accepted: false,
+                        accepted_noop: false,
                         rejected_reason: Some(ToolCatalogLoadRejectedReason::NotDeferredEligible),
                     });
                 }
@@ -161,11 +237,26 @@ impl CatalogControlDispatcher {
                         .staged_requested_deferred_names
                         .contains(&name)
                         || accepted_names.contains(&name);
-                    if already_requested {
+                    let already_visible = visible_tool_names.contains(&name);
+                    if already_requested || already_visible {
+                        noop_names.insert(name.clone());
+                        resolutions.push(ToolCatalogLoadResolution {
+                            name,
+                            accepted: true,
+                            accepted_noop: true,
+                            rejected_reason: None,
+                        });
+                        continue;
+                    }
+                    if !self
+                        .visibility_provider
+                        .staged_session_filters_allow_name(&name)
+                    {
                         resolutions.push(ToolCatalogLoadResolution {
                             name,
                             accepted: false,
-                            rejected_reason: Some(ToolCatalogLoadRejectedReason::AlreadyRequested),
+                            accepted_noop: false,
+                            rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
                         });
                         continue;
                     }
@@ -181,6 +272,7 @@ impl CatalogControlDispatcher {
                     resolutions.push(ToolCatalogLoadResolution {
                         name,
                         accepted: true,
+                        accepted_noop: false,
                         rejected_reason: None,
                     });
                 }
@@ -197,6 +289,7 @@ impl CatalogControlDispatcher {
             LoadResponse {
                 catalog_exact: true,
                 accepted_names: accepted_names_vec,
+                noop_names: noop_names.into_iter().collect(),
                 resolutions,
             },
             effect,
@@ -284,6 +377,10 @@ struct SearchResponse {
     catalog_exact: bool,
     total_matches: usize,
     results: Vec<SearchResultItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_result_status: Option<SearchVisibilityStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,12 +388,24 @@ struct SearchResultItem {
     name: String,
     description: String,
     currently_callable: bool,
+    visibility_status: SearchVisibilityStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SearchVisibilityStatus {
+    Loaded,
+    Deferred,
+    BlockedByFilter,
+    PendingSource,
+    TemporarilyUnavailable,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct LoadResponse {
     catalog_exact: bool,
     accepted_names: Vec<String>,
+    noop_names: Vec<String>,
     resolutions: Vec<ToolCatalogLoadResolution>,
 }
 
@@ -364,12 +473,15 @@ fn load_tool_def() -> ToolDef {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::ToolFilter;
     use meerkat_core::types::ToolProvenance;
     use serde_json::value::RawValue;
+    use std::collections::BTreeMap;
 
     struct ExactCatalogDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[ToolCatalogEntry]>,
+        pending_sources: Arc<[String]>,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -387,6 +499,10 @@ mod tests {
 
         fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
             Arc::clone(&self.catalog)
+        }
+
+        fn pending_catalog_sources(&self) -> Arc<[String]> {
+            Arc::clone(&self.pending_sources)
         }
 
         async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
@@ -427,17 +543,22 @@ mod tests {
             catalog: vec![
                 ToolCatalogEntry::session_deferred(
                     Arc::clone(&deferred),
-                    false,
+                    true,
                     "callback:test".to_string(),
                 ),
                 ToolCatalogEntry::session_inline(Arc::clone(&inline), true),
             ]
             .into(),
+            pending_sources: Arc::from([]),
         });
-        let control = CatalogControlDispatcher::new(
-            dispatcher,
-            Arc::new(CatalogControlVisibilityProvider::new()),
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
         );
+        visibility_provider.set_scope(scope);
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
 
         let outcome = control
             .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "mcp" })))
@@ -452,8 +573,65 @@ mod tests {
         assert!(!response.results[0].currently_callable);
     }
 
+    #[test]
+    fn should_enable_requires_exact_catalog_with_deferred_session_entries() {
+        let inline = session_tool("inline_tool", "Inline callback tool");
+        let exact_inline_only = ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&inline)].into(),
+            catalog: vec![ToolCatalogEntry::session_inline(Arc::clone(&inline), true)].into(),
+            pending_sources: Arc::from([]),
+        };
+        assert!(
+            !CatalogControlDispatcher::should_enable_for(&exact_inline_only),
+            "inline-only exact catalogs should not expose control-plane tools"
+        );
+
+        let deferred = session_tool(
+            "deferred_mcp_tool",
+            "Deferred MCP tool with enough surface area to justify catalog mode.",
+        );
+        let deferred_two = session_tool(
+            "deferred_mcp_tool_two",
+            "Another deferred MCP tool so the exact catalog crosses the adaptive threshold.",
+        );
+        let exact_with_deferred = ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred), Arc::clone(&deferred_two)].into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred),
+                    true,
+                    "callback:test".to_string(),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred_two),
+                    true,
+                    "callback:test".to_string(),
+                ),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+        };
+        assert!(
+            CatalogControlDispatcher::should_enable_for(&exact_with_deferred),
+            "exact catalogs with deferred session entries should enable the control plane"
+        );
+    }
+
+    #[test]
+    fn should_enable_when_pending_sources_are_warming_without_catalog_entries_yet() {
+        let pending_only = ExactCatalogDispatcher {
+            tools: Arc::from([]),
+            catalog: Arc::from([]),
+            pending_sources: Arc::from(["pending-mcp".to_string()]),
+        };
+        assert!(
+            CatalogControlDispatcher::should_enable_for(&pending_only),
+            "pending exact sources should keep the catalog control plane available"
+        );
+    }
+
     #[tokio::test]
-    async fn load_rejects_unknown_inline_and_already_requested_names() {
+    async fn load_noops_for_already_requested_names_and_rejects_unknown_or_inline_entries() {
         let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
         let inline = session_tool("inline_tool", "Inline callback tool");
         let dispatcher = Arc::new(ExactCatalogDispatcher {
@@ -467,6 +645,7 @@ mod tests {
                 ToolCatalogEntry::session_inline(Arc::clone(&inline), true),
             ]
             .into(),
+            pending_sources: Arc::from([]),
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = ToolScope::new(Arc::from([]));
@@ -492,22 +671,26 @@ mod tests {
 
         assert!(response.catalog_exact);
         assert!(response.accepted_names.is_empty());
+        assert_eq!(response.noop_names, vec!["deferred_mcp_tool".to_string()]);
         assert_eq!(
             response.resolutions,
             vec![
                 ToolCatalogLoadResolution {
                     name: "deferred_mcp_tool".to_string(),
-                    accepted: false,
-                    rejected_reason: Some(ToolCatalogLoadRejectedReason::AlreadyRequested),
+                    accepted: true,
+                    accepted_noop: true,
+                    rejected_reason: None,
                 },
                 ToolCatalogLoadResolution {
                     name: "inline_tool".to_string(),
                     accepted: false,
+                    accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::NotDeferredEligible),
                 },
                 ToolCatalogLoadResolution {
                     name: "missing_tool".to_string(),
                     accepted: false,
+                    accepted_noop: false,
                     rejected_reason: Some(ToolCatalogLoadRejectedReason::UnknownKey),
                 },
             ]
@@ -526,6 +709,7 @@ mod tests {
                 "callback:test".to_string(),
             )]
             .into(),
+            pending_sources: Arc::from([]),
         });
         let control = CatalogControlDispatcher::new(
             dispatcher,
@@ -545,6 +729,7 @@ mod tests {
             response.accepted_names,
             vec!["deferred_mcp_tool".to_string()]
         );
+        assert!(response.noop_names.is_empty());
         assert_eq!(outcome.session_effects.len(), 1);
         let SessionEffect::RequestDeferredTools { names, witnesses } = &outcome.session_effects[0]
         else {
@@ -554,6 +739,206 @@ mod tests {
         assert_eq!(
             witnesses["deferred_mcp_tool"].stable_owner_key.as_deref(),
             Some("callback:test")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_rejects_deferred_names_hidden_by_staged_filters() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        );
+        scope
+            .set_visibility_state(SessionToolVisibilityState {
+                staged_filter: ToolFilter::Deny(
+                    ["deferred_mcp_tool".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            })
+            .unwrap();
+        visibility_provider.set_scope(scope);
+
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert!(response.accepted_names.is_empty());
+        assert!(response.noop_names.is_empty());
+        assert_eq!(
+            response.resolutions,
+            vec![ToolCatalogLoadResolution {
+                name: "deferred_mcp_tool".to_string(),
+                accepted: false,
+                accepted_noop: false,
+                rejected_reason: Some(ToolCatalogLoadRejectedReason::NotFilterable),
+            }]
+        );
+        assert!(
+            outcome.session_effects.is_empty(),
+            "filter-hidden deferred tools should not emit a staged load effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reports_pending_sources_when_catalog_is_still_warming() {
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: Arc::from([]),
+            catalog: Arc::from([]),
+            pending_sources: Arc::from(["pending-mcp".to_string()]),
+        });
+        let control = CatalogControlDispatcher::new(
+            dispatcher,
+            Arc::new(CatalogControlVisibilityProvider::new()),
+        );
+
+        let outcome = control
+            .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "secret" })))
+            .await
+            .unwrap();
+        let response: SearchResponse =
+            serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert!(response.catalog_exact);
+        assert_eq!(response.total_matches, 0);
+        assert_eq!(response.pending_sources, vec!["pending-mcp".to_string()]);
+        assert_eq!(
+            response.empty_result_status,
+            Some(SearchVisibilityStatus::PendingSource)
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reports_loaded_deferred_blocked_and_temporarily_unavailable_states() {
+        let loaded = session_tool(
+            "loaded_secret_lookup",
+            "Deferred secret lookup that is already loaded and visible.",
+        );
+        let deferred = session_tool(
+            "deferred_secret_lookup",
+            "Deferred secret lookup that still needs tool_catalog_load.",
+        );
+        let blocked = session_tool(
+            "blocked_secret_lookup",
+            "Deferred secret lookup that is currently blocked by a session filter.",
+        );
+        let unavailable = session_tool(
+            "offline_secret_lookup",
+            "Deferred secret lookup whose source is temporarily unavailable.",
+        );
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![
+                Arc::clone(&loaded),
+                Arc::clone(&deferred),
+                Arc::clone(&blocked),
+            ]
+            .into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&loaded),
+                    true,
+                    "callback:test".to_string(),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred),
+                    true,
+                    "callback:test".to_string(),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&blocked),
+                    true,
+                    "callback:test".to_string(),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&unavailable),
+                    false,
+                    "callback:test".to_string(),
+                ),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = ToolScope::new_with_projection_names(
+            vec![
+                Arc::clone(&loaded),
+                Arc::clone(&deferred),
+                Arc::clone(&blocked),
+            ]
+            .into(),
+            std::collections::HashSet::new(),
+            [
+                "loaded_secret_lookup".to_string(),
+                "deferred_secret_lookup".to_string(),
+                "blocked_secret_lookup".to_string(),
+                "offline_secret_lookup".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        scope
+            .set_visibility_state(SessionToolVisibilityState {
+                active_requested_deferred_names: ["loaded_secret_lookup".to_string()]
+                    .into_iter()
+                    .collect(),
+                staged_filter: ToolFilter::Deny(
+                    ["blocked_secret_lookup".to_string()].into_iter().collect(),
+                ),
+                active_filter: ToolFilter::Deny(
+                    ["blocked_secret_lookup".to_string()].into_iter().collect(),
+                ),
+                ..Default::default()
+            })
+            .unwrap();
+        visibility_provider.set_scope(scope);
+
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let outcome = control
+            .dispatch(search_call(SEARCH_TOOL_NAME, json!({ "query": "secret" })))
+            .await
+            .unwrap();
+        let response: SearchResponse =
+            serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        let statuses = response
+            .results
+            .into_iter()
+            .map(|item| (item.name, item.visibility_status))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            statuses.get("loaded_secret_lookup"),
+            Some(&SearchVisibilityStatus::Loaded)
+        );
+        assert_eq!(
+            statuses.get("deferred_secret_lookup"),
+            Some(&SearchVisibilityStatus::Deferred)
+        );
+        assert_eq!(
+            statuses.get("blocked_secret_lookup"),
+            Some(&SearchVisibilityStatus::BlockedByFilter)
+        );
+        assert_eq!(
+            statuses.get("offline_secret_lookup"),
+            Some(&SearchVisibilityStatus::TemporarilyUnavailable)
         );
     }
 }

@@ -274,7 +274,7 @@ struct RuntimeLoopAttachment {
 }
 
 /// Explicit registration phase — the type-level distinction between
-/// "registered but inert" and "executor attached."
+/// "registered but inert," "attachment in progress," and "executor attached."
 ///
 /// Replaces the implicit `Option<RuntimeLoopAttachment>` discriminant
 /// (Dogma §8: Option must not hide ownership uncertainty).
@@ -282,6 +282,10 @@ enum RegistrationPhase {
     /// Registered via `prepare_bindings()`. No executor — inputs queue
     /// but are not processed until an executor attaches.
     Queuing,
+    /// `ensure_session_with_executor()` is in progress — another task is
+    /// wiring the runtime loop. Concurrent callers must treat this as
+    /// "attachment pending" and not race a second loop spawn.
+    Attaching,
     /// Executor attached with live channels. Inputs are processed
     /// by the RuntimeLoop.
     Active(RuntimeLoopAttachment),
@@ -293,11 +297,22 @@ impl RuntimeSessionEntry {
             RegistrationPhase::Active(attachment) => {
                 !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed()
             }
-            RegistrationPhase::Queuing => false,
+            RegistrationPhase::Queuing | RegistrationPhase::Attaching => false,
         }
     }
 
-    fn has_attachment(&self) -> bool {
+    /// Returns `true` if an executor is attached with live channels, OR if
+    /// attachment is in progress (another task is wiring the loop).
+    /// Used by external-facing queries (`session_has_executor`) to prevent
+    /// concurrent callers from racing a second loop spawn.
+    fn has_attachment_or_attaching(&self) -> bool {
+        matches!(self.phase, RegistrationPhase::Attaching) || self.attachment_is_live()
+    }
+
+    /// Returns `true` only if the executor is fully attached with live channels.
+    /// Used by internal publish logic within `ensure_session_with_executor`
+    /// where the caller itself may have set `Attaching`.
+    fn has_live_attachment(&self) -> bool {
         self.attachment_is_live()
     }
 
@@ -316,6 +331,8 @@ impl RuntimeSessionEntry {
 
     fn clear_dead_attachment(&mut self) -> bool {
         if matches!(self.phase, RegistrationPhase::Active(_)) && !self.attachment_is_live() {
+            // Don't regress to Queuing if another task is mid-attach;
+            // Active with dead channels goes back to Queuing for retry.
             self.phase = RegistrationPhase::Queuing;
             // Clear detached wake state — it will be re-created on
             // re-registration along with the new runtime loop.
@@ -639,8 +656,15 @@ impl RuntimeSessionAdapter {
             let mut sessions = self.sessions.write().await;
             sessions.get_mut(&session_id).map(|entry| {
                 entry.clear_dead_attachment();
+                let occupied = entry.has_attachment_or_attaching();
+                if !occupied {
+                    // Claim the attachment slot so concurrent callers see
+                    // Attaching and return early instead of racing a second
+                    // loop spawn (which would cross-wire detached-wake state).
+                    entry.phase = RegistrationPhase::Attaching;
+                }
                 (
-                    entry.has_attachment(),
+                    occupied,
                     entry.driver.clone(),
                     entry.completions.clone(),
                     entry.ops_lifecycle.clone(),
@@ -675,9 +699,10 @@ impl RuntimeSessionAdapter {
                 let mut sessions = self.sessions.write().await;
                 if let Some(entry) = sessions.get_mut(&session_id) {
                     entry.clear_dead_attachment();
-                    if entry.has_attachment() {
+                    if entry.has_attachment_or_attaching() {
                         return;
                     }
+                    entry.phase = RegistrationPhase::Attaching;
                     (
                         entry.driver.clone(),
                         entry.completions.clone(),
@@ -746,6 +771,7 @@ impl RuntimeSessionAdapter {
                         error = %error,
                         "failed to attach runtime driver before publishing loop attachment"
                     );
+                    self.revert_attaching(&session_id).await;
                     return;
                 }
             }
@@ -826,7 +852,7 @@ impl RuntimeSessionAdapter {
                 None => (false, true),
                 Some(entry) => {
                     entry.clear_dead_attachment();
-                    if entry.has_attachment() {
+                    if entry.has_live_attachment() {
                         (false, false)
                     } else if !Arc::ptr_eq(&entry.driver, &driver)
                         || !Arc::ptr_eq(&entry.completions, &completions)
@@ -864,11 +890,24 @@ impl RuntimeSessionAdapter {
                 let mut driver_guard = driver.lock().await;
                 let _ = driver_guard.detach();
             }
+            self.revert_attaching(&session_id).await;
             return;
         }
 
         if should_wake {
             let _ = wake_tx.try_send(());
+        }
+    }
+
+    /// Revert `Attaching → Queuing` if attachment failed. This unblocks
+    /// future `ensure_session_with_executor` callers that would otherwise
+    /// see `Attaching` forever and return early.
+    async fn revert_attaching(&self, session_id: &SessionId) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id)
+            && matches!(entry.phase, RegistrationPhase::Attaching)
+        {
+            entry.phase = RegistrationPhase::Queuing;
         }
     }
 
@@ -903,16 +942,14 @@ impl RuntimeSessionAdapter {
         self.sessions.read().await.contains_key(session_id)
     }
 
-    /// Check whether a session has an active RuntimeLoop (executor attached
-    /// with live channels). Sessions registered via `prepare_bindings()` /
-    /// `register_session()` exist in the map but have no loop — inputs will
-    /// queue but never be processed until an executor is attached via
-    /// `ensure_session_with_executor()`.
+    /// Check whether a session has an active RuntimeLoop or attachment in
+    /// progress. Returns `false` only for `Queuing` sessions (registered via
+    /// `prepare_bindings()` with no executor) and unknown sessions.
     pub async fn session_has_executor(&self, session_id: &SessionId) -> bool {
         let sessions = self.sessions.read().await;
         sessions
             .get(session_id)
-            .map(RuntimeSessionEntry::has_attachment)
+            .map(RuntimeSessionEntry::has_attachment_or_attaching)
             .unwrap_or(false)
     }
 

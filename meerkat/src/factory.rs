@@ -2695,7 +2695,7 @@ fn deferred_catalog_guidance() -> &'static str {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+mod prompt_tests {
     use super::{deferred_catalog_guidance, render_tool_usage_instructions};
     use async_trait::async_trait;
     use futures::stream;

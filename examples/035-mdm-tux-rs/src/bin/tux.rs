@@ -320,6 +320,11 @@ enum RpcCommand {
         target_id: String,
         session_id: String,
     },
+    /// Resume the most recent session, or create new if none exist.
+    ResumeLatestOrCreate {
+        target_id: String,
+        model: Option<String>,
+    },
     /// Connect to a target's RPC address.
     Connect {
         target_id: String,
@@ -755,6 +760,85 @@ async fn rpc_command_loop(
                                 .send(TuiEvent::RpcError {
                                     target_id,
                                     message: format!("turn/interrupt failed: {e}"),
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
+            RpcCommand::ResumeLatestOrCreate { target_id, model } => {
+                let event_tx = event_tx.clone();
+                let clients = clients.clone();
+                tokio::spawn(async move {
+                    let client = {
+                        let map = clients.lock().await;
+                        map.get(&target_id).cloned()
+                    };
+                    let Some(client) = client else { return };
+                    // Try to find an existing session to resume
+                    if let Ok(list_result) = client
+                        .request("session/list", serde_json::json!({}))
+                        .await
+                    {
+                        if let Some(sessions) = list_result.get("sessions").and_then(|v| v.as_array()) {
+                            if let Some(latest) = sessions.first() {
+                                if let Some(sid) = latest.get("session_id").and_then(|v| v.as_str()) {
+                                    // Resume existing session — open stream + bind
+                                    let _ = client
+                                        .request(
+                                            "session/stream_open",
+                                            serde_json::json!({ "session_id": sid }),
+                                        )
+                                        .await;
+                                    let _ = event_tx
+                                        .send(TuiEvent::SessionBound {
+                                            target_id: target_id.clone(),
+                                            session_id: sid.to_string(),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    // No existing session — create new (deferred)
+                    let mut params = serde_json::json!({
+                        "prompt": "",
+                        "initial_turn": "deferred",
+                        "enable_builtins": true,
+                        "enable_shell": true,
+                        "enable_mob": true,
+                    });
+                    if let Some(m) = model {
+                        params["model"] = Value::String(m);
+                    }
+                    match client.request("session/create", params).await {
+                        Ok(result) => {
+                            let session_id = result
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !session_id.is_empty() {
+                                let _ = client
+                                    .request(
+                                        "session/stream_open",
+                                        serde_json::json!({ "session_id": session_id }),
+                                    )
+                                    .await;
+                                let _ = event_tx
+                                    .send(TuiEvent::SessionBound {
+                                        target_id,
+                                        session_id,
+                                    })
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(TuiEvent::RpcError {
+                                    target_id,
+                                    message: format!("session/create failed: {e}"),
                                 })
                                 .await;
                         }
@@ -1699,9 +1783,9 @@ fn process_event(
                 app.targets[idx].phase = TargetPhase::Idle;
                 let name = app.targets[idx].name.clone();
                 app.targets[idx].push_notice("connected", &format!("RPC connection to {name} established"));
-                // Auto-create session if none exists
+                // Auto-resume latest session or create new
                 if app.targets[idx].session_id.is_none() {
-                    let _ = rpc_tx.send(RpcCommand::NewSession {
+                    let _ = rpc_tx.send(RpcCommand::ResumeLatestOrCreate {
                         target_id,
                         model: app.pending_model.clone(),
                     });

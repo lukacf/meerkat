@@ -1310,7 +1310,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         let mut rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
             rpc_factory,
             rpc_config,
-            10,
+            1024,
             rpc_persistence,
             meerkat_rpc::router::NotificationSink::noop(),
         );

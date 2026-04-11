@@ -147,6 +147,18 @@ impl OpenAiClient {
             body["tools"] = Value::Array(tools);
         }
 
+        // Inject provider-native web search tool from provider_params.
+        if let Some(ref params) = request.provider_params
+            && let Some(ws) = params.get("web_search")
+        {
+            let mut tools_arr = body
+                .get("tools")
+                .and_then(|t| t.as_array().cloned())
+                .unwrap_or_default();
+            tools_arr.push(ws.clone());
+            body["tools"] = Value::Array(tools_arr);
+        }
+
         // Extract OpenAI-specific parameters from provider_params
         if let Some(params) = &request.provider_params {
             if reasoning_enabled && let Some(reasoning_effort) = params.get("reasoning_effort") {
@@ -2511,5 +2523,71 @@ mod tests {
             output.contains("[image: image/png]"),
             "image should degrade to text projection: got {output}"
         );
+    }
+
+    // =========================================================================
+    // Web search tool injection tests
+    // =========================================================================
+
+    #[test]
+    fn test_web_search_tool_appended_openai() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4.1-mini",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object"}),
+        ))])
+        .with_provider_params(serde_json::json!({
+            "web_search": {"type": "web_search"}
+        }));
+        let body = client.build_request_body(&request).expect("build request");
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 2, "should have regular tool + web_search");
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[1]["type"], "web_search");
+    }
+
+    #[test]
+    fn test_web_search_only_openai() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4.1-mini",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_params(serde_json::json!({
+            "web_search": {"type": "web_search"}
+        }));
+        let body = client.build_request_body(&request).expect("build request");
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "web_search");
+    }
+
+    #[test]
+    fn test_no_web_search_when_absent_openai() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-4.1-mini",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object"}),
+        ))]);
+        let body = client.build_request_body(&request).expect("build request");
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1, "should only have the regular tool");
+        assert_eq!(tools[0]["type"], "function");
     }
 }

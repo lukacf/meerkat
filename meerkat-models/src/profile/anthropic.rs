@@ -172,6 +172,7 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
         supports_temperature: supports_temperature(model),
         supports_thinking: supports_thinking(model),
         supports_reasoning: false,
+        supports_web_search: true,
         inline_video: false,
         vision: true,
         image_tool_results: true,

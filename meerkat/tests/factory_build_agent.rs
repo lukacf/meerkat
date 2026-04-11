@@ -380,6 +380,7 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             supports_temperature: true,
             supports_thinking: false,
             supports_reasoning: false,
+            supports_web_search: false,
             call_timeout_secs: Some(600),
         },
     );
@@ -431,6 +432,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             supports_temperature: true,
             supports_thinking: true,
             supports_reasoning: true,
+            supports_web_search: false,
             call_timeout_secs: Some(600),
         },
     );
@@ -1918,5 +1920,148 @@ async fn shared_comms_runtime_skipped_when_comms_name_set() {
             .map(String::as_str),
         Some("mob/delegate/helper"),
         "member session should have its own comms_name in metadata"
+    );
+}
+
+// ============================================================================
+// Provider web search default tests
+// ============================================================================
+
+/// Mock client that captures provider_params from LlmRequest.
+struct ParamsCaptureClient {
+    /// Captured provider_params (empty object if None was passed).
+    captured: Mutex<serde_json::Value>,
+}
+
+impl ParamsCaptureClient {
+    fn new() -> Self {
+        Self {
+            captured: Mutex::new(serde_json::json!(null)),
+        }
+    }
+
+    fn captured_params(&self) -> Option<serde_json::Value> {
+        let val = self.captured.lock().unwrap().clone();
+        if val.is_null() { None } else { Some(val) }
+    }
+}
+
+#[async_trait]
+impl LlmClient for ParamsCaptureClient {
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>>
+    {
+        *self.captured.lock().unwrap() = request
+            .provider_params
+            .clone()
+            .unwrap_or(serde_json::json!({}));
+        Box::pin(stream::iter(vec![
+            Ok(LlmEvent::TextDelta {
+                delta: "ok".to_string(),
+                meta: None,
+            }),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                },
+            }),
+        ]))
+    }
+    fn provider(&self) -> &'static str {
+        "anthropic"
+    }
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn web_search_default_injected_for_anthropic() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        ..AgentBuildConfig::new("claude-sonnet-4-6")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client
+        .captured_params()
+        .expect("should have provider_params");
+    assert!(
+        params.get("web_search").is_some(),
+        "Anthropic catalog model should have web_search default: {params}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_not_injected_when_config_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.provider_tools.anthropic.web_search = false;
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        ..AgentBuildConfig::new("claude-sonnet-4-6")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client.captured_params();
+    let has_web_search = params.as_ref().and_then(|p| p.get("web_search")).is_some();
+    assert!(
+        !has_web_search,
+        "web_search should not be injected when config disabled: {params:?}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_opt_out_via_null() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        provider_params: Some(json!({"web_search": null})),
+        ..AgentBuildConfig::new("claude-sonnet-4-6")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client.captured_params();
+    let has_web_search = params.as_ref().and_then(|p| p.get("web_search")).is_some();
+    assert!(
+        !has_web_search,
+        "web_search should be removed by null override: {params:?}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_explicit_params_merged_with_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        provider_params: Some(json!({"thinking_budget": 5000})),
+        ..AgentBuildConfig::new("claude-sonnet-4-6")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client
+        .captured_params()
+        .expect("should have provider_params");
+    assert!(
+        params.get("web_search").is_some(),
+        "web_search default should survive explicit param merge: {params}"
+    );
+    assert!(
+        params.get("thinking_budget").is_some(),
+        "explicit thinking_budget should be present: {params}"
     );
 }

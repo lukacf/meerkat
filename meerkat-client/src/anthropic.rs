@@ -391,6 +391,18 @@ impl AnthropicClient {
             body["tools"] = Value::Array(tools);
         }
 
+        // Inject provider-native web search tool from provider_params.
+        if let Some(ref params) = request.provider_params
+            && let Some(ws) = params.get("web_search")
+        {
+            let mut tools_arr = body
+                .get("tools")
+                .and_then(|t| t.as_array().cloned())
+                .unwrap_or_default();
+            tools_arr.push(ws.clone());
+            body["tools"] = Value::Array(tools_arr);
+        }
+
         // Extract provider-specific params
         if let Some(ref params) = request.provider_params {
             // Handle thinking config from three formats:
@@ -2223,6 +2235,88 @@ mod tests {
             "text-only user message content should be a string"
         );
         assert_eq!(messages[0]["content"], "just text");
+        Ok(())
+    }
+
+    // =========================================================================
+    // Web search tool injection tests
+    // =========================================================================
+
+    #[test]
+    fn test_web_search_tool_appended() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let tool = std::sync::Arc::new(meerkat_core::ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object"}),
+        ));
+        let mut request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hi".to_string()))],
+        );
+        request.tools = vec![tool];
+        request.provider_params = Some(serde_json::json!({
+            "web_search": {"type": "web_search_20250305", "name": "web_search"}
+        }));
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 2, "should have regular tool + web_search");
+        assert_eq!(tools[1]["type"], "web_search_20250305");
+        Ok(())
+    }
+
+    #[test]
+    fn test_web_search_tool_alone() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let mut request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hi".to_string()))],
+        );
+        request.provider_params = Some(serde_json::json!({
+            "web_search": {"type": "web_search_20250305", "name": "web_search"}
+        }));
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "web_search_20250305");
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_web_search_when_absent() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let tool = std::sync::Arc::new(meerkat_core::ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object"}),
+        ));
+        let mut request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hi".to_string()))],
+        );
+        request.tools = vec![tool];
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1, "should have only the regular tool");
+        assert_eq!(tools[0]["name"], "my_tool");
+        Ok(())
+    }
+
+    #[test]
+    fn test_web_search_not_leaked_to_body() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let mut request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hi".to_string()))],
+        );
+        request.provider_params = Some(serde_json::json!({
+            "web_search": {"type": "web_search_20250305", "name": "web_search"}
+        }));
+        let body = client.build_request_body(&request)?;
+        assert!(
+            body.get("web_search").is_none(),
+            "web_search should not be a top-level body key"
+        );
         Ok(())
     }
 }

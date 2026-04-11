@@ -98,9 +98,9 @@ pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
     HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
-    PlainEventSource, ProviderConfig, ProviderSettings, RetryConfig, SelfHostedApiStyle,
-    SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
-    ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+    PlainEventSource, ProviderConfig, ProviderSettings, ProviderToolsConfig, RetryConfig,
+    SelfHostedApiStyle, SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig,
+    SelfHostedTransport, ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{

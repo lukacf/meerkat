@@ -634,7 +634,21 @@ where
 
                     let mut effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    let mut effective_provider_params = self.config.provider_params.clone();
+                    // Merge provider tool defaults with explicit provider_params (RFC 7396).
+                    // tool_defaults are non-persisted, re-derived each build from config + profile.
+                    // explicit provider_params are persisted and override/remove defaults via null.
+                    let mut effective_provider_params = match (
+                        &self.config.provider_tool_defaults,
+                        &self.config.provider_params,
+                    ) {
+                        (Some(defaults), Some(explicit)) => {
+                            let mut merged = defaults.clone();
+                            crate::config_store::merge_patch(&mut merged, explicit.clone());
+                            Some(merged)
+                        }
+                        (Some(defaults), None) => Some(defaults.clone()),
+                        (None, some_or_none) => some_or_none.clone(),
+                    };
 
                     // Pre-LLM hooks may rewrite request params or deny the turn.
                     let pre_llm_report = self
@@ -716,6 +730,11 @@ where
                             && let Some(obj) = params.as_object_mut()
                         {
                             obj.insert("structured_output".to_string(), output_schema.to_value());
+                        }
+                        // Strip provider-native tool keys — extraction is deterministic, no tools.
+                        if let Some(obj) = params.as_object_mut() {
+                            obj.remove("web_search");
+                            obj.remove("google_search");
                         }
                         effective_provider_params = Some(params);
                     }

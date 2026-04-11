@@ -172,6 +172,7 @@ fn append_self_hosted(
             supports_temperature: model.supports_temperature,
             supports_thinking: model.supports_thinking,
             supports_reasoning: model.supports_reasoning,
+            supports_web_search: model.supports_web_search,
             inline_video: model.inline_video,
             vision: model.vision,
             image_tool_results: model.image_tool_results,
@@ -255,6 +256,7 @@ mod tests {
                 supports_temperature: true,
                 supports_thinking: false,
                 supports_reasoning: false,
+                supports_web_search: false,
                 call_timeout_secs: Some(600),
             },
         );
@@ -320,6 +322,7 @@ mod tests {
                 supports_temperature: true,
                 supports_thinking: false,
                 supports_reasoning: false,
+                supports_web_search: false,
                 call_timeout_secs: None,
             },
         );
@@ -359,6 +362,7 @@ mod tests {
                 supports_temperature: true,
                 supports_thinking: false,
                 supports_reasoning: false,
+                supports_web_search: false,
                 call_timeout_secs: None,
             },
         );

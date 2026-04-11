@@ -1875,3 +1875,125 @@ mod scenario_22_runtime_host_comms {
         );
     }
 }
+
+// ============================================================================
+// SCENARIO 23: Web search default-on per provider
+// ============================================================================
+
+mod scenario_23_web_search_default_on {
+    use super::*;
+
+    /// Anthropic: default web search produces a grounded answer to a current-events question.
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_web_search_anthropic() {
+        let Some(_key) = anthropic_api_key() else {
+            eprintln!("[scenario 23] Skipping web search Anthropic: no API key");
+            return;
+        };
+        let temp = TempDir::new().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        // No explicit provider_params — web search enabled by default
+        let build = AgentBuildConfig::new(smoke_model());
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("Anthropic agent should build");
+        let result = agent
+            .run("What was the most recent SpaceX launch? Answer in one sentence.".into())
+            .await
+            .expect("Anthropic web search run should succeed");
+        assert!(!result.text.is_empty(), "response must not be empty");
+        eprintln!(
+            "[scenario 23] Anthropic web search OK: {}",
+            result.text.trim()
+        );
+    }
+
+    /// OpenAI: default web search produces a grounded answer.
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_web_search_openai() {
+        #[cfg(not(feature = "openai"))]
+        {
+            eprintln!("[scenario 23] Skipping OpenAI web search: openai feature not enabled");
+            return;
+        }
+        #[cfg(feature = "openai")]
+        {
+            let Some(_key) = openai_api_key() else {
+                eprintln!("[scenario 23] Skipping web search OpenAI: no API key");
+                return;
+            };
+            let temp = TempDir::new().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions"));
+            let config = Config::default();
+            let mut build = AgentBuildConfig::new("gpt-5.2");
+            build.provider = Some(meerkat_core::Provider::OpenAI);
+            let mut agent = factory
+                .build_agent(build, &config)
+                .await
+                .expect("OpenAI agent should build");
+            let result = agent
+                .run("What was the most recent SpaceX launch? Answer in one sentence.".into())
+                .await
+                .expect("OpenAI web search run should succeed");
+            assert!(!result.text.is_empty(), "response must not be empty");
+            eprintln!("[scenario 23] OpenAI web search OK: {}", result.text.trim());
+        }
+    }
+
+    /// Gemini: default google_search produces a grounded answer.
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_web_search_gemini() {
+        let Some(_key) = gemini_api_key() else {
+            eprintln!("[scenario 23] Skipping web search Gemini: no API key");
+            return;
+        };
+        let temp = TempDir::new().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let mut build = AgentBuildConfig::new("gemini-3.1-flash-lite");
+        build.provider = Some(meerkat_core::Provider::Gemini);
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("Gemini agent should build");
+        let result = agent
+            .run("What was the most recent SpaceX launch? Answer in one sentence.".into())
+            .await
+            .expect("Gemini web search run should succeed");
+        assert!(!result.text.is_empty(), "response must not be empty");
+        eprintln!("[scenario 23] Gemini web search OK: {}", result.text.trim());
+    }
+
+    /// Opt-out: explicit null in provider_params disables web search.
+    #[tokio::test]
+    #[ignore = "lane:e2e-smoke"]
+    async fn e2e_smoke_web_search_opt_out_anthropic() {
+        let Some(_key) = anthropic_api_key() else {
+            eprintln!("[scenario 23] Skipping web search opt-out: no API key");
+            return;
+        };
+        let temp = TempDir::new().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let mut build = AgentBuildConfig::new(smoke_model());
+        build.provider_params = Some(serde_json::json!({"web_search": null}));
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("Anthropic agent should build with web_search disabled");
+        let result = agent
+            .run("What is 2+2? Answer with just the number.".into())
+            .await
+            .expect("Agent run should succeed with web search disabled");
+        assert!(!result.text.is_empty(), "response must not be empty");
+        eprintln!(
+            "[scenario 23] Anthropic web search opt-out OK: {}",
+            result.text.trim()
+        );
+    }
+}

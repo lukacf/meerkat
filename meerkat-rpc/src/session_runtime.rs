@@ -3384,6 +3384,7 @@ mod tests {
                 supports_temperature: true,
                 supports_thinking: true,
                 supports_reasoning: true,
+                supports_web_search: false,
                 call_timeout_secs: Some(600),
             },
         );

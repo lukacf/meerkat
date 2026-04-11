@@ -1239,6 +1239,54 @@ impl AgentFactory {
         }
     }
 
+    /// Anthropic's current web search tool type identifier.
+    const ANTHROPIC_WEB_SEARCH_TOOL_TYPE: &'static str = "web_search_20250305";
+
+    /// Resolve provider-native tool defaults for a model.
+    ///
+    /// Returns `None` when the model's profile does not support web search,
+    /// the config has the feature disabled, or the provider is self-hosted/other.
+    fn resolve_provider_tool_defaults(
+        registry: &meerkat_core::ModelRegistry,
+        provider: Provider,
+        model: &str,
+        config: &Config,
+    ) -> Option<serde_json::Value> {
+        let profile = registry.profile_for(model)?;
+        if !profile.supports_web_search {
+            return None;
+        }
+        let mut tools = serde_json::Map::new();
+        match provider {
+            Provider::Anthropic if config.provider_tools.anthropic.web_search => {
+                tools.insert(
+                    "web_search".into(),
+                    serde_json::json!({
+                        "type": Self::ANTHROPIC_WEB_SEARCH_TOOL_TYPE,
+                        "name": "web_search"
+                    }),
+                );
+            }
+            Provider::OpenAI if config.provider_tools.openai.web_search => {
+                tools.insert(
+                    "web_search".into(),
+                    serde_json::json!({"type": "web_search"}),
+                );
+            }
+            Provider::Gemini if config.provider_tools.gemini.google_search => {
+                tools.insert("google_search".into(), serde_json::json!({}));
+            }
+            // Self-hosted: capability flag is plumbed but tool shape emission
+            // is not wired yet (needs per-transport knowledge).
+            _ => {}
+        }
+        if tools.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(tools))
+        }
+    }
+
     fn resolve_provider_credentials(
         &self,
         provider: Provider,
@@ -1525,6 +1573,10 @@ impl AgentFactory {
         } else {
             None
         };
+
+        // 2b. Resolve provider-native tool defaults (web search, etc.)
+        let provider_tool_defaults =
+            Self::resolve_provider_tool_defaults(&registry, provider, &build_config.model, config);
 
         // 3. Create LLM client
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
@@ -2225,6 +2277,13 @@ impl AgentFactory {
             }))
             .with_call_timeout_override(effective_call_timeout_override);
 
+        if let Some(params) = build_config.provider_params.clone() {
+            builder = builder.provider_params(params);
+        }
+        if let Some(defaults) = provider_tool_defaults {
+            builder = builder.provider_tool_defaults(defaults);
+        }
+
         if let Some(system_prompt) = system_prompt {
             builder = builder.system_prompt(system_prompt);
         }
@@ -2456,6 +2515,7 @@ mod tests {
                 supports_temperature: true,
                 supports_thinking: true,
                 supports_reasoning: true,
+                supports_web_search: false,
                 call_timeout_secs: Some(600),
             },
         );

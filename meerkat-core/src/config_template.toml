@@ -33,3 +33,12 @@ min_turns_between_compactions = 3
 default_timeout_ms = 5000
 payload_max_bytes = 131072
 background_max_concurrency = 32
+
+[provider_tools.anthropic]
+web_search = true
+
+[provider_tools.openai]
+web_search = true
+
+[provider_tools.gemini]
+google_search = true

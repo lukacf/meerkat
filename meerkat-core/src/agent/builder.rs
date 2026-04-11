@@ -133,6 +133,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Set provider-native tool defaults (resolved at build time, not persisted).
+    pub fn provider_tool_defaults(mut self, defaults: Value) -> Self {
+        self.config.provider_tool_defaults = Some(defaults);
+        self
+    }
+
     /// Set retry policy for LLM calls
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;

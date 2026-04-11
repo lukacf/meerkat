@@ -43,6 +43,7 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub skills: crate::skills_config::SkillsConfig,
     pub self_hosted: SelfHostedConfig,
+    pub provider_tools: ProviderToolsConfig,
 }
 
 impl Default for Config {
@@ -72,6 +73,7 @@ impl Default for Config {
             hooks: HooksConfig::default(),
             skills: crate::skills_config::SkillsConfig::default(),
             self_hosted: SelfHostedConfig::default(),
+            provider_tools: ProviderToolsConfig::default(),
         }
     }
 }
@@ -231,12 +233,14 @@ impl Config {
         let tools_layer = file_config.tools.clone();
         let retry_layer = file_config.retry.clone();
         let self_hosted_layer = file_config.self_hosted.clone();
+        let provider_tools_layer = file_config.provider_tools.clone();
         // Merge (file values override defaults)
         self.merge(file_config);
         let parsed: toml::Value = toml::from_str(content).map_err(ConfigError::Parse)?;
         self.merge_tools_from_toml_presence(&parsed, &tools_layer);
         self.merge_retry_from_toml_presence(&parsed, &retry_layer);
         self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
+        self.merge_provider_tools_from_toml_presence(&parsed, &provider_tools_layer);
         Ok(())
     }
 
@@ -426,6 +430,31 @@ impl Config {
         }
         if retry.contains_key("call_timeout") {
             self.retry.call_timeout_override = layer.call_timeout_override.clone();
+        }
+    }
+
+    fn merge_provider_tools_from_toml_presence(
+        &mut self,
+        parsed: &toml::Value,
+        layer: &ProviderToolsConfig,
+    ) {
+        let Some(pt) = parsed.get("provider_tools").and_then(toml::Value::as_table) else {
+            return;
+        };
+        if let Some(anthropic) = pt.get("anthropic").and_then(toml::Value::as_table)
+            && anthropic.contains_key("web_search")
+        {
+            self.provider_tools.anthropic.web_search = layer.anthropic.web_search;
+        }
+        if let Some(openai) = pt.get("openai").and_then(toml::Value::as_table)
+            && openai.contains_key("web_search")
+        {
+            self.provider_tools.openai.web_search = layer.openai.web_search;
+        }
+        if let Some(gemini) = pt.get("gemini").and_then(toml::Value::as_table)
+            && gemini.contains_key("google_search")
+        {
+            self.provider_tools.gemini.google_search = layer.gemini.google_search;
         }
     }
 
@@ -758,6 +787,14 @@ pub struct AgentConfig {
     /// and applying relevant parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Provider-native tool defaults resolved at build time.
+    ///
+    /// NOT persisted in SessionMetadata. Re-derived on every build from
+    /// `Config.provider_tools` + `ModelProfile.supports_web_search`.
+    /// Merged with `provider_params` per-turn in the agent state machine
+    /// via RFC 7396 merge-patch semantics.
+    #[serde(skip)]
+    pub provider_tool_defaults: Option<serde_json::Value>,
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
@@ -795,6 +832,7 @@ impl Default for AgentConfig {
                 .unwrap_or_default(),
             max_turns: None,
             provider_params: None,
+            provider_tool_defaults: None,
             output_schema: None,
             structured_output_retries: default_structured_output_retries(),
             extraction_prompt: None,
@@ -1039,6 +1077,9 @@ pub struct SelfHostedModelConfig {
     pub supports_temperature: bool,
     pub supports_thinking: bool,
     pub supports_reasoning: bool,
+    /// Whether the model supports provider-native web search tools.
+    #[serde(default)]
+    pub supports_web_search: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_secs: Option<u64>,
 }
@@ -1059,6 +1100,7 @@ impl Default for SelfHostedModelConfig {
             supports_temperature: true,
             supports_thinking: false,
             supports_reasoning: false,
+            supports_web_search: false,
             call_timeout_secs: None,
         }
     }
@@ -1069,6 +1111,68 @@ impl Default for SelfHostedModelConfig {
 pub struct SelfHostedConfig {
     pub servers: BTreeMap<String, SelfHostedServerConfig>,
     pub models: BTreeMap<String, SelfHostedModelConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Provider-native tool defaults
+// ---------------------------------------------------------------------------
+
+/// Per-provider defaults for provider-native tools (web search, etc.).
+///
+/// These defaults are resolved at factory build time and injected as
+/// non-persisted `AgentConfig.provider_tool_defaults`. The `enabled` flags
+/// here control whether the factory injects tool config for models whose
+/// `ModelProfile.supports_web_search` is `true`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ProviderToolsConfig {
+    pub anthropic: AnthropicProviderToolsConfig,
+    pub openai: OpenAiProviderToolsConfig,
+    pub gemini: GeminiProviderToolsConfig,
+}
+
+/// Anthropic provider-native tool defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AnthropicProviderToolsConfig {
+    /// Enable web search for Anthropic models that support it.
+    pub web_search: bool,
+}
+
+impl Default for AnthropicProviderToolsConfig {
+    fn default() -> Self {
+        Self { web_search: true }
+    }
+}
+
+/// OpenAI provider-native tool defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OpenAiProviderToolsConfig {
+    /// Enable web search for OpenAI models that support it.
+    pub web_search: bool,
+}
+
+impl Default for OpenAiProviderToolsConfig {
+    fn default() -> Self {
+        Self { web_search: true }
+    }
+}
+
+/// Gemini provider-native tool defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GeminiProviderToolsConfig {
+    /// Enable Google Search for Gemini models that support it.
+    pub google_search: bool,
+}
+
+impl Default for GeminiProviderToolsConfig {
+    fn default() -> Self {
+        Self {
+            google_search: true,
+        }
+    }
 }
 
 /// Runtime limits configured at the config layer.
@@ -2642,6 +2746,70 @@ call_timeout = "30s"
         assert_eq!(
             config.retry.call_timeout_override,
             CallTimeoutOverride::Value(Duration::from_secs(30))
+        );
+    }
+
+    // ---- Provider tools config tests ----
+
+    #[test]
+    fn test_provider_tools_defaults_all_enabled() {
+        let config = Config::default();
+        assert!(config.provider_tools.anthropic.web_search);
+        assert!(config.provider_tools.openai.web_search);
+        assert!(config.provider_tools.gemini.google_search);
+    }
+
+    #[test]
+    fn test_provider_tools_roundtrip_toml() {
+        let config = Config::default();
+        let toml_str = toml::to_string(&config.provider_tools).unwrap();
+        let parsed: ProviderToolsConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed, config.provider_tools);
+    }
+
+    #[test]
+    fn test_provider_tools_merge_preserves_when_absent() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"[agent]
+model = "custom-model"
+"#,
+            )
+            .unwrap();
+        // provider_tools should be untouched
+        assert!(config.provider_tools.anthropic.web_search);
+        assert!(config.provider_tools.openai.web_search);
+        assert!(config.provider_tools.gemini.google_search);
+    }
+
+    #[test]
+    fn test_provider_tools_merge_overrides_single_provider() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str("[provider_tools.anthropic]\nweb_search = false\n")
+            .unwrap();
+        // Only anthropic should be disabled
+        assert!(!config.provider_tools.anthropic.web_search);
+        // Others unchanged
+        assert!(config.provider_tools.openai.web_search);
+        assert!(config.provider_tools.gemini.google_search);
+    }
+
+    // ---- AgentConfig.provider_tool_defaults serialization test ----
+
+    #[test]
+    fn test_provider_tool_defaults_not_serialized() {
+        let agent_config = AgentConfig {
+            provider_tool_defaults: Some(
+                serde_json::json!({"web_search": {"type": "web_search_20250305"}}),
+            ),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&agent_config).unwrap();
+        assert!(
+            json.get("provider_tool_defaults").is_none(),
+            "provider_tool_defaults must not be serialized: {json}"
         );
     }
 }

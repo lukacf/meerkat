@@ -26,6 +26,8 @@ pub struct WireModelProfile {
     pub supports_thinking: bool,
     /// Whether the model supports explicit reasoning effort control.
     pub supports_reasoning: bool,
+    /// Whether the model supports provider-native web search tools.
+    pub supports_web_search: bool,
     /// Whether the model accepts inline video content in user messages.
     pub inline_video: bool,
     /// JSON Schema describing accepted provider-specific parameters.

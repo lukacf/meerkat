@@ -111,6 +111,7 @@ pub fn build_models_catalog_response(
                         supports_temperature: entry.profile.supports_temperature,
                         supports_thinking: entry.profile.supports_thinking,
                         supports_reasoning: entry.profile.supports_reasoning,
+                        supports_web_search: entry.profile.supports_web_search,
                         inline_video: entry.profile.inline_video,
                         params_schema: entry.profile.params_schema.clone(),
                     });

@@ -341,7 +341,7 @@ impl GeminiClient {
             match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
                 Some(arr) => arr.push(serde_json::json!({"google_search": gs})),
                 None => {
-                    body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})])
+                    body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})]);
                 }
             }
         }

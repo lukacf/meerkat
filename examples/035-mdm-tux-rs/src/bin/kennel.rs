@@ -289,7 +289,9 @@ async fn main() -> anyhow::Result<()> {
         println!("hive_mob  : {mob_id}");
     }
 
-    let hive_rpc_addr = format!("0.0.0.0:{hive_rpc_port}");
+    // Use the kennel's listen host for the hive RPC address (not 0.0.0.0)
+    let kennel_host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or(&listen);
+    let hive_rpc_addr = format!("tcp://{kennel_host}:{hive_rpc_port}");
 
     tokio::spawn(run_janitor(
         state.clone(),

@@ -204,7 +204,8 @@ impl CatalogControlDispatcher {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for CatalogControlDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.tools)
@@ -371,7 +372,8 @@ mod tests {
         catalog: Arc<[ToolCatalogEntry]>,
     }
 
-    #[async_trait]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentToolDispatcher for ExactCatalogDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
             Arc::clone(&self.tools)

@@ -335,6 +335,24 @@ async fn handle_connection(
                 handle_rebind_targets(&mut guard, &keypair, &kennel_id, &tux_id, target_ids);
             }
 
+            KennelPayload::HivePrompt { prompt } => {
+                if !matches!(&session_kind, Some(SessionKind::Tux(_))) {
+                    continue;
+                }
+                // STUB: hive agent not yet implemented. Send back an error.
+                eprintln!("[kennel] hive prompt from TUX (stub): {prompt}");
+                let reply = build_signed_envelope(
+                    &keypair,
+                    &kennel_id,
+                    KennelPayload::HiveError {
+                        message: "Hive agent not yet implemented".into(),
+                    },
+                );
+                if let Ok(env) = reply {
+                    let _ = tx.send(env);
+                }
+            }
+
             KennelPayload::TuxHeartbeat | KennelPayload::TargetHeartbeat => {}
             _ => {}
         }

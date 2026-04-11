@@ -179,6 +179,8 @@ struct App {
     /// Kennel-mode target states (keyed by target_id).
     target_states: HashMap<String, KennelUiState>,
     target_leases: HashMap<String, String>,
+    /// Hive agent view (displayed when in Hive mode).
+    hive_view: TargetView,
 }
 
 impl App {
@@ -276,6 +278,10 @@ enum TuiEvent {
         target_id: String,
         sessions: Value,
     },
+    /// Hive agent responses from the kennel.
+    HiveStreamEvent { event: Value },
+    HiveComplete { text: String },
+    HiveError { message: String },
 }
 
 // ── Commands to background RPC tasks ─────────────────────────────────────────
@@ -325,6 +331,7 @@ enum KennelClientCommand {
     ClaimTarget { target_id: String },
     ClaimAck { lease_id: String },
     ReleaseTarget { lease_id: String },
+    HivePrompt { prompt: String },
     Shutdown { reply: tokio::sync::oneshot::Sender<()> },
 }
 
@@ -1277,6 +1284,15 @@ async fn spawn_kennel_client(
                                 })
                                 .await;
                         }
+                        KennelPayload::HiveStreamEvent { event } => {
+                            let _ = event_tx.send(TuiEvent::HiveStreamEvent { event }).await;
+                        }
+                        KennelPayload::HiveComplete { text } => {
+                            let _ = event_tx.send(TuiEvent::HiveComplete { text }).await;
+                        }
+                        KennelPayload::HiveError { message } => {
+                            let _ = event_tx.send(TuiEvent::HiveError { message }).await;
+                        }
                         _ => {}
                     }
                 }
@@ -1317,6 +1333,18 @@ async fn spawn_kennel_client(
                                 &keypair,
                                 &tux_id,
                                 KennelPayload::ReleaseTargets { lease_ids: vec![lease_id] },
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        KennelClientCommand::HivePrompt { prompt } => {
+                            if !send_kennel_message(
+                                &mut write_half,
+                                &keypair,
+                                &tux_id,
+                                KennelPayload::HivePrompt { prompt },
                             )
                             .await
                             {
@@ -1430,9 +1458,10 @@ async fn main() -> anyhow::Result<()> {
         pending_model: None,
         target_states: HashMap::new(),
         target_leases: HashMap::new(),
+        hive_view: TargetView::new("hive".into(), "hive".into(), String::new()),
     };
 
-    tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, None))
+    tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, None, None))
         .await?
         .context("TUI loop")?;
 
@@ -1530,10 +1559,12 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
         pending_model: None,
         target_states: HashMap::new(),
         target_leases: HashMap::new(),
+        hive_view: TargetView::new("hive".into(), "hive".into(), String::new()),
     };
 
     let claims_for_tui = Some(claims.clone());
-    tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, claims_for_tui))
+    let kennel_tx_for_tui = Some(kennel_tx.clone());
+    tokio::task::spawn_blocking(move || tui_loop(app, rpc_tx, event_rx, claims_for_tui, kennel_tx_for_tui))
         .await?
         .context("TUI loop")?;
 
@@ -1551,6 +1582,7 @@ fn tui_loop(
     rpc_tx: mpsc::UnboundedSender<RpcCommand>,
     mut event_rx: mpsc::Receiver<TuiEvent>,
     claims: Option<Arc<ClaimRegistry>>,
+    kennel_tx: Option<mpsc::UnboundedSender<KennelClientCommand>>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
 
@@ -1576,6 +1608,7 @@ fn tui_loop(
                         key.modifiers,
                         &rpc_tx,
                         claims.as_deref(),
+                        kennel_tx.as_ref(),
                     );
                     dirty = true;
                 }
@@ -1810,6 +1843,21 @@ fn process_event(
                 t.push_notice("kennel", &msg);
             }
         }
+        TuiEvent::HiveStreamEvent { event } => {
+            handle_stream_event(&mut app.hive_view, &event);
+        }
+        TuiEvent::HiveComplete { text } => {
+            app.hive_view.flush_streaming();
+            if !text.is_empty() {
+                app.hive_view.push_remote_turn(&text);
+            }
+            app.hive_planning = false;
+        }
+        TuiEvent::HiveError { message } => {
+            app.hive_view.flush_streaming();
+            app.hive_view.push_notice("hive error", &message);
+            app.hive_planning = false;
+        }
     }
 }
 
@@ -1862,6 +1910,7 @@ fn handle_key(
     modifiers: KeyModifiers,
     rpc_tx: &mpsc::UnboundedSender<RpcCommand>,
     claims: Option<&ClaimRegistry>,
+    kennel_tx: Option<&mpsc::UnboundedSender<KennelClientCommand>>,
 ) {
     match code {
         KeyCode::Tab => {
@@ -1908,7 +1957,10 @@ fn handle_key(
             app.input.clear();
         }
         KeyCode::Char('l') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(t) = app.selected_target_mut() {
+            if app.mode == Mode::Hive {
+                app.hive_view.history.clear();
+                app.hive_view.streaming_text.clear();
+            } else if let Some(t) = app.selected_target_mut() {
                 t.history.clear();
                 t.streaming_text.clear();
             }
@@ -1973,6 +2025,21 @@ fn handle_key(
                     handling_mode,
                     model,
                 });
+            }
+
+            // Hive mode: send prompt to kennel
+            else if app.mode == Mode::Hive {
+                if app.transport != TransportMode::Kennel {
+                    app.hive_view.push_notice("error", "hive mode requires kennel transport (--kennel)");
+                    return;
+                }
+                if let Some(ktx) = kennel_tx {
+                    app.hive_view.push_user_turn(&body);
+                    app.hive_planning = true;
+                    let _ = ktx.send(KennelClientCommand::HivePrompt { prompt: body });
+                } else {
+                    app.hive_view.push_notice("error", "kennel not connected");
+                }
             }
         }
         KeyCode::Char(c) => app.input.push(c),
@@ -2301,7 +2368,12 @@ fn render_timeline(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mu
     let inner_width = area.width.saturating_sub(2);
     let inner_height = area.height.saturating_sub(2);
 
-    let Some(target) = app.targets.get(app.selected) else {
+    // In Hive mode, show the hive view; in Direct mode, show the selected target.
+    let target: &TargetView = if app.mode == Mode::Hive {
+        &app.hive_view
+    } else if let Some(t) = app.targets.get(app.selected) {
+        t
+    } else {
         let placeholder =
             "No targets configured.\n\nUse --target HOST:PORT to connect to an agent.";
         f.render_widget(
@@ -2556,6 +2628,7 @@ mod tests {
             pending_model: None,
             target_states: HashMap::new(),
             target_leases: HashMap::new(),
+            hive_view: TargetView::new("hive".into(), "hive".into(), String::new()),
         };
         scroll_timeline_up(&mut app, 5);
         assert!(!app.auto_scroll);

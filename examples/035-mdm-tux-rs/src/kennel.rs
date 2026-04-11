@@ -168,6 +168,18 @@ pub enum KennelPayload {
     RebindTargets {
         target_ids: Vec<String>,
     },
+    HivePrompt {
+        prompt: String,
+    },
+    HiveStreamEvent {
+        event: serde_json::Value,
+    },
+    HiveComplete {
+        text: String,
+    },
+    HiveError {
+        message: String,
+    },
     Error {
         message: String,
     },

@@ -1,109 +1,211 @@
 # 035 — MDM TUX: Meerkat Device Manager
 
-A smart MDM (Mobile Device Management) demo using Meerkat peer-to-peer comms over TCP.
-Three binaries: **`mdm-target`** runs on each managed machine, **`mdm-tux`** is the ratatui TUI controller, and **`mdm-kennel`** is the kennel-mode rendezvous service.
-
-Targets register with TUX automatically — no config files, no manual key exchange.
+A smart MDM (Mobile Device Management) demo using Meerkat. Three binaries:
+**`mdm-target`** runs on each managed machine, **`mdm-tux`** is the ratatui TUI
+controller (pure RPC client), and **`mdm-kennel`** is the kennel-mode rendezvous
+service that brokers target discovery and claim management.
 
 ```
   Managed machine                    Controller machine
-  ┌────────────────────────┐         ┌───────────────────────────────────────────┐
-  │ mdm-target <HOST:PORT> │         │ mdm-tux <PORT>                            │
-  │                        │  TCP    │                                           │
-  │ auto-registers ────────┼────────►│ registration server (PORT+1)              │
-  │ shell + comms tools    │◄───────►│ comms listener (PORT)                     │
-  │ inbox loop             │         │                                           │
-  └────────────────────────┘         │ Direct mode: select target, type command  │
-                                     │ Hive mode:   LLM fans out to all targets  │
-                                     └───────────────────────────────────────────┘
+  ┌──────────────────────────┐       ┌────────────────────────────────────────────┐
+  │ mdm-target               │       │ mdm-tux                                    │
+  │  --kennel HOST:PORT      │  TCP  │  --kennel HOST:PORT                        │
+  │  --rpc-port PORT         │◄─────►│                                            │
+  │                          │       │  Pure RPC client (no comms identity)        │
+  │ JSON-RPC over TCP        │       │  Direct mode: select target, type command   │
+  │ Agent runtime + comms    │       │  Hive mode:   LLM fans out to all targets   │
+  │ Shell + delegation tools │       │  Slash commands for model/steer/queue/etc.  │
+  └──────────────────────────┘       └────────────────────────────────────────────┘
+           │                                      │
+           │ Kennel protocol                      │ Kennel protocol
+           │ (signed envelopes)                   │ (signed envelopes)
+           ▼                                      ▼
+       ┌──────────────────────────────────────────────┐
+       │ mdm-kennel --listen HOST:PORT                 │
+       │  Rendezvous broker                            │
+       │  Target registration + discovery              │
+       │  Claim/lease management (TTL, ack, recovery)  │
+       │  Hive agent stub (sends error for now)        │
+       └──────────────────────────────────────────────┘
 ```
+
+---
+
+## Architecture
+
+**TUX** is a pure RPC client with no comms identity and no agent runtime. It
+connects to target agents via JSON-RPC over TCP. In kennel mode, the kennel
+broker gives TUX the target's RPC address; all subsequent interaction goes
+direct to the target.
+
+**Target** serves a JSON-RPC TCP server on `--rpc-port`. It runs a full
+runtime-backed agent with `PersistentSessionService`, comms for inter-agent
+traffic, shell + delegation + schedule tools. Sessions are persisted to disk.
+
+**Kennel** manages target registration, claim/lease lifecycle (TTL, ack
+windows, recovery), and TUX/target discovery. Hive mode prompts are forwarded
+through the kennel (currently a stub that returns an error).
 
 ---
 
 ## Quick Start (local test)
 
+### Direct mode (no kennel)
+
 ```bash
 cd examples/035-mdm-tux-rs
 
-# Terminal 1 — host
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-tux -- 4747
+# Terminal 1 — target agent
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- \
+    --rpc-port 4800 --name my-mac
 
-# Terminal 2 — target (auto-registers with host)
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- 127.0.0.1:4747
+# Terminal 2 — TUX controller (direct connection)
+cargo run --bin mdm-tux -- --target 127.0.0.1:4800
 ```
 
-That's it. The target registers automatically. In TUX, type `ls /tmp` and press Enter.
+### Kennel mode (brokered discovery)
+
+```bash
+cd examples/035-mdm-tux-rs
+
+# Terminal 1 — kennel broker
+cargo run --bin mdm-kennel -- --listen 127.0.0.1:5000
+
+# Terminal 2 — target agent (registers with kennel)
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- \
+    --kennel 127.0.0.1:5000 --rpc-port 4800 --name my-mac
+
+# Terminal 3 — TUX controller (discovers targets via kennel)
+cargo run --bin mdm-tux -- --kennel 127.0.0.1:5000
+```
+
+In TUX, use `/claim` to claim a target, then type a command and press Enter.
 
 ---
 
 ## CLI Reference
 
-### `mdm-tux <PORT> [--model MODEL]`
+### `mdm-tux --target HOST:PORT [--target HOST2:PORT2]`
 
-Starts the TUI controller. Comms listens on `PORT`, target registration on `PORT+1`.
+Direct mode: connect to target RPC servers directly. No API key required.
 
-- **Direct mode** (default): no API key required — dispatches commands via `router.send()`
-- **Hive mode** (Tab): requires an API key — an LLM agent decides which targets to contact
+### `mdm-tux --kennel HOST:PORT [--listen PORT] [--advertise IP]`
 
-### `mdm-target <HOST:PORT> [--name NAME] [--model MODEL]`
+Kennel mode: the kennel broker discovers targets and provides their RPC
+addresses. Use `/claim` and `/release` to manage target ownership.
 
-Starts a managed agent that registers with TUX and waits for commands.
+### `mdm-target --rpc-port PORT [--name NAME] [--model MODEL]`
 
-- `HOST:PORT` — TUX's comms port (registration auto-connects to `PORT+1`)
-- `--name` — agent name shown in TUX (default: system hostname)
-- `--model` — LLM model (default: auto-detect from API key env vars)
+Starts a managed agent that serves JSON-RPC on the given port. In direct mode,
+TUX connects to this port directly.
+
+### `mdm-target --kennel HOST:PORT [--advertise IP] [--rpc-port PORT] [--name NAME]`
+
+Kennel mode: registers with the kennel and advertises its RPC address.
+
+### `mdm-kennel --listen HOST:PORT [--data-dir PATH]`
+
+Starts the kennel rendezvous broker.
 
 ### Provider auto-detection
 
-Both binaries detect the provider from the model name or available API keys:
+Both `mdm-tux` (for hive mode, when implemented) and `mdm-target` detect the
+provider from the model name or available API keys:
 
 | Env var | Provider | Default model |
 |---------|----------|---------------|
+| `OPENAI_API_KEY` | OpenAI | `gpt-5.4` |
 | `ANTHROPIC_API_KEY` | Anthropic | `claude-sonnet-4-6` |
-| `OPENAI_API_KEY` | OpenAI | `gpt-5.2` |
 | `GEMINI_API_KEY` | Gemini | `gemini-3.1-flash-lite` |
 
-If `--model` is given, the provider is inferred from the prefix (`claude-*` → Anthropic, `gpt-*`/`o1-*` → OpenAI, `gemini-*` → Gemini).
+If `--model` is given, the provider is inferred from the prefix (`claude-*` ->
+Anthropic, `gpt-*`/`o1-*` -> OpenAI, `gemini-*` -> Gemini).
+
+---
+
+## Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a fresh session |
+| `/resume` | List past sessions |
+| `/resume <ID>` | Resume session by ID |
+| `/model <name>` | Set model for next turn |
+| `/models` | List available models |
+| `/steer` | Set handling mode to steer (interrupts current turn) |
+| `/queue` | Set handling mode to queue (waits for current turn) |
+| `/interrupt` | Interrupt the current turn |
+| `/claim` | Claim the selected target from the kennel (kennel mode) |
+| `/release` | Release the selected target back to the kennel (kennel mode) |
+| `/help` | Show help |
 
 ---
 
 ## Delegation And Scheduling
 
-Both the target agent and the hive agent now expose Meerkat's built-in delegation, mob management, and schedule tools:
+The target agent exposes Meerkat's built-in delegation, mob management, and
+schedule tools:
 
-- `delegate`
-- `mob_create`
-- `mob_destroy`
-- `mob_spawn_member`
-- `mob_retire_member`
-- `mob_check_member`
-- `mob_list_members`
-- `mob_list`
-- `meerkat_schedule_create`
-- `meerkat_schedule_get`
-- `meerkat_schedule_list`
-- `meerkat_schedule_update`
-- `meerkat_schedule_pause`
-- `meerkat_schedule_resume`
-- `meerkat_schedule_delete`
-- `meerkat_schedule_occurrences`
-
-This example uses the built-in option-1 surface only. Delegated helpers are inspected through the mob tools themselves, not projected into the TUX timeline as first-class targets.
+- `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`,
+  `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`
+- `meerkat_schedule_create`, `meerkat_schedule_get`, `meerkat_schedule_list`,
+  `meerkat_schedule_update`, `meerkat_schedule_pause`,
+  `meerkat_schedule_resume`, `meerkat_schedule_delete`,
+  `meerkat_schedule_occurrences`
 
 ---
 
-## How Pairing Works
+## Using TUX
 
-No manual key exchange is needed. The sequence:
+```
++---------------------------------------------------------------------------+
+| TUX -- Meerkat Device Manager  [Kennel]  Direct   Hive   2 targets       |
++----------------------+----------------------------------------------------+
+| TARGETS              | TIMELINE  my-mac  idle  12 lines                   |
+| > o my-mac mine      | _connected_                                       |
+|   o office-pc        | RPC connection to my-mac established               |
+|                      |                                                    |
+|                      | _session_                                          |
+|                      | bound to abc123...xyz789                           |
+|                      |                                                    |
+|                      | **You**                                            |
+|                      | ls /tmp                                            |
+|                      |                                                    |
+|                      | **tool** `shell`                                   |
+|                      | $ ls /tmp                                          |
++----------------------+----------------------------------------------------+
+| COMMAND  Ready                                                            |
+| [my-mac] > _                                                              |
+| Ready to send to my-mac.                                                  |
++---------------------------------------------------------------------------+
+| selected: my-mac  |  timeline live                                        |
+| [Tab] mode  [Up/Down] select  [Enter] send  [PgUp/PgDn] scroll  [Esc]   |
++---------------------------------------------------------------------------+
+```
 
-1. TUX starts, generates an Ed25519 keypair, listens on `PORT` (comms) and `PORT+1` (registration)
-2. Target starts, generates its own keypair, binds a random comms port
-3. Target connects to `HOST:PORT+1` and sends: name, pubkey, comms address (JSON)
-4. TUX adds the target to its trusted peer list and responds with its own pubkey
-5. Target adds TUX to its trusted peer list
-6. All subsequent messages use Ed25519-signed comms on `PORT`
+| Key | Action |
+|-----|--------|
+| Tab | Toggle Direct / Hive mode |
+| Up / Down | Select target (Direct mode) |
+| PgUp / PgDn | Scroll timeline |
+| End | Resume auto-scroll |
+| Enter | Send command |
+| Shift+Enter | Newline in input |
+| Ctrl+U | Clear input |
+| Ctrl+L | Clear timeline |
+| Esc | Quit |
 
-Keypairs are persisted in `~/.rkat/mdm/tux/identity/` (TUX), `~/.rkat/mdm/targets/<name>/identity/` (targets), and `~/.rkat/mdm/kennel/identity/` (kennel), so restarts reuse the same identity.
+---
+
+## Security
+
+- All kennel protocol messages are Ed25519 signed. The kennel verifies every
+  envelope's signature.
+- TUX-to-target traffic uses JSON-RPC over TCP (no encryption). Use a VPN or
+  private LAN.
+- API keys live only on the machine that uses them.
+- Keypairs are persisted in `~/.rkat/mdm/` (`tux/identity/`, `targets/<name>/identity/`,
+  `kennel/identity/`). Lock down the directory with `chmod 700` in production.
 
 ---
 
@@ -114,10 +216,12 @@ Keypairs are persisted in `~/.rkat/mdm/tux/identity/` (TUX), `~/.rkat/mdm/target
 ```bash
 cd examples/035-mdm-tux-rs
 cargo build --release
-# Produces: target/release/mdm-target, target/release/mdm-tux, and target/release/mdm-kennel
+# Produces: target/release/mdm-target, target/release/mdm-tux, target/release/mdm-kennel
 ```
 
-Copy `target/release/mdm-target` to each managed machine. Run `target/release/mdm-tux` on the controller.
+Copy `target/release/mdm-target` to each managed machine.
+Run `target/release/mdm-tux` on the controller.
+Run `target/release/mdm-kennel` on the rendezvous host.
 
 ### macOS launchd (target as a persistent service)
 
@@ -134,7 +238,10 @@ Copy `target/release/mdm-target` to each managed machine. Run `target/release/md
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/mdm-target</string>
-    <string>192.168.1.50:4747</string>
+    <string>--kennel</string>
+    <string>192.168.1.50:5000</string>
+    <string>--rpc-port</string>
+    <string>4800</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -170,7 +277,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mdm-target 192.168.1.50:4747
+ExecStart=/usr/local/bin/mdm-target --kennel 192.168.1.50:5000 --rpc-port 4800
 Environment=ANTHROPIC_API_KEY=sk-ant-YOUR_KEY_HERE
 Restart=always
 RestartSec=5
@@ -191,28 +298,17 @@ sudo systemctl enable --now mdm-target
 
 The target agent runs shell commands as its own user. For privileged operations:
 
-### Option A — Run as root (simplest)
+### Option A -- Run as root (simplest)
 
 ```bash
-sudo ANTHROPIC_API_KEY=sk-ant-... ./mdm-target 192.168.1.50:4747
+sudo ANTHROPIC_API_KEY=sk-ant-... ./mdm-target --kennel 192.168.1.50:5000 --rpc-port 4800
 ```
 
 Or in the launchd plist: `<key>UserName</key><string>root</string>`.
 
-### Option B — Scoped passwordless sudo (recommended)
+### Option B -- Scoped passwordless sudo (recommended)
 
 Create a dedicated user with passwordless sudo for specific commands:
-
-```bash
-# macOS
-sudo dscl . -create /Users/mdm-agent
-sudo dscl . -create /Users/mdm-agent UserShell /bin/bash
-sudo dscl . -create /Users/mdm-agent UniqueID 510
-sudo dscl . -create /Users/mdm-agent PrimaryGroupID 20
-sudo mkdir -p /var/mdm-agent && sudo chown mdm-agent /var/mdm-agent
-```
-
-Grant scoped sudo:
 
 ```bash
 sudo visudo -f /etc/sudoers.d/mdm-agent
@@ -223,59 +319,8 @@ mdm-agent ALL=(ALL) NOPASSWD: /usr/sbin/softwareupdate, /bin/launchctl, \
                                /usr/sbin/diskutil, /usr/bin/installer, /usr/local/bin/brew
 ```
 
-Run as that user: `sudo -u mdm-agent ANTHROPIC_API_KEY=... ./mdm-target 192.168.1.50:4747`
-
-### Option C — Full passwordless sudo
+### Option C -- Full passwordless sudo
 
 ```
 mdm-agent ALL=(ALL) NOPASSWD: ALL
 ```
-
----
-
-## Using TUX
-
-```
-┌───────────────────────────────────────────────────────────────────┐
-│ TUX — Meerkat Device Manager    [Direct]  Hive  [Tab] [Esc]      │
-├──────────────────────┬────────────────────────────────────────────┤
-│ TARGETS              │ OUTPUT                                     │
-│ > mac-laptop         │ [registered] target 'mac-laptop' connected │
-│   office-pc          │ > [mac-laptop] ls /tmp                     │
-│                      │ [COMMS MESSAGE from mac-laptop]            │
-│                      │ file1.txt  file2.txt                       │
-├──────────────────────┴────────────────────────────────────────────┤
-│ COMMAND                                                           │
-│ [mac-laptop] > _                                                  │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-| Key | Action |
-|-----|--------|
-| Tab | Toggle Direct ↔ Hive |
-| ↑ / ↓ | Select target (Direct mode) |
-| Enter | Send command |
-| Esc | Quit |
-
----
-
-## Security
-
-- All comms messages are Ed25519 signed. Only registered peers are accepted.
-- Registration is unauthenticated (plain TCP on PORT+1) — any client that connects to
-  the registration port is trusted. Run on a private network or VPN.
-- API keys live only on the machine that uses them.
-- Keypairs are persisted in `~/.rkat/mdm/` (`tux/identity/`, `targets/<name>/identity/`, `kennel/identity/`).
-  For production, lock down the directory with `chmod 700`.
-- There is no transport encryption beyond signatures — use a VPN or private LAN.
-
----
-
-## What you'll learn (code)
-
-- Building a `Router` + `Inbox` directly (bypassing `CommsManager`) for dynamic peer registration
-- `CommsMessage::from_inbox_item` with live `Arc<RwLock<TrustedPeers>>` for runtime-added peers
-- `CommsToolDispatcher::with_inner` composing shell + comms tools on a single agent
-- `DynAgent` (fully type-erased agent) for provider-agnostic hive agent construction
-- `TermGuard` (RAII) for terminal restore on error paths
-- Async/sync TUI bridge: `spawn_blocking` + unbounded mpsc + `try_recv`

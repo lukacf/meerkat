@@ -29,7 +29,6 @@ use meerkat_mob::MobSessionService;
 pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
-    notification_sink: NotificationSink,
 }
 
 #[cfg(feature = "mob")]
@@ -57,15 +56,14 @@ impl MobRpcRuntimeExecutor {
 
 impl SessionRuntimeExecutor {
     /// Create a new executor for a specific session.
-    pub fn new(
-        runtime: Arc<SessionRuntime>,
-        session_id: SessionId,
-        notification_sink: NotificationSink,
-    ) -> Self {
+    ///
+    /// The notification sink is NOT captured here — the executor reads the
+    /// current sink from the runtime at apply time so reconnected TCP clients
+    /// always get events routed to the live transport.
+    pub fn new(runtime: Arc<SessionRuntime>, session_id: SessionId) -> Self {
         Self {
             runtime,
             session_id,
-            notification_sink,
         }
     }
 }
@@ -79,9 +77,11 @@ impl CoreExecutor for SessionRuntimeExecutor {
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         let prompt = primitive.extract_content_input();
 
-        // Create an event channel and forward events to the notification sink
+        // Create an event channel and forward events to the notification sink.
+        // Read the CURRENT sink from the runtime (not the one captured at
+        // executor creation) so reconnected TCP clients get events.
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
-        let sink = self.notification_sink.clone();
+        let sink = self.runtime.current_notification_sink();
         let sid = self.session_id.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {

@@ -364,6 +364,9 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
+        // Ensure the runtime's notification sink is up-to-date so that
+        // executors created lazily read the current sink at apply time.
+        runtime.set_notification_sink(notification_sink.clone());
         Self {
             runtime,
             config_store,
@@ -462,7 +465,6 @@ impl MethodRouter {
                 Box::new(crate::session_executor::SessionRuntimeExecutor::new(
                     self.runtime.clone(),
                     session_id.clone(),
-                    self.notification_sink.clone(),
                 ))
             }
             #[cfg(feature = "mob")]
@@ -517,6 +519,9 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
+        // Ensure the runtime's notification sink is up-to-date so that
+        // executors created lazily read the current sink at apply time.
+        runtime.set_notification_sink(notification_sink.clone());
         Self {
             runtime,
             config_store,

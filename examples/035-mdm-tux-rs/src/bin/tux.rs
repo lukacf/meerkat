@@ -291,11 +291,6 @@ enum TuiEvent {
 // ── Commands to background RPC tasks ─────────────────────────────────────────
 
 enum RpcCommand {
-    /// Create a new session.
-    NewSession {
-        target_id: String,
-        model: Option<String>,
-    },
     /// Start a turn on the current session.
     StartTurn {
         target_id: String,
@@ -328,6 +323,12 @@ enum RpcCommand {
     ResumeLatestOrCreate {
         target_id: String,
         model: Option<String>,
+    },
+    /// Respawn a mob member via the hive. Retires + re-spawns with fresh
+    /// comms wiring. Used instead of raw session/create for mob members.
+    MobRespawn {
+        /// The target name (mob member meerkat_id).
+        target_name: String,
     },
     /// Connect to a target's RPC address.
     Connect {
@@ -448,74 +449,6 @@ async fn rpc_command_loop(
                                 .send(TuiEvent::RpcError {
                                     target_id: tid,
                                     message: format!("connect failed: {e}"),
-                                })
-                                .await;
-                        }
-                    }
-                });
-            }
-            RpcCommand::NewSession { target_id, model } => {
-                let event_tx = event_tx.clone();
-                let clients = clients.clone();
-                tokio::spawn(async move {
-                    let client = {
-                        let map = clients.lock().await;
-                        map.get(&target_id).cloned()
-                    };
-                    let Some(client) = client else {
-                        let _ = event_tx
-                            .send(TuiEvent::RpcError {
-                                target_id,
-                                message: "not connected".into(),
-                            })
-                            .await;
-                        return;
-                    };
-                    let mut params = serde_json::json!({
-                        "prompt": "",
-                        "initial_turn": "deferred",
-                        "enable_builtins": true,
-                        "enable_shell": true,
-                        "enable_mob": true,
-                    });
-                    if let Some(m) = model {
-                        params["model"] = Value::String(m);
-                    }
-                    match client.request("session/create", params).await {
-                        Ok(result) => {
-                            let session_id = result
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !session_id.is_empty() {
-                                // Open stream
-                                let _ = client
-                                    .request(
-                                        "session/stream_open",
-                                        serde_json::json!({ "session_id": session_id }),
-                                    )
-                                    .await;
-                                let _ = event_tx
-                                    .send(TuiEvent::SessionBound {
-                                        target_id,
-                                        session_id,
-                                    })
-                                    .await;
-                            } else {
-                                let _ = event_tx
-                                    .send(TuiEvent::RpcError {
-                                        target_id,
-                                        message: format!("no session_id in response: {result}"),
-                                    })
-                                    .await;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id,
-                                    message: format!("session/create failed: {e}"),
                                 })
                                 .await;
                         }
@@ -794,6 +727,58 @@ async fn rpc_command_loop(
                     }
                 });
             }
+            RpcCommand::MobRespawn { target_name } => {
+                let event_tx = event_tx.clone();
+                let clients = clients.clone();
+                tokio::spawn(async move {
+                    // mob/respawn routes to the hive (kennel mode) or the
+                    // target itself (direct mode — target has its own mob).
+                    let (client, mob_id) = {
+                        let map = clients.lock().await;
+                        if let Some(hive) = map.get("hive").cloned() {
+                            (hive, "hive-fleet".to_string())
+                        } else if let Some(target) = map.get(&target_name).cloned() {
+                            // Direct mode: the target manages its own mob.
+                            (target, "local".to_string())
+                        } else {
+                            let _ = event_tx
+                                .send(TuiEvent::RpcError {
+                                    target_id: target_name,
+                                    message: "no RPC connection for mob/respawn".into(),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+                    match client
+                        .request(
+                            "mob/respawn",
+                            serde_json::json!({
+                                "mob_id": mob_id,
+                                "meerkat_id": target_name,
+                            }),
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            let _ = event_tx
+                                .send(TuiEvent::RpcResponse {
+                                    target_id: target_name,
+                                    body: format!("respawned: {result}"),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(TuiEvent::RpcError {
+                                    target_id: target_name,
+                                    message: format!("mob/respawn failed: {e}"),
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
             RpcCommand::ResumeLatestOrCreate { target_id, model } => {
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
@@ -803,7 +788,6 @@ async fn rpc_command_loop(
                         map.get(&target_id).cloned()
                     };
                     let Some(client) = client else { return };
-                    let is_hive = target_id == "hive";
                     // Try to find an existing session to resume.
                     if let Ok(list_result) = client
                         .request("session/list", serde_json::json!({}))
@@ -812,7 +796,6 @@ async fn rpc_command_loop(
                         if let Some(sessions) = list_result.get("sessions").and_then(|v| v.as_array()) {
                             if let Some(latest) = sessions.first() {
                                 if let Some(sid) = latest.get("session_id").and_then(|v| v.as_str()) {
-                                    // Resume existing session — open stream + bind
                                     let _ = client
                                         .request(
                                             "session/stream_open",
@@ -830,59 +813,15 @@ async fn rpc_command_loop(
                             }
                         }
                     }
-                    let mut params = serde_json::json!({
-                        "prompt": "",
-                        "initial_turn": "deferred",
-                        "enable_builtins": true,
-                        "enable_shell": true,
-                        "enable_mob": true,
-                    });
-                    if is_hive {
-                        params["system_prompt"] = Value::String(
-                            "You are the hive orchestrator for a fleet of managed target agents.\n\
-                             Use the 'peers' tool to discover which targets are connected.\n\
-                             Use 'send_request' with handling_mode 'steer' to dispatch tasks to targets. \
-                             Each target will process your request and send back a structured response \
-                             via send_response. Use 'send_message' for fire-and-forget notifications.\n\
-                             When the user asks you to do something across targets, fan the work out \
-                             to the appropriate targets and collect their responses.\n\
-                             Always check peers first to see who is available.".into()
-                        );
-                    }
-                    if let Some(m) = model {
-                        params["model"] = Value::String(m);
-                    }
-                    match client.request("session/create", params).await {
-                        Ok(result) => {
-                            let session_id = result
-                                .get("session_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !session_id.is_empty() {
-                                let _ = client
-                                    .request(
-                                        "session/stream_open",
-                                        serde_json::json!({ "session_id": session_id }),
-                                    )
-                                    .await;
-                                let _ = event_tx
-                                    .send(TuiEvent::SessionBound {
-                                        target_id,
-                                        session_id,
-                                    })
-                                    .await;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id,
-                                    message: format!("session/create failed: {e}"),
-                                })
-                                .await;
-                        }
-                    }
+                    // No existing session. For targets this shouldn't happen
+                    // (the mob creates sessions at spawn time). For the hive,
+                    // the kennel pre-creates the session. Report the gap.
+                    let _ = event_tx
+                        .send(TuiEvent::RpcError {
+                            target_id,
+                            message: "no session found — target may not be registered yet".into(),
+                        })
+                        .await;
                 });
             }
         }
@@ -2304,15 +2243,10 @@ fn handle_slash_command(
             if app.targets.is_empty() {
                 return;
             }
-            let target_id = app.targets[idx].target_id.clone();
+            let target_name = app.targets[idx].name.clone();
             app.targets[idx].push_user_turn("/new");
-            app.targets[idx].history.clear();
-            app.targets[idx].streaming_text.clear();
-            app.targets[idx].session_id = None;
-            let _ = rpc_tx.send(RpcCommand::NewSession {
-                target_id,
-                model: app.pending_model.take(),
-            });
+            app.targets[idx].push_notice("mob", &format!("respawning {target_name}..."));
+            let _ = rpc_tx.send(RpcCommand::MobRespawn { target_name });
         }
         "/resume" if arg.is_empty() => {
             if app.targets.is_empty() {

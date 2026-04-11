@@ -372,7 +372,6 @@ pub async fn handle_create(
         let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
             runtime.clone(),
             session_id.clone(),
-            notification_sink.clone(),
         ));
         runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)

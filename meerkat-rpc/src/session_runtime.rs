@@ -989,6 +989,14 @@ impl SessionRuntime {
     /// Called by `serve_tcp_connection` when a new TCP client connects — each
     /// connection has its own transport writer so the sink must be updated to
     /// route events to the currently-connected client.
+    /// Read the current notification sink (for use by executors at apply time).
+    pub fn current_notification_sink(&self) -> crate::router::NotificationSink {
+        self.notification_sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn set_notification_sink(&self, sink: crate::router::NotificationSink) {
         if let Ok(mut slot) = self.notification_sink.write() {
             *slot = sink;
@@ -1064,15 +1072,9 @@ impl SessionRuntime {
                     data: None,
                 });
             }
-            let sink = self
-                .notification_sink
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
                 Arc::clone(self),
                 session_id.clone(),
-                sink,
             ));
             self.runtime_adapter
                 .ensure_session_with_executor(session_id.clone(), executor)

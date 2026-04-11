@@ -1017,8 +1017,9 @@ async fn setup_session(
         .ensure_session_with_executor(session_id.clone(), executor)
         .await;
 
-    // Enable peer ingress so the hive can send us comms messages (requests
-    // and responses) that trigger autonomous turns.
+    // Enable peer ingress for this session so the hive can reach us via comms.
+    // This is the one session the mob manages for this target — TUX resets go
+    // through mob/respawn, not session/create, so this wiring is stable.
     if let Some(comms) = comms_runtime {
         runtime_adapter
             .update_peer_ingress_context(
@@ -1027,7 +1028,6 @@ async fn setup_session(
                 Some(comms as Arc<dyn meerkat_core::agent::CommsRuntime>),
             )
             .await;
-        eprintln!("[target] peer ingress enabled for {session_id}");
     }
 
     Ok(session_id)

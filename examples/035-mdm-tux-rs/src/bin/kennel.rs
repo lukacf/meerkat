@@ -313,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 peer_description: "Managed target agent".to_string(),
                 external_addressable: true,
                 backend: Some(MobBackendKind::External),
-                runtime_mode: MobRuntimeMode::AutonomousHost,
+                runtime_mode: MobRuntimeMode::TurnDriven,
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,

@@ -104,10 +104,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             registered_tools.clone(),
         );
 
-        // Update the runtime's notification sink so that lazily-created
-        // session executors forward events to the current transport.
-        runtime.set_notification_sink(notification_sink.clone());
-
         let router = MethodRouter::new(runtime, config_store, notification_sink)
             .with_skill_runtime(skill_runtime);
         Self {

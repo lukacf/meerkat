@@ -1,10 +1,8 @@
 //! Method router - dispatches JSON-RPC requests to the correct handler.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-#[cfg(feature = "mob")]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::sync::Mutex;
@@ -307,6 +305,9 @@ impl MethodRouter {
     }
 
     /// Create a new method router.
+    ///
+    /// Reuses existing mob state from the runtime if available, otherwise
+    /// creates a default. Also spawns schedule host startup.
     pub fn new(
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
@@ -504,6 +505,10 @@ impl MethodRouter {
         }
     }
 
+    /// Create a new method router with an explicit mob state.
+    ///
+    /// The mob state is registered on the runtime and schedule host should
+    /// Also spawns schedule host startup and updates the notification sink.
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -529,11 +534,8 @@ impl MethodRouter {
             skill_runtime: None,
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
-            #[cfg(feature = "mob")]
             mob_state,
-            #[cfg(feature = "mob")]
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             runtime_adapter,
         }
@@ -2153,6 +2155,7 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
+
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
@@ -2190,6 +2193,7 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
+
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
@@ -2219,6 +2223,7 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         let runtime = Arc::new(runtime);
+
         let (notif_tx, notif_rx) = mpsc::channel(notification_capacity);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
@@ -2277,6 +2282,7 @@ mod tests {
         )));
         runtime.set_skill_identity_registry(registry);
         let runtime = Arc::new(runtime);
+
         let (notif_tx, notif_rx) = mpsc::channel(100);
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);

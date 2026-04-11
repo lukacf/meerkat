@@ -147,7 +147,7 @@ impl SessionBackend {
     ) -> Option<Arc<RuntimeSessionState>> {
         let adapter = self.runtime_adapter.as_ref()?;
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
-            if adapter.contains_session(session_id).await {
+            if adapter.session_has_executor(session_id).await {
                 return Some(existing);
             }
             existing.clear_queued_turns().await;

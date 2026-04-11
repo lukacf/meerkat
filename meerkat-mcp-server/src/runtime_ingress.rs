@@ -71,7 +71,7 @@ impl McpRuntimeIngressContext {
 
     async fn runtime_session_state(&self, session_id: &SessionId) -> Arc<McpRuntimeSessionState> {
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
-            if self.runtime_adapter.contains_session(session_id).await {
+            if self.runtime_adapter.session_has_executor(session_id).await {
                 return existing;
             }
             existing.clear_queued_turns().await;

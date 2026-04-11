@@ -1098,7 +1098,7 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
         prompt: ContentInput,
-        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
@@ -1125,7 +1125,7 @@ impl SessionRuntime {
         #[cfg(feature = "mcp")]
         {
             let mut mcp_text = String::new();
-            self.apply_mcp_boundary(session_id, &event_tx, &mut mcp_text)
+            self.apply_mcp_boundary(session_id, &mcp_event_tx, &mut mcp_text)
                 .await?;
             if !mcp_text.is_empty() {
                 let mut blocks = prompt.into_blocks();

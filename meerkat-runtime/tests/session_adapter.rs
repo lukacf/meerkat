@@ -2158,3 +2158,87 @@ async fn successful_execution_fires_boundary_applied() {
     let state = adapter.runtime_state(&sid).await.unwrap();
     assert_eq!(state, RuntimeState::Attached);
 }
+
+// --- session_has_executor tests ---
+
+#[tokio::test]
+async fn registered_session_is_not_executor_ready() {
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
+
+    assert!(
+        adapter.contains_session(&sid).await,
+        "prepare_bindings should register the session"
+    );
+    assert!(
+        !adapter.session_has_executor(&sid).await,
+        "prepare_bindings alone should not attach an executor"
+    );
+}
+
+#[tokio::test]
+async fn executor_attached_session_is_executor_ready() {
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+    struct NoopExecutor;
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
+
+    assert!(
+        !adapter.session_has_executor(&sid).await,
+        "before executor attachment"
+    );
+
+    adapter
+        .ensure_session_with_executor(sid.clone(), Box::new(NoopExecutor))
+        .await;
+
+    assert!(
+        adapter.session_has_executor(&sid).await,
+        "after executor attachment"
+    );
+}
+
+#[tokio::test]
+async fn session_has_executor_false_for_unknown() {
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let unknown = SessionId::new();
+    assert!(
+        !adapter.session_has_executor(&unknown).await,
+        "unknown session should not have an executor"
+    );
+}

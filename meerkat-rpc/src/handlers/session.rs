@@ -420,14 +420,14 @@ pub async fn handle_create(
         return RpcResponse::success(id, result);
     }
 
-    // Set up event forwarding. The spawned task exits naturally when `event_tx`
-    // is dropped at the end of the turn (the session task holds the only sender).
-    let (event_tx, mut event_rx) =
+    // Set up MCP lifecycle event forwarding. Agent execution events flow
+    // through SessionRuntimeExecutor's own channel, not this one.
+    let (mcp_event_tx, mut mcp_event_rx) =
         mpsc::channel::<EventEnvelope<AgentEvent>>(NOTIFICATION_CHANNEL_CAPACITY);
     let sink = notification_sink.clone();
     let sid_clone = session_id.clone();
     tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
+        while let Some(event) = mcp_event_rx.recv().await {
             sink.emit_event(&sid_clone, &event).await;
         }
     });
@@ -436,7 +436,7 @@ pub async fn handle_create(
     let result = if params.keep_alive {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
-        let event_tx_for_turn = event_tx.clone();
+        let event_tx_for_turn = mcp_event_tx.clone();
         let prompt_for_turn = params.prompt.clone();
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
@@ -483,7 +483,7 @@ pub async fn handle_create(
             .start_turn_via_runtime(
                 &session_id,
                 params.prompt,
-                event_tx,
+                mcp_event_tx,
                 skill_refs,
                 None,
                 None,

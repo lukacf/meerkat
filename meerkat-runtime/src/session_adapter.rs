@@ -239,7 +239,7 @@ impl DriverEntry {
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
 pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::CompletionRegistry>>;
 
-/// Per-session state: driver + optional RuntimeLoop.
+/// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
@@ -251,8 +251,9 @@ struct RuntimeSessionEntry {
     cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
-    /// Runtime-loop capabilities. Presence means a loop is attached.
-    attachment: Option<RuntimeLoopAttachment>,
+    /// Registration phase — explicit type-level distinction between
+    /// "registered but inert" and "executor attached."
+    phase: RegistrationPhase,
     /// Detached-wake state for background op completions.
     /// Shared with the runtime loop which selects on the Notify directly.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
@@ -272,12 +273,28 @@ struct RuntimeLoopAttachment {
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Explicit registration phase — the type-level distinction between
+/// "registered but inert" and "executor attached."
+///
+/// Replaces the implicit `Option<RuntimeLoopAttachment>` discriminant
+/// (Dogma §8: Option must not hide ownership uncertainty).
+enum RegistrationPhase {
+    /// Registered via `prepare_bindings()`. No executor — inputs queue
+    /// but are not processed until an executor attaches.
+    Queuing,
+    /// Executor attached with live channels. Inputs are processed
+    /// by the RuntimeLoop.
+    Active(RuntimeLoopAttachment),
+}
+
 impl RuntimeSessionEntry {
     fn attachment_is_live(&self) -> bool {
-        self.attachment
-            .as_ref()
-            .map(|attachment| !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed())
-            .unwrap_or(false)
+        match &self.phase {
+            RegistrationPhase::Active(attachment) => {
+                !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed()
+            }
+            RegistrationPhase::Queuing => false,
+        }
     }
 
     fn has_attachment(&self) -> bool {
@@ -290,7 +307,7 @@ impl RuntimeSessionEntry {
         control_tx: mpsc::Sender<RunControlCommand>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
-        self.attachment = Some(RuntimeLoopAttachment {
+        self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
             control_tx,
             _loop_handle: loop_handle,
@@ -298,8 +315,8 @@ impl RuntimeSessionEntry {
     }
 
     fn clear_dead_attachment(&mut self) -> bool {
-        if self.attachment.is_some() && !self.attachment_is_live() {
-            self.attachment = None;
+        if matches!(self.phase, RegistrationPhase::Active(_)) && !self.attachment_is_live() {
+            self.phase = RegistrationPhase::Queuing;
             // Clear detached wake state — it will be re-created on
             // re-registration along with the new runtime loop.
             self.detached_wake = None;
@@ -309,21 +326,25 @@ impl RuntimeSessionEntry {
     }
 
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
-        if !self.attachment_is_live() {
-            return None;
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+            {
+                Some(attachment.wake_tx.clone())
+            }
+            _ => None,
         }
-        self.attachment
-            .as_ref()
-            .map(|attachment| attachment.wake_tx.clone())
     }
 
     fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
-        if !self.attachment_is_live() {
-            return None;
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+            {
+                Some(attachment.control_tx.clone())
+            }
+            _ => None,
         }
-        self.attachment
-            .as_ref()
-            .map(|attachment| attachment.control_tx.clone())
     }
 }
 
@@ -566,7 +587,7 @@ impl RuntimeSessionAdapter {
             epoch_id,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
-            attachment: None,
+            phase: RegistrationPhase::Queuing,
             detached_wake: None,
             keep_alive: false,
             comms_runtime: None,
@@ -674,7 +695,7 @@ impl RuntimeSessionAdapter {
                             epoch_id: recovered_epoch,
                             cursor_state: recovered_cursors,
                             completions: completions.clone(),
-                            attachment: None,
+                            phase: RegistrationPhase::Queuing,
                             detached_wake: None,
                             keep_alive: false,
                             comms_runtime: None,
@@ -882,11 +903,11 @@ impl RuntimeSessionAdapter {
         self.sessions.read().await.contains_key(session_id)
     }
 
-    /// Check whether a session is registered AND has an active RuntimeLoop
-    /// (executor attached with live channels). Sessions registered via
-    /// `prepare_bindings()` / `register_session()` exist in the map but have
-    /// no loop — inputs will queue but never be processed until an executor
-    /// is attached via `ensure_session_with_executor()`.
+    /// Check whether a session has an active RuntimeLoop (executor attached
+    /// with live channels). Sessions registered via `prepare_bindings()` /
+    /// `register_session()` exist in the map but have no loop — inputs will
+    /// queue but never be processed until an executor is attached via
+    /// `ensure_session_with_executor()`.
     pub async fn session_has_executor(&self, session_id: &SessionId) -> bool {
         let sessions = self.sessions.read().await;
         sessions

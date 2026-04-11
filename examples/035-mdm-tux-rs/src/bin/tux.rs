@@ -271,7 +271,7 @@ enum TuiEvent {
     /// Model catalog response.
     ModelCatalog {
         target_id: String,
-        models: Value,
+        catalog: Value,
     },
     /// Session list response.
     SessionList {
@@ -441,6 +441,9 @@ async fn rpc_command_loop(
                     let mut params = serde_json::json!({
                         "prompt": "",
                         "initial_turn": "deferred",
+                        "enable_builtins": true,
+                        "enable_shell": true,
+                        "enable_mob": true,
                     });
                     if let Some(m) = model {
                         params["model"] = Value::String(m);
@@ -636,7 +639,7 @@ async fn rpc_command_loop(
                             let _ = event_tx
                                 .send(TuiEvent::ModelCatalog {
                                     target_id,
-                                    models: result,
+                                    catalog: result,
                                 })
                                 .await;
                         }
@@ -1727,40 +1730,32 @@ fn process_event(
                 handle_stream_event(&mut app.targets[idx], &event);
             }
         }
-        TuiEvent::ModelCatalog { target_id, models } => {
+        TuiEvent::ModelCatalog { target_id, catalog } => {
             if let Some(idx) = app.find_target_by_id(&target_id) {
                 let mut lines = vec!["**Available models:**".to_string(), String::new()];
-                if let Some(entries) = models.get("models").and_then(|v| v.as_array()) {
-                    let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
-                        std::collections::BTreeMap::new();
-                    for entry in entries {
-                        let provider = entry
+                // The catalog response has { providers: [{ provider, default_model_id, models: [...] }] }
+                if let Some(providers) = catalog.get("providers").and_then(|v| v.as_array()) {
+                    for provider_entry in providers {
+                        let provider_name = provider_entry
                             .get("provider")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                        let name = entry
-                            .get("display_name")
+                        let default_model = provider_entry
+                            .get("default_model_id")
                             .and_then(|v| v.as_str())
-                            .unwrap_or(id);
-                        by_provider
-                            .entry(provider.to_string())
-                            .or_default()
-                            .push(format!("  `{id}` -- {name}"));
-                    }
-                    for (provider, models) in &by_provider {
-                        lines.push(format!("*{provider}*"));
-                        for m in models {
-                            lines.push(m.clone());
+                            .unwrap_or("");
+                        lines.push(format!("*{provider_name}* (default: {default_model})"));
+                        if let Some(models) = provider_entry.get("models").and_then(|v| v.as_array()) {
+                            for model in models {
+                                let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                                let name = model.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
+                                lines.push(format!("  `{id}` -- {name}"));
+                            }
                         }
                         lines.push(String::new());
                     }
                 } else {
-                    lines.push(format!(
-                        "```text\n{}\n```",
-                        serde_json::to_string_pretty(&models)
-                            .unwrap_or_else(|_| models.to_string())
-                    ));
+                    lines.push("(unexpected catalog format)".into());
                 }
                 app.targets[idx].push_section(lines);
             }

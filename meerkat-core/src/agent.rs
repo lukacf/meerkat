@@ -29,7 +29,8 @@ use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{
-    ToolCatalogCapabilities, ToolCatalogEntry, ToolCatalogMode, select_catalog_mode_from_snapshot,
+    ToolCatalogCapabilities, ToolCatalogEntry, ToolCatalogMode, deferred_session_entry_count,
+    select_catalog_mode_from_snapshot,
 };
 use crate::tool_scope::ToolScope;
 use crate::types::{
@@ -310,6 +311,29 @@ where
         catalog.as_ref(),
         pending_sources.as_ref(),
     )
+}
+
+/// Compute whether the catalog control plane should be composed for this
+/// dispatcher, even if the current adaptive snapshot remains inline.
+pub fn should_compose_tool_catalog_control_plane<T>(dispatcher: &T) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    let capabilities = dispatcher.tool_catalog_capabilities();
+    if !capabilities.exact_catalog {
+        return false;
+    }
+    if capabilities.may_require_catalog_control_plane {
+        return true;
+    }
+
+    let pending_sources = dispatcher.pending_catalog_sources();
+    if !pending_sources.is_empty() {
+        return true;
+    }
+
+    let catalog = dispatcher.tool_catalog();
+    deferred_session_entry_count(catalog.as_ref()) > 0
 }
 
 /// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].

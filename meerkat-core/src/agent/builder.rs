@@ -233,26 +233,28 @@ impl AgentBuilder {
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let catalog_mode = select_tool_catalog_mode(tools.as_ref());
         let (control_tool_names, deferred_tool_names) =
-            if tools.tool_catalog_capabilities().exact_catalog
-                && matches!(catalog_mode, ToolCatalogMode::Deferred)
-            {
+            if tools.tool_catalog_capabilities().exact_catalog {
                 let catalog = tools.tool_catalog();
                 let control_names = catalog
                     .iter()
                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
                     .map(|entry| entry.tool.name.clone())
                     .collect();
-                let deferred_names = catalog
-                    .iter()
-                    .filter(|entry| entry.plane == ToolPlaneClass::Session)
-                    .filter(|entry| {
-                        matches!(
-                            entry.deferred_eligibility,
-                            ToolCatalogDeferredEligibility::DeferredEligible { .. }
-                        )
-                    })
-                    .map(|entry| entry.tool.name.clone())
-                    .collect();
+                let deferred_names = if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                    catalog
+                        .iter()
+                        .filter(|entry| entry.plane == ToolPlaneClass::Session)
+                        .filter(|entry| {
+                            matches!(
+                                entry.deferred_eligibility,
+                                ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                            )
+                        })
+                        .map(|entry| entry.tool.name.clone())
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
                 (control_names, deferred_names)
             } else {
                 (

@@ -6,7 +6,7 @@ use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, Too
 use meerkat_core::{
     AgentToolDispatcher, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
     ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
-    ToolScope, select_tool_catalog_mode,
+    ToolScope, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -85,6 +85,10 @@ impl CatalogControlDispatcher {
             Self::mode_for(session_dispatcher),
             ToolCatalogMode::Deferred
         )
+    }
+
+    pub fn should_compose_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        should_compose_tool_catalog_control_plane(session_dispatcher)
     }
 
     pub fn new(
@@ -307,6 +311,7 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,
+            may_require_catalog_control_plane: false,
         }
     }
 
@@ -482,6 +487,7 @@ mod tests {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[ToolCatalogEntry]>,
         pending_sources: Arc<[String]>,
+        may_require_control_plane: bool,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -494,6 +500,7 @@ mod tests {
         fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
             ToolCatalogCapabilities {
                 exact_catalog: true,
+                may_require_catalog_control_plane: self.may_require_control_plane,
             }
         }
 
@@ -550,6 +557,7 @@ mod tests {
             ]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = ToolScope::new_with_projection_names(
@@ -580,6 +588,7 @@ mod tests {
             tools: vec![Arc::clone(&inline)].into(),
             catalog: vec![ToolCatalogEntry::session_inline(Arc::clone(&inline), true)].into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         };
         assert!(
             !CatalogControlDispatcher::should_enable_for(&exact_inline_only),
@@ -610,6 +619,7 @@ mod tests {
             ]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         };
         assert!(
             CatalogControlDispatcher::should_enable_for(&exact_with_deferred),
@@ -623,10 +633,36 @@ mod tests {
             tools: Arc::from([]),
             catalog: Arc::from([]),
             pending_sources: Arc::from(["pending-mcp".to_string()]),
+            may_require_control_plane: false,
         };
         assert!(
             CatalogControlDispatcher::should_enable_for(&pending_only),
             "pending exact sources should keep the catalog control plane available"
+        );
+    }
+
+    #[test]
+    fn should_compose_for_dynamic_exact_dispatchers_even_before_threshold() {
+        let deferred = session_tool("secret_lookup", "Deferred secret lookup");
+        let below_threshold_dynamic = ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: true,
+        };
+
+        assert!(
+            CatalogControlDispatcher::should_compose_for(&below_threshold_dynamic),
+            "dynamic exact dispatchers should pre-compose the control plane before adaptive mode flips"
+        );
+        assert!(
+            !CatalogControlDispatcher::should_enable_for(&below_threshold_dynamic),
+            "a single deferred tool should still stay inline until the adaptive threshold is crossed"
         );
     }
 
@@ -646,6 +682,7 @@ mod tests {
             ]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = ToolScope::new(Arc::from([]));
@@ -710,6 +747,7 @@ mod tests {
             )]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         });
         let control = CatalogControlDispatcher::new(
             dispatcher,
@@ -754,6 +792,7 @@ mod tests {
             )]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = ToolScope::new_with_projection_names(
@@ -804,6 +843,7 @@ mod tests {
             tools: Arc::from([]),
             catalog: Arc::from([]),
             pending_sources: Arc::from(["pending-mcp".to_string()]),
+            may_require_control_plane: false,
         });
         let control = CatalogControlDispatcher::new(
             dispatcher,
@@ -875,6 +915,7 @@ mod tests {
             ]
             .into(),
             pending_sources: Arc::from([]),
+            may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
         let scope = ToolScope::new_with_projection_names(

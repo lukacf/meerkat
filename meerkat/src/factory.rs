@@ -2024,7 +2024,7 @@ impl AgentFactory {
             "tool composition: final dispatcher"
         );
 
-        if CatalogControlDispatcher::should_enable_for(tools.as_ref()) {
+        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
             if !tool_usage_instructions.is_empty() {
                 tool_usage_instructions.push_str("\n\n");
             }
@@ -2395,7 +2395,7 @@ impl AgentFactory {
 
         let mut hoisted_control_visibility_provider: Option<Arc<CatalogControlVisibilityProvider>> =
             None;
-        if CatalogControlDispatcher::should_enable_for(tools.as_ref()) {
+        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
             let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
             let control_dispatcher = Arc::new(CatalogControlDispatcher::new(
                 Arc::clone(&tools),
@@ -2715,6 +2715,7 @@ mod prompt_tests {
     struct UsageTestDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         exact_catalog: bool,
+        may_require_control_plane: bool,
         pending_sources: Arc<[String]>,
     }
 
@@ -2727,6 +2728,7 @@ mod prompt_tests {
         fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
             ToolCatalogCapabilities {
                 exact_catalog: self.exact_catalog,
+                may_require_catalog_control_plane: self.may_require_control_plane,
             }
         }
 
@@ -2808,6 +2810,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: tools(&["visible", "secret"]),
             exact_catalog: false,
+            may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
 
@@ -2822,6 +2825,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: tools(&["visible", "secret_lookup", "secret_audit"]),
             exact_catalog: true,
+            may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
 
@@ -2837,6 +2841,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: tools(&["visible"]),
             exact_catalog: true,
+            may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
 
@@ -2864,6 +2869,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: vec![Arc::clone(&secret), Arc::clone(&secret_audit)].into(),
             exact_catalog: true,
+            may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
         let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
@@ -2903,6 +2909,7 @@ mod prompt_tests {
         let dispatcher = UsageTestDispatcher {
             tools: vec![Arc::clone(&visible)].into(),
             exact_catalog: true,
+            may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
         let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
@@ -2942,6 +2949,51 @@ mod prompt_tests {
                 .unwrap()
                 .contains("tool_catalog_search"),
             "control-plane tools should not be injected when there is no deferred catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_exact_sessions_precompose_deferred_catalog_surface_before_threshold() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let secret = Arc::new(ToolDef {
+            name: "secret_lookup".to_string(),
+            description: "Look up a secret value".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let dispatcher = UsageTestDispatcher {
+            tools: vec![Arc::clone(&secret)].into(),
+            exact_catalog: true,
+            may_require_control_plane: true,
+            pending_sources: Arc::from([]),
+        };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
+        };
+        let system_prompt = &message.content;
+        let visible_names = agent.tool_scope().visible_tool_names().unwrap();
+
+        assert!(
+            system_prompt.contains("tool_catalog_search"),
+            "dynamic exact sessions should advertise deferred catalog discovery before the adaptive threshold flips"
+        );
+        assert!(
+            visible_names.contains("tool_catalog_search"),
+            "control-plane tools should already be present when the dispatcher may switch into deferred mode later"
+        );
+        assert!(
+            visible_names.contains("secret_lookup"),
+            "the session-plane tool should remain inline until adaptive deferred mode activates"
         );
     }
 }

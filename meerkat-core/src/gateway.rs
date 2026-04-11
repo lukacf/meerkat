@@ -412,6 +412,12 @@ impl AgentToolDispatcher for ToolGateway {
                 .entries
                 .iter()
                 .all(|entry| entry.dispatcher.tool_catalog_capabilities().exact_catalog),
+            may_require_catalog_control_plane: self.entries.iter().any(|entry| {
+                entry
+                    .dispatcher
+                    .tool_catalog_capabilities()
+                    .may_require_catalog_control_plane
+            }),
         }
     }
 
@@ -670,6 +676,11 @@ impl AgentToolDispatcher for DynamicToolComposite {
                 .dispatchers
                 .iter()
                 .all(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog),
+            may_require_catalog_control_plane: self.dispatchers.iter().any(|dispatcher| {
+                dispatcher
+                    .tool_catalog_capabilities()
+                    .may_require_catalog_control_plane
+            }),
         }
     }
 
@@ -843,6 +854,7 @@ mod tests {
         fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
             crate::ToolCatalogCapabilities {
                 exact_catalog: true,
+                may_require_catalog_control_plane: false,
             }
         }
 

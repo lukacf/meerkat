@@ -607,26 +607,34 @@ where
                         };
                         let (control_tool_names, deferred_tool_names) = match (
                             exact_catalog,
-                            matches!(catalog_mode, ToolCatalogMode::Deferred),
                             current_catalog.as_ref(),
                         ) {
-                            (true, true, Some(catalog)) => {
+                            (true, Some(catalog)) => {
                                 let control_names = catalog
                                     .iter()
                                     .filter(|entry| entry.plane == ToolPlaneClass::Control)
                                     .map(|entry| entry.tool.name.clone())
                                     .collect();
-                                let deferred_names = catalog
-                                    .iter()
-                                    .filter(|entry| entry.plane == ToolPlaneClass::Session)
-                                    .filter(|entry| {
-                                        matches!(
-                                            entry.deferred_eligibility,
-                                            ToolCatalogDeferredEligibility::DeferredEligible { .. }
-                                        )
-                                    })
-                                    .map(|entry| entry.tool.name.clone())
-                                    .collect();
+                                let deferred_names = if matches!(
+                                    catalog_mode,
+                                    ToolCatalogMode::Deferred
+                                ) {
+                                    catalog
+                                                .iter()
+                                                .filter(|entry| {
+                                                    entry.plane == ToolPlaneClass::Session
+                                                })
+                                                .filter(|entry| {
+                                                    matches!(
+                                                        entry.deferred_eligibility,
+                                                        ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                                                    )
+                                                })
+                                                .map(|entry| entry.tool.name.clone())
+                                                .collect()
+                                } else {
+                                    std::collections::HashSet::new()
+                                };
                                 (control_names, deferred_names)
                             }
                             _ => (
@@ -2475,6 +2483,7 @@ mod tests {
         fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
             crate::ToolCatalogCapabilities {
                 exact_catalog: true,
+                may_require_catalog_control_plane: false,
             }
         }
 
@@ -2569,6 +2578,7 @@ mod tests {
         fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
             crate::ToolCatalogCapabilities {
                 exact_catalog: true,
+                may_require_catalog_control_plane: false,
             }
         }
 

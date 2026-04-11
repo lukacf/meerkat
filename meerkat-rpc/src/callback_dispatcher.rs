@@ -138,6 +138,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,
+            may_require_catalog_control_plane: true,
         }
     }
 
@@ -275,16 +276,19 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 }
 
 fn callback_catalog_entry(tool: ToolDef) -> ToolCatalogEntry {
-    let stable_owner_key =
-        stable_owner_key_for_tool(&tool).unwrap_or_else(|| "callback:registered".to_string());
-
-    ToolCatalogEntry::session_deferred(Arc::new(tool), true, stable_owner_key)
+    let tool = Arc::new(tool);
+    if let Some(stable_owner_key) = stable_owner_key_for_tool(&tool) {
+        ToolCatalogEntry::session_deferred(tool, true, stable_owner_key)
+    } else {
+        ToolCatalogEntry::session_inline(tool, true)
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::types::{ToolProvenance, ToolSourceKind};
     use serde_json::value::RawValue;
 
     fn make_tool_def(name: &str) -> ToolDef {
@@ -293,6 +297,16 @@ mod tests {
             description: format!("Test tool {name}"),
             input_schema: serde_json::json!({"type": "object"}),
             provenance: None,
+        }
+    }
+
+    fn make_provenanced_tool_def(name: &str) -> ToolDef {
+        ToolDef {
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Callback,
+                source_id: "callback".to_string(),
+            }),
+            ..make_tool_def(name)
         }
     }
 
@@ -414,6 +428,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_catalog_reflects_late_registered_provenanced_tools() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_provenanced_tool_def(
+            "secret_lookup",
+        )]));
+
+        let dispatcher =
+            CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter, vec![]);
+        assert_eq!(
+            dispatcher
+                .tool_catalog()
+                .iter()
+                .map(|entry| entry.tool.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["secret_lookup".to_string()]
+        );
+
+        tools
+            .write()
+            .unwrap()
+            .push(make_provenanced_tool_def("secret_audit"));
+
+        let names = dispatcher
+            .tool_catalog()
+            .iter()
+            .map(|entry| entry.tool.name.clone())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"secret_lookup".to_string()));
+        assert!(names.contains(&"secret_audit".to_string()));
+    }
+
+    #[tokio::test]
     async fn inline_tools_take_precedence_over_globals() {
         let (callback_tx, _rx) = mpsc::channel(10);
         let id_counter = Arc::new(AtomicU64::new(0));
@@ -444,7 +491,7 @@ mod tests {
         let id_counter = Arc::new(AtomicU64::new(0));
         let tools = Arc::new(StdRwLock::new(vec![
             make_tool_def("shared"),
-            make_tool_def("global_only"),
+            make_provenanced_tool_def("global_only"),
         ]));
         let inline = vec![make_tool_def("shared"), make_tool_def("inline_only")];
 
@@ -485,6 +532,25 @@ mod tests {
                 .unwrap()
                 .deferred_eligibility,
             meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unprovenanced_registered_tools_stay_inline_only_in_the_catalog() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("global_only")]));
+
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, vec![]);
+        let catalog = dispatcher.tool_catalog();
+
+        assert!(matches!(
+            catalog
+                .iter()
+                .find(|entry| entry.tool.name == "global_only")
+                .unwrap()
+                .deferred_eligibility,
+            meerkat_core::ToolCatalogDeferredEligibility::InlineOnly
         ));
     }
 

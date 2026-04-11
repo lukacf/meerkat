@@ -112,6 +112,10 @@ pub struct ToolCatalogCapabilities {
     /// True only when `tool_catalog()` is an exact precedence-resolved registry
     /// for this dispatcher.
     pub exact_catalog: bool,
+    /// True when the dispatcher can dynamically require the deferred catalog
+    /// control plane in the future, even if the current adaptive snapshot is
+    /// still inline.
+    pub may_require_catalog_control_plane: bool,
 }
 
 /// Count deferred-eligible session entries in a catalog snapshot.

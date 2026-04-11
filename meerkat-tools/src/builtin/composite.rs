@@ -338,6 +338,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 .external
                 .as_ref()
                 .is_none_or(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog),
+            may_require_catalog_control_plane: self.external.as_ref().is_some_and(|dispatcher| {
+                dispatcher
+                    .tool_catalog_capabilities()
+                    .may_require_catalog_control_plane
+            }),
         }
     }
 
@@ -670,6 +675,7 @@ mod tests {
         fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
             meerkat_core::ToolCatalogCapabilities {
                 exact_catalog: true,
+                may_require_catalog_control_plane: false,
             }
         }
 

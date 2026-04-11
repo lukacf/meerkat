@@ -70,6 +70,7 @@ pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
     FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
+    should_compose_tool_catalog_control_plane,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};

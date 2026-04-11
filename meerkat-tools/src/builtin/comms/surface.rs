@@ -94,6 +94,7 @@ impl AgentToolDispatcher for CommsToolSurface {
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,
+            may_require_catalog_control_plane: false,
         }
     }
 

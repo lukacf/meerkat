@@ -64,6 +64,7 @@ Likely artifacts to keep here:
 - Mob-Meerkat seam shadow checks
 - Mob-Meerkat seam hook inventory
 - two-kernel shadow implementation plan
+- two-kernel shadow scenario matrix
 - frozen abstract member contract for the seam
 - frozen bridge alphabet for the seam
 - two-kernel refinement and cutover program
@@ -121,4 +122,7 @@ Current freeze status:
   uncertainty
 - the next active work is refinement/cutover preparation, not additional
   freeze authoring, and is now captured in
-  `two-kernel-refinement-program.md`
+  `two-kernel-refinement-program.md`; the first cutover-facing scenario order
+  is now made explicit in `two-kernel-shadow-scenario-matrix.md`
+- the explicit final pre-cutover handoff is now captured in
+  `two-kernel-cutover-readiness.md`

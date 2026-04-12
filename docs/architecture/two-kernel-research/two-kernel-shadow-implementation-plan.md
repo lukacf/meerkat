@@ -160,8 +160,63 @@ This plan is complete enough to start code once:
 The next implementation step after first-wave lanes is:
 
 - use the aggregate suite helpers to run one real scenario end to end
-- only then add a longer-lived sink/export path if the collected mismatches
-  need durable storage or external surfacing
+- use `two-kernel-shadow-scenario-matrix.md` as the scenario source of truth
+- Scenario 1 is now landed for Meerkat (`plain reset with pending ops`)
+- Scenario 3 is now landed for Meerkat (`tool visibility mutation + MCP apply`)
+- Scenario 4 is now landed for Meerkat (`peer ingress receive / trust mutation / drain`)
+- Scenario 5 is now landed for Mob (`provision / kickoff / finalize`)
+- Scenario 6 is now landed for Mob (`single-step flow run`)
+- the settled replacement-provisioning branch of Scenario 8 is now landed for
+  Mob (`respawn supersession`)
+- the destroy-in-flight branch of Scenario 8 is now landed for Mob
+  (`destroy in-flight flow`)
+- both attached replay branches of Scenario 7 are now landed for Meerkat:
+  - recover replay
+  - recycle replay
+- the branch-fallback failure-history run is now landed for Mob
+- the next step is no longer to land the first-wave matrix
+- taxonomy summarizers over aggregate suite reports are now landed
+- the first broader Meerkat smoke run is now landed and currently produces an
+  empty mismatch taxonomy on the rebased baseline
+- the first broader Mob + seam smoke run is now landed and currently produces
+  an empty mismatch taxonomy on the rebased baseline
+- seeded taxonomy validation is now landed for:
+  - `MeerkatMachine` lifecycle/control drift
+  - `MobMachine` provisioning drift plus seam work-bridge drift
+- the first mismatch-producing live taxonomy run is now landed for the seam:
+  - archive the live bridge session under active single-step flow
+  - expect real taxonomy buckets in:
+    - `composition / LifecycleSupersession / lifecycle`
+    - `composition / WorkBridge / work`
+- the shared first sink/export shape is now frozen in:
+  - `two-kernel-shadow-sink-schema.md`
+- both kernels can now emit that shared sink shape
+- the first combined cutover-facing runner is now landed for:
+  - `seam.live_bridge_loss`
+  - active phase: empty Meerkat sample + empty Mob sample
+  - `post_archive` phase: empty Meerkat sample + non-empty Mob/seam sample
+- the first reusable batch consumer is now landed on the Mob side:
+  - pair optional Meerkat sample + Mob sample into one normalized sink sample
+  - collect multiple normalized samples under one `run_id`
+- the first reusable multi-scenario run batch is now landed on the Mob side:
+  - `run_id = "shadow.cutover.smoke"`
+  - scenario batch `0`: one green `mob.flow.single_step.green` sample
+  - scenario batch `1`: one mismatch-producing `seam.live_bridge_loss` sample
+- the first shared report/session layer is now landed on the Mob side:
+  - `session_id = "shadow.cutover.session"`
+  - run batch `0`: `shadow.cutover.smoke`
+  - run batch `1`: `shadow.cutover.green-only`
+- the first genuinely multi-run live report session is now landed:
+  - `session_id = "shadow.cutover.multi-run"`
+  - run batch `0`: one healthy runtime-backed run
+  - run batch `1`: one drift-producing runtime-backed run
+- the first session-level triage summary is now landed:
+  - top-level counts over the multi-run live report session
+  - separates green samples from mismatch-producing samples
+  - preserves per-scope bucket totals (`meerkat`, `mob`, `composition`)
+- only now add a longer-lived sink/export path if broader shadow runs start
+  surfacing real mismatch taxonomy that needs durable storage or external
+  surfacing
 
 ## Read with
 
@@ -171,3 +226,4 @@ The next implementation step after first-wave lanes is:
 - `meerkat-shadow-hook-inventory.md`
 - `mob-shadow-hook-inventory.md`
 - `mob-meerkat-seam-hook-inventory.md`
+- `two-kernel-shadow-scenario-matrix.md`

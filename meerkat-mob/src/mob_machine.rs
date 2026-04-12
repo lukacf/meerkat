@@ -12,8 +12,8 @@ use crate::runtime::{
     MobHandle, MobKernelDiagnosticSnapshot, MobMemberListEntry, MobMemberStatus,
     MobOrchestratorSnapshot, MobState,
 };
-use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::{MeerkatMachineSpineSnapshot, RuntimeState};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Joined diagnostic view over the current mob lifecycle state plus the live
@@ -28,14 +28,14 @@ pub(crate) struct MobMachineSnapshot {
     pub tracked_runs: BTreeMap<RunId, TrackedRunSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum MobShadowLane {
     ProvisioningLifecycle,
     FlowFrameLoop,
     TaskHistoryRecovery,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(dead_code)]
 pub(crate) enum ShadowMismatchTriage {
     ImplementationDetail,
@@ -59,7 +59,7 @@ pub(crate) struct MobShadowReport {
     pub mismatches: Vec<MobShadowMismatch>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CompositionShadowLane {
     LifecycleSupersession,
     WorkBridge,
@@ -85,6 +85,287 @@ pub(crate) struct CompositionShadowReport {
 pub(crate) struct MobShadowSuiteReport {
     pub mob: Vec<MobShadowReport>,
     pub composition: Vec<CompositionShadowReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MobShadowTaxonomyBucket {
+    pub scope: &'static str,
+    pub lane: String,
+    pub region: &'static str,
+    pub triage: ShadowMismatchTriage,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ShadowTaxonomySinkBucket {
+    pub scope: &'static str,
+    pub lane: String,
+    pub region: &'static str,
+    pub triage: &'static str,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TwoKernelShadowScenarioSample {
+    pub scenario_id: String,
+    pub phase: String,
+    pub timestamp: String,
+    pub meerkat_buckets: Vec<ShadowTaxonomySinkBucket>,
+    pub mob_buckets: Vec<ShadowTaxonomySinkBucket>,
+    pub seam_buckets: Vec<ShadowTaxonomySinkBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TwoKernelShadowScenarioBatch {
+    pub run_id: String,
+    pub samples: Vec<TwoKernelShadowScenarioSample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TwoKernelShadowRunBatch {
+    pub run_id: String,
+    pub scenarios: Vec<TwoKernelShadowScenarioBatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TwoKernelShadowReportSession {
+    pub session_id: String,
+    pub runs: Vec<TwoKernelShadowRunBatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TwoKernelShadowReportSessionSummary {
+    pub session_id: String,
+    pub run_count: u64,
+    pub scenario_count: u64,
+    pub sample_count: u64,
+    pub green_sample_count: u64,
+    pub mismatch_sample_count: u64,
+    pub meerkat_bucket_count: u64,
+    pub mob_bucket_count: u64,
+    pub seam_bucket_count: u64,
+}
+
+fn shadow_mismatch_triage_label(triage: ShadowMismatchTriage) -> &'static str {
+    match triage {
+        ShadowMismatchTriage::ImplementationDetail => "implementation_detail",
+        ShadowMismatchTriage::SemanticGap => "semantic_gap",
+        ShadowMismatchTriage::DogmaViolation => "dogma_violation",
+    }
+}
+
+fn sink_bucket_from_taxonomy_bucket(bucket: &MobShadowTaxonomyBucket) -> ShadowTaxonomySinkBucket {
+    ShadowTaxonomySinkBucket {
+        scope: bucket.scope,
+        lane: bucket.lane.clone(),
+        region: bucket.region,
+        triage: shadow_mismatch_triage_label(bucket.triage),
+        count: bucket.count as u64,
+    }
+}
+
+pub(crate) fn export_mob_shadow_scenario_sample(
+    scenario_id: impl Into<String>,
+    phase: impl Into<String>,
+    timestamp: impl Into<String>,
+    taxonomy: &[MobShadowTaxonomyBucket],
+) -> TwoKernelShadowScenarioSample {
+    let mut mob_buckets = Vec::new();
+    let mut seam_buckets = Vec::new();
+
+    for bucket in taxonomy {
+        let sink_bucket = sink_bucket_from_taxonomy_bucket(bucket);
+        match bucket.scope {
+            "mob" => mob_buckets.push(sink_bucket),
+            "composition" => seam_buckets.push(sink_bucket),
+            _ => {}
+        }
+    }
+
+    TwoKernelShadowScenarioSample {
+        scenario_id: scenario_id.into(),
+        phase: phase.into(),
+        timestamp: timestamp.into(),
+        meerkat_buckets: Vec::new(),
+        mob_buckets,
+        seam_buckets,
+    }
+}
+
+pub(crate) fn merge_two_kernel_shadow_scenario_samples(
+    meerkat: Option<meerkat::MeerkatShadowScenarioSample>,
+    mob: TwoKernelShadowScenarioSample,
+) -> TwoKernelShadowScenarioSample {
+    if let Some(meerkat) = meerkat {
+        assert_eq!(
+            meerkat.scenario_id, mob.scenario_id,
+            "paired Meerkat and Mob shadow samples must agree on scenario_id"
+        );
+        assert_eq!(
+            meerkat.phase, mob.phase,
+            "paired Meerkat and Mob shadow samples must agree on phase"
+        );
+        assert_eq!(
+            meerkat.timestamp, mob.timestamp,
+            "paired Meerkat and Mob shadow samples must agree on timestamp"
+        );
+        TwoKernelShadowScenarioSample {
+            scenario_id: mob.scenario_id,
+            phase: mob.phase,
+            timestamp: mob.timestamp,
+            meerkat_buckets: meerkat
+                .meerkat_buckets
+                .into_iter()
+                .map(|bucket| ShadowTaxonomySinkBucket {
+                    scope: bucket.scope,
+                    lane: bucket.lane,
+                    region: bucket.region,
+                    triage: bucket.triage,
+                    count: bucket.count,
+                })
+                .collect(),
+            mob_buckets: mob.mob_buckets,
+            seam_buckets: mob.seam_buckets,
+        }
+    } else {
+        mob
+    }
+}
+
+pub(crate) fn export_two_kernel_shadow_batch(
+    run_id: impl Into<String>,
+    samples: impl IntoIterator<Item = TwoKernelShadowScenarioSample>,
+) -> TwoKernelShadowScenarioBatch {
+    TwoKernelShadowScenarioBatch {
+        run_id: run_id.into(),
+        samples: samples.into_iter().collect(),
+    }
+}
+
+pub(crate) fn export_two_kernel_shadow_run_batch(
+    run_id: impl Into<String>,
+    scenarios: impl IntoIterator<Item = TwoKernelShadowScenarioBatch>,
+) -> TwoKernelShadowRunBatch {
+    TwoKernelShadowRunBatch {
+        run_id: run_id.into(),
+        scenarios: scenarios.into_iter().collect(),
+    }
+}
+
+pub(crate) fn export_two_kernel_shadow_report_session(
+    session_id: impl Into<String>,
+    runs: impl IntoIterator<Item = TwoKernelShadowRunBatch>,
+) -> TwoKernelShadowReportSession {
+    TwoKernelShadowReportSession {
+        session_id: session_id.into(),
+        runs: runs.into_iter().collect(),
+    }
+}
+
+pub(crate) fn export_two_kernel_shadow_report_session_pretty_json(
+    session: &TwoKernelShadowReportSession,
+) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(session)
+}
+
+pub(crate) fn summarize_two_kernel_shadow_report_session(
+    session: &TwoKernelShadowReportSession,
+) -> TwoKernelShadowReportSessionSummary {
+    let mut scenario_count = 0_u64;
+    let mut sample_count = 0_u64;
+    let mut green_sample_count = 0_u64;
+    let mut mismatch_sample_count = 0_u64;
+    let mut meerkat_bucket_count = 0_u64;
+    let mut mob_bucket_count = 0_u64;
+    let mut seam_bucket_count = 0_u64;
+
+    for run in &session.runs {
+        scenario_count += run.scenarios.len() as u64;
+        for scenario in &run.scenarios {
+            sample_count += scenario.samples.len() as u64;
+            for sample in &scenario.samples {
+                let bucket_total = sample.meerkat_buckets.len()
+                    + sample.mob_buckets.len()
+                    + sample.seam_buckets.len();
+                if bucket_total == 0 {
+                    green_sample_count += 1;
+                } else {
+                    mismatch_sample_count += 1;
+                }
+                meerkat_bucket_count += sample.meerkat_buckets.len() as u64;
+                mob_bucket_count += sample.mob_buckets.len() as u64;
+                seam_bucket_count += sample.seam_buckets.len() as u64;
+            }
+        }
+    }
+
+    TwoKernelShadowReportSessionSummary {
+        session_id: session.session_id.clone(),
+        run_count: session.runs.len() as u64,
+        scenario_count,
+        sample_count,
+        green_sample_count,
+        mismatch_sample_count,
+        meerkat_bucket_count,
+        mob_bucket_count,
+        seam_bucket_count,
+    }
+}
+
+pub(crate) fn summarize_mob_shadow_taxonomy_reports(
+    reports: &[MobShadowSuiteReport],
+) -> Vec<MobShadowTaxonomyBucket> {
+    let mut counts: HashMap<(&'static str, String, &'static str, ShadowMismatchTriage), usize> =
+        HashMap::new();
+
+    for report in reports {
+        for lane_report in &report.mob {
+            for mismatch in &lane_report.mismatches {
+                *counts
+                    .entry((
+                        "mob",
+                        format!("{:?}", mismatch.lane),
+                        mismatch.region,
+                        mismatch.triage,
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+        for lane_report in &report.composition {
+            for mismatch in &lane_report.mismatches {
+                *counts
+                    .entry((
+                        "composition",
+                        format!("{:?}", mismatch.lane),
+                        mismatch.region,
+                        mismatch.triage,
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut buckets = counts
+        .into_iter()
+        .map(
+            |((scope, lane, region, triage), count)| MobShadowTaxonomyBucket {
+                scope,
+                lane,
+                region,
+                triage,
+                count,
+            },
+        )
+        .collect::<Vec<_>>();
+    buckets.sort_by(|a, b| {
+        (a.scope, a.lane.as_str(), a.region, a.triage).cmp(&(
+            b.scope,
+            b.lane.as_str(),
+            b.region,
+            b.triage,
+        ))
+    });
+    buckets
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2552,6 +2833,7 @@ mod tests {
     use crate::roster::{Roster, RosterAddEntry};
     use crate::runtime_mode::MobRuntimeMode;
     use meerkat_core::types::SessionId;
+    use meerkat_runtime::LogicalRuntimeId;
 
     fn valid_kernel_snapshot() -> MobKernelDiagnosticSnapshot {
         MobKernelDiagnosticSnapshot {
@@ -3392,6 +3674,136 @@ mod tests {
                 .expected_summary
                 .contains("nonterminal Mob work should surface at least one observable Meerkat work posture")
         )));
+    }
+
+    #[test]
+    fn summarize_mob_shadow_taxonomy_reports_collapses_seeded_mob_and_seam_drift() {
+        let mut roster = Roster::new();
+        let worker_sid = add_member(&mut roster, "worker-1");
+        let projected = projected_entry(&roster, "worker-1");
+        let run_id = RunId::new();
+
+        let provisioning_snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: {
+                let mut kernel = valid_kernel_snapshot();
+                kernel.lifecycle.phase = MobState::Completed;
+                let orchestrator = kernel
+                    .orchestrator
+                    .as_mut()
+                    .expect("synthetic kernel snapshot should include orchestrator");
+                orchestrator.phase = MobState::Destroyed;
+                orchestrator.pending_spawn_count = 1;
+                orchestrator.active_flow_count = 1;
+                orchestrator.coordinator_bound = true;
+                orchestrator.supervisor_active = true;
+                kernel
+            },
+            roster: roster.clone(),
+            members: vec![projected.clone()],
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::new(),
+        };
+
+        let work_snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                lifecycle: crate::runtime::MobLifecycleSnapshot {
+                    phase: MobState::Running,
+                    active_run_count: 1,
+                    cleanup_pending: false,
+                },
+                orchestrator: Some(MobOrchestratorSnapshot {
+                    phase: MobState::Running,
+                    coordinator_bound: true,
+                    pending_spawn_count: 0,
+                    active_flow_count: 1,
+                    topology_revision: 1,
+                    supervisor_active: true,
+                }),
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster,
+            members: vec![projected],
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                run_id,
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: vec![StepId::from("start")],
+                    step_dependencies: BTreeMap::from([(StepId::from("start"), Vec::new())]),
+                    step_dependency_modes: BTreeMap::from([(
+                        StepId::from("start"),
+                        DependencyMode::All,
+                    )]),
+                    step_has_conditions: BTreeMap::from([(StepId::from("start"), false)]),
+                    step_branches: BTreeMap::from([(StepId::from("start"), None)]),
+                    step_collection_policy_kinds: BTreeMap::from([(
+                        StepId::from("start"),
+                        RunCollectionPolicyKind::All,
+                    )]),
+                    step_quorum_thresholds: BTreeMap::from([(StepId::from("start"), 0)]),
+                    step_statuses: BTreeMap::new(),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let taxonomy = summarize_mob_shadow_taxonomy_reports(&[MobShadowSuiteReport {
+            mob: vec![MobShadowReport {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                mismatches: capture_provisioning_lifecycle_shadow_mismatches(
+                    &provisioning_snapshot,
+                ),
+            }],
+            composition: vec![CompositionShadowReport {
+                lane: CompositionShadowLane::WorkBridge,
+                mismatches: capture_composition_work_bridge_shadow_mismatches(
+                    &work_snapshot,
+                    &HashMap::from([(
+                        worker_sid.clone(),
+                        Some(active_meerkat_spine(&worker_sid, RuntimeState::Idle)),
+                    )]),
+                ),
+            }],
+        }]);
+
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.scope == "mob"
+                && bucket.lane == "ProvisioningLifecycle"
+                && bucket.region == "lifecycle"
+                && bucket.triage == ShadowMismatchTriage::DogmaViolation
+                && bucket.count == 1
+        }));
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.scope == "mob"
+                && bucket.lane == "ProvisioningLifecycle"
+                && bucket.region == "orchestrator"
+                && bucket.triage == ShadowMismatchTriage::ImplementationDetail
+                && bucket.count == 1
+        }));
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.scope == "composition"
+                && bucket.lane == "WorkBridge"
+                && bucket.region == "work"
+                && bucket.triage == ShadowMismatchTriage::SemanticGap
+                && bucket.count == 1
+        }));
     }
 
     #[test]
@@ -4305,5 +4717,53 @@ mod tests {
                 loop_iteration_count: 1,
             } if run_id == &flow_run_id
         )));
+    }
+
+    #[test]
+    fn export_two_kernel_shadow_report_session_pretty_json_roundtrips_structure() {
+        let session = export_two_kernel_shadow_report_session(
+            "shadow.cutover.session",
+            [export_two_kernel_shadow_run_batch(
+                "shadow.cutover.smoke",
+                [export_two_kernel_shadow_batch(
+                    "seam.live_bridge_loss",
+                    [TwoKernelShadowScenarioSample {
+                        scenario_id: "seam.live_bridge_loss".into(),
+                        phase: "post_archive".into(),
+                        timestamp: "2026-04-12T00:00:00Z".into(),
+                        meerkat_buckets: Vec::new(),
+                        mob_buckets: Vec::new(),
+                        seam_buckets: vec![ShadowTaxonomySinkBucket {
+                            scope: "composition",
+                            lane: "WorkBridge".into(),
+                            region: "work",
+                            triage: "semantic_gap",
+                            count: 1,
+                        }],
+                    }],
+                )],
+            )],
+        );
+
+        let json = export_two_kernel_shadow_report_session_pretty_json(&session)
+            .expect("serialize shadow report session");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("roundtrip json should parse");
+
+        assert_eq!(value["session_id"], "shadow.cutover.session");
+        assert_eq!(value["runs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["runs"][0]["run_id"], "shadow.cutover.smoke");
+        assert_eq!(
+            value["runs"][0]["scenarios"][0]["run_id"],
+            "seam.live_bridge_loss"
+        );
+        assert_eq!(
+            value["runs"][0]["scenarios"][0]["samples"][0]["scenario_id"],
+            "seam.live_bridge_loss"
+        );
+        assert_eq!(
+            value["runs"][0]["scenarios"][0]["samples"][0]["seam_buckets"][0]["lane"],
+            "WorkBridge"
+        );
     }
 }

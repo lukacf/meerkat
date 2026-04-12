@@ -303,6 +303,73 @@ Why this matters:
   when the underlying session service actually owns them
 - we avoided baking a fake “all live members always have execution snapshots”
   rule into the pre-cutover alignment work
+
+## 2026-04-12 — Slice 262: first cutover-facing shadow scenario matrix lands
+
+Added:
+
+- `two-kernel-shadow-scenario-matrix.md`
+
+This closes the next gap in the alignment work. Before this slice, we had:
+
+- frozen machines
+- proven machines
+- landed shadow lanes
+- hook inventories
+- aggregate suite helpers
+
+But the next live step still depended on informal judgment about which real
+scenario to run first and what each scenario was supposed to teach us.
+
+The new matrix now makes that explicit:
+
+- each first cutover-facing scenario names one primary suite helper
+- each scenario maps to already-landed lanes
+- each scenario predicts likely mismatch classes up front
+- execution order now reflects current confidence instead of ad hoc preference
+
+That means the next step is no longer “run something realistic.” It is to pick
+the first scenario from the matrix and start collecting real mismatch taxonomy
+against the rebased frozen/proven baseline.
+
+## 2026-04-12 — Slice 263: first cutover-facing Meerkat shadow scenario lands
+
+Landed the first real scenario-level shadow run from the matrix in:
+
+- `meerkat/src/meerkat_machine.rs`
+
+What now exists:
+
+- `capture_all_meerkat_shadow_reports_stay_empty_across_plain_reset_with_pending_ops`
+
+This scenario uses the already-landed aggregate Meerkat suite helper and
+checks three points on the same real path:
+
+- before reset
+- after reset while `wait_all` is still live
+- after the pending op settles
+
+The important result is that the aggregate frozen Meerkat lanes remain clean
+through the full reset split, not just in isolated lane-level unit tests.
+
+This is the first genuine cutover-facing shadow scenario because it exercises
+multiple lanes together against the live runtime:
+
+- `LifecycleControl`
+- `TurnOpsBarrier`
+- `PeerDrain`
+
+Verification:
+
+- focused scenario test passed
+- full `cargo test -p meerkat --lib` passed
+
+Why this matters:
+
+- the shadow program is now beyond helper surfaces and into scenario-level
+  validation
+- the next scenario should move to the first Mob lifecycle seam:
+  Mob provision / kickoff / finalize
 - the remaining target-state ownership choices are now frozen instead of being
   spread implicitly across older architecture notes
 
@@ -312,6 +379,375 @@ Package alignment updates:
   target proof handoff package
 - `mob-cutover-checklist.md` now requires them for `C7`
 - `README.md` and `tla/README.md` now list them in the active Mob package
+
+## 2026-04-12 — Slice 264: Scenario 3 lands for rebased tools seam
+
+What landed:
+
+- a real cutover-facing scenario-level Meerkat shadow test in
+  `meerkat/src/meerkat_machine.rs`:
+  `capture_all_meerkat_shadow_reports_stay_empty_across_tool_visibility_mutation_and_mcp_apply`
+
+What it covers:
+
+- stages a real live session-plane visibility mutation through
+  `SessionService::set_session_tool_filter(...)`
+- drives a real MCP reload/apply/wait sequence through `McpRouterAdapter`
+- samples the aggregate frozen Meerkat suite:
+  - before mutation
+  - after the staged visibility change
+  - after MCP apply
+  - after MCP settle
+
+Useful backtracks:
+
+- the first version incorrectly tried to filter the staged MCP server name
+  itself; the rebased tools seam does not currently expose that as a filterable
+  session-plane name
+- the landed scenario uses a tiny local composite dispatcher so one stable
+  filterable session-plane tool and one live MCP surface can coexist on the
+  same session honestly
+
+Verification:
+
+- `cargo test -p meerkat --lib capture_all_meerkat_shadow_reports --features mcp`
+- `cargo test -p meerkat --lib --features mcp`
+
+## 2026-04-12 — Slice 265: Scenario 4 lands for rebased peer/trust seam
+
+What landed:
+
+- a real cutover-facing scenario-level Meerkat shadow test in
+  `meerkat/src/meerkat_machine.rs`:
+  `capture_all_meerkat_shadow_reports_stay_empty_across_peer_ingress_trust_and_drain`
+
+What it covers:
+
+- creates a real comms-enabled runtime-backed session
+- performs real trust mutation through `CommsRuntime::add_trusted_peer(...)`
+- performs real peer ingress through the live event injector
+- drives the real drain lifecycle seam through
+  `RuntimeSessionAdapter::update_peer_ingress_context(...)`
+- samples the aggregate frozen Meerkat suite:
+  - before ingress
+  - after trust + ingress + live drain
+  - after drain stop
+
+Verification:
+
+- `cargo test -p meerkat --lib capture_all_meerkat_shadow_reports --features comms`
+
+## 2026-04-12 — Slice 266: Scenario 5 lands for Mob provision / kickoff / finalize
+
+What landed:
+
+- a real cutover-facing scenario-level Mob shadow test in
+  `meerkat-mob/src/runtime/tests.rs`:
+  `test_capture_mob_shadow_suite_report_stays_empty_across_provision_kickoff_finalize`
+
+What it covers:
+
+- creates a real runtime-adapter-backed mob with autonomous kickoff enabled
+- samples the aggregate frozen Mob + seam suite:
+  - before any member is provisioned
+  - during staged pending spawn lineage
+  - after spawn finalization while kickoff is still pending
+  - after kickoff settles
+
+Important shape choice:
+
+- “finalize” here means the real lifecycle completion of spawn provisioning into
+  a canonical roster/session-backed member, followed by kickoff-barrier
+  settlement
+- it does **not** smuggle in stop/destroy semantics under a nicer name
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_stays_empty_across_provision_kickoff_finalize`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 267: Scenario 6 lands for single-step flow run
+
+What landed:
+
+- a real cutover-facing scenario-level Mob shadow test in
+  `meerkat-mob/src/runtime/tests.rs`:
+  `test_capture_mob_shadow_suite_report_stays_empty_across_single_step_flow_run`
+
+What it covers:
+
+- uses a runtime-adapter-backed mob with the canonical single-step `demo` flow
+- samples the aggregate frozen Mob + seam suite:
+  - before flow dispatch
+  - while tracked run state and live Meerkat work posture are both observable
+  - after terminal flow completion and cleanup
+
+Why this matters:
+
+- Scenario 5 proved provisioning/kickoff/finalization remains coherent
+- this scenario proves the first real flow/work aggregate path remains coherent
+  too, without relying on lane-local unit tests
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_stays_empty_across_single_step_flow_run`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 268: Scenario 8 replacement-provisioning branch lands
+
+What landed:
+
+- a real cutover-facing Mob/seam supersession scenario test in
+  `meerkat-mob/src/runtime/tests.rs`:
+  `test_capture_mob_shadow_suite_report_stays_empty_across_respawn_supersession`
+
+What it covers:
+
+- uses a runtime-adapter-backed member with replacement provisioning on the
+  real respawn path
+- samples the aggregate frozen Mob + seam suite:
+  - before respawn
+  - after respawn returns with the old bridge archived and the new bridge current
+
+Important honesty note:
+
+- this lands the **settled** `retire with replacement provisioning` branch of
+  Scenario 8
+- it does **not** claim that the separate `destroy in flight` branch is already
+  covered by the same scenario
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_stays_empty_across_respawn_supersession`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 269: Scenario 8 destroy-in-flight branch lands
+
+What landed:
+
+- a real cutover-facing Mob/seam destroy supersession scenario test in
+  `meerkat-mob/src/runtime/tests.rs`:
+  `test_capture_mob_shadow_suite_report_stays_empty_across_destroy_inflight_flow`
+
+What it covers:
+
+- uses a runtime-adapter-backed member with a deliberately nonterminal
+  single-step flow
+- samples the aggregate frozen Mob + seam suite:
+  - before flow dispatch
+  - while tracked run state and live Meerkat work posture are both observable
+  - then validates the stable post-destroy seam through:
+    - `MobState::Destroyed`
+    - archived live sessions
+    - durable canceled run state
+
+Important honesty note:
+
+- this lands the `destroy in flight` branch of Scenario 8 against the stable
+  surfaces the runtime actually owns:
+  active tracked run visibility, live Meerkat work posture, durable canceled
+  terminal run state, and destroyed mob/seam cleanup
+- it does **not** pretend the aggregate shadow suite itself remains callable
+  after the actor has fully dropped; post-destroy checks intentionally use the
+  durable and externally visible surfaces that survive actor teardown
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_stays_empty_across_destroy_inflight_flow`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 270: Scenario 7 attached recover replay branch lands
+
+What landed:
+
+- a real cutover-facing aggregate Meerkat shadow scenario test in
+  `meerkat/src/meerkat_machine.rs`:
+  `capture_all_meerkat_shadow_reports_stay_empty_across_attached_recover_replay`
+
+What it covers:
+
+- uses a runtime-backed session with an attached blocking executor
+- drives the aggregate frozen Meerkat suite through:
+  - pre-recover attached queued work + live `wait_all`
+  - in-flight attached replay after `recover()`
+  - post-replay state while `wait_all` still remains live
+  - settled state after the waited background operation completes
+
+Important honesty note:
+
+- this lands the `attached recover replay` branch of Scenario 7
+- it does **not** yet claim that the symmetric `attached recycle replay`
+  branch is already covered
+
+Verification:
+
+- `cargo test -p meerkat --lib capture_all_meerkat_shadow_reports_stay_empty_across_attached_recover_replay`
+- `cargo test -p meerkat --lib`
+
+## 2026-04-12 — Slice 271: Scenario 7 attached recycle replay branch lands
+
+What landed:
+
+- a second real cutover-facing aggregate Meerkat shadow scenario test in
+  `meerkat/src/meerkat_machine.rs`:
+  `capture_all_meerkat_shadow_reports_stay_empty_across_attached_recycle_replay`
+
+What it covers:
+
+- uses a runtime-backed session with an attached blocking executor
+- drives the aggregate frozen Meerkat suite through:
+  - pre-recycle attached queued work + live `wait_all`
+  - in-flight attached replay after `recycle()`
+  - post-replay state while `wait_all` still remains live
+  - settled state after the waited background operation completes
+
+Important honesty note:
+
+- this closes the symmetric `attached recycle replay` branch of Scenario 7
+- Scenario 7 is now fully landed for Meerkat:
+  - attached recover replay
+  - attached recycle replay
+
+Verification:
+
+- `cargo test -p meerkat --lib capture_all_meerkat_shadow_reports_stay_empty_across_attached_recycle_replay`
+- `cargo test -p meerkat --lib`
+
+## 2026-04-12 — Slice 272: Scenario 7 branch fallback failure-history run lands
+
+What landed:
+
+- a real cutover-facing aggregate Mob + seam shadow scenario test in
+  `meerkat-mob/src/runtime/tests.rs`:
+  `test_capture_mob_shadow_suite_report_stays_empty_across_branch_fallback_failure_history`
+
+What it covers:
+
+- uses the real `branch_fallback` flow family with:
+  - one failing branch candidate
+  - one healthy fallback candidate
+  - a live nonterminal failure history on the tracked run
+- drives the aggregate frozen Mob + seam suite through:
+  - pre-run state
+  - active `Running` state while `failure_count > 0`
+  - settled post-terminal cleanup
+
+Important honesty note:
+
+- this closes the final first-wave cutover-facing scenario from the scenario
+  matrix
+- the next step is no longer “land the next scenario”
+- the next step is to use the landed aggregate suites to collect real mismatch
+  taxonomy from broader shadow runs
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_stays_empty_across_branch_fallback_failure_history`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 273: Broader shadow taxonomy smoke run starts
+
+What landed:
+
+- taxonomy summarizers over aggregate shadow suites:
+  - `summarize_meerkat_shadow_taxonomy_reports(...)`
+  - `summarize_mob_shadow_taxonomy_reports(...)`
+- a broader Mob + seam smoke run in `meerkat-mob/src/runtime/tests.rs`:
+  - `test_capture_mob_shadow_suite_taxonomy_stays_empty_across_broader_smoke_run`
+
+What it covers:
+
+- treats the landed aggregate suite helpers as a real broader-run collection
+  surface instead of just a pointwise assertion helper
+- samples the aggregate Mob + seam shadow suite across:
+  - initial provisioned state
+  - active single-step flow work
+  - settled flow cleanup
+  - settled respawn supersession
+- collapses all collected suite reports into one mismatch taxonomy
+
+Important honesty note:
+
+- this is the first post-matrix broader shadow run
+- it does not yet claim that broader live runs surface real mismatches
+- it does prove that the rebased frozen/proven baseline still yields an empty
+  mismatch taxonomy across a multi-scenario Mob + seam smoke path
+
+Verification:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_taxonomy_stays_empty_across_broader_smoke_run`
+- `cargo test -p meerkat-mob --lib`
+
+## 2026-04-12 — Slice 274: Broader Meerkat shadow taxonomy smoke run lands
+
+What landed:
+
+- a Meerkat-side taxonomy summarizer over aggregate shadow suites:
+  - `summarize_meerkat_shadow_taxonomy_reports(...)`
+- a broader Meerkat smoke run in `meerkat/src/meerkat_machine.rs`:
+  - `capture_meerkat_shadow_taxonomy_stays_empty_across_broader_smoke_run`
+
+What it covers:
+
+- treats the landed aggregate Meerkat suite helper as a real broader-run
+  collection surface instead of just a pointwise assertion helper
+- samples the aggregate Meerkat shadow suite across:
+  - healthy baseline
+  - plain reset with pending ops
+  - settled post-reset wait-all cleanup
+  - attached recover replay in-flight and settled
+- collapses all collected suite reports into one mismatch taxonomy
+
+Important honesty note:
+
+- this is the first post-matrix broader Meerkat shadow run
+- it does not yet claim that broader live runs surface real mismatches
+- it does prove that the rebased frozen/proven baseline still yields an empty
+  mismatch taxonomy across a multi-phase Meerkat smoke path
+
+Verification:
+
+- `cargo test -p meerkat --lib capture_meerkat_shadow_taxonomy_stays_empty_across_broader_smoke_run`
+
+## 2026-04-12 — Slice 275: Seeded taxonomy validation lands on both kernels
+
+Goal:
+
+- prove the new taxonomy helpers are useful on real seeded drift, not only empty
+  on the rebased happy path
+
+What landed:
+
+- added a seeded aggregate taxonomy test in `meerkat/src/meerkat_machine.rs`:
+  - `summarize_meerkat_shadow_taxonomy_reports_collapses_seeded_lifecycle_control_drift`
+- added a seeded aggregate taxonomy test in `meerkat-mob/src/mob_machine.rs`:
+  - `summarize_mob_shadow_taxonomy_reports_collapses_seeded_mob_and_seam_drift`
+- each test reuses already-landed seeded mismatch shapes instead of inventing a
+  new drift harness:
+  - Meerkat: lifecycle/control drift
+  - Mob: provisioning drift plus seam work-bridge drift
+
+Why this slice matters:
+
+- it proves the aggregate taxonomy output is actually actionable when drift is
+  present
+- it keeps the next refinement step honest: we can now distinguish “taxonomy is
+  empty on green paths” from “taxonomy can classify real mismatches cleanly”
+
+Result:
+
+- broader smoke runs are still green on the rebased baseline
+- taxonomy usefulness is now validated on seeded drift for both machines
+- the next refinement target is:
+  - mismatch-producing live runs that surface the first real taxonomy classes
+
+Validation:
+
+- `cargo test -p meerkat --lib summarize_meerkat_shadow_taxonomy_reports_collapses_seeded_lifecycle_control_drift`
+- `cargo test -p meerkat-mob --lib summarize_mob_shadow_taxonomy_reports_collapses_seeded_mob_and_seam_drift`
+- `cargo test -p meerkat --lib`
+- `cargo test -p meerkat-mob --lib`
+- `cargo test -p meerkat --lib`
 
 ## 2026-04-09 — Slice 1: Meerkat runtime spine snapshot
 
@@ -15498,3 +15934,430 @@ Result:
   - all previously landed lane-level helpers
 - the next shadow target is:
   - first real end-to-end shadow scenario run using the aggregate suite helpers
+
+## Slice 276 - First live seam mismatch taxonomy lands
+
+Goal:
+
+- move beyond seeded synthetic taxonomy drift and prove that the aggregate
+  shadow taxonomy surfaces a real mismatch class from live implementation
+  contact
+
+What landed:
+
+- added `test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift`
+  in `meerkat-mob/src/runtime/tests.rs`
+- the scenario:
+  - provisions a real runtime-adapter-backed member
+  - starts a real single-step flow and waits for observable Meerkat work
+    posture
+  - archives the live bridge session through the mock session service while the
+    flow is still nonterminal
+  - captures the aggregate Mob + seam shadow suite and collapses it into
+    taxonomy buckets
+- the live taxonomy now proves two real seam mismatch classes:
+  - `composition / LifecycleSupersession / lifecycle`
+  - `composition / WorkBridge / work`
+- with the currently observed live triage:
+  - `composition / LifecycleSupersession / lifecycle / implementation_detail`
+  - `composition / WorkBridge / work / semantic_gap`
+
+Why this slice matters:
+
+- it is the first mismatch-producing **live** shadow run instead of a seeded
+  synthetic mutation
+- it proves the aggregate taxonomy is useful on real implementation drift, not
+  just empty on green paths or shaped correctly on seeded snapshots
+- it moves the branch from “shadow taxonomy is validated” to “shadow taxonomy
+  is now collecting real refinement signals”
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift`
+- `git diff --check`
+
+## Slice 277 - Shared shadow sink schema lands after first live mismatch
+
+Goal:
+
+- stop treating mismatch export as a vague future step once the first live
+  taxonomy class has appeared
+
+What landed:
+
+- added `two-kernel-shadow-sink-schema.md`
+- the schema defines one shared pre-cutover export unit for:
+  - `MeerkatMachine` taxonomy buckets
+  - `MobMachine` taxonomy buckets
+  - seam taxonomy buckets
+- the first required live sample is now frozen explicitly:
+  - `seam.live_bridge_loss`
+  - `composition / LifecycleSupersession / lifecycle`
+  - `composition / WorkBridge / work`
+- and the currently observed live triage is now recorded explicitly in the
+  schema:
+  - `LifecycleSupersession / lifecycle / implementation_detail`
+  - `WorkBridge / work / semantic_gap`
+
+Why this slice matters:
+
+- it turns the “shared sink/export path” from a deferred idea into an explicit
+  next implementation target
+- it keeps the sink taxonomy-oriented instead of prematurely exporting raw
+  machine snapshots
+- it gives the cutover program one stable shape to build against now that live
+  mismatch classes exist
+
+Validation:
+
+- `git diff --check`
+
+## Slice 278 - Both kernels can emit the first sink sample shape
+
+Goal:
+
+- stop treating the shared sink schema as Mob-only once the shape exists
+
+What landed:
+
+- added `export_meerkat_shadow_scenario_sample(...)` in
+  `meerkat/src/meerkat_machine.rs`
+- validated it on:
+  - the broader green Meerkat smoke taxonomy (empty sample)
+  - the seeded lifecycle/control drift taxonomy (three explicit Meerkat
+    buckets)
+- kept the existing Mob-side export consumer as the first live seam-mismatch
+  sample path
+
+Why this slice matters:
+
+- both kernels can now emit the same scenario-sample export shape
+- the branch is no longer blocked on “make the sink symmetric first” before
+  writing a shared cutover-facing runner
+- the next honest step is the first combined scenario collector, not more
+  export-shape work
+
+Validation:
+
+- `cargo test -p meerkat --lib summarize_meerkat_shadow_taxonomy_reports_collapses_seeded_lifecycle_control_drift`
+- `cargo test -p meerkat --lib capture_meerkat_shadow_taxonomy_stays_empty_across_broader_smoke_run`
+- `git diff --check`
+
+## Slice 279 - First combined cutover-facing shadow runner lands
+
+Goal:
+
+- move from separate Meerkat and Mob exporters to the first paired scenario
+  run that emits both sides of the same cutover-facing scenario
+
+What landed:
+
+- added a narrow public Meerkat diagnostic export helper in
+  `meerkat/src/meerkat_machine.rs` that works from:
+  - `MeerkatMachineSpineSnapshot`
+  - best-effort live execution/tool/peer projections
+- re-exported that helper from `meerkat/src/lib.rs`
+- extended
+  `test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift`
+  in `meerkat-mob/src/runtime/tests.rs` so the same live scenario now emits:
+  - active Meerkat sample
+  - active Mob sample
+  - post-archive Meerkat sample
+  - post-archive Mob sample
+
+Important backtrack:
+
+- the first version assumed the post-archive Meerkat sample would disappear
+- that was false on the rebased baseline
+- the honest paired result is now:
+  - active phase: empty Meerkat sample + empty Mob sample
+  - `post_archive` phase:
+    - empty Meerkat sample
+    - non-empty Mob/seam sample carrying the real bridge-loss taxonomy
+
+Why this slice matters:
+
+- it is the first actual combined cutover-facing runner, not just two
+  exporters that happen to share a shape
+- it proves the shared sink/export path can represent asymmetric machine
+  behavior honestly without inventing a stronger seam story
+- it gives the pre-cutover program one real paired sample to build durable sink
+  consumers around
+
+Validation:
+
+- `cargo test -p meerkat --lib`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 280 - Reusable two-kernel shadow batch consumer lands
+
+Goal:
+
+- move the first combined cutover-facing runner from "paired ad hoc exports"
+  to a reusable batch/sink shape
+
+What landed:
+
+- added `merge_two_kernel_shadow_scenario_samples(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- added `export_two_kernel_shadow_batch(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- updated the live `seam.live_bridge_loss` scenario in
+  `meerkat-mob/src/runtime/tests.rs` so it now exports:
+  - one normalized `active` sample
+  - one normalized `post_archive` sample
+  - one reusable batch with:
+    - `run_id = "seam.live_bridge_loss"`
+    - ordered samples `[active, post_archive]`
+
+Important backtrack:
+
+- the merge helper could not reuse the Meerkat sink bucket type directly
+- the honest fix was an explicit field-by-field conversion from the Meerkat
+  bucket shape into the Mob-side sink bucket shape
+
+Why this slice matters:
+
+- the sink/export path is now reusable across more than one scenario phase
+- the branch has moved from "first combined runner exists" to
+  "first reusable cutover-facing batch consumer exists"
+- this is the right base for a future runner that collects multiple scenarios
+  in one shadow session
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift`
+- `cargo test -p meerkat --lib`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 281 - Multi-scenario cutover-facing shadow run batch lands
+
+Goal:
+
+- move the shadow sink from one reusable scenario batch to the first reusable
+  cutover-facing run that carries both a green scenario and a
+  mismatch-producing scenario under one run id
+
+What landed:
+
+- added `TwoKernelShadowRunBatch` in `meerkat-mob/src/mob_machine.rs`
+- added `export_two_kernel_shadow_run_batch(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- added
+  `test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
+  in `meerkat-mob/src/runtime/tests.rs`
+- the new run batch now exports:
+  - `run_id = "shadow.cutover.smoke"`
+  - scenario batch `0`:
+    - `mob.flow.single_step.green`
+    - one empty `active` sample
+  - scenario batch `1`:
+    - `seam.live_bridge_loss`
+    - one non-empty `post_archive` sample
+
+Important backtrack:
+
+- the first version considered reusing the same scenario id for both the green
+  and drift phases
+- the landed version keeps them as distinct scenario batches so the sink stays
+  faithful to the scenario matrix instead of flattening unrelated meanings into
+  one synthetic scenario
+
+Why this slice matters:
+
+- the cutover-facing sink can now represent one run session with:
+  - healthy machine/seam posture
+  - real live drift
+- this is the first shape that starts looking like a real shadow-run artifact
+  instead of a one-test export helper
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 286 - Final cutover-readiness handoff lands
+
+Goal:
+
+- close the preparation phase with one explicit note that says what is frozen,
+  what is proven, what is shadowed, and what we already expect to break first
+
+What landed:
+
+- added `two-kernel-cutover-readiness.md`
+- removed the stray unused `LogicalRuntimeId` import from
+  `meerkat-mob/src/mob_machine.rs` so the final prep patch set does not add
+  fresh local warning noise
+
+Why this slice matters:
+
+- the branch no longer relies on piecing together the final cutover posture
+  from many machine, proof, and shadow docs
+- the first brutalist pass now has one canonical handoff note
+
+Validation:
+
+- `cargo test --workspace --lib --quiet`
+- `git diff --check`
+
+## Slice 283 - First genuinely multi-run live report session lands
+
+Goal:
+
+- prove the shared report/session layer on more than one real runtime-backed
+  run instead of one mixed test assembly
+
+What landed:
+
+- extended `meerkat-mob/src/runtime/tests.rs` with
+  `test_export_two_kernel_shadow_report_session_collects_multiple_live_runs`
+- the new live report session now exports:
+  - `session_id = "shadow.cutover.multi-run"`
+  - run batch `0`:
+    - `run_id = "shadow.cutover.green-run"`
+    - one healthy runtime-backed green scenario batch
+  - run batch `1`:
+    - `run_id = "shadow.cutover.drift-run"`
+    - one mismatch-producing runtime-backed drift scenario batch
+
+Important backtrack:
+
+- the first tempting approach was to keep reusing one live run and just split
+  it into more phases
+- the landed version uses two distinct runtime-backed runs so the session layer
+  now proves a real cutover collection story, not just a more nested one-run
+  fixture
+
+Why this slice matters:
+
+- the sink now has a first honest "collection session" artifact over multiple
+  live runs
+- this is the first point where the shadow export path starts resembling a
+  real cutover rehearsal harness instead of a sequence of unit-shaped exports
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_report_session_collects_multiple_live_runs`
+- `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 284 - Session-level triage summary lands for shared shadow reports
+
+Goal:
+
+- add the first compact top-level triage view over a multi-run cutover shadow
+  collection session
+
+What landed:
+
+- added `TwoKernelShadowReportSessionSummary` in
+  `meerkat-mob/src/mob_machine.rs`
+- added `summarize_two_kernel_shadow_report_session(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- extended
+  `test_export_two_kernel_shadow_report_session_collects_multiple_live_runs`
+  in `meerkat-mob/src/runtime/tests.rs` so it now proves:
+  - `run_count = 2`
+  - `scenario_count = 2`
+  - `sample_count = 2`
+  - `green_sample_count = 1`
+  - `mismatch_sample_count = 1`
+  - `seam_bucket_count >= 2`
+
+Why this slice matters:
+
+- the sink is no longer just a nested export tree
+- it now has the first compact session-level triage artifact a real cutover
+  rehearsal can inspect before drilling into raw scenario batches
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_report_session_collects_multiple_live_runs`
+- `git diff --check`
+
+## Slice 285 - Machine-readable shadow report export lands
+
+Goal:
+
+- turn the shared shadow report-session shape into a real cutover artifact
+  instead of keeping it purely in-memory and test-local
+
+What landed:
+
+- added `export_two_kernel_shadow_report_session_pretty_json(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- added
+  `export_two_kernel_shadow_report_session_pretty_json_roundtrips_structure`
+  in `meerkat-mob/src/mob_machine.rs`
+- the JSON proof now round-trips:
+  - `session_id`
+  - run ids
+  - scenario batch ids
+  - sample ids
+  - seam bucket labels
+
+Why this slice matters:
+
+- the first brutal cutover can emit a single machine-readable artifact without
+  inventing a second export format later
+- the sink hierarchy now has:
+  - structural export
+  - compact session summary
+  - machine-readable serialization
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib export_two_kernel_shadow_report_session_pretty_json_roundtrips_structure`
+- `git diff --check`
+
+## Slice 282 - Shared two-kernel shadow report session lands
+
+Goal:
+
+- move the sink from one reusable run batch to the first reusable shared
+  collection session that can accumulate multiple cutover-facing runs
+
+What landed:
+
+- added `TwoKernelShadowReportSession` in `meerkat-mob/src/mob_machine.rs`
+- added `export_two_kernel_shadow_report_session(...)` in
+  `meerkat-mob/src/mob_machine.rs`
+- extended
+  `test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
+  in `meerkat-mob/src/runtime/tests.rs` so it now exports:
+  - `session_id = "shadow.cutover.session"`
+  - run batch `0`:
+    - `run_id = "shadow.cutover.smoke"`
+    - one green scenario batch
+    - one mismatch-producing scenario batch
+  - run batch `1`:
+    - `run_id = "shadow.cutover.green-only"`
+    - one green-only scenario batch
+
+Important backtrack:
+
+- the first tempting shape was a flat session-level list of scenario samples
+- the landed shape keeps the run batch boundary intact, because one cutover
+  collection session may include multiple runs and each run may still include
+  multiple scenario batches
+
+Why this slice matters:
+
+- the sink now has a stable hierarchy:
+  - sample
+  - scenario batch
+  - run batch
+  - report session
+- this is the first shape that can honestly model an actual cutover shadow
+  collection session instead of a single test fixture
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`

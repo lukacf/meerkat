@@ -12,6 +12,10 @@ plan:
 The remaining work is no longer semantic freeze authoring. It is refinement,
 lowering, and staged cutover preparation against the real implementation.
 
+The explicit final pre-cutover handoff is now:
+
+- `two-kernel-cutover-readiness.md`
+
 ## Current Proven Baseline
 
 The current rebased branch has:
@@ -168,6 +172,7 @@ This is now grounded by:
 - `mob-shadow-hook-inventory.md`
 - `mob-meerkat-seam-hook-inventory.md`
 - `two-kernel-shadow-implementation-plan.md`
+- `two-kernel-shadow-scenario-matrix.md`
 
 ### Step 6. Hard-cut `MeerkatMachine`, then `MobMachine`
 
@@ -202,13 +207,55 @@ The immediate next step is:
    - optionally enrich Mob-side scenario probes with
      `diagnostic_meerkat_shadow_inputs(...)` when the underlying session
      service owns canonical live diagnostic surfaces
-2. wire the first cutover-facing shadow run around:
-   - Meerkat lifecycle/control + tools + turn/ops/barrier + peer/drain
-   - Mob provisioning/lifecycle + flow/frame/loop + task/history/recovery
-   - seam lifecycle/supersession + work bridge
+   - pick the first run from `two-kernel-shadow-scenario-matrix.md`
+2. treat Scenario 1, Scenario 3, Scenario 4, Scenario 5, Scenario 6, both landed branches of Scenario 8, and both landed Scenario 7 paths as landed and move to the next
+   refinement step:
+   - broader shadow runs that start collecting real mismatch taxonomy
+   - keep the first broader Meerkat and Mob/seam smoke paths green
+   - validate taxonomy usefulness on seeded drift before widening into
+     mismatch-producing live runs
+   - treat the first live seam bridge-loss taxonomy run as landed
+     (`LifecycleSupersession/lifecycle` +
+     `WorkBridge/work`) and widen from that real mismatch class
 3. keep `two-kernel-shadow-implementation-plan.md` as the active patch-order
    plan for any remaining lane additions
-4. add a shared sink/export path only after the aggregate scenario helpers start
-   surfacing real mismatch classes during live runs
+4. treat the shared sink/export path as landed:
+   - both kernels can emit the shared scenario-sample shape
+   - the first combined cutover-facing runner is anchored on
+     `seam.live_bridge_loss`
+   - current honest paired behavior is:
+     - active phase: empty Meerkat sample + empty Mob sample
+     - `post_archive` phase: empty Meerkat sample + non-empty Mob/seam sample
+   - the first reusable batch consumer is now landed:
+     - `run_id = "seam.live_bridge_loss"`
+     - two ordered scenario samples (`active`, `post_archive`)
+   - the first reusable multi-scenario run batch is now landed:
+     - `run_id = "shadow.cutover.smoke"`
+     - one green scenario batch:
+       - `mob.flow.single_step.green`
+     - one mismatch-producing scenario batch:
+       - `seam.live_bridge_loss`
+   - the first shared report/session layer is now landed:
+     - `session_id = "shadow.cutover.session"`
+     - includes:
+       - one mixed run batch (`shadow.cutover.smoke`)
+       - one green-only run batch (`shadow.cutover.green-only`)
+   - the first genuinely multi-run live report session is now landed:
+     - `session_id = "shadow.cutover.multi-run"`
+     - one healthy runtime-backed run batch:
+       - `shadow.cutover.green-run`
+     - one drift-producing runtime-backed run batch:
+       - `shadow.cutover.drift-run`
+   - the first session-level triage summary is now landed:
+     - one shared summary over the multi-run session
+     - green vs mismatch sample counts
+     - bucket counts split by Meerkat, Mob, and seam
+   - the first machine-readable session export is now landed:
+     - pretty JSON over the shared report-session shape
+     - no secondary sink format required for the first brutal cutover
+   - `two-kernel-shadow-sink-schema.md` is now the canonical first export shape
+   - both kernels can now emit that scenario-sample shape:
+     - `MeerkatMachine`: empty broader-smoke + seeded lifecycle/control drift
+     - `MobMachine`: live seam bridge-loss drift
 5. treat newly surfaced mismatches as refinement work, not as proof/freeze
    uncertainty, unless they force a real semantic backtrack

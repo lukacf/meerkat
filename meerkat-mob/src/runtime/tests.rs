@@ -18,6 +18,7 @@ use crate::store::{
 use async_trait::async_trait;
 use chrono::Utc;
 use indexmap::IndexMap;
+use meerkat::export_meerkat_shadow_scenario_sample_from_diagnostic_snapshot;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
@@ -80,6 +81,35 @@ struct MockCommsRuntime {
     peer_statuses: RwLock<HashMap<String, (PeerReachability, Option<PeerReachabilityReason>)>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
+}
+
+async fn export_best_effort_meerkat_shadow_sample(
+    handle: &MobHandle,
+    session_id: &SessionId,
+    scenario_id: &str,
+    phase: &str,
+    timestamp: &str,
+) -> Option<meerkat::MeerkatShadowScenarioSample> {
+    let runtime_adapter = handle.diagnostic_runtime_adapter()?;
+    let spine = runtime_adapter
+        .meerkat_machine_spine_snapshot(session_id)
+        .await?;
+    let inputs = handle
+        .diagnostic_meerkat_shadow_inputs(session_id)
+        .await
+        .ok()?;
+    Some(
+        export_meerkat_shadow_scenario_sample_from_diagnostic_snapshot(
+            scenario_id,
+            phase,
+            timestamp,
+            spine,
+            inputs.execution,
+            inputs.tool_scope,
+            inputs.tool_surface,
+            inputs.peer_ingress,
+        ),
+    )
 }
 
 impl MockCommsRuntime {
@@ -16392,6 +16422,1309 @@ async fn test_capture_mob_shadow_suite_report_returns_empty_for_live_system() {
 
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_stays_empty_across_provision_kickoff_finalize() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_create_session_delay_ms(150);
+    service.set_keep_alive_turns_complete_immediately(true);
+    service.set_start_turn_delay_ms(150);
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "fresh mob should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "fresh mob should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    let spawn_task = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(
+                    ProfileName::from("lead"),
+                    MeerkatId::from("lead-shadow"),
+                    None,
+                )
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let staged = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        staged.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pending-spawn stage should not emit aggregate Mob shadow mismatches: {:#?}",
+        staged.mob
+    );
+    assert!(
+        staged
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pending-spawn stage should not emit aggregate seam shadow mismatches: {:#?}",
+        staged.composition
+    );
+
+    spawn_task.await.expect("spawn join").expect("spawn lead");
+
+    let kickoff_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if snapshot
+            .kernel
+            .kickoff_barrier
+            .pending_member_ids
+            .contains(&MeerkatId::from("lead-shadow"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < kickoff_deadline,
+            "timed out waiting for live kickoff barrier state to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let kickoff_pending = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        kickoff_pending
+            .mob
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "kickoff-pending stage should not emit aggregate Mob shadow mismatches: {:#?}",
+        kickoff_pending.mob
+    );
+    assert!(
+        kickoff_pending
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "kickoff-pending stage should not emit aggregate seam shadow mismatches: {:#?}",
+        kickoff_pending.composition
+    );
+
+    handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("kickoff barrier should settle");
+
+    let settled = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        settled.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "settled kickoff stage should not emit aggregate Mob shadow mismatches: {:#?}",
+        settled.mob
+    );
+    assert!(
+        settled
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "settled kickoff stage should not emit aggregate seam shadow mismatches: {:#?}",
+        settled.composition
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_stays_empty_across_single_step_flow_run() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(1_000, 1))
+            .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pre-run mob should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pre-run mob should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for aggregate shadow checks");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == MeerkatId::from("w-1"))
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for aggregate live flow posture to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let active = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        active.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "active flow run should not emit aggregate Mob shadow mismatches: {:#?}",
+        active.mob
+    );
+    assert!(
+        active
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "active flow run should not emit aggregate seam shadow mismatches: {:#?}",
+        active.composition
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let settled = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        settled.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "settled flow run should not emit aggregate Mob shadow mismatches: {:#?}",
+        settled.mob
+    );
+    assert!(
+        settled
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "settled flow run should not emit aggregate seam shadow mismatches: {:#?}",
+        settled.composition
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_stays_empty_across_branch_fallback_failure_history() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_branch_fallback_flow()).await;
+    let sid_fail = handle
+        .spawn(
+            ProfileName::from("worker_fail"),
+            MeerkatId::from("w-fail"),
+            None,
+        )
+        .await
+        .expect("spawn failing worker")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(
+            ProfileName::from("worker_ok"),
+            MeerkatId::from("w-ok"),
+            None,
+        )
+        .await
+        .expect("spawn healthy worker");
+    service
+        .set_flow_turn_fail_for_session(&sid_fail, true)
+        .await;
+    service.set_flow_turn_delay_ms(150);
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pre-run branch-fallback flow should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pre-run branch-fallback flow should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("branch_fallback"),
+            serde_json::json!({"try_fallback": true}),
+        )
+        .await
+        .expect("run branch fallback flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if let Some(crate::mob_machine::TrackedRunSnapshot::Present(tracked_run)) =
+            snapshot.tracked_runs.get(&run_id)
+            && tracked_run.status == MobRunStatus::Running
+            && tracked_run.failure_count > 0
+            && !tracked_run.step_statuses.is_empty()
+        {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for nonterminal branch-fallback failure history to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let active = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        active.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "nonterminal branch-fallback failure history should not emit aggregate Mob shadow mismatches: {:#?}",
+        active.mob
+    );
+    assert!(
+        active
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "nonterminal branch-fallback failure history should not emit aggregate seam shadow mismatches: {:#?}",
+        active.composition
+    );
+
+    let _terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+
+    let settled = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        settled.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "settled branch-fallback flow should not emit aggregate Mob shadow mismatches: {:#?}",
+        settled.mob
+    );
+    assert!(
+        settled
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "settled branch-fallback flow should not emit aggregate seam shadow mismatches: {:#?}",
+        settled.composition
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_taxonomy_stays_empty_across_broader_smoke_run() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(1_000, 1))
+            .await;
+    let member_id = MeerkatId::from("shadow-smoke");
+    handle
+        .spawn(ProfileName::from("worker"), member_id.clone(), None)
+        .await
+        .expect("spawn worker");
+
+    let mut reports = Vec::new();
+    reports.push(crate::mob_machine::capture_mob_shadow_suite_report(&handle).await);
+
+    service.set_flow_turn_delay_ms(150);
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({"smoke": true}))
+        .await
+        .expect("run single-step smoke flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for broader shadow smoke run");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == member_id)
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for broader shadow smoke flow posture to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    reports.push(crate::mob_machine::capture_mob_shadow_suite_report(&handle).await);
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    reports.push(crate::mob_machine::capture_mob_shadow_suite_report(&handle).await);
+
+    service.set_create_session_delay_ms(150);
+    let _receipt = handle
+        .respawn(member_id.clone(), Some("shadow smoke respawn".into()))
+        .await
+        .expect("respawn succeeds");
+    reports.push(crate::mob_machine::capture_mob_shadow_suite_report(&handle).await);
+
+    let taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&reports);
+    assert!(
+        taxonomy.is_empty(),
+        "broader Mob+seam shadow smoke run should keep mismatch taxonomy empty: {taxonomy:#?}"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(60_000, 8))
+            .await;
+    let member_id = MeerkatId::from("shadow-bridge-loss");
+    let member_ref = handle
+        .spawn(ProfileName::from("worker"), member_id.clone(), None)
+        .await
+        .expect("spawn worker");
+    let session_id = member_ref
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service.set_flow_turn_never_terminal(true);
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pre-archive mob should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pre-archive mob should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"shadow_bridge_loss": true}),
+        )
+        .await
+        .expect("run flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for aggregate shadow checks");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == member_id)
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for live bridge/work posture before archive"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let active_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &session_id,
+        "seam.live_bridge_loss",
+        "active",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+    assert!(
+        active_meerkat.is_some(),
+        "live bridge-loss scenario should export a Meerkat-side sample while the bridge is still present"
+    );
+
+    let active_report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let active_taxonomy =
+        crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[active_report]);
+    let active_mob = crate::mob_machine::export_mob_shadow_scenario_sample(
+        "seam.live_bridge_loss",
+        "active",
+        "2026-04-12T00:00:00Z",
+        &active_taxonomy,
+    );
+
+    service
+        .archive(&session_id)
+        .await
+        .expect("archive live session under active flow");
+    assert!(
+        !handle.diagnostic_has_live_session(&session_id).await,
+        "archive should remove the live bridge session before taxonomy capture"
+    );
+
+    let post_transition_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &session_id,
+        "seam.live_bridge_loss",
+        "post_archive",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+
+    let drift = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[drift]);
+    assert!(
+        !taxonomy.is_empty(),
+        "archiving the live session under active flow should surface a real seam mismatch"
+    );
+    assert!(
+        taxonomy.iter().any(|bucket| {
+            bucket.scope == "composition"
+                && bucket.lane == "LifecycleSupersession"
+                && bucket.region == "lifecycle"
+        }),
+        "live bridge loss should surface a seam lifecycle mismatch: {taxonomy:#?}"
+    );
+    assert!(
+        taxonomy.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "live bridge loss under nonterminal work should surface a seam work-bridge mismatch: {taxonomy:#?}"
+    );
+
+    let exported = crate::mob_machine::export_mob_shadow_scenario_sample(
+        "seam.live_bridge_loss",
+        "post_archive",
+        "2026-04-12T00:00:00Z",
+        &taxonomy,
+    );
+    assert_eq!(exported.scenario_id, "seam.live_bridge_loss");
+    assert_eq!(exported.phase, "post_archive");
+    assert_eq!(exported.timestamp, "2026-04-12T00:00:00Z");
+    assert!(
+        exported.mob_buckets.is_empty(),
+        "live bridge-loss export should currently be a seam-only sample: {exported:#?}"
+    );
+    assert!(
+        exported.meerkat_buckets.is_empty(),
+        "Mob-side sink consumer should not synthesize Meerkat buckets: {exported:#?}"
+    );
+    assert!(
+        exported.seam_buckets.iter().any(|bucket| {
+            bucket.scope == "composition"
+                && bucket.lane == "LifecycleSupersession"
+                && bucket.region == "lifecycle"
+                && bucket.triage == "implementation_detail"
+                && bucket.count >= 1
+        }),
+        "exported sink sample should retain the seam lifecycle bucket: {exported:#?}"
+    );
+    assert!(
+        exported.seam_buckets.iter().any(|bucket| {
+            bucket.scope == "composition"
+                && bucket.lane == "WorkBridge"
+                && bucket.region == "work"
+                && bucket.triage == "semantic_gap"
+                && bucket.count >= 1
+        }),
+        "exported sink sample should retain the seam work bucket: {exported:#?}"
+    );
+
+    let combined = crate::mob_machine::export_two_kernel_shadow_batch(
+        "seam.live_bridge_loss",
+        [
+            crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                active_meerkat,
+                active_mob,
+            ),
+            crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                post_transition_meerkat,
+                exported,
+            ),
+        ],
+    );
+    assert_eq!(combined.run_id, "seam.live_bridge_loss");
+    assert_eq!(combined.samples.len(), 2);
+    let active = &combined.samples[0];
+    let post_archive = &combined.samples[1];
+    assert_eq!(active.scenario_id, "seam.live_bridge_loss");
+    assert_eq!(active.phase, "active");
+    assert!(
+        active.meerkat_buckets.is_empty(),
+        "healthy live bridge posture should export an empty Meerkat taxonomy sample: {:#?}",
+        active
+    );
+    assert!(
+        active.mob_buckets.is_empty() && active.seam_buckets.is_empty(),
+        "healthy active bridge posture should export an empty Mob/seam taxonomy sample: {:#?}",
+        active
+    );
+    assert_eq!(post_archive.scenario_id, "seam.live_bridge_loss");
+    assert_eq!(post_archive.phase, "post_archive");
+    assert!(
+        post_archive.meerkat_buckets.is_empty(),
+        "post-archive Meerkat sample should currently be empty on the rebased baseline: {:#?}",
+        post_archive
+    );
+    assert!(
+        post_archive.seam_buckets.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "post-archive Mob sample should retain the live seam work-bridge drift: {:#?}",
+        post_archive
+    );
+}
+
+#[tokio::test]
+async fn test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(60_000, 8))
+            .await;
+    let member_id = MeerkatId::from("shadow-run-batch");
+    let member_ref = handle
+        .spawn(ProfileName::from("worker"), member_id.clone(), None)
+        .await
+        .expect("spawn worker");
+    let session_id = member_ref
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"shadow_run_batch": true}),
+        )
+        .await
+        .expect("run flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for aggregate shadow checks");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == member_id)
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for live bridge/work posture before batch export"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let green_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &session_id,
+        "mob.flow.single_step.green",
+        "active",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+    assert!(
+        green_meerkat.is_some(),
+        "green scenario should export a Meerkat-side sample while the bridge is live"
+    );
+    let green_report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let green_taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[green_report]);
+    assert!(
+        green_taxonomy.is_empty(),
+        "healthy active bridge posture should keep the green scenario taxonomy empty: {green_taxonomy:#?}"
+    );
+    let green_batch = crate::mob_machine::export_two_kernel_shadow_batch(
+        "mob.flow.single_step.green",
+        [
+            crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                green_meerkat,
+                crate::mob_machine::export_mob_shadow_scenario_sample(
+                    "mob.flow.single_step.green",
+                    "active",
+                    "2026-04-12T00:00:00Z",
+                    &green_taxonomy,
+                ),
+            ),
+        ],
+    );
+
+    service
+        .archive(&session_id)
+        .await
+        .expect("archive live session under active flow");
+    assert!(
+        !handle.diagnostic_has_live_session(&session_id).await,
+        "archive should remove the live bridge session before drift batch export"
+    );
+
+    let post_archive_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &session_id,
+        "seam.live_bridge_loss",
+        "post_archive",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+    let drift_report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let drift_taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[drift_report]);
+    assert!(
+        drift_taxonomy.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "bridge-loss drift batch should retain the seam work bucket: {drift_taxonomy:#?}"
+    );
+    let drift_batch = crate::mob_machine::export_two_kernel_shadow_batch(
+        "seam.live_bridge_loss",
+        [
+            crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                post_archive_meerkat,
+                crate::mob_machine::export_mob_shadow_scenario_sample(
+                    "seam.live_bridge_loss",
+                    "post_archive",
+                    "2026-04-12T00:00:00Z",
+                    &drift_taxonomy,
+                ),
+            ),
+        ],
+    );
+
+    let run_batch = crate::mob_machine::export_two_kernel_shadow_run_batch(
+        "shadow.cutover.smoke",
+        [green_batch, drift_batch],
+    );
+
+    assert_eq!(run_batch.run_id, "shadow.cutover.smoke");
+    assert_eq!(run_batch.scenarios.len(), 2);
+
+    let green = &run_batch.scenarios[0];
+    assert_eq!(green.run_id, "mob.flow.single_step.green");
+    assert_eq!(green.samples.len(), 1);
+    assert!(
+        green.samples[0].meerkat_buckets.is_empty()
+            && green.samples[0].mob_buckets.is_empty()
+            && green.samples[0].seam_buckets.is_empty(),
+        "green scenario batch should stay empty: {:#?}",
+        green.samples[0]
+    );
+
+    let drift = &run_batch.scenarios[1];
+    assert_eq!(drift.run_id, "seam.live_bridge_loss");
+    assert_eq!(drift.samples.len(), 1);
+    assert!(
+        drift.samples[0].seam_buckets.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "drift scenario batch should retain the seam work mismatch: {:#?}",
+        drift.samples[0]
+    );
+
+    let report_session = crate::mob_machine::export_two_kernel_shadow_report_session(
+        "shadow.cutover.session",
+        [
+            run_batch.clone(),
+            crate::mob_machine::export_two_kernel_shadow_run_batch(
+                "shadow.cutover.green-only",
+                [crate::mob_machine::export_two_kernel_shadow_batch(
+                    "mob.flow.single_step.green",
+                    [green.samples[0].clone()],
+                )],
+            ),
+        ],
+    );
+
+    assert_eq!(report_session.session_id, "shadow.cutover.session");
+    assert_eq!(report_session.runs.len(), 2);
+    assert_eq!(report_session.runs[0].run_id, "shadow.cutover.smoke");
+    assert_eq!(report_session.runs[1].run_id, "shadow.cutover.green-only");
+    assert_eq!(report_session.runs[0].scenarios.len(), 2);
+    assert_eq!(report_session.runs[1].scenarios.len(), 1);
+    assert!(
+        report_session.runs[1].scenarios[0].samples[0]
+            .meerkat_buckets
+            .is_empty()
+            && report_session.runs[1].scenarios[0].samples[0]
+                .mob_buckets
+                .is_empty()
+            && report_session.runs[1].scenarios[0].samples[0]
+                .seam_buckets
+                .is_empty(),
+        "green-only run should remain empty inside the shared report session: {:#?}",
+        report_session.runs[1]
+    );
+}
+
+#[tokio::test]
+async fn test_export_two_kernel_shadow_report_session_collects_multiple_live_runs() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(60_000, 8))
+            .await;
+    let green_member_id = MeerkatId::from("shadow-session-green");
+    let drift_member_id = MeerkatId::from("shadow-session-drift");
+
+    let green_ref = handle
+        .spawn(ProfileName::from("worker"), green_member_id.clone(), None)
+        .await
+        .expect("spawn green worker");
+    let green_session_id = green_ref
+        .session_id()
+        .cloned()
+        .expect("green member should be session-backed");
+
+    let drift_ref = handle
+        .spawn(ProfileName::from("worker"), drift_member_id.clone(), None)
+        .await
+        .expect("spawn drift worker");
+    let drift_session_id = drift_ref
+        .session_id()
+        .cloned()
+        .expect("drift member should be session-backed");
+
+    service.set_flow_turn_never_terminal(true);
+
+    let green_run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"shadow_session": "green"}),
+        )
+        .await
+        .expect("run green flow");
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for shared report-session checks");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let green_worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == green_member_id)
+            .cloned();
+        let green_run_present = matches!(
+            snapshot.tracked_runs.get(&green_run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let green_work_visible = if let Some(worker) = green_worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if green_run_present && green_work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for green live work posture before report-session export"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let green_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &green_session_id,
+        "mob.flow.single_step.green",
+        "active",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+    assert!(
+        green_meerkat.is_some(),
+        "green scenario should export a Meerkat-side sample while the bridge is live"
+    );
+    let green_report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let green_taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[green_report]);
+    assert!(
+        green_taxonomy.is_empty(),
+        "healthy green run should keep mismatch taxonomy empty: {green_taxonomy:#?}"
+    );
+    let green_run_batch = crate::mob_machine::export_two_kernel_shadow_run_batch(
+        "shadow.cutover.green-run",
+        [crate::mob_machine::export_two_kernel_shadow_batch(
+            "mob.flow.single_step.green",
+            [
+                crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                    green_meerkat,
+                    crate::mob_machine::export_mob_shadow_scenario_sample(
+                        "mob.flow.single_step.green",
+                        "active",
+                        "2026-04-12T00:00:00Z",
+                        &green_taxonomy,
+                    ),
+                ),
+            ],
+        )],
+    );
+
+    service
+        .archive(&green_session_id)
+        .await
+        .expect("archive green session after capture");
+
+    let drift_run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({"shadow_session": "drift"}),
+        )
+        .await
+        .expect("run drift flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let drift_worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == drift_member_id)
+            .cloned();
+        let drift_run_present = matches!(
+            snapshot.tracked_runs.get(&drift_run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let drift_work_visible = if let Some(worker) = drift_worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if drift_run_present && drift_work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for drift live work posture before archive"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    service
+        .archive(&drift_session_id)
+        .await
+        .expect("archive drift session under active flow");
+    assert!(
+        !handle.diagnostic_has_live_session(&drift_session_id).await,
+        "archive should remove the drift bridge session before report-session export"
+    );
+
+    let drift_meerkat = export_best_effort_meerkat_shadow_sample(
+        &handle,
+        &drift_session_id,
+        "seam.live_bridge_loss",
+        "post_archive",
+        "2026-04-12T00:00:00Z",
+    )
+    .await;
+    let drift_report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    let drift_taxonomy = crate::mob_machine::summarize_mob_shadow_taxonomy_reports(&[drift_report]);
+    assert!(
+        drift_taxonomy.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "drift run should retain the seam work bucket: {drift_taxonomy:#?}"
+    );
+    let drift_run_batch = crate::mob_machine::export_two_kernel_shadow_run_batch(
+        "shadow.cutover.drift-run",
+        [crate::mob_machine::export_two_kernel_shadow_batch(
+            "seam.live_bridge_loss",
+            [
+                crate::mob_machine::merge_two_kernel_shadow_scenario_samples(
+                    drift_meerkat,
+                    crate::mob_machine::export_mob_shadow_scenario_sample(
+                        "seam.live_bridge_loss",
+                        "post_archive",
+                        "2026-04-12T00:00:00Z",
+                        &drift_taxonomy,
+                    ),
+                ),
+            ],
+        )],
+    );
+
+    let report_session = crate::mob_machine::export_two_kernel_shadow_report_session(
+        "shadow.cutover.multi-run",
+        [green_run_batch, drift_run_batch],
+    );
+    let summary = crate::mob_machine::summarize_two_kernel_shadow_report_session(&report_session);
+
+    assert_eq!(report_session.session_id, "shadow.cutover.multi-run");
+    assert_eq!(report_session.runs.len(), 2);
+    assert_eq!(report_session.runs[0].run_id, "shadow.cutover.green-run");
+    assert_eq!(report_session.runs[1].run_id, "shadow.cutover.drift-run");
+
+    let green_sample = &report_session.runs[0].scenarios[0].samples[0];
+    assert!(
+        green_sample.meerkat_buckets.is_empty()
+            && green_sample.mob_buckets.is_empty()
+            && green_sample.seam_buckets.is_empty(),
+        "green live run should remain empty inside the report session: {green_sample:#?}"
+    );
+
+    let drift_sample = &report_session.runs[1].scenarios[0].samples[0];
+    assert!(
+        drift_sample.seam_buckets.iter().any(|bucket| {
+            bucket.scope == "composition" && bucket.lane == "WorkBridge" && bucket.region == "work"
+        }),
+        "drift live run should retain the seam work mismatch inside the report session: {drift_sample:#?}"
+    );
+
+    assert_eq!(summary.session_id, "shadow.cutover.multi-run");
+    assert_eq!(summary.run_count, 2);
+    assert_eq!(summary.scenario_count, 2);
+    assert_eq!(summary.sample_count, 2);
+    assert_eq!(summary.green_sample_count, 1);
+    assert_eq!(summary.mismatch_sample_count, 1);
+    assert_eq!(summary.meerkat_bucket_count, 0);
+    assert_eq!(summary.mob_bucket_count, 0);
+    assert!(
+        summary.seam_bucket_count >= 2,
+        "drift summary should retain both seam mismatch buckets: {summary:#?}"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_stays_empty_across_respawn_supersession() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    let member_id = MeerkatId::from("respawn-shadow");
+    let original_ref = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original member");
+    let old_session_id = original_ref
+        .session_id()
+        .cloned()
+        .expect("original session id");
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pre-respawn mob should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pre-respawn mob should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    service.set_create_session_delay_ms(150);
+    let receipt = handle
+        .respawn(member_id.clone(), Some("resume shadow".into()))
+        .await
+        .expect("respawn succeeds");
+    let new_session_id = receipt
+        .new_session_id
+        .clone()
+        .expect("replacement session id");
+    assert_ne!(new_session_id, old_session_id);
+
+    assert!(
+        service.read(&old_session_id).await.is_err(),
+        "respawn should archive the retired session before returning"
+    );
+
+    let settled = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        settled.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "settled respawn should not emit aggregate Mob shadow mismatches: {:#?}",
+        settled.mob
+    );
+    assert!(
+        settled
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "settled respawn should not emit aggregate seam shadow mismatches: {:#?}",
+        settled.composition
+    );
+
+    let member = handle
+        .member_status(&member_id)
+        .await
+        .expect("replacement member status");
+    assert_eq!(
+        member.current_session_id,
+        Some(new_session_id),
+        "respawn must leave the canonical replacement bridge current"
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_stays_empty_across_destroy_inflight_flow() {
+    let run_store = Arc::new(RecordingRunStore::new());
+    let (handle, service) = create_test_mob_with_run_store(
+        sample_definition_with_single_step_flow(60_000, 8),
+        run_store.clone(),
+    )
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let initial = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        initial.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "pre-destroy mob should not emit aggregate Mob shadow mismatches: {:#?}",
+        initial.mob
+    );
+    assert!(
+        initial
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "pre-destroy mob should not emit aggregate seam shadow mismatches: {:#?}",
+        initial.composition
+    );
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for aggregate shadow checks");
+    let mut active_session_id = None;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == MeerkatId::from("w-1"))
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                active_session_id = Some(session_id.clone());
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for aggregate in-flight destroy posture to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let active = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+    assert!(
+        active.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "active in-flight destroy path should not emit aggregate Mob shadow mismatches: {:#?}",
+        active.mob
+    );
+    assert!(
+        active
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "active in-flight destroy path should not emit aggregate seam shadow mismatches: {:#?}",
+        active.composition
+    );
+
+    handle.destroy().await.expect("destroy mob");
+    assert_eq!(handle.status(), MobState::Destroyed);
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "destroy should archive active sessions before returning"
+    );
+
+    let active_session_id = active_session_id.expect("active session id before destroy");
+    assert!(
+        !handle.diagnostic_has_live_session(&active_session_id).await,
+        "destroy should remove the live member session"
+    );
+
+    let terminal = run_store
+        .get_run(&run_id)
+        .await
+        .expect("read run after destroy")
+        .expect("run should remain queryable in run store after destroy");
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
 }
 
 #[tokio::test]

@@ -44,7 +44,7 @@ pub(crate) struct MeerkatMachineSnapshot {
     pub peer: Option<PeerIngressRuntimeSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum MeerkatShadowLane {
     LifecycleControl,
     Tools,
@@ -52,7 +52,7 @@ pub(crate) enum MeerkatShadowLane {
     PeerDrain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(dead_code)]
 pub(crate) enum ShadowMismatchTriage {
     ImplementationDetail,
@@ -80,6 +80,169 @@ pub(crate) struct MeerkatShadowReport {
 pub(crate) struct MeerkatShadowSuiteReport {
     pub session_id: SessionId,
     pub reports: Vec<MeerkatShadowReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeerkatShadowTaxonomyBucket {
+    pub lane: MeerkatShadowLane,
+    pub region: &'static str,
+    pub triage: ShadowMismatchTriage,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowTaxonomySinkBucket {
+    pub scope: &'static str,
+    pub lane: String,
+    pub region: &'static str,
+    pub triage: &'static str,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwoKernelShadowScenarioSample {
+    pub scenario_id: String,
+    pub phase: String,
+    pub timestamp: String,
+    pub meerkat_buckets: Vec<ShadowTaxonomySinkBucket>,
+    pub mob_buckets: Vec<ShadowTaxonomySinkBucket>,
+    pub seam_buckets: Vec<ShadowTaxonomySinkBucket>,
+}
+
+fn shadow_mismatch_triage_label(triage: ShadowMismatchTriage) -> &'static str {
+    match triage {
+        ShadowMismatchTriage::ImplementationDetail => "implementation_detail",
+        ShadowMismatchTriage::SemanticGap => "semantic_gap",
+        ShadowMismatchTriage::DogmaViolation => "dogma_violation",
+    }
+}
+
+fn sink_bucket_from_taxonomy_bucket(
+    bucket: &MeerkatShadowTaxonomyBucket,
+) -> ShadowTaxonomySinkBucket {
+    ShadowTaxonomySinkBucket {
+        scope: "meerkat",
+        lane: format!("{:?}", bucket.lane),
+        region: bucket.region,
+        triage: shadow_mismatch_triage_label(bucket.triage),
+        count: bucket.count as u64,
+    }
+}
+
+pub(crate) fn export_meerkat_shadow_scenario_sample(
+    scenario_id: impl Into<String>,
+    phase: impl Into<String>,
+    timestamp: impl Into<String>,
+    taxonomy: &[MeerkatShadowTaxonomyBucket],
+) -> TwoKernelShadowScenarioSample {
+    TwoKernelShadowScenarioSample {
+        scenario_id: scenario_id.into(),
+        phase: phase.into(),
+        timestamp: timestamp.into(),
+        meerkat_buckets: taxonomy
+            .iter()
+            .map(sink_bucket_from_taxonomy_bucket)
+            .collect(),
+        mob_buckets: Vec::new(),
+        seam_buckets: Vec::new(),
+    }
+}
+
+pub(crate) fn summarize_meerkat_shadow_taxonomy_reports(
+    reports: &[MeerkatShadowSuiteReport],
+) -> Vec<MeerkatShadowTaxonomyBucket> {
+    let mut counts: HashMap<(MeerkatShadowLane, &'static str, ShadowMismatchTriage), usize> =
+        HashMap::new();
+
+    for report in reports {
+        for lane_report in &report.reports {
+            for mismatch in &lane_report.mismatches {
+                *counts
+                    .entry((mismatch.lane, mismatch.region, mismatch.triage))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut buckets = counts
+        .into_iter()
+        .map(
+            |((lane, region, triage), count)| MeerkatShadowTaxonomyBucket {
+                lane,
+                region,
+                triage,
+                count,
+            },
+        )
+        .collect::<Vec<_>>();
+    buckets.sort_by_key(|bucket| (bucket.lane, bucket.region, bucket.triage));
+    buckets
+}
+
+fn summarize_meerkat_shadow_taxonomy_snapshot(
+    snapshot: &MeerkatMachineSnapshot,
+) -> Vec<MeerkatShadowTaxonomyBucket> {
+    let mut counts: HashMap<(MeerkatShadowLane, &'static str, ShadowMismatchTriage), usize> =
+        HashMap::new();
+
+    for mismatch in capture_lifecycle_control_shadow_mismatches(snapshot) {
+        *counts
+            .entry((mismatch.lane, mismatch.region, mismatch.triage))
+            .or_insert(0) += 1;
+    }
+    for mismatch in capture_tools_shadow_mismatches(snapshot) {
+        *counts
+            .entry((mismatch.lane, mismatch.region, mismatch.triage))
+            .or_insert(0) += 1;
+    }
+    for mismatch in capture_turn_ops_barrier_shadow_mismatches(snapshot) {
+        *counts
+            .entry((mismatch.lane, mismatch.region, mismatch.triage))
+            .or_insert(0) += 1;
+    }
+    for mismatch in capture_peer_drain_shadow_mismatches(snapshot) {
+        *counts
+            .entry((mismatch.lane, mismatch.region, mismatch.triage))
+            .or_insert(0) += 1;
+    }
+
+    let mut buckets = counts
+        .into_iter()
+        .map(
+            |((lane, region, triage), count)| MeerkatShadowTaxonomyBucket {
+                lane,
+                region,
+                triage,
+                count,
+            },
+        )
+        .collect::<Vec<_>>();
+    buckets.sort_by_key(|bucket| (bucket.lane, bucket.region, bucket.triage));
+    buckets
+}
+
+/// Export a Meerkat shadow scenario sample from already-captured diagnostic
+/// inputs. This keeps the public seam on the snapshot side rather than
+/// exposing the live session-service trait boundary cross-crate.
+pub fn export_meerkat_shadow_scenario_sample_from_diagnostic_snapshot(
+    scenario_id: impl Into<String>,
+    phase: impl Into<String>,
+    timestamp: impl Into<String>,
+    spine: MeerkatMachineSpineSnapshot,
+    execution: Option<AgentExecutionSnapshot>,
+    tool_scope: Option<ToolScopeSnapshot>,
+    tool_surface: Option<ExternalToolSurfaceSnapshot>,
+    peer_ingress: Option<PeerIngressRuntimeSnapshot>,
+) -> TwoKernelShadowScenarioSample {
+    let snapshot = MeerkatMachineSnapshot {
+        spine,
+        turn: execution,
+        tools: tool_scope,
+        tool_surface,
+        peer: peer_ingress,
+    };
+    let taxonomy = summarize_meerkat_shadow_taxonomy_snapshot(&snapshot);
+    export_meerkat_shadow_scenario_sample(scenario_id, phase, timestamp, &taxonomy)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -335,9 +498,6 @@ pub(crate) enum MeerkatMachineInvariantViolation {
     },
     RetiredRuntimeStillHasCompletionWaiters {
         waiter_count: usize,
-    },
-    AttachedRuntimeStillHasSteerQueuedWork {
-        count: usize,
     },
     StoppedRuntimeStillHasQueuedWork {
         queue: &'static str,
@@ -624,19 +784,6 @@ fn lifecycle_control_shadow_mismatch_from_violation(
             ),
             triage: ShadowMismatchTriage::ImplementationDetail,
         }),
-        MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork { count } => {
-            Some(MeerkatShadowMismatch {
-                lane: MeerkatShadowLane::LifecycleControl,
-                region: "inputs",
-                entity_id: Some("steer_queue".into()),
-                expected_summary:
-                    "settled attached runtimes do not retain ordinary steered queued work".into(),
-                observed_summary: format!(
-                    "attached runtime still exposes {count} queued steered inputs"
-                ),
-                triage: ShadowMismatchTriage::ImplementationDetail,
-            })
-        }
         _ => None,
     }
 }
@@ -1821,13 +1968,6 @@ pub(crate) fn validate_meerkat_machine_snapshot(
             },
         );
     }
-    if control.phase == RuntimeState::Attached && !inputs.steer_queue.is_empty() {
-        violations.push(
-            MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork {
-                count: inputs.steer_queue.len(),
-            },
-        );
-    }
     if control.phase == RuntimeState::Stopped && completion_waiters.waiter_count > 0 {
         violations.push(
             MeerkatMachineInvariantViolation::StoppedRuntimeStillHasCompletionWaiters {
@@ -2652,21 +2792,31 @@ mod tests {
     use crate::service_factory::FactoryAgentBuilder;
     use crate::{AgentFactory, Config, Session, SessionService};
     use async_trait::async_trait;
+    use chrono::Utc;
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
     #[cfg(feature = "comms")]
     use meerkat_comms::Keypair;
     use meerkat_core::DeferredPromptPolicy;
+    use meerkat_core::OpsLifecycleRegistry;
     #[cfg(feature = "comms")]
     use meerkat_core::PlainEventSource;
+    #[cfg(feature = "mcp")]
+    use meerkat_core::agent::AgentToolDispatcher;
     use meerkat_core::agent::CommsRuntime;
     use meerkat_core::comms::TrustedPeerSpec;
     use meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
     use meerkat_core::lifecycle::{InputId, RunId, WaitRequestId};
+    use meerkat_core::lifecycle::{
+        RunApplyBoundary, RunBoundaryReceipt, RunControlCommand, RunPrimitive,
+    };
     use meerkat_core::ops::{OperationId, OperationResult};
     use meerkat_core::ops_lifecycle::{
-        OperationKind, OperationLifecycleSnapshot, OperationPeerHandle, OperationStatus,
-        OperationTerminalOutcome,
+        OperationKind, OperationLifecycleSnapshot, OperationPeerHandle, OperationSpec,
+        OperationStatus, OperationTerminalOutcome,
     };
     use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
     #[cfg(feature = "comms")]
@@ -2675,15 +2825,18 @@ mod tests {
     use meerkat_core::{
         ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation,
         ExternalToolSurfaceDeltaPhase, ExternalToolSurfaceGlobalPhase,
-        ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp, McpServerConfig,
+        ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp, McpServerConfig, ToolDef,
+        ToolError,
     };
     use meerkat_runtime::runtime_state::RuntimeState;
     use meerkat_runtime::{
-        Input, InputLifecycleState, InputTerminalOutcome, MeerkatAdmittedInputSnapshot,
-        MeerkatCompletionWaiterSnapshot, PromptInput,
+        CompletionOutcome, Input, InputLifecycleState, InputTerminalOutcome,
+        MeerkatAdmittedInputSnapshot, MeerkatCompletionWaiterSnapshot, PromptInput,
     };
+    use meerkat_runtime::{RuntimeControlPlane, SessionServiceRuntimeExt};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::Notify;
 
@@ -2706,6 +2859,31 @@ mod tests {
             last_delta_operation: meerkat_core::ExternalToolSurfaceDeltaOperation::None,
             last_delta_phase: meerkat_core::ExternalToolSurfaceDeltaPhase::None,
         }
+    }
+
+    fn make_shadow_progress_input(label: &str) -> Input {
+        Input::Peer(meerkat_runtime::PeerInput {
+            header: meerkat_runtime::InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: meerkat_runtime::InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: meerkat_runtime::InputDurability::Ephemeral,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(meerkat_runtime::PeerConvention::ResponseProgress {
+                request_id: format!("req-{label}"),
+                phase: meerkat_runtime::ResponseProgressPhase::InProgress,
+            }),
+            body: format!("progress-{label}"),
+            blocks: None,
+            handling_mode: None,
+        })
     }
 
     fn invalid_input_snapshot(
@@ -2796,6 +2974,57 @@ mod tests {
         builder.default_llm_client = Some(std::sync::Arc::new(MockLlmClient));
         builder.default_tool_dispatcher = Some(dispatcher);
         EphemeralSessionService::new(builder, 4)
+    }
+
+    #[cfg(feature = "mcp")]
+    struct ToolPlusMcpDispatcher {
+        local_tool: Arc<ToolDef>,
+        inner: Arc<meerkat_mcp::McpRouterAdapter>,
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[cfg(feature = "mcp")]
+    impl ToolPlusMcpDispatcher {
+        fn new(local_tool: Arc<ToolDef>, inner: Arc<meerkat_mcp::McpRouterAdapter>) -> Self {
+            let mut tools = vec![Arc::clone(&local_tool)];
+            tools.extend(inner.tools().iter().cloned());
+            Self {
+                local_tool,
+                inner,
+                tools: tools.into(),
+            }
+        }
+    }
+
+    #[cfg(feature = "mcp")]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentToolDispatcher for ToolPlusMcpDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+            if call.name == self.local_tool.name {
+                return Err(ToolError::NotFound {
+                    name: call.name.to_string(),
+                });
+            }
+            self.inner.dispatch(call).await
+        }
+
+        async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+            self.inner.poll_external_updates().await
+        }
+
+        fn external_tool_surface_snapshot(
+            &self,
+        ) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+            self.inner.external_tool_surface_snapshot()
+        }
     }
 
     fn runtime_backed_request(
@@ -3472,6 +3701,250 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn summarize_meerkat_shadow_taxonomy_reports_collapses_seeded_lifecycle_control_drift()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        queued_input.last_run_id = Some(run_id.clone());
+
+        snapshot.spine.control.phase = RuntimeState::Retired;
+        snapshot.spine.control.current_run_id = Some(run_id.clone());
+        snapshot.spine.inputs.current_run_id = Some(run_id);
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.completion_waiters.input_count = 1;
+        snapshot.spine.completion_waiters.waiter_count = 1;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
+            input_id: InputId::new(),
+            waiter_count: 1,
+        }];
+
+        let taxonomy = summarize_meerkat_shadow_taxonomy_reports(&[MeerkatShadowSuiteReport {
+            session_id,
+            reports: vec![MeerkatShadowReport {
+                lane: MeerkatShadowLane::LifecycleControl,
+                mismatches: capture_lifecycle_control_shadow_mismatches(&snapshot),
+            }],
+        }]);
+
+        assert_eq!(taxonomy.len(), 3);
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.lane == MeerkatShadowLane::LifecycleControl
+                && bucket.region == "control"
+                && bucket.triage == ShadowMismatchTriage::ImplementationDetail
+                && bucket.count == 1
+        }));
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.lane == MeerkatShadowLane::LifecycleControl
+                && bucket.region == "inputs"
+                && bucket.triage == ShadowMismatchTriage::DogmaViolation
+                && bucket.count == 1
+        }));
+        assert!(taxonomy.iter().any(|bucket| {
+            bucket.lane == MeerkatShadowLane::LifecycleControl
+                && bucket.region == "completion_waiters"
+                && bucket.triage == ShadowMismatchTriage::ImplementationDetail
+                && bucket.count == 1
+        }));
+
+        let exported = export_meerkat_shadow_scenario_sample(
+            "meerkat.seeded.lifecycle_control",
+            "seeded",
+            "2026-04-12T00:00:00Z",
+            &taxonomy,
+        );
+        assert_eq!(exported.scenario_id, "meerkat.seeded.lifecycle_control");
+        assert_eq!(exported.phase, "seeded");
+        assert_eq!(exported.timestamp, "2026-04-12T00:00:00Z");
+        assert!(
+            exported.mob_buckets.is_empty() && exported.seam_buckets.is_empty(),
+            "Meerkat-side exporter should not synthesize Mob/seam buckets: {exported:#?}"
+        );
+        assert_eq!(exported.meerkat_buckets.len(), 3);
+        assert!(exported.meerkat_buckets.iter().any(|bucket| {
+            bucket.scope == "meerkat"
+                && bucket.lane == "LifecycleControl"
+                && bucket.region == "control"
+                && bucket.triage == "implementation_detail"
+                && bucket.count == 1
+        }));
+        assert!(exported.meerkat_buckets.iter().any(|bucket| {
+            bucket.scope == "meerkat"
+                && bucket.lane == "LifecycleControl"
+                && bucket.region == "inputs"
+                && bucket.triage == "dogma_violation"
+                && bucket.count == 1
+        }));
+        assert!(exported.meerkat_buckets.iter().any(|bucket| {
+            bucket.scope == "meerkat"
+                && bucket.lane == "LifecycleControl"
+                && bucket.region == "completion_waiters"
+                && bucket.triage == "implementation_detail"
+                && bucket.count == 1
+        }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_stay_empty_across_plain_reset_with_pending_ops()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let input = Input::Prompt(PromptInput::new("shadow reset pending ops", None));
+        let (_outcome, completion_handle) = runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| err.to_string())?;
+        let completion_handle =
+            completion_handle.expect("queued prompt should register a completion waiter");
+
+        let registry = runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .expect("ops registry should exist for registered session");
+
+        let operation_id = OperationId::new();
+        registry
+            .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: session_id.clone(),
+                display_name: "shadow-reset-wait-target".into(),
+                source_label: "meerkat_machine_test".into(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .expect("operation should register");
+        registry
+            .provisioning_succeeded(&operation_id)
+            .expect("operation should enter running");
+
+        let wait_future = registry.wait_all(&RunId::new(), std::slice::from_ref(&operation_id));
+
+        let before_reset =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("healthy live session should produce aggregate shadow report before reset");
+        assert!(
+            before_reset
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "plain reset scenario should start mismatch-free before reset: {before_reset:#?}"
+        );
+
+        let report = SessionServiceRuntimeExt::reset_runtime(&runtime_adapter, &session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(report.inputs_abandoned, 1);
+
+        match completion_handle.wait().await {
+            CompletionOutcome::RuntimeTerminated(reason) => {
+                assert_eq!(reason, "runtime reset");
+            }
+            other => {
+                return Err(format!(
+                    "expected runtime reset completion termination, got {other:?}"
+                ));
+            }
+        }
+
+        let after_reset =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("healthy live session should produce aggregate shadow report after reset");
+        assert!(
+            after_reset
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "plain reset scenario should remain mismatch-free after reset while wait_all is live: {after_reset:#?}"
+        );
+
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("operation should complete after reset");
+
+        let wait_result = wait_future.await.expect("wait_all should still resolve");
+        assert_eq!(
+            wait_result.satisfied.operation_ids,
+            vec![operation_id.clone()]
+        );
+
+        let settled = capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .expect("healthy live session should produce aggregate shadow report after settle");
+        assert!(
+            settled
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "plain reset scenario should remain mismatch-free after wait_all settles: {settled:#?}"
+        );
+
+        Ok(())
+    }
+
     struct FakeDrainRuntime {
         notify: Arc<Notify>,
         dismiss: AtomicBool,
@@ -3657,6 +4130,985 @@ mod tests {
         assert_eq!(tools.known_base_names, tools.visible_names);
         assert!(snapshot.tool_surface.is_none());
         assert!(snapshot.peer.is_none());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_stay_empty_across_tool_visibility_mutation_and_mcp_apply()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let router_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
+            meerkat_mcp::McpRouter::new(),
+        ));
+        router_adapter
+            .stage_add(McpServerConfig::stdio(
+                "planner",
+                "/bin/echo",
+                Vec::<String>::new(),
+                std::collections::HashMap::new(),
+            ))
+            .await
+            .map_err(|err| format!("stage initial planner add: {err}"))?;
+        router_adapter
+            .apply_staged()
+            .await
+            .map_err(|err| format!("apply initial planner add: {err}"))?;
+        let _ = router_adapter
+            .wait_until_ready(std::time::Duration::from_secs(1))
+            .await;
+
+        let local_tool = Arc::new(ToolDef::new(
+            "visible_local",
+            "Stable filterable session-plane tool for Meerkat shadow testing",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ));
+        let dispatcher = Arc::new(ToolPlusMcpDispatcher::new(
+            Arc::clone(&local_tool),
+            Arc::clone(&router_adapter),
+        )) as Arc<dyn meerkat_core::AgentToolDispatcher>;
+        let service = build_runtime_backed_ephemeral_service_with_dispatcher(&temp, dispatcher);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let before_mutation =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live session should produce joined shadow report before tool mutation");
+        assert!(
+            before_mutation
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "healthy live session should emit no aggregate Meerkat mismatches before tool mutation: {before_mutation:#?}"
+        );
+
+        SessionService::set_session_tool_filter(
+            &service,
+            &session_id,
+            meerkat_core::ToolFilter::Deny([local_tool.name.clone()].into_iter().collect()),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let staged_snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "runtime-backed session should produce a Meerkat snapshot after tool mutation"
+                        .to_string()
+                })?;
+        let staged_tools = staged_snapshot.tools.ok_or_else(|| {
+            "runtime-backed session should expose tool-scope snapshot after tool mutation"
+                .to_string()
+        })?;
+        assert_eq!(
+            staged_tools.active_external_filter,
+            meerkat_core::ToolFilter::All
+        );
+        assert_eq!(
+            staged_tools.staged_external_filter,
+            meerkat_core::ToolFilter::Deny([local_tool.name.clone()].into_iter().collect())
+        );
+        assert!(
+            staged_tools.staged_revision.0 > staged_tools.active_revision.0,
+            "staged tool visibility mutation should advance the staged revision"
+        );
+
+        let after_mutation =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live session should produce joined shadow report after tool mutation");
+        assert!(
+            after_mutation
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "staged tool visibility mutation should keep the aggregate Meerkat shadow suite clean: {after_mutation:#?}"
+        );
+
+        router_adapter
+            .stage_reload("planner")
+            .await
+            .map_err(|err| format!("stage planner reload: {err}"))?;
+        router_adapter
+            .apply_staged()
+            .await
+            .map_err(|err| format!("apply planner reload: {err}"))?;
+
+        let after_apply =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live session should produce joined shadow report after MCP apply");
+        assert!(
+            after_apply
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "tool visibility mutation + MCP apply should keep the aggregate Meerkat shadow suite clean: {after_apply:#?}"
+        );
+
+        let _ = router_adapter
+            .wait_until_ready(std::time::Duration::from_secs(1))
+            .await;
+
+        let after_settle =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live session should produce joined shadow report after MCP settle");
+        assert!(
+            after_settle
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "tool visibility mutation + settled MCP reload should keep the aggregate Meerkat shadow suite clean: {after_settle:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_stay_empty_across_peer_ingress_trust_and_drain()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request_with_comms(
+                session,
+                bindings,
+                Some("peer-shadow-session".to_string()),
+            ))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let before_ingress =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live comms session should produce joined shadow report before ingress");
+        assert!(
+            before_ingress
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "healthy live comms session should emit no aggregate Meerkat mismatches before peer ingress: {before_ingress:#?}"
+        );
+
+        let runtime = service
+            .comms_runtime(&session_id)
+            .await
+            .ok_or_else(|| "runtime-backed session should expose comms runtime".to_string())?;
+
+        let trusted_peer_key = Keypair::generate();
+        let trusted_peer = TrustedPeerSpec::new(
+            "ally",
+            trusted_peer_key.public_key().to_peer_id(),
+            "inproc://ally",
+        )
+        .map_err(|err| format!("trusted peer spec: {err}"))?;
+
+        runtime
+            .add_trusted_peer(trusted_peer)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let spawned = runtime_adapter
+            .update_peer_ingress_context(
+                &session_id,
+                true,
+                Some(Arc::clone(&runtime) as Arc<dyn CommsRuntime>),
+            )
+            .await;
+        assert!(spawned, "keep_alive=true should spawn a live comms drain");
+
+        runtime
+            .event_injector()
+            .ok_or_else(|| "comms runtime should expose event injector".to_string())?
+            .inject(
+                "peer shadow wake".to_string().into(),
+                PlainEventSource::Tcp,
+                HandlingMode::Queue,
+                None,
+            )
+            .map_err(|err| err.to_string())?;
+
+        let after_ingress =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live comms session should produce joined shadow report after ingress");
+        assert!(
+            after_ingress
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "peer ingress + trust mutation + live drain should keep aggregate Meerkat shadow suite clean: {after_ingress:#?}"
+        );
+
+        runtime_adapter
+            .update_peer_ingress_context(&session_id, false, Some(runtime))
+            .await;
+
+        let after_stop =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("live comms session should produce joined shadow report after drain stop");
+        assert!(
+            after_stop
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "stopped drain state should keep aggregate Meerkat shadow suite clean: {after_stop:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_stay_empty_across_attached_recover_replay()
+    -> Result<(), String> {
+        struct BlockingExecutor {
+            apply_started: Arc<Notify>,
+            apply_finished: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                self.apply_finished.notify_waiters();
+
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                    run_result: None,
+                })
+            }
+
+            async fn control(
+                &mut self,
+                _command: RunControlCommand,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let apply_started = Arc::new(Notify::new());
+        let apply_finished = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+
+        runtime_adapter
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(BlockingExecutor {
+                    apply_started: Arc::clone(&apply_started),
+                    apply_finished: Arc::clone(&apply_finished),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await;
+
+        let input = make_shadow_progress_input("shadow-attached-recover-replay");
+        let (_outcome, completion_handle) = runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| err.to_string())?;
+        let completion_handle = completion_handle
+            .expect("queued attached replay input should register a completion waiter");
+
+        let registry = runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .expect("ops registry should exist for attached session");
+
+        let operation_id = OperationId::new();
+        registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: session_id.clone(),
+                display_name: "shadow attached recover replay wait target".into(),
+                source_label: "meerkat_machine_test".into(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .expect("operation should register");
+        registry
+            .provisioning_succeeded(&operation_id)
+            .expect("operation should enter running");
+
+        let wait_future = registry.wait_all(&RunId::new(), std::slice::from_ref(&operation_id));
+
+        let before_recover =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached runtime should produce aggregate shadow report before recover");
+        assert!(
+            before_recover
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recover replay scenario should start mismatch-free before recover: {before_recover:#?}"
+        );
+
+        let runtime_id =
+            meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+        let report = RuntimeControlPlane::recover(&runtime_adapter, &runtime_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(report.inputs_recovered, 1);
+
+        tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+            .await
+            .map_err(|_| {
+                "recover should wake the attached runtime loop to replay preserved queued work"
+                    .to_string()
+            })?;
+
+        let during_recover =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect(
+                    "attached runtime should produce aggregate shadow report during recover replay",
+                );
+        assert!(
+            during_recover
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recover replay should remain mismatch-free while replay is in flight: {during_recover:#?}"
+        );
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .map_err(|_| "attached replay should finish recovered work".to_string())?;
+
+        match completion_handle.wait().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => {
+                return Err(format!(
+                    "expected recover+replay to complete queued work, got {other:?}"
+                ));
+            }
+        }
+
+        let after_replay =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached runtime should produce aggregate shadow report after replay");
+        assert!(
+            after_replay
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recover replay should remain mismatch-free after replay while wait_all is still live: {after_replay:#?}"
+        );
+
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("operation should complete after attached recover replay");
+
+        let wait_result = wait_future.await.expect("wait_all should still resolve");
+        assert_eq!(
+            wait_result.satisfied.operation_ids,
+            vec![operation_id.clone()]
+        );
+
+        let settled = capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .expect("attached runtime should produce aggregate shadow report after settle");
+        assert!(
+            settled
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recover replay should remain mismatch-free after wait_all settles: {settled:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_stay_empty_across_attached_recycle_replay()
+    -> Result<(), String> {
+        struct BlockingExecutor {
+            apply_started: Arc<Notify>,
+            apply_finished: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                self.apply_finished.notify_waiters();
+
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                    run_result: None,
+                })
+            }
+
+            async fn control(
+                &mut self,
+                _command: RunControlCommand,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let apply_started = Arc::new(Notify::new());
+        let apply_finished = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+
+        runtime_adapter
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(BlockingExecutor {
+                    apply_started: Arc::clone(&apply_started),
+                    apply_finished: Arc::clone(&apply_finished),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await;
+
+        let input = make_shadow_progress_input("shadow-attached-recycle-replay");
+        let (_outcome, completion_handle) = runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| err.to_string())?;
+        let completion_handle = completion_handle
+            .expect("queued attached replay input should register a completion waiter");
+
+        let registry = runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .expect("ops registry should exist for attached session");
+
+        let operation_id = OperationId::new();
+        registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: session_id.clone(),
+                display_name: "shadow attached recycle replay wait target".into(),
+                source_label: "meerkat_machine_test".into(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .expect("operation should register");
+        registry
+            .provisioning_succeeded(&operation_id)
+            .expect("operation should enter running");
+
+        let wait_future = registry.wait_all(&RunId::new(), std::slice::from_ref(&operation_id));
+
+        let before_recycle =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached runtime should produce aggregate shadow report before recycle");
+        assert!(
+            before_recycle
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recycle replay scenario should start mismatch-free before recycle: {before_recycle:#?}"
+        );
+
+        let runtime_id =
+            meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+        let report = RuntimeControlPlane::recycle(&runtime_adapter, &runtime_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(report.inputs_transferred, 1);
+
+        tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+            .await
+            .expect("recycle should wake the attached runtime loop to replay preserved work");
+
+        let during_recycle =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect(
+                    "attached runtime should produce aggregate shadow report during recycle replay",
+                );
+        assert!(
+            during_recycle
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recycle replay scenario should stay mismatch-free during replay: {during_recycle:#?}"
+        );
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .expect("attached loop should finish replaying preserved work after recycle");
+
+        let after_replay =
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect(
+                    "attached runtime should produce aggregate shadow report after recycle replay",
+                );
+        assert!(
+            after_replay
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recycle replay scenario should stay mismatch-free after replay while wait_all remains live: {after_replay:#?}"
+        );
+
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("operation should complete after recycle replay");
+
+        match completion_handle.wait().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => {
+                return Err(format!(
+                    "expected recycle+replay to complete queued work, got {other:?}"
+                ));
+            }
+        }
+        let wait_result = wait_future.await.map_err(|err| err.to_string())?;
+        assert_eq!(
+            wait_result.satisfied.operation_ids,
+            vec![operation_id.clone()]
+        );
+
+        let settled = capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .expect(
+                "attached runtime should produce aggregate shadow report after recycle settles",
+            );
+        assert!(
+            settled
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "attached recycle replay scenario should settle mismatch-free: {settled:#?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_taxonomy_stays_empty_across_broader_smoke_run()
+    -> Result<(), String> {
+        struct BlockingExecutor {
+            apply_started: Arc<Notify>,
+            apply_finished: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                self.apply_finished.notify_waiters();
+
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                    run_result: None,
+                })
+            }
+
+            async fn control(
+                &mut self,
+                _command: RunControlCommand,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let mut reports = Vec::new();
+
+        let plain_session = Session::new();
+        let plain_session_id = plain_session.id().clone();
+        let plain_bindings = runtime_adapter
+            .prepare_bindings(plain_session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+        service
+            .create_session(runtime_backed_request(plain_session, plain_bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &plain_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("healthy plain session should produce aggregate shadow report"),
+        );
+
+        let input = Input::Prompt(PromptInput::new("shadow broader smoke reset", None));
+        let (_outcome, completion_handle) = runtime_adapter
+            .accept_input_with_completion(&plain_session_id, input)
+            .await
+            .map_err(|err| err.to_string())?;
+        let completion_handle =
+            completion_handle.expect("queued prompt should register a completion waiter");
+
+        let registry = runtime_adapter
+            .ops_lifecycle_registry(&plain_session_id)
+            .await
+            .expect("ops registry should exist for registered session");
+
+        let operation_id = OperationId::new();
+        registry
+            .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: plain_session_id.clone(),
+                display_name: "shadow-broader-smoke-reset-target".into(),
+                source_label: "meerkat_machine_test".into(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .expect("operation should register");
+        registry
+            .provisioning_succeeded(&operation_id)
+            .expect("operation should enter running");
+        let wait_future = registry.wait_all(&RunId::new(), std::slice::from_ref(&operation_id));
+
+        let report = SessionServiceRuntimeExt::reset_runtime(&runtime_adapter, &plain_session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(report.inputs_abandoned, 1);
+
+        match completion_handle.wait().await {
+            CompletionOutcome::RuntimeTerminated(reason) => {
+                assert_eq!(reason, "runtime reset");
+            }
+            other => {
+                return Err(format!(
+                    "expected runtime reset completion termination in broader smoke run, got {other:?}"
+                ));
+            }
+        }
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &plain_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("plain session should produce aggregate shadow report after reset"),
+        );
+
+        registry
+            .complete_operation(
+                &operation_id,
+                OperationResult {
+                    id: operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("operation should complete after reset in broader smoke run");
+        let wait_result = wait_future.await.expect("wait_all should still resolve");
+        assert_eq!(
+            wait_result.satisfied.operation_ids,
+            vec![operation_id.clone()]
+        );
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &plain_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("plain session should produce aggregate shadow report after reset settle"),
+        );
+
+        let attached_session = Session::new();
+        let attached_session_id = attached_session.id().clone();
+        let attached_bindings = runtime_adapter
+            .prepare_bindings(attached_session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+        service
+            .create_session(runtime_backed_request(attached_session, attached_bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let apply_started = Arc::new(Notify::new());
+        let apply_finished = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+        runtime_adapter
+            .register_session_with_executor(
+                attached_session_id.clone(),
+                Box::new(BlockingExecutor {
+                    apply_started: Arc::clone(&apply_started),
+                    apply_finished: Arc::clone(&apply_finished),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await;
+
+        let attached_input = make_shadow_progress_input("shadow-broader-smoke-attached-recover");
+        let (_outcome, completion_handle) = runtime_adapter
+            .accept_input_with_completion(&attached_session_id, attached_input)
+            .await
+            .map_err(|err| err.to_string())?;
+        let completion_handle = completion_handle
+            .expect("queued attached replay input should register a completion waiter");
+
+        let attached_registry = runtime_adapter
+            .ops_lifecycle_registry(&attached_session_id)
+            .await
+            .expect("ops registry should exist for attached session");
+        let attached_operation_id = OperationId::new();
+        attached_registry
+            .register_operation(OperationSpec {
+                id: attached_operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: attached_session_id.clone(),
+                display_name: "shadow broader smoke attached recover target".into(),
+                source_label: "meerkat_machine_test".into(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .expect("operation should register");
+        attached_registry
+            .provisioning_succeeded(&attached_operation_id)
+            .expect("operation should enter running");
+        let attached_wait_future =
+            attached_registry.wait_all(&RunId::new(), std::slice::from_ref(&attached_operation_id));
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &attached_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached session should produce aggregate shadow report before recover"),
+        );
+
+        let runtime_id =
+            meerkat_runtime::identifiers::LogicalRuntimeId::new(attached_session_id.to_string());
+        let report = RuntimeControlPlane::recover(&runtime_adapter, &runtime_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(report.inputs_recovered, 1);
+
+        tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+            .await
+            .map_err(|_| {
+                "recover should wake the attached runtime loop in broader smoke run".to_string()
+            })?;
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &attached_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached session should produce aggregate shadow report during recover"),
+        );
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .map_err(|_| "attached replay should finish in broader smoke run".to_string())?;
+
+        match completion_handle.wait().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => {
+                return Err(format!(
+                    "expected recover+replay to complete queued work in broader smoke run, got {other:?}"
+                ));
+            }
+        }
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &attached_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect(
+                    "attached session should produce aggregate shadow report after recover replay",
+                ),
+        );
+
+        attached_registry
+            .complete_operation(
+                &attached_operation_id,
+                OperationResult {
+                    id: attached_operation_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .expect("operation should complete after attached recover replay");
+        let attached_wait_result = attached_wait_future
+            .await
+            .expect("wait_all should still resolve after attached recover replay");
+        assert_eq!(
+            attached_wait_result.satisfied.operation_ids,
+            vec![attached_operation_id.clone()]
+        );
+
+        reports.push(
+            capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &attached_session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .expect("attached session should produce aggregate shadow report after settle"),
+        );
+
+        let taxonomy = summarize_meerkat_shadow_taxonomy_reports(&reports);
+        assert!(
+            taxonomy.is_empty(),
+            "broader Meerkat shadow smoke run should keep mismatch taxonomy empty: {taxonomy:#?}"
+        );
+
+        let exported = export_meerkat_shadow_scenario_sample(
+            "meerkat.broader_smoke",
+            "settled",
+            "2026-04-12T00:00:00Z",
+            &taxonomy,
+        );
+        assert_eq!(exported.scenario_id, "meerkat.broader_smoke");
+        assert_eq!(exported.phase, "settled");
+        assert_eq!(exported.timestamp, "2026-04-12T00:00:00Z");
+        assert!(
+            exported.meerkat_buckets.is_empty()
+                && exported.mob_buckets.is_empty()
+                && exported.seam_buckets.is_empty(),
+            "empty Meerkat taxonomy should export as an empty sample: {exported:#?}"
+        );
 
         Ok(())
     }
@@ -5687,10 +7139,7 @@ mod tests {
 
         let violations = validate_meerkat_machine_snapshot(&snapshot);
 
-        assert!(violations.iter().any(|violation| matches!(
-            violation,
-            MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork { count: 1 }
-        )));
+        assert!(violations.is_empty());
 
         Ok(())
     }

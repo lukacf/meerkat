@@ -188,6 +188,10 @@ pub use persistence::PersistenceError;
 pub use persistence::open_realm_persistence_in;
 
 mod meerkat_machine;
+pub use meerkat_machine::{
+    TwoKernelShadowScenarioSample as MeerkatShadowScenarioSample,
+    export_meerkat_shadow_scenario_sample_from_diagnostic_snapshot,
+};
 
 // Factory-backed SessionService wiring (substrate — testing/embedded use).
 // Production surfaces use runtime-backed paths (see meerkat-rpc, meerkat-rest).

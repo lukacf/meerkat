@@ -40,6 +40,13 @@ matches=$(cd "$ROOT_DIR" && rg -n -H -e "$PATTERN" \
   --glob '!artifacts/**' \
   --glob '!dist/**' \
   --glob '!.rct/**' \
+  --glob '!.claude/worktrees/**' \
+  --glob '!.claude/skills/**' \
+  --glob '!examples/*/target/**' \
+  --glob '!target_*/**' \
+  --glob '!target-*/**' \
+  --glob '!**/node_modules/**' \
+  --glob '!scripts/deprecated_backend_scan.sh' \
   --glob '!nohup.out' \
   . || true)
 
@@ -56,11 +63,23 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
   fi
 } >"$OUTPUT_FILE"
 
+# Filter allowlisted patterns: rejection tests and historical comments
+# that reference the deprecated backend name in a safe context.
 if [[ -n "$matches" ]]; then
-  echo "Deprecated-backend gate failed: found forbidden backend references outside CHANGELOG.md." >&2
-  echo "See $OUTPUT_FILE for full report." >&2
-  if [[ "$FAIL_ON_MATCHES" == true ]]; then
-    exit 1
+  filtered=$(printf "%s\n" "$matches" | grep -v \
+    -e 'rejects_unsupported_redb_backend' \
+    -e '"backend": "redb"' \
+    -e 'redb backend must be rejected' \
+    -e 'error.contains.*unsupported.*redb' \
+    -e 'avoids opening redb at' \
+    -e 'only checks the redb store' \
+    || true)
+  if [[ -n "$filtered" ]]; then
+    echo "Deprecated-backend gate failed: found forbidden backend references outside CHANGELOG.md." >&2
+    echo "See $OUTPUT_FILE for full report." >&2
+    if [[ "$FAIL_ON_MATCHES" == true ]]; then
+      exit 1
+    fi
   fi
 fi
 

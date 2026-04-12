@@ -1890,7 +1890,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
-            "RuntimeSessionEntry.attachment",
+            "RuntimeSessionEntry.phase",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
             "RuntimeSessionAdapter attachment publication contract",
@@ -3320,10 +3320,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
         invariant(
             "runtime_attachment_alignment",
             Subsystem::Runtime,
-            &[
-                "RuntimeSessionEntry.attachment",
-                "RuntimeSessionEntry.driver",
-            ],
+            &["RuntimeSessionEntry.phase", "RuntimeSessionEntry.driver"],
             "live attachment publication is aligned with driver attachment/control transitions on stop/ensure paths",
             "RuntimeSessionAdapter attachment publication contract + RuntimeControl transitions",
             "driver attachment semantics + ownership-ledger",

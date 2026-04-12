@@ -9,9 +9,10 @@ use meerkat_core::{
     ToolScope, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
+
+use crate::schema::schema_for;
 
 const SEARCH_TOOL_NAME: &str = "tool_catalog_search";
 const LOAD_TOOL_NAME: &str = "tool_catalog_load";
@@ -375,16 +376,18 @@ impl AgentToolDispatcher for CatalogControlDispatcher {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
     #[serde(default)]
     query: Option<String>,
     #[serde(default)]
+    #[schemars(range(min = 1, max = 50))]
     limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct LoadArgs {
+    #[schemars(length(min = 1))]
     names: Vec<String>,
 }
 
@@ -451,14 +454,7 @@ fn search_tool_def() -> ToolDef {
         description:
             "Search the deferred session tool catalog by name or description. Returns deferred-eligible session tools without loading them."
                 .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
-            },
-            "additionalProperties": false
-        }),
+        input_schema: schema_for::<SearchArgs>(),
         provenance: control_provenance(),
     }
 }
@@ -469,18 +465,7 @@ fn load_tool_def() -> ToolDef {
         description:
             "Load one or more deferred session tools by canonical tool name so they become part of the staged session tool surface on the next boundary."
                 .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "names": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "minItems": 1
-                }
-            },
-            "required": ["names"],
-            "additionalProperties": false
-        }),
+        input_schema: schema_for::<LoadArgs>(),
         provenance: control_provenance(),
     }
 }
@@ -491,6 +476,7 @@ mod tests {
     use super::*;
     use meerkat_core::ToolFilter;
     use meerkat_core::types::ToolProvenance;
+    use serde_json::json;
     use serde_json::value::RawValue;
     use std::collections::BTreeMap;
 

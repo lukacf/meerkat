@@ -18,6 +18,7 @@ pub mod peer_directory_reachability;
 pub mod runtime_control;
 pub mod runtime_ingress;
 pub mod schedule_lifecycle;
+pub mod session_tool_visibility;
 pub mod session_turn_admission;
 pub mod turn_execution;
 
@@ -30,11 +31,12 @@ pub fn all_kernels() -> Vec<GeneratedMachineKernel> {
         runtime_ingress::kernel(),
         ops_lifecycle::kernel(),
         schedule_lifecycle::kernel(),
+        session_tool_visibility::kernel(),
         occurrence_lifecycle::kernel(),
         peer_comms::kernel(),
         peer_directory_reachability::kernel(),
-        session_turn_admission::kernel(),
         external_tool_surface::kernel(),
+        session_turn_admission::kernel(),
         turn_execution::kernel(),
         mob_lifecycle::kernel(),
         mob_member_lifecycle::kernel(),

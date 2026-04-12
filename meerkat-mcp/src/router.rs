@@ -19,12 +19,15 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
+use meerkat_core::ToolCatalogCapabilities;
+use meerkat_core::ToolCatalogEntry;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
+use meerkat_core::tool_catalog::stable_owner_key_for_tool;
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -127,6 +130,7 @@ struct RouterProjectionSnapshot {
     #[allow(dead_code)]
     epoch: u64,
     tool_to_server: HashMap<String, String>,
+    catalog_entries: Arc<[ToolCatalogEntry]>,
     visible_tools: Arc<[Arc<ToolDef>]>,
 }
 
@@ -135,6 +139,7 @@ impl Default for RouterProjectionSnapshot {
         Self {
             epoch: 0,
             tool_to_server: HashMap::new(),
+            catalog_entries: Arc::from([]),
             visible_tools: Arc::from([]),
         }
     }
@@ -775,11 +780,7 @@ impl McpRouter {
     /// Drain pending results and return queued external update notices.
     pub fn take_external_updates(&mut self) -> ExternalToolUpdate {
         self.drain_pending();
-        let pending = self
-            .auth()
-            .pending_surfaces()
-            .map(|surface_id| surface_id.0.clone())
-            .collect();
+        let pending = self.pending_sources_snapshot();
 
         ExternalToolUpdate {
             notices: self
@@ -795,6 +796,14 @@ impl McpRouter {
     /// Returns true if there are pending background operations or undelivered notices.
     pub fn has_pending_or_notices(&self) -> bool {
         self.auth().pending_count() > 0 || !self.completed_updates.is_empty()
+    }
+
+    /// Snapshot the names of tool sources still connecting/loading.
+    pub fn pending_sources_snapshot(&self) -> Vec<String> {
+        self.auth()
+            .pending_surfaces()
+            .map(|surface_id| surface_id.0.clone())
+            .collect()
     }
 
     /// Backward-compatible immediate install path. Bypasses staged/boundary
@@ -991,7 +1000,7 @@ impl McpRouter {
         drop(auth);
 
         let mut tool_to_server = HashMap::new();
-        let mut visible_tools: Vec<Arc<ToolDef>> = Vec::new();
+        let mut canonical_tools: BTreeMap<String, Arc<ToolDef>> = BTreeMap::new();
         let mut complete = true;
 
         for server_name in server_names {
@@ -1015,21 +1024,42 @@ impl McpRouter {
                         "MCP projection remapped duplicate tool name to newer owner"
                     );
                 }
-                visible_tools.push(Arc::clone(tool));
+                canonical_tools.insert(tool.name.clone(), Arc::clone(tool));
             }
         }
-        visible_tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let catalog_entries: Arc<[ToolCatalogEntry]> = canonical_tools
+            .values()
+            .map(|tool| {
+                if let Some(stable_owner_key) = stable_owner_key_for_tool(tool) {
+                    ToolCatalogEntry::session_deferred(Arc::clone(tool), true, stable_owner_key)
+                } else {
+                    ToolCatalogEntry::session_inline(Arc::clone(tool), true)
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let visible_tools: Arc<[Arc<ToolDef>]> = catalog_entries
+            .iter()
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect::<Vec<_>>()
+            .into();
 
         self.projection = Arc::new(RouterProjectionSnapshot {
             epoch,
             tool_to_server,
-            visible_tools: visible_tools.into(),
+            catalog_entries,
+            visible_tools,
         });
         complete
     }
 
     fn projection_tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::clone(&self.projection.visible_tools)
+    }
+
+    fn projection_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        Arc::clone(&self.projection.catalog_entries)
     }
 
     /// Get current lifecycle state for a server.
@@ -1227,6 +1257,21 @@ impl McpRouter {
 impl AgentToolDispatcher for McpRouter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         self.projection_tools()
+    }
+
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        self.projection_catalog()
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.pending_sources_snapshot().into()
     }
 
     async fn dispatch(

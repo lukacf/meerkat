@@ -3,8 +3,10 @@
 //! Unified abstraction for tool calls, shell commands, and delegated branches.
 
 use crate::budget::BudgetLimits;
+use crate::session::ToolVisibilityWitness;
 use crate::types::Message;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 /// Unique identifier for an operation
@@ -82,6 +84,11 @@ impl AsyncOpRef {
 pub enum SessionEffect {
     /// Grant management scope for a specific mob.
     GrantManageMob { mob_id: String },
+    /// Record durable deferred-tool requests for subsequent boundaries.
+    RequestDeferredTools {
+        names: BTreeSet<String>,
+        witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    },
 }
 
 #[derive(Debug, Clone)]

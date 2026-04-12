@@ -8,10 +8,11 @@ use crate::ops::ConcurrencyLimits;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
-use crate::session::Session;
+use crate::session::{SESSION_TOOL_VISIBILITY_STATE_KEY, Session, SessionToolVisibilityState};
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope,
 };
@@ -20,7 +21,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
+use super::{
+    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
+    select_tool_catalog_mode,
+};
 
 /// Builder for creating an Agent
 #[derive(Default)]
@@ -227,7 +231,44 @@ impl AgentBuilder {
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
-        let tool_scope = ToolScope::new(tools.tools());
+        let catalog_mode = select_tool_catalog_mode(tools.as_ref());
+        let (control_tool_names, deferred_tool_names) =
+            if tools.tool_catalog_capabilities().exact_catalog {
+                let catalog = tools.tool_catalog();
+                let control_names = catalog
+                    .iter()
+                    .filter(|entry| entry.plane == ToolPlaneClass::Control)
+                    .map(|entry| entry.tool.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                let deferred_names = if !control_names.is_empty()
+                    && matches!(catalog_mode, ToolCatalogMode::Deferred)
+                {
+                    catalog
+                        .iter()
+                        .filter(|entry| entry.plane == ToolPlaneClass::Session)
+                        .filter(|entry| {
+                            matches!(
+                                entry.deferred_eligibility,
+                                ToolCatalogDeferredEligibility::DeferredEligible { .. }
+                            )
+                        })
+                        .map(|entry| entry.tool.name.clone())
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+                (control_names, deferred_names)
+            } else {
+                (
+                    std::collections::HashSet::new(),
+                    std::collections::HashSet::new(),
+                )
+            };
+        let tool_scope = ToolScope::new_with_projection_names(
+            tools.tools(),
+            control_tool_names,
+            deferred_tool_names,
+        );
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
         let mut agent = Agent {
@@ -282,69 +323,80 @@ impl AgentBuilder {
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
+            last_hidden_deferred_catalog_names: Default::default(),
+            last_pending_catalog_sources: Default::default(),
         };
 
-        if let Some(raw_filter) = agent
+        let mut visibility_state = agent.session.tool_visibility_state().unwrap_or_default();
+        let has_canonical_visibility_state = agent
             .session
             .metadata()
-            .get(EXTERNAL_TOOL_FILTER_METADATA_KEY)
-            .cloned()
-        {
-            match serde_json::from_value::<ToolFilter>(raw_filter) {
-                Ok(filter) => {
-                    let mut filter = filter;
-                    let known_tool_names = agent
-                        .tools
-                        .tools()
-                        .iter()
-                        .map(|tool| tool.name.clone())
-                        .collect::<std::collections::HashSet<_>>();
-                    filter.prune_to_known(&known_tool_names);
-                    if let Err(err) = agent.stage_external_tool_filter(filter) {
+            .contains_key(SESSION_TOOL_VISIBILITY_STATE_KEY);
+
+        if !has_canonical_visibility_state {
+            if let Some(raw_filter) = agent
+                .session
+                .metadata()
+                .get(EXTERNAL_TOOL_FILTER_METADATA_KEY)
+                .cloned()
+            {
+                match serde_json::from_value::<ToolFilter>(raw_filter) {
+                    Ok(filter) => {
+                        visibility_state.active_filter = filter.clone();
+                        visibility_state.staged_filter = filter;
+                    }
+                    Err(err) => {
                         tracing::warn!(
                             error = %err,
-                            "invalid persisted tool scope filter; ignoring"
+                            "failed to parse persisted tool scope filter; ignoring"
                         );
                     }
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to parse persisted tool scope filter; ignoring"
-                    );
+            }
+
+            if let Some(raw_filter) = agent
+                .session
+                .metadata()
+                .get(INHERITED_TOOL_FILTER_METADATA_KEY)
+                .cloned()
+            {
+                match serde_json::from_value::<ToolFilter>(raw_filter) {
+                    Ok(filter) => {
+                        visibility_state.inherited_base_filter = filter;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to parse inherited tool scope filter; ignoring"
+                        );
+                    }
                 }
             }
         }
 
-        if let Some(raw_filter) = agent
-            .session
-            .metadata()
-            .get(INHERITED_TOOL_FILTER_METADATA_KEY)
-            .cloned()
+        if visibility_state != SessionToolVisibilityState::default()
+            || has_canonical_visibility_state
         {
-            match serde_json::from_value::<ToolFilter>(raw_filter) {
-                Ok(filter) => {
-                    let mut filter = filter;
-                    let known_tool_names = agent
-                        .tools
-                        .tools()
-                        .iter()
-                        .map(|tool| tool.name.clone())
-                        .collect::<std::collections::HashSet<_>>();
-                    filter.prune_to_known(&known_tool_names);
-                    if let Err(err) = agent.tool_scope.set_base_filter(filter) {
-                        tracing::warn!(
-                            error = %err,
-                            "failed to apply inherited tool scope filter; ignoring"
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to parse inherited tool scope filter; ignoring"
-                    );
-                }
+            if let Err(err) = agent
+                .tool_scope
+                .set_visibility_state(visibility_state.clone())
+            {
+                tracing::warn!(
+                    error = %err,
+                    "failed to apply canonical tool visibility state; ignoring"
+                );
+            } else if let Err(err) = agent.session.set_tool_visibility_state(visibility_state) {
+                tracing::warn!(
+                    error = %err,
+                    "failed to persist canonical tool visibility state during restore"
+                );
+            } else {
+                agent
+                    .session
+                    .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
+                agent
+                    .session
+                    .remove_metadata(INHERITED_TOOL_FILTER_METADATA_KEY);
             }
         }
 

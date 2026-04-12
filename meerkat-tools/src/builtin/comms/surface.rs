@@ -8,6 +8,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::gateway::Availability;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -90,6 +91,21 @@ impl AgentToolDispatcher for CommsToolSurface {
         Arc::clone(&self.tool_defs)
     }
 
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        self.tool_defs
+            .iter()
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
@@ -141,6 +157,15 @@ mod tests {
             true,
         ));
         (router, trusted_peers)
+    }
+
+    #[test]
+    fn comms_surface_reports_exact_catalog_support() {
+        let (router, trusted_peers) = make_tool_context();
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        assert!(surface.tool_catalog_capabilities().exact_catalog);
+        let catalog = surface.tool_catalog();
+        assert_eq!(catalog.len(), surface.tools().len());
     }
 
     #[test]

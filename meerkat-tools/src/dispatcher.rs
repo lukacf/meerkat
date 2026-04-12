@@ -245,6 +245,18 @@ mod tests {
     }
 
     #[test]
+    fn filtered_dispatcher_is_not_exact_catalog_capable() {
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(MockDispatcher::new(vec!["a", "b"]));
+        let filtered =
+            FilteredDispatcher::new(inner, &ToolAccessPolicy::AllowList(vec!["a".to_string()]));
+
+        assert!(
+            !filtered.tool_catalog_capabilities().exact_catalog,
+            "cached filtered dispatcher must stay on the non-exact path"
+        );
+    }
+
+    #[test]
     fn test_filtered_dispatcher_inherit_passes_all_tools() {
         let inner = Arc::new(MockDispatcher::new(vec!["shell", "task_list", "wait"]));
         let filtered = FilteredDispatcher::new(inner, &ToolAccessPolicy::Inherit);

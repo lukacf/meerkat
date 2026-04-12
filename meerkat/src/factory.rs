@@ -66,6 +66,7 @@ use meerkat_tools::builtin::SqliteTaskStore;
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolPolicyLayer};
+use meerkat_tools::{CatalogControlDispatcher, CatalogControlVisibilityProvider};
 #[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1818,7 +1819,7 @@ impl AgentFactory {
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
-                let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
+                let usage = render_tool_usage_instructions(dispatcher.as_ref());
                 (dispatcher, usage)
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1904,8 +1905,7 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
-            let schedule_usage =
-                render_tool_usage_instructions(schedule_dispatcher.tools().as_ref());
+            let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
                 schedule_dispatcher,
@@ -1979,7 +1979,7 @@ impl AgentFactory {
                 .build_mob_tools(mob_args)
                 .await
                 .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
-            let mob_usage = render_tool_usage_instructions(mob_dispatcher.tools().as_ref());
+            let mob_usage = render_tool_usage_instructions(mob_dispatcher.as_ref());
             // Use DynamicToolComposite (not ToolGateway) so dynamic child
             // dispatchers (e.g. callback tools) can surface additions between turns.
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -2023,6 +2023,13 @@ impl AgentFactory {
             tool_names = %tools.tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
             "tool composition: final dispatcher"
         );
+
+        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
+            if !tool_usage_instructions.is_empty() {
+                tool_usage_instructions.push_str("\n\n");
+            }
+            tool_usage_instructions.push_str(deferred_catalog_guidance());
+        }
 
         // 10. Resolve hooks (override > filesystem layered config)
         #[allow(
@@ -2386,8 +2393,27 @@ impl AgentFactory {
             builder = builder.with_completion_enrichment(enrichment);
         }
 
+        let mut hoisted_control_visibility_provider: Option<Arc<CatalogControlVisibilityProvider>> =
+            None;
+        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
+            let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+            let control_dispatcher = Arc::new(CatalogControlDispatcher::new(
+                Arc::clone(&tools),
+                Arc::clone(&visibility_provider),
+            )) as Arc<dyn AgentToolDispatcher>;
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                control_dispatcher,
+            ]));
+            hoisted_control_visibility_provider = Some(visibility_provider);
+        }
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
+
+        if let Some(provider) = hoisted_control_visibility_provider {
+            provider.set_scope(agent.tool_scope().clone());
+        }
 
         // Wire mob authority handle into agent for session-effect application.
         if let Some(handle) = hoisted_mob_authority_handle {
@@ -2577,7 +2603,7 @@ impl AgentFactory {
             // No builtins — return the external tools if provided, otherwise empty.
             return match external {
                 Some(ext) => {
-                    let usage = render_tool_usage_instructions(ext.tools().as_ref());
+                    let usage = render_tool_usage_instructions(ext.as_ref());
                     Ok((ext, usage))
                 }
                 None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
@@ -2642,18 +2668,332 @@ impl AgentFactory {
             )
             .await?;
 
-        let usage = render_tool_usage_instructions(dispatcher.tools().as_ref());
+        let usage = render_tool_usage_instructions(dispatcher.as_ref());
         Ok((dispatcher, usage))
     }
 }
 
-fn render_tool_usage_instructions(tools: &[Arc<meerkat_core::ToolDef>]) -> String {
+fn render_tool_usage_instructions(dispatcher: &dyn AgentToolDispatcher) -> String {
+    if CatalogControlDispatcher::should_enable_for(dispatcher) {
+        return String::new();
+    }
+
+    let tools = dispatcher.tools();
     if tools.is_empty() {
         return String::new();
     }
     let mut out = String::from("# Available Tools\n\n");
-    for tool in tools {
+    for tool in tools.iter() {
         out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
     }
     out
+}
+
+fn deferred_catalog_guidance() -> &'static str {
+    "Additional tools may be available in a deferred catalog. Use `tool_catalog_search` to discover deferred tools and `tool_catalog_load` to stage the ones you need."
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod prompt_tests {
+    use super::{deferred_catalog_guidance, render_tool_usage_instructions};
+    use async_trait::async_trait;
+    use futures::stream;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::error::ToolError;
+    use meerkat_core::ops::ToolDispatchOutcome;
+    use meerkat_core::types::{StopReason, ToolCallView, ToolDef, ToolResult};
+    use meerkat_core::{
+        AgentToolDispatcher, Config, Message, ToolCatalogCapabilities,
+        ToolCatalogDeferredEligibility, ToolCatalogEntry, ToolCategoryOverride, ToolPlaneClass,
+    };
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use crate::{AgentBuildConfig, AgentFactory};
+
+    struct UsageTestDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        exact_catalog: bool,
+        may_require_control_plane: bool,
+        pending_sources: Arc<[String]>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for UsageTestDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: self.exact_catalog,
+                may_require_catalog_control_plane: self.may_require_control_plane,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            self.tools
+                .iter()
+                .map(|tool| {
+                    if tool.name == "tool_catalog_search" {
+                        ToolCatalogEntry::control_inline(Arc::clone(tool), true)
+                    } else if tool.name.starts_with("secret_") {
+                        ToolCatalogEntry::session_deferred(
+                            Arc::clone(tool),
+                            true,
+                            "callback:registered".to_string(),
+                        )
+                    } else {
+                        ToolCatalogEntry {
+                            tool: Arc::clone(tool),
+                            plane: ToolPlaneClass::Session,
+                            currently_callable: true,
+                            deferred_eligibility: ToolCatalogDeferredEligibility::InlineOnly,
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn pending_catalog_sources(&self) -> Arc<[String]> {
+            Arc::clone(&self.pending_sources)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), call.name.to_string(), false).into())
+        }
+    }
+
+    struct PromptTestClient;
+
+    #[async_trait]
+    impl LlmClient for PromptTestClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
+            })]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn tools(names: &[&str]) -> Arc<[Arc<ToolDef>]> {
+        names
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: (*name).to_string(),
+                    description: format!("{name} tool"),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_keeps_inventory_for_non_exact_dispatchers() {
+        let dispatcher = UsageTestDispatcher {
+            tools: tools(&["visible", "secret"]),
+            exact_catalog: false,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+
+        let usage = render_tool_usage_instructions(&dispatcher);
+        assert!(usage.contains("# Available Tools"));
+        assert!(usage.contains("visible tool"));
+        assert!(usage.contains("secret tool"));
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_omits_inventory_for_exact_dispatchers() {
+        let dispatcher = UsageTestDispatcher {
+            tools: tools(&["visible", "secret_lookup", "secret_audit"]),
+            exact_catalog: true,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+
+        let usage = render_tool_usage_instructions(&dispatcher);
+        assert!(usage.is_empty());
+        assert!(deferred_catalog_guidance().contains("tool_catalog_search"));
+        assert!(deferred_catalog_guidance().contains("tool_catalog_load"));
+    }
+
+    #[test]
+    fn render_tool_usage_instructions_keeps_inventory_for_exact_dispatchers_without_deferred_entries()
+     {
+        let dispatcher = UsageTestDispatcher {
+            tools: tools(&["visible"]),
+            exact_catalog: true,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+
+        let usage = render_tool_usage_instructions(&dispatcher);
+        assert!(usage.contains("# Available Tools"));
+        assert!(usage.contains("visible tool"));
+    }
+
+    #[tokio::test]
+    async fn exact_external_sessions_include_deferred_catalog_guidance_in_system_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let secret = Arc::new(ToolDef {
+            name: "secret_lookup".to_string(),
+            description: "Look up a secret value".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let secret_audit = Arc::new(ToolDef {
+            name: "secret_audit".to_string(),
+            description: "Audit a secret value".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let dispatcher = UsageTestDispatcher {
+            tools: vec![Arc::clone(&secret), Arc::clone(&secret_audit)].into(),
+            exact_catalog: true,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
+        };
+        let system_prompt = &message.content;
+
+        assert!(
+            system_prompt.contains("tool_catalog_search"),
+            "exact external sessions should advertise deferred catalog discovery"
+        );
+        assert!(
+            system_prompt.contains("tool_catalog_load"),
+            "exact external sessions should advertise deferred catalog loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_inline_only_sessions_do_not_inject_deferred_catalog_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let visible = Arc::new(ToolDef {
+            name: "visible".to_string(),
+            description: "Always-inline tool".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let dispatcher = UsageTestDispatcher {
+            tools: vec![Arc::clone(&visible)].into(),
+            exact_catalog: true,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
+        };
+        let system_prompt = &message.content;
+
+        assert!(
+            !system_prompt.contains("tool_catalog_search"),
+            "inline-only exact sessions should not advertise deferred catalog discovery"
+        );
+        assert!(
+            !system_prompt.contains("tool_catalog_load"),
+            "inline-only exact sessions should not advertise deferred catalog loading"
+        );
+        assert!(
+            agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains("visible"),
+            "inline session tool should remain visible"
+        );
+        assert!(
+            !agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains("tool_catalog_search"),
+            "control-plane tools should not be injected when there is no deferred catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_exact_sessions_precompose_deferred_catalog_surface_before_threshold() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let secret = Arc::new(ToolDef {
+            name: "secret_lookup".to_string(),
+            description: "Look up a secret value".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            provenance: None,
+        });
+        let dispatcher = UsageTestDispatcher {
+            tools: vec![Arc::clone(&secret)].into(),
+            exact_catalog: true,
+            may_require_control_plane: true,
+            pending_sources: Arc::from([]),
+        };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
+        };
+        let system_prompt = &message.content;
+        let visible_names = agent.tool_scope().visible_tool_names().unwrap();
+
+        assert!(
+            system_prompt.contains("tool_catalog_search"),
+            "dynamic exact sessions should advertise deferred catalog discovery before the adaptive threshold flips"
+        );
+        assert!(
+            visible_names.contains("tool_catalog_search"),
+            "control-plane tools should already be present when the dispatcher may switch into deferred mode later"
+        );
+        assert!(
+            visible_names.contains("secret_lookup"),
+            "the session-plane tool should remain inline until adaptive deferred mode activates"
+        );
+    }
 }

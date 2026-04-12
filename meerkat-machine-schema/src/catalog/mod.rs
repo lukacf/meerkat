@@ -19,6 +19,7 @@ mod peer_directory_reachability;
 mod runtime_control;
 mod runtime_ingress;
 mod schedule_lifecycle;
+mod session_tool_visibility;
 mod session_turn_admission;
 mod turn_execution;
 
@@ -54,6 +55,7 @@ pub use peer_directory_reachability::peer_directory_reachability_machine;
 pub use runtime_control::runtime_control_machine;
 pub use runtime_ingress::runtime_ingress_machine;
 pub use schedule_lifecycle::schedule_lifecycle_machine;
+pub use session_tool_visibility::session_tool_visibility_machine;
 pub use session_turn_admission::session_turn_admission_machine;
 pub use turn_execution::turn_execution_machine;
 
@@ -64,11 +66,12 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         runtime_ingress_machine(),
         ops_lifecycle_machine(),
         schedule_lifecycle_machine(),
+        session_tool_visibility_machine(),
         occurrence_lifecycle_machine(),
         peer_comms_machine(),
         peer_directory_reachability_machine(),
-        session_turn_admission_machine(),
         external_tool_surface_machine(),
+        session_turn_admission_machine(),
         turn_execution_machine(),
         mob_lifecycle_machine(),
         mob_member_lifecycle_machine(),

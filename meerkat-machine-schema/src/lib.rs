@@ -15,7 +15,7 @@ pub use catalog::{
     ops_peer_bundle_composition, ops_runtime_bundle_composition, peer_comms_machine,
     peer_directory_reachability_machine, peer_runtime_bundle_composition, runtime_control_machine,
     runtime_ingress_machine, runtime_pipeline_composition, schedule_lifecycle_machine,
-    session_turn_admission_machine, turn_execution_machine,
+    session_tool_visibility_machine, session_turn_admission_machine, turn_execution_machine,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriverRustBinding,

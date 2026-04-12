@@ -6,7 +6,7 @@ use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
-use crate::session::{PendingSystemContextAppend, Session};
+use crate::session::{PendingSystemContextAppend, SESSION_TOOL_VISIBILITY_STATE_KEY, Session};
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -46,11 +46,15 @@ where
         filter: ToolFilter,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         let handle = self.tool_scope.handle();
-        let revision = handle.stage_external_filter(filter.clone())?;
+        let revision = handle.stage_external_filter(filter)?;
         let _ = handle.staged_revision();
-        if let Ok(value) = serde_json::to_value(filter) {
+        if let Ok(visibility_state) = self.tool_scope.visibility_state()
+            && let Ok(value) = serde_json::to_value(visibility_state)
+        {
             self.session
-                .set_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY, value);
+                .set_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY, value);
+            self.session
+                .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
         }
         Ok(revision)
     }
@@ -94,34 +98,60 @@ where
         use crate::error::AgentError;
 
         let mut build_state = self.session.build_state().unwrap_or_default();
-        let authority = build_state
-            .mob_tool_authority_context
-            .as_mut()
-            .ok_or_else(|| {
-                AgentError::InternalError(
-                    "mob authority effect applied without canonical authority context".into(),
-                )
-            })?;
+        let mut build_state_changed = false;
+        let mut visibility_changed = false;
 
         for effect in effects {
             match effect {
                 crate::ops::SessionEffect::GrantManageMob { mob_id } => {
+                    let authority =
+                        build_state
+                            .mob_tool_authority_context
+                            .as_mut()
+                            .ok_or_else(|| {
+                                AgentError::InternalError(
+                                "mob authority effect applied without canonical authority context"
+                                    .into(),
+                            )
+                            })?;
                     authority.grant_manage_mob_in_place(mob_id.clone());
+                    build_state_changed = true;
+                }
+                crate::ops::SessionEffect::RequestDeferredTools { names, witnesses } => {
+                    self.tool_scope
+                        .add_requested_deferred_names(names, witnesses)
+                        .map_err(|err| {
+                            AgentError::InternalError(format!(
+                                "failed to record requested deferred tool names: {err}"
+                            ))
+                        })?;
+                    visibility_changed = true;
                 }
             }
         }
 
-        self.session.set_build_state(build_state).map_err(|e| {
-            AgentError::InternalError(format!(
-                "failed to persist session effects into build state: {e}"
-            ))
-        })?;
+        if build_state_changed {
+            self.session.set_build_state(build_state).map_err(|e| {
+                AgentError::InternalError(format!(
+                    "failed to persist session effects into build state: {e}"
+                ))
+            })?;
+        }
+
+        if visibility_changed
+            && let Ok(visibility_state) = self.tool_scope.visibility_state()
+            && let Err(err) = self.session.set_tool_visibility_state(visibility_state)
+        {
+            return Err(AgentError::InternalError(format!(
+                "failed to persist session effects into tool visibility state: {err}"
+            )));
+        }
 
         // Update the shared effective-authority handle so mob tools in
         // subsequent batches see the widened scope. The handle is a derived
         // projection of the canonical session build_state — it is never
         // treated as an independent truth source.
-        if let Some(ref handle) = self.mob_authority_handle {
+        if build_state_changed && let Some(ref handle) = self.mob_authority_handle {
             let updated = self
                 .session
                 .build_state()
@@ -208,6 +238,11 @@ where
         &self.event_tap
     }
 
+    /// Access the live tool-scope projection bridge.
+    pub fn tool_scope(&self) -> &crate::ToolScope {
+        &self.tool_scope
+    }
+
     /// Get shared runtime system-context control state.
     pub fn system_context_state(
         &self,
@@ -227,6 +262,11 @@ where
         };
         if let Err(err) = session.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to serialize system-context state into session");
+        }
+        if let Ok(visibility_state) = self.tool_scope.visibility_state()
+            && let Err(err) = session.set_tool_visibility_state(visibility_state)
+        {
+            tracing::warn!(error = %err, "failed to serialize tool visibility state into session");
         }
         session
     }

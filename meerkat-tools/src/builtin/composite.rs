@@ -14,6 +14,7 @@ use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
+use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use serde_json::Value;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
@@ -331,6 +332,68 @@ impl AgentToolDispatcher for CompositeDispatcher {
         tools.into()
     }
 
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        ToolCatalogCapabilities {
+            exact_catalog: self
+                .external
+                .as_ref()
+                .is_none_or(|dispatcher| dispatcher.tool_catalog_capabilities().exact_catalog),
+            may_require_catalog_control_plane: self.external.as_ref().is_some_and(|dispatcher| {
+                dispatcher
+                    .tool_catalog_capabilities()
+                    .may_require_catalog_control_plane
+            }),
+        }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.external
+            .as_ref()
+            .map(|dispatcher| dispatcher.pending_catalog_sources())
+            .unwrap_or_else(|| Arc::from([]))
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        let mut catalog = Vec::new();
+        let mut seen_names = HashSet::new();
+
+        for tool in &self.builtin_tools {
+            if self.allowed_tools.contains(tool.name()) {
+                seen_names.insert(tool.name().to_string());
+                catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
+            }
+        }
+
+        #[cfg(feature = "skills")]
+        if let Some(ref skill) = self.skill_tools {
+            for tool in skill.tools() {
+                if self.allowed_tools.contains(tool.name())
+                    && seen_names.insert(tool.name().to_string())
+                {
+                    catalog.push(ToolCatalogEntry::session_inline(Arc::new(tool.def()), true));
+                }
+            }
+        }
+
+        if let Some(ref ext) = self.external {
+            if ext.tool_catalog_capabilities().exact_catalog {
+                for entry in ext.tool_catalog().iter() {
+                    if seen_names.insert(entry.tool.name.clone()) {
+                        catalog.push(entry.clone());
+                    }
+                }
+            } else {
+                for tool in ext.tools().iter() {
+                    if seen_names.insert(tool.name.clone()) {
+                        catalog.push(ToolCatalogEntry::session_inline(Arc::clone(tool), true));
+                    }
+                }
+            }
+        }
+
+        catalog.into()
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
@@ -568,6 +631,70 @@ mod tests {
         }
     }
 
+    struct ExactExternalDispatcher {
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
+    impl ExactExternalDispatcher {
+        fn new(entries: &[(&str, bool)]) -> Self {
+            let catalog: Vec<meerkat_core::ToolCatalogEntry> = entries
+                .iter()
+                .map(|(name, currently_callable)| {
+                    meerkat_core::ToolCatalogEntry::session_inline(
+                        Arc::new(ToolDef {
+                            name: (*name).to_string(),
+                            description: format!("external tool: {name}"),
+                            input_schema: json!({
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            }),
+                            provenance: None,
+                        }),
+                        *currently_callable,
+                    )
+                })
+                .collect();
+            Self {
+                catalog: catalog.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ExactExternalDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .filter(|entry| entry.currently_callable)
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            if self
+                .catalog
+                .iter()
+                .any(|entry| entry.tool.name == call.name && entry.currently_callable)
+            {
+                return Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into());
+            }
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
     #[async_trait]
     impl AgentToolDispatcher for MockExternalDispatcher {
         fn tools(&self) -> Arc<[Arc<ToolDef>]> {
@@ -603,6 +730,53 @@ mod tests {
         assert!(usage.contains("External tools"));
         assert!(usage.contains("mob_list"));
         assert!(usage.contains("List active mobs"));
+    }
+
+    #[test]
+    fn exact_catalog_prefers_builtin_winners_over_external_collisions() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> = Arc::new(ExactExternalDispatcher::new(&[
+            ("datetime", true),
+            ("external_only", true),
+        ]));
+
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        assert!(
+            dispatcher.tool_catalog_capabilities().exact_catalog,
+            "composite should be exact when its external dispatcher is exact"
+        );
+
+        let catalog = dispatcher.tool_catalog();
+        let names: Vec<_> = catalog
+            .iter()
+            .map(|entry| entry.tool.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"datetime".to_string()),
+            "builtin winner should remain in the catalog"
+        );
+        assert!(
+            names.contains(&"external_only".to_string()),
+            "non-colliding external winner should remain in the catalog"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "datetime")
+                .count(),
+            1,
+            "collision losers must be absent from the exact catalog"
+        );
     }
 
     #[tokio::test]

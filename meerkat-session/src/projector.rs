@@ -43,15 +43,12 @@ impl SessionProjector {
             .join(session_id.to_string())
     }
 
-    /// Project events for a session from the given checkpoint.
-    ///
-    /// Reads events from `from_seq` onward and writes/appends to output files.
-    /// Returns the sequence number of the last processed event.
-    pub async fn project<E: EventStore>(
+    async fn project_with_mode<E: EventStore>(
         &self,
         event_store: &E,
         session_id: &SessionId,
         from_seq: u64,
+        replace_existing: bool,
     ) -> Result<u64, ProjectionError> {
         let events = event_store
             .read_from(session_id, from_seq)
@@ -92,7 +89,9 @@ impl SessionProjector {
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .append(!replace_existing)
+            .truncate(replace_existing)
             .open(&events_path)
             .await
             .map_err(ProjectionError::Io)?;
@@ -115,6 +114,20 @@ impl SessionProjector {
             .map_err(ProjectionError::Io)?;
 
         Ok(last_seq)
+    }
+
+    /// Project events for a session from the given checkpoint.
+    ///
+    /// Reads events from `from_seq` onward and writes/appends to output files.
+    /// Returns the sequence number of the last processed event.
+    pub async fn project<E: EventStore>(
+        &self,
+        event_store: &E,
+        session_id: &SessionId,
+        from_seq: u64,
+    ) -> Result<u64, ProjectionError> {
+        self.project_with_mode(event_store, session_id, from_seq, false)
+            .await
     }
 
     /// Read the last checkpoint seq for a session (0 if no checkpoint).
@@ -148,16 +161,24 @@ impl SessionProjector {
         event_store: &E,
         session_id: &SessionId,
     ) -> Result<u64, ProjectionError> {
-        // Delete existing output
         let dir = self.session_dir(session_id);
-        if dir.exists() {
-            tokio::fs::remove_dir_all(&dir)
-                .await
-                .map_err(ProjectionError::Io)?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(ProjectionError::Io)?;
+
+        // Remove derived files that may no longer be rewritten by the replay.
+        for file_name in ["events.jsonl", "summary.txt", "checkpoint"] {
+            let path = dir.join(file_name);
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(ProjectionError::Io(err)),
+            }
         }
 
-        // Replay from seq 1
-        self.project(event_store, session_id, 1).await
+        // Replay from seq 1, replacing any previous derived output.
+        self.project_with_mode(event_store, session_id, 1, true)
+            .await
     }
 
     /// Resume projection from the last checkpoint.

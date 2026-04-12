@@ -8,6 +8,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::stream;
@@ -45,6 +46,44 @@ impl LlmClient for MockLlmClient {
                 },
             }),
         ]))
+    }
+
+    fn provider(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingToolClient {
+    seen_tools: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingToolClient {
+    fn seen_tools(&self) -> Vec<Vec<String>> {
+        self.seen_tools.lock().expect("recording lock").clone()
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingToolClient {
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
+    {
+        self.seen_tools
+            .lock()
+            .expect("recording lock")
+            .push(request.tools.iter().map(|tool| tool.name.clone()).collect());
+        Box::pin(stream::iter(vec![Ok(meerkat_client::LlmEvent::Done {
+            outcome: meerkat_client::LlmDoneOutcome::Success {
+                stop_reason: StopReason::EndTurn,
+            },
+        })]))
     }
 
     fn provider(&self) -> &'static str {
@@ -97,6 +136,48 @@ fn spawn_test_server() -> (
 
     let server_handle = tokio::spawn(async move {
         // Keep temp alive for the duration of the server
+        let _temp = temp;
+        let reader = BufReader::new(server_reader);
+        let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
+        server.run().await
+    });
+
+    let client_reader = BufReader::new(client_reader);
+    (client_writer, client_reader, server_handle)
+}
+
+fn spawn_test_server_with_client(
+    client: Arc<dyn LlmClient>,
+) -> (
+    tokio::io::DuplexStream,
+    BufReader<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let config = Config::default();
+    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+    let mut runtime = SessionRuntime::new(
+        factory,
+        config,
+        10,
+        meerkat::PersistenceBundle::new(store, None, blob_store),
+        meerkat_rpc::router::NotificationSink::noop(),
+    );
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(Config::default()));
+    runtime.default_llm_client = Some(client);
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
+
+    let (server_reader, client_writer) = tokio::io::duplex(4096);
+    let (client_reader, server_writer) = tokio::io::duplex(4096);
+
+    let server_handle = tokio::spawn(async move {
         let _temp = temp;
         let reader = BufReader::new(server_reader);
         let mut server = RpcServer::new(reader, server_writer, runtime, config_store);
@@ -191,6 +272,319 @@ async fn initialize_roundtrip() {
     }
 
     // Close to trigger EOF
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_turn() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value through a deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value through the same deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let register_resp = read_response(&mut reader).await;
+    assert!(
+        register_resp["error"].is_null(),
+        "tools/register failed: {register_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/create",
+            "params": {
+                "prompt": "Bootstrap deferred session",
+                "initial_turn": "deferred",
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Inspect the deferred control plane."
+            }
+        }),
+    )
+    .await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected exactly one LLM call, got {seen:?}");
+    let first_call = &seen[0];
+    assert!(
+        first_call.iter().any(|name| name == "tool_catalog_search"),
+        "direct deferred sessions should expose tool_catalog_search, got {first_call:?}"
+    );
+    assert!(
+        first_call.iter().any(|name| name == "tool_catalog_load"),
+        "direct deferred sessions should expose tool_catalog_load, got {first_call:?}"
+    );
+    assert!(
+        !first_call.iter().any(|name| name == "secret_lookup"),
+        "deferred tools should remain hidden before load, got {first_call:?}"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_build() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value through a deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let register_resp = read_response(&mut reader).await;
+    assert!(
+        register_resp["error"].is_null(),
+        "initial tools/register failed: {register_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/create",
+            "params": {
+                "prompt": "Bootstrap late deferred session",
+                "initial_turn": "deferred",
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Inspect the current inline callback tool surface."
+            }
+        }),
+    )
+    .await;
+    let first_turn_resp = read_response(&mut reader).await;
+    assert!(
+        first_turn_resp["error"].is_null(),
+        "initial turn/start failed: {first_turn_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(
+        seen.len(),
+        1,
+        "expected exactly one initial LLM call, got {seen:?}"
+    );
+    let initial_call = &seen[0];
+    assert!(
+        initial_call.iter().any(|name| name == "secret_lookup"),
+        "the session should start inline before the adaptive deferred threshold is crossed, got {initial_call:?}"
+    );
+    assert!(
+        initial_call
+            .iter()
+            .any(|name| name == "tool_catalog_search"),
+        "dynamically defer-capable sessions should still precompose tool_catalog_search, got {initial_call:?}"
+    );
+    assert!(
+        initial_call.iter().any(|name| name == "tool_catalog_load"),
+        "dynamically defer-capable sessions should still precompose tool_catalog_load, got {initial_call:?}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_audit",
+                    "description": "Audit a secret value through the same deferred catalog.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let late_register_resp = read_response(&mut reader).await;
+    assert!(
+        late_register_resp["error"].is_null(),
+        "late tools/register failed: {late_register_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Inspect the deferred control plane after a late registration."
+            }
+        }),
+    )
+    .await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(
+        seen.len(),
+        2,
+        "expected exactly two LLM calls, got {seen:?}"
+    );
+    let first_call = &seen[1];
+    assert!(
+        first_call.iter().any(|name| name == "tool_catalog_search"),
+        "late-switch deferred sessions should expose tool_catalog_search, got {first_call:?}"
+    );
+    assert!(
+        first_call.iter().any(|name| name == "tool_catalog_load"),
+        "late-switch deferred sessions should expose tool_catalog_load, got {first_call:?}"
+    );
+    assert!(
+        !first_call.iter().any(|name| name == "secret_audit"),
+        "late-added deferred tools should remain hidden until loaded, got {first_call:?}"
+    );
+
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }

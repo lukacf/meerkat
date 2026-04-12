@@ -31,6 +31,7 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod builder;
 pub mod builtin;
+pub mod control_plane;
 pub mod dispatcher;
 pub mod error;
 pub mod registry;
@@ -51,6 +52,7 @@ pub use builtin::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
+pub use control_plane::{CatalogControlDispatcher, CatalogControlVisibilityProvider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use dispatcher::ToolDispatcher;
 pub use dispatcher::{EmptyToolDispatcher, FilteredDispatcher};

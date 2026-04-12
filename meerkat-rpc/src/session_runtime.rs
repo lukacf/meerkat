@@ -92,6 +92,21 @@ fn pending_system_context_appends(
         .collect()
 }
 
+fn exported_tool_filter(session: &Session) -> meerkat_core::ToolFilter {
+    session
+        .tool_visibility_state()
+        .map(|state| state.staged_filter)
+        .or_else(|| {
+            session
+                .metadata()
+                .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+                .and_then(|value| {
+                    serde_json::from_value::<meerkat_core::ToolFilter>(value.clone()).ok()
+                })
+        })
+        .unwrap_or(meerkat_core::ToolFilter::All)
+}
+
 #[derive(Clone)]
 struct SkillIdentityRegistryState {
     generation: u64,
@@ -778,14 +793,7 @@ impl SessionRuntime {
             .export_live_session(session_id)
             .await
             .ok()
-            .and_then(|session| {
-                session
-                    .metadata()
-                    .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-                    .and_then(|v| {
-                        serde_json::from_value::<meerkat_core::ToolFilter>(v.clone()).ok()
-                    })
-            })
+            .map(|session| exported_tool_filter(&session))
             .unwrap_or(meerkat_core::ToolFilter::All);
 
         let view_image = "view_image".to_string();
@@ -5116,12 +5124,7 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter_value = session
-            .metadata()
-            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-            .expect("tool filter metadata should be set after hot-swap");
-        let filter: meerkat_core::ToolFilter =
-            serde_json::from_value(filter_value.clone()).unwrap();
+        let filter = exported_tool_filter(&session);
         assert_eq!(
             filter,
             meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
@@ -5201,12 +5204,7 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter_value = session
-            .metadata()
-            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-            .expect("tool filter metadata should be set after hot-swap");
-        let filter: meerkat_core::ToolFilter =
-            serde_json::from_value(filter_value.clone()).unwrap();
+        let filter = exported_tool_filter(&session);
         assert_eq!(
             filter,
             meerkat_core::ToolFilter::All,
@@ -5275,12 +5273,7 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter_value = session
-            .metadata()
-            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-            .expect("tool filter metadata should be set after hot-swap");
-        let filter: meerkat_core::ToolFilter =
-            serde_json::from_value(filter_value.clone()).unwrap();
+        let filter = exported_tool_filter(&session);
 
         let expected_deny: std::collections::HashSet<String> = ["datetime", "view_image"]
             .iter()
@@ -5359,12 +5352,7 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter_value = session
-            .metadata()
-            .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-            .expect("tool filter metadata should be set after hot-swap");
-        let filter: meerkat_core::ToolFilter =
-            serde_json::from_value(filter_value.clone()).unwrap();
+        let filter = exported_tool_filter(&session);
 
         assert_eq!(
             filter,

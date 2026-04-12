@@ -59,6 +59,7 @@ pub mod skills;
 pub mod skills_config;
 pub mod state;
 pub mod time_compat;
+pub mod tool_catalog;
 pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
@@ -68,7 +69,8 @@ pub mod types;
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult,
+    FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
+    should_compose_tool_catalog_control_plane,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
@@ -182,10 +184,11 @@ pub use service::{
 pub use session::{
     DeferredFirstTurnPhase, PendingDeferredPrompt, PendingSystemContextAppend,
     PendingToolResultsMessage, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
-    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
-    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
-    SessionSystemContextState, SessionTooling, SystemContextStageError, ToolCategoryOverride,
+    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
+    SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
+    SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
+    ToolCategoryOverride, ToolVisibilityWitness,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
@@ -195,6 +198,12 @@ pub use session_recovery::{
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;
+pub use tool_catalog::{
+    ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
+    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolPlaneClass,
+    deferred_session_entry_count, deferred_session_schema_volume,
+    select_catalog_mode_from_snapshot,
+};
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,
     ToolScopeRevision, ToolScopeStageError,

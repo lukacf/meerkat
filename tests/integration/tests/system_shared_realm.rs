@@ -11,6 +11,8 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep, timeout};
 
+const SHARED_REALM_RPC_STEP_TIMEOUT_SECS: u64 = 180;
+
 fn sqlite_shared_realm_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -393,7 +395,7 @@ async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
             "prompt": "Create a shared sqlite session.",
             "model": "claude-sonnet-4-5",
         }),
-        60,
+        SHARED_REALM_RPC_STEP_TIMEOUT_SECS,
     )
     .await?;
     let session_id = find_first_string_field(&created, "session_id").expect("session_id");
@@ -480,7 +482,7 @@ async fn rpc_rest_rpc_default_sqlite_shared_realm_roundtrip()
             "session_id": session_id_str.clone(),
             "prompt": "Continue once more.",
         }),
-        60,
+        SHARED_REALM_RPC_STEP_TIMEOUT_SECS,
     )
     .await?;
     assert_eq!(

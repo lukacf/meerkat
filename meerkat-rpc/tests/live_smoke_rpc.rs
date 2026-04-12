@@ -18,7 +18,7 @@ use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use meerkat_store::FsBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::time::timeout;
+use tokio::time::{Duration, timeout};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,6 +101,91 @@ async fn read_response(reader: &mut BufReader<tokio::io::DuplexStream>) -> serde
             return value;
         }
         // Otherwise it's a notification - skip it
+    }
+}
+
+async fn read_response_with_callback_tool_reply(
+    writer: &mut tokio::io::DuplexStream,
+    reader: &mut BufReader<tokio::io::DuplexStream>,
+    request_id: u64,
+    timeout_duration: Duration,
+    expected_tool_name: &str,
+    callback_result_text: &str,
+) -> (serde_json::Value, Vec<String>) {
+    let mut callback_names = Vec::new();
+    let response = timeout(timeout_duration, async {
+        loop {
+            let value = read_line_json(reader).await;
+
+            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
+                let callback_name = value["params"]["name"]
+                    .as_str()
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                callback_names.push(callback_name.clone());
+                assert_eq!(
+                    callback_name, expected_tool_name,
+                    "unexpected callback tool during deferred smoke flow"
+                );
+
+                let callback_id = value["id"].clone();
+                let callback_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": callback_id,
+                    "result": {
+                        "content": callback_result_text,
+                        "is_error": false
+                    }
+                });
+                send_request(writer, &callback_resp).await;
+                continue;
+            }
+
+            if value.get("id") == Some(&serde_json::json!(request_id)) {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("RPC request timed out while waiting for deferred callback flow");
+
+    (response, callback_names)
+}
+
+async fn session_history_response(
+    writer: &mut tokio::io::DuplexStream,
+    reader: &mut BufReader<tokio::io::DuplexStream>,
+    request_id: u64,
+    timeout_duration: Duration,
+    session_id: &str,
+    limit: usize,
+) -> serde_json::Value {
+    send_request(
+        writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/history",
+            "params": {
+                "session_id": session_id,
+                "limit": limit
+            }
+        }),
+    )
+    .await;
+
+    timeout(timeout_duration, read_response(reader))
+        .await
+        .expect("session/history timed out")
+}
+
+fn assert_history_contains_tool_uses(history: &serde_json::Value, tool_names: &[&str]) {
+    let history_text = history["result"].to_string();
+    for tool_name in tool_names {
+        assert!(
+            history_text.contains(&format!("\"name\":\"{tool_name}\"")),
+            "expected session history to contain tool use `{tool_name}`, history={history_text}"
+        );
     }
 }
 
@@ -968,12 +1053,13 @@ async fn e2e_scenario_17_multi_turn_event_streaming() {
 // ---------------------------------------------------------------------------
 
 /// Scenario 21: Register a callback tool via `tools/register`, create a mob,
-/// spawn a member, start a turn that instructs the LLM to use the tool, handle
-/// the `tool/execute` callback, and verify the turn completes with the tool result.
+/// spawn a member, and verify a real LLM discovers it through
+/// `tool_catalog_search`, loads it through `tool_catalog_load`, then calls it.
 ///
 /// This exercises the full ExternalToolsProvider pipeline:
 ///   tools/register → SessionRuntime → MethodRouter → MobMcpState → MobBuilder
-///   → MobActor → compose_external_tools_for_profile → agent session.
+///   → MobActor → compose_external_tools_for_profile → deferred control plane
+///   → exact session tool surface.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_21_mob_callback_tools() {
@@ -1022,6 +1108,16 @@ async fn e2e_scenario_21_mob_callback_tools() {
                         "type": "object",
                         "properties": {
                             "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value without returning the final code directly.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
                         },
                         "required": ["key"]
                     }
@@ -1080,7 +1176,8 @@ async fn e2e_scenario_21_mob_callback_tools() {
     assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
     let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
 
-    // 5. Start a turn that should trigger the callback tool.
+    // 5. Start a turn that must discover, load, and then call the deferred tool.
+    let secret_code = "MEERKAT-42";
     let id = next_id();
     send_request(
         &mut writer,
@@ -1090,51 +1187,21 @@ async fn e2e_scenario_21_mob_callback_tools() {
             "method": "turn/start",
             "params": {
                 "session_id": session_id,
-                "prompt": "What is the secret code for key 'alpha'? Use the secret_lookup tool to find out."
+                "prompt": "Find the deferred tool that can retrieve a secret code for key 'alpha'. First call tool_catalog_search with a query about secret lookup, then call tool_catalog_load for the matching tool, then call the loaded tool with key 'alpha'. The answer is not knowable without calling the loaded tool. Reply with only the secret code."
             }
         }),
     )
     .await;
 
-    // 6. Read lines until we get a tool/execute callback OR the response.
-    //    The server sends tool/execute as a request to the client.
-    let mut got_callback = false;
-    let turn_resp = timeout(t, async {
-        loop {
-            let value = read_line_json(&mut reader).await;
-
-            // Check if this is a tool/execute callback request from server
-            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
-                got_callback = true;
-                let callback_id = value["id"].clone();
-                eprintln!(
-                    "[scenario 21] received tool/execute callback: {}",
-                    value["params"]["name"]
-                );
-
-                // Respond to the callback with a canned result.
-                let callback_resp = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": callback_id,
-                    "result": {
-                        "content": "The secret code for 'alpha' is MEERKAT-42.",
-                        "is_error": false
-                    }
-                });
-                send_request(&mut writer, &callback_resp).await;
-                continue;
-            }
-
-            // Check if this is the turn/start response (has our request id)
-            if value.get("id") == Some(&serde_json::json!(id)) {
-                return value;
-            }
-
-            // Otherwise it's a notification — skip
-        }
-    })
-    .await
-    .expect("turn/start with callback tool timed out");
+    let (turn_resp, callback_names) = read_response_with_callback_tool_reply(
+        &mut writer,
+        &mut reader,
+        id,
+        t,
+        "secret_lookup",
+        &format!("The secret code for 'alpha' is {secret_code}."),
+    )
+    .await;
 
     assert!(
         turn_resp["error"].is_null(),
@@ -1143,17 +1210,28 @@ async fn e2e_scenario_21_mob_callback_tools() {
     let text = turn_resp["result"]["text"].as_str().unwrap_or("");
     eprintln!("[scenario 21] turn response text: {text}");
 
-    // The LLM should have used the tool and included the secret in its answer.
     assert!(
-        got_callback,
+        callback_names.iter().any(|name| name == "secret_lookup"),
         "Expected the LLM to call secret_lookup but no tool/execute callback was received"
     );
     assert!(
-        text.contains("MEERKAT-42") || text.contains("meerkat-42") || text.contains("Meerkat-42"),
-        "Expected response to contain 'MEERKAT-42' from callback tool result, got: {text}"
+        text.contains(secret_code),
+        "Expected response to contain '{secret_code}' from callback tool result, got: {text}"
     );
 
-    eprintln!("[scenario 21] PASSED: mob member used callback tool and got result");
+    let history_id = next_id();
+    let history_resp =
+        session_history_response(&mut writer, &mut reader, history_id, t, &session_id, 100).await;
+    assert!(
+        history_resp["error"].is_null(),
+        "session/history failed: {history_resp}"
+    );
+    assert_history_contains_tool_uses(
+        &history_resp,
+        &["tool_catalog_search", "tool_catalog_load", "secret_lookup"],
+    );
+
+    eprintln!("[scenario 21] PASSED: mob member used deferred search/load/call flow");
 
     // Clean up
     drop(writer);
@@ -1314,8 +1392,9 @@ async fn e2e_scenario_22_transport_backpressure() {
 // Scenario 23: Late tools/register on already-spawned mob members (#158)
 // ---------------------------------------------------------------------------
 
-/// Scenario 23: Spawn a mob member, THEN register callback tools, THEN start a
-/// turn and verify the already-materialized member can use the late-registered tool.
+/// Scenario 23: Spawn a mob member, THEN register callback tools, THEN verify
+/// the already-materialized member discovers/loads the late-registered tool on
+/// the next turn via the deferred control plane.
 ///
 /// This proves post-spawn dynamic tool pickup: the `CallbackToolDispatcher` is
 /// backed by the shared `registered_tools` list and picks up additions via
@@ -1425,6 +1504,16 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                         },
                         "required": ["key"]
                     }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value without returning the final code directly.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
+                        },
+                        "required": ["key"]
+                    }
                 }]
             }
         }),
@@ -1434,7 +1523,9 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     assert!(resp["error"].is_null(), "tools/register failed: {resp}");
 
     // 5. Start a turn on the already-materialized member.
-    //    The dynamic dispatcher should pick up the late-registered tool.
+    //    The dynamic dispatcher should pick up the late-registered tool, but the
+    //    model still has to discover/load it through the deferred catalog.
+    let secret_code = "KESTREL-99";
     let id = next_id();
     send_request(
         &mut writer,
@@ -1444,44 +1535,21 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
             "method": "turn/start",
             "params": {
                 "session_id": session_id,
-                "prompt": "What is the secret code for key 'beta'? Use the secret_lookup tool to find out."
+                "prompt": "A deferred callback tool for secret lookup was registered after this member already existed. Use tool_catalog_search to find a tool for secret lookup, use tool_catalog_load to load it, then call the loaded tool with key 'beta'. The answer is not knowable without the tool call. Reply with only the secret code."
             }
         }),
     )
     .await;
 
-    // 5. Handle tool/execute callback and collect response.
-    let mut got_callback = false;
-    let turn_resp = timeout(t, async {
-        loop {
-            let value = read_line_json(&mut reader).await;
-
-            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
-                got_callback = true;
-                let callback_id = value["id"].clone();
-                eprintln!(
-                    "[scenario 23] received tool/execute callback: {}",
-                    value["params"]["name"]
-                );
-                let callback_resp = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": callback_id,
-                    "result": {
-                        "content": "The secret code for 'beta' is KESTREL-99.",
-                        "is_error": false
-                    }
-                });
-                send_request(&mut writer, &callback_resp).await;
-                continue;
-            }
-
-            if value.get("id") == Some(&serde_json::json!(id)) {
-                return value;
-            }
-        }
-    })
-    .await
-    .expect("turn/start with late-registered callback tool timed out");
+    let (turn_resp, callback_names) = read_response_with_callback_tool_reply(
+        &mut writer,
+        &mut reader,
+        id,
+        t,
+        "secret_lookup",
+        &format!("The secret code for 'beta' is {secret_code}."),
+    )
+    .await;
 
     assert!(
         turn_resp["error"].is_null(),
@@ -1491,16 +1559,193 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     eprintln!("[scenario 23] turn response text: {text}");
 
     assert!(
-        got_callback,
+        callback_names.iter().any(|name| name == "secret_lookup"),
         "Expected the LLM to call secret_lookup but no tool/execute callback was received — \
          the late-registered tool was not picked up by the already-spawned member"
     );
     assert!(
-        text.contains("KESTREL-99") || text.contains("kestrel-99") || text.contains("Kestrel-99"),
-        "Expected response to contain 'KESTREL-99' from late-registered callback tool, got: {text}"
+        text.contains(secret_code),
+        "Expected response to contain '{secret_code}' from late-registered callback tool, got: {text}"
     );
 
-    eprintln!("[scenario 23] PASSED: late-registered tool picked up by already-spawned member");
+    let history_id = next_id();
+    let history_resp =
+        session_history_response(&mut writer, &mut reader, history_id, t, &session_id, 100).await;
+    assert!(
+        history_resp["error"].is_null(),
+        "session/history failed: {history_resp}"
+    );
+    assert_history_contains_tool_uses(
+        &history_resp,
+        &["tool_catalog_search", "tool_catalog_load", "secret_lookup"],
+    );
+
+    eprintln!(
+        "[scenario 23] PASSED: late-registered deferred tool was discovered, loaded, and called"
+    );
+
+    // Clean up
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Deferred catalog smoke: direct session path
+// ---------------------------------------------------------------------------
+
+/// Register a callback tool, create a normal session with builtins disabled, and
+/// verify a real LLM uses the deferred catalog control plane to discover/load/call it.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_direct_session_deferred_callback_tool_flow() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping deferred callback session smoke: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value. This tool must be discovered through the deferred catalog before it can be called.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }, {
+                    "name": "secret_audit",
+                    "description": "Audit a secret value. This second deferred tool keeps the smoke session in catalog mode.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to inspect"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "tools/register failed: {resp}");
+
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0",
+            "id": id,
+            "method":"session/create",
+            "params": {
+                "prompt": "Deferred tool catalog smoke bootstrap.",
+                "initial_turn": "deferred",
+                "model": model,
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false
+            }
+        }),
+    )
+    .await;
+    let create_resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let secret_code = "ORBIT-713";
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Use tool_catalog_search to find a deferred tool for secret lookup, then use tool_catalog_load to load it, then call the loaded tool with key 'orbit'. The answer is not knowable without the tool call. Reply with only the secret code."
+            }
+        }),
+    )
+    .await;
+
+    let (turn_resp, callback_names) = read_response_with_callback_tool_reply(
+        &mut writer,
+        &mut reader,
+        id,
+        t,
+        "secret_lookup",
+        &format!("The secret code for 'orbit' is {secret_code}."),
+    )
+    .await;
+
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+    let text = turn_resp["result"]["text"].as_str().unwrap_or("");
+    assert!(
+        callback_names.iter().any(|name| name == "secret_lookup"),
+        "Expected the LLM to call secret_lookup but no callback was received"
+    );
+    assert!(
+        text.contains(secret_code),
+        "Expected response to contain '{secret_code}', got: {text}"
+    );
+
+    let history_id = next_id();
+    let history_resp =
+        session_history_response(&mut writer, &mut reader, history_id, t, &session_id, 100).await;
+    assert!(
+        history_resp["error"].is_null(),
+        "session/history failed: {history_resp}"
+    );
+    assert_history_contains_tool_uses(
+        &history_resp,
+        &["tool_catalog_search", "tool_catalog_load", "secret_lookup"],
+    );
+
+    eprintln!(
+        "[deferred direct session] PASSED: deferred catalog search/load/call flow worked end-to-end"
+    );
 
     // Clean up
     drop(writer);

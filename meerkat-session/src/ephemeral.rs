@@ -103,6 +103,11 @@ enum SessionCommand {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    SetToolVisibilityState {
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     SyncSystemContextState {
         reply_tx: oneshot::Sender<()>,
     },
@@ -293,6 +298,16 @@ pub trait SessionAgent: Send {
         _filter: meerkat_core::ToolFilter,
     ) -> Result<(), meerkat_core::error::AgentError> {
         Ok(())
+    }
+
+    /// Replace the canonical tool visibility state carried by the live session.
+    fn set_tool_visibility_state(
+        &mut self,
+        _state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "tool visibility updates are not supported by this session agent".to_string(),
+        ))
     }
 
     /// Cancel the currently running turn.
@@ -617,6 +632,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })?;
 
         Ok(session)
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::SetToolVisibilityState { state, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     /// Get shared deferred-turn control state for a session, if available.
@@ -1873,6 +1918,11 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StageToolFilter { filter, reply_tx } => {
                 let _ = reply_tx.send(agent.stage_external_tool_filter(filter));
+                continue;
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::SetToolVisibilityState { state, reply_tx } => {
+                let _ = reply_tx.send(agent.set_tool_visibility_state(state));
                 continue;
             }
             SessionCommand::SyncSystemContextState { reply_tx } => {

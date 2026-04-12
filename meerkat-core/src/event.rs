@@ -100,6 +100,31 @@ pub struct ToolConfigChangedPayload {
     pub persisted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_at_turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<ToolConfigChangeDomain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_catalog_delta: Option<DeferredCatalogDelta>,
+}
+
+/// Optional typed domain for tool-configuration change payloads.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolConfigChangeDomain {
+    ToolScope,
+    DeferredCatalog,
+}
+
+/// Additive hidden-catalog delta metadata for runtime notices.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeferredCatalogDelta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_hidden_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_hidden_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_sources: Vec<String>,
 }
 
 /// Operation kind for live tool configuration changes.
@@ -203,6 +228,8 @@ impl ExternalToolDelta {
             status: self.status_text(),
             persisted: self.persisted,
             applied_at_turn: self.applied_at_turn,
+            domain: None,
+            deferred_catalog_delta: None,
         }
     }
 }
@@ -752,6 +779,8 @@ mod tests {
                     status: "staged".to_string(),
                     persisted: false,
                     applied_at_turn: Some(12),
+                    domain: None,
+                    deferred_catalog_delta: None,
                 },
             },
             AgentEvent::BackgroundJobCompleted {
@@ -935,6 +964,8 @@ mod tests {
                     status: "applied".to_string(),
                     persisted: true,
                     applied_at_turn: Some(1),
+                    domain: None,
+                    deferred_catalog_delta: None,
                 },
             },
             AgentEvent::BackgroundJobCompleted {

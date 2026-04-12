@@ -2,7 +2,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;

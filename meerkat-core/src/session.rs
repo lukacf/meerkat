@@ -13,9 +13,10 @@ use crate::Provider;
 use crate::peer_meta::PeerMeta;
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
-use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolResult, Usage};
+use crate::tool_scope::ToolFilter;
+use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolProvenance, ToolResult, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Current session format version
@@ -107,6 +108,9 @@ pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
 /// Metadata key used to store recoverable build-only session state.
 pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
 
+/// Metadata key used to store durable session-local tool visibility intent.
+pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_state_v1";
+
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 
@@ -169,6 +173,48 @@ fn is_default_hook_run_overrides(value: &crate::HookRunOverrides) -> bool {
 
 fn is_default_call_timeout_override(value: &crate::CallTimeoutOverride) -> bool {
     value == &crate::CallTimeoutOverride::default()
+}
+
+fn is_tool_filter_all(value: &ToolFilter) -> bool {
+    matches!(value, ToolFilter::All)
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Persisted witness for a durable tool-visibility name.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolVisibilityWitness {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_owner_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_provenance: Option<ToolProvenance>,
+}
+
+/// Canonical durable session-local tool visibility intent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionToolVisibilityState {
+    #[serde(default, skip_serializing_if = "is_tool_filter_all")]
+    pub inherited_base_filter: ToolFilter,
+    #[serde(default, skip_serializing_if = "is_tool_filter_all")]
+    pub active_filter: ToolFilter,
+    #[serde(default, skip_serializing_if = "is_tool_filter_all")]
+    pub staged_filter: ToolFilter,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub active_requested_deferred_names: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub staged_requested_deferred_names: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub active_revision: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub staged_revision: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requested_witnesses: BTreeMap<String, ToolVisibilityWitness>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub filter_witnesses: BTreeMap<String, ToolVisibilityWitness>,
 }
 
 /// Durable build-only session state required to faithfully recover and rebuild
@@ -670,6 +716,23 @@ impl Session {
             .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 
+    /// Store durable tool-visibility control state in the session metadata map.
+    pub fn set_tool_visibility_state(
+        &mut self,
+        state: SessionToolVisibilityState,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load durable tool-visibility control state from the session metadata map.
+    pub fn tool_visibility_state(&self) -> Option<SessionToolVisibilityState> {
+        self.metadata
+            .get(SESSION_TOOL_VISIBILITY_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
     /// Store typed mob operator authority inside canonical build-state metadata.
     pub fn set_mob_tool_authority_context(
         &mut self,
@@ -1144,6 +1207,32 @@ mod tests {
             .set_mob_tool_authority_context(None)
             .expect("authority should clear");
         assert!(session.mob_tool_authority_context().is_none());
+    }
+
+    #[test]
+    fn test_session_tool_visibility_state_roundtrip() {
+        let mut session = Session::new();
+        let state = SessionToolVisibilityState {
+            inherited_base_filter: ToolFilter::Allow(["visible".to_string()].into_iter().collect()),
+            active_filter: ToolFilter::Allow(
+                ["visible".to_string(), "missing".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+            staged_filter: ToolFilter::Allow(
+                ["visible".to_string(), "missing".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
+            active_revision: 1,
+            staged_revision: 2,
+            ..Default::default()
+        };
+
+        session
+            .set_tool_visibility_state(state.clone())
+            .expect("tool visibility state should serialize");
+        assert_eq!(session.tool_visibility_state(), Some(state));
     }
 
     #[test]

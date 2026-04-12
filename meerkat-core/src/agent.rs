@@ -28,6 +28,10 @@ use crate::session::Session;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::tool_catalog::{
+    ToolCatalogCapabilities, ToolCatalogEntry, ToolCatalogMode, deferred_session_entry_count,
+    select_catalog_mode_from_snapshot,
+};
 use crate::tool_scope::ToolScope;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
@@ -36,7 +40,7 @@ use crate::types::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 pub use builder::AgentBuilder;
@@ -213,6 +217,37 @@ impl BindOutcome {
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
+
+    /// Query exact catalog support for this dispatcher.
+    ///
+    /// Dispatchers report `exact_catalog=true` only when `tool_catalog()`
+    /// returns the exact precedence-resolved winner registry for the plane
+    /// they own. Wrappers that cannot prove exactness must leave this false.
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        ToolCatalogCapabilities::default()
+    }
+
+    /// Return the precedence-resolved tool catalog for this dispatcher.
+    ///
+    /// The default implementation mirrors `tools()` as a visible-only inline
+    /// catalog. Callers must gate any deferred-catalog behavior on
+    /// `tool_catalog_capabilities().exact_catalog`.
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        self.tools()
+            .iter()
+            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Return non-draining pending source names for exact-catalog discovery.
+    ///
+    /// Pending sources are catalog-level discovery metadata rather than
+    /// provider-visible tools. The default implementation reports none.
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        Arc::from([])
+    }
+
     /// Execute a tool call, returning the transcript result and any async operations.
     ///
     /// The `ToolDispatchOutcome` separates transcript data (`result`) from
@@ -258,6 +293,47 @@ pub trait AgentToolDispatcher: Send + Sync {
     ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
         None
     }
+}
+
+/// Compute whether the current exact catalog should stay inline or switch to deferred mode.
+pub fn select_tool_catalog_mode<T>(dispatcher: &T) -> ToolCatalogMode
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    let capabilities = dispatcher.tool_catalog_capabilities();
+    if !capabilities.exact_catalog {
+        return ToolCatalogMode::Inline;
+    }
+    let pending_sources = dispatcher.pending_catalog_sources();
+    let catalog = dispatcher.tool_catalog();
+    select_catalog_mode_from_snapshot(
+        capabilities.exact_catalog,
+        catalog.as_ref(),
+        pending_sources.as_ref(),
+    )
+}
+
+/// Compute whether the catalog control plane should be composed for this
+/// dispatcher, even if the current adaptive snapshot remains inline.
+pub fn should_compose_tool_catalog_control_plane<T>(dispatcher: &T) -> bool
+where
+    T: AgentToolDispatcher + ?Sized,
+{
+    let capabilities = dispatcher.tool_catalog_capabilities();
+    if !capabilities.exact_catalog {
+        return false;
+    }
+    if capabilities.may_require_catalog_control_plane {
+        return true;
+    }
+
+    let pending_sources = dispatcher.pending_catalog_sources();
+    if !pending_sources.is_empty() {
+        return true;
+    }
+
+    let catalog = dispatcher.tool_catalog();
+    deferred_session_entry_count(catalog.as_ref()) > 0
 }
 
 /// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].
@@ -639,6 +715,10 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
+    /// Last published hidden deferred-catalog names.
+    pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
+    /// Last published pending catalog sources.
+    pub(crate) last_pending_catalog_sources: BTreeSet<String>,
 }
 
 #[cfg(test)]

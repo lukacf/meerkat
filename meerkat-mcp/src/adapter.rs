@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::{
-    ExternalToolDelta, ExternalToolUpdate, ToolCallView, ToolDef, ToolResult,
-    agent::AgentToolDispatcher,
+    ExternalToolDelta, ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry,
+    ToolDef, ToolResult, agent::AgentToolDispatcher,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -25,16 +25,22 @@ pub struct McpRouterAdapter {
     router: AsyncRwLock<Option<McpRouter>>,
     has_pending: AtomicBool,
     tools_cache: StdRwLock<Arc<[Arc<ToolDef>]>>,
+    catalog_cache: StdRwLock<Arc<[ToolCatalogEntry]>>,
+    pending_sources_cache: StdRwLock<Arc<[String]>>,
 }
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         let has_pending = router.has_pending_or_notices();
         let tools = AgentToolDispatcher::tools(&router);
+        let catalog = AgentToolDispatcher::tool_catalog(&router);
+        let pending_sources: Arc<[String]> = router.pending_sources_snapshot().into();
         Self {
             router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
             tools_cache: StdRwLock::new(tools),
+            catalog_cache: StdRwLock::new(catalog),
+            pending_sources_cache: StdRwLock::new(pending_sources),
         }
     }
 
@@ -55,8 +61,44 @@ impl McpRouterAdapter {
         }
     }
 
+    fn set_catalog_cache(&self, catalog: Arc<[ToolCatalogEntry]>) {
+        match self.catalog_cache.write() {
+            Ok(mut guard) => *guard = catalog,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = catalog;
+            }
+        }
+    }
+
+    fn cached_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        match self.catalog_cache.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn set_pending_sources_cache(&self, pending_sources: Arc<[String]>) {
+        match self.pending_sources_cache.write() {
+            Ok(mut guard) => *guard = pending_sources,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = pending_sources;
+            }
+        }
+    }
+
+    fn cached_pending_sources(&self) -> Arc<[String]> {
+        match self.pending_sources_cache.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     fn sync_router_projection(&self, router: &McpRouter) {
         self.set_tools_cache(AgentToolDispatcher::tools(router));
+        self.set_catalog_cache(AgentToolDispatcher::tool_catalog(router));
+        self.set_pending_sources_cache(router.pending_sources_snapshot().into());
         self.has_pending
             .store(router.has_pending_or_notices(), Ordering::Release);
     }
@@ -81,6 +123,7 @@ impl McpRouterAdapter {
         }
         self.has_pending.store(false, Ordering::Release);
         self.set_tools_cache(Arc::from([]));
+        self.set_pending_sources_cache(Arc::from([]));
     }
 
     /// Stage an MCP server add operation.
@@ -232,6 +275,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
                 Some(router) => {
                     let tools = AgentToolDispatcher::tools(router);
                     self.set_tools_cache(tools.clone());
+                    self.set_catalog_cache(AgentToolDispatcher::tool_catalog(router));
                     tools
                 }
                 None => self.cached_tools(),
@@ -274,6 +318,31 @@ impl AgentToolDispatcher for McpRouterAdapter {
 
         self.sync_router_projection(router);
         update
+    }
+
+    fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: true,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+        match self.router.try_read() {
+            Ok(router) => match router.as_ref() {
+                Some(router) => {
+                    let catalog = AgentToolDispatcher::tool_catalog(router);
+                    self.set_catalog_cache(catalog.clone());
+                    catalog
+                }
+                None => self.cached_catalog(),
+            },
+            Err(_) => self.cached_catalog(),
+        }
+    }
+
+    fn pending_catalog_sources(&self) -> Arc<[String]> {
+        self.cached_pending_sources()
     }
 }
 
@@ -324,6 +393,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_adapter_reports_exact_catalog_support() {
+        let adapter = McpRouterAdapter::new(McpRouter::new());
+        assert!(
+            adapter.tool_catalog_capabilities().exact_catalog,
+            "empty MCP adapters should preserve exact deferred catalogs on other tool planes"
+        );
+        assert!(adapter.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_empty_adapter_keeps_exact_catalog_support_and_reports_pending_sources() {
+        let adapter = McpRouterAdapter::new(McpRouter::new());
+        adapter.has_pending.store(true, Ordering::Release);
+        adapter.set_pending_sources_cache(Arc::from(["pending-mcp".to_string()]));
+
+        assert!(
+            adapter.tool_catalog_capabilities().exact_catalog,
+            "empty pending MCP adapters should preserve exact catalog support on sibling planes"
+        );
+        assert_eq!(
+            adapter.pending_catalog_sources().as_ref(),
+            ["pending-mcp".to_string()].as_slice()
+        );
+    }
+
+    #[tokio::test]
     async fn wait_until_ready_returns_notices_when_server_connects() {
         let Some(server_path) = skip_if_no_test_server() else {
             return;
@@ -352,6 +447,52 @@ mod tests {
         assert!(
             update.pending.is_empty(),
             "no servers should be pending after wait_until_ready"
+        );
+
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn connected_adapter_reports_exact_catalog_support_with_deferred_entries() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+
+        let mut router = McpRouter::new();
+        router
+            .add_server(test_server_config("exact-srv", &server_path))
+            .await
+            .expect("add server");
+
+        let adapter = McpRouterAdapter::new(router);
+        let catalog = adapter.tool_catalog();
+
+        assert!(
+            adapter.tool_catalog_capabilities().exact_catalog,
+            "connected MCP adapters should keep exact catalog support"
+        );
+        assert!(
+            !catalog.is_empty(),
+            "connected MCP adapters should publish a canonical catalog"
+        );
+        assert!(
+            catalog.iter().all(|entry| matches!(
+                entry.deferred_eligibility,
+                meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { .. }
+            )),
+            "connected MCP catalog entries should stay deferred-eligible when provenance proves stable ownership"
+        );
+        assert_eq!(
+            adapter
+                .tools()
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>(),
+            catalog
+                .iter()
+                .map(|entry| entry.tool.name.clone())
+                .collect::<Vec<_>>(),
+            "adapter tools() should expose the same canonical winner set as its exact catalog"
         );
 
         adapter.shutdown().await;

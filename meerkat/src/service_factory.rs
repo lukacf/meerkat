@@ -202,6 +202,36 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn set_tool_visibility_state(
+        &mut self,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        let visibility_state = state.clone().unwrap_or_default();
+        self.agent
+            .tool_scope()
+            .set_visibility_state(visibility_state)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to replace tool visibility state on live scope: {err}"
+                ))
+            })?;
+        if let Some(state) = state {
+            self.agent
+                .session_mut()
+                .set_tool_visibility_state(state)
+                .map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to persist tool visibility state into session metadata: {err}"
+                    ))
+                })
+        } else {
+            self.agent
+                .session_mut()
+                .remove_metadata(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
+            Ok(())
+        }
+    }
+
     fn sync_system_context_state(&mut self) {
         self.agent.sync_system_context_state_to_session();
     }

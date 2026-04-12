@@ -73,6 +73,40 @@ fn write_deferred_turn_state(
     })
 }
 
+fn rollback_tool_visibility_state_snapshot(
+    session: &Session,
+) -> Option<meerkat_core::SessionToolVisibilityState> {
+    if let Some(state) = session.tool_visibility_state() {
+        return Some(state);
+    }
+
+    let mut state = meerkat_core::SessionToolVisibilityState::default();
+    let mut changed = false;
+
+    if let Some(raw_filter) = session
+        .metadata()
+        .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
+        .cloned()
+        && let Ok(filter) = serde_json::from_value::<meerkat_core::ToolFilter>(raw_filter)
+    {
+        state.active_filter = filter.clone();
+        state.staged_filter = filter;
+        changed = true;
+    }
+
+    if let Some(raw_filter) = session
+        .metadata()
+        .get(meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY)
+        .cloned()
+        && let Ok(filter) = serde_json::from_value::<meerkat_core::ToolFilter>(raw_filter)
+    {
+        state.inherited_base_filter = filter;
+        changed = true;
+    }
+
+    changed.then_some(state)
+}
+
 fn control_error_into_session_error(err: SessionControlError) -> SessionError {
     match err {
         SessionControlError::Session(session_err) => session_err,
@@ -959,7 +993,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         filter: meerkat_core::ToolFilter,
     ) -> Result<(), SessionError> {
-        self.inner.set_session_tool_filter(id, filter).await
+        let previous_visibility_state = self
+            .export_session_with_labels(id)
+            .await
+            .map(|session| rollback_tool_visibility_state_snapshot(&session))?;
+
+        self.inner.set_session_tool_filter(id, filter).await?;
+
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self
+                .inner
+                .set_session_tool_visibility_state(id, previous_visibility_state)
+                .await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
@@ -1818,6 +1866,44 @@ mod tests {
                     "failed to update dummy session metadata: {err}"
                 ))
             })
+        }
+
+        fn stage_external_tool_filter(
+            &mut self,
+            filter: meerkat_core::ToolFilter,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut state = session.tool_visibility_state().unwrap_or_default();
+            state.staged_filter = filter;
+            state.staged_revision = state.staged_revision.max(state.active_revision) + 1;
+            session.set_tool_visibility_state(state).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update dummy visibility state: {err}"
+                ))
+            })
+        }
+
+        fn set_tool_visibility_state(
+            &mut self,
+            state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(state) = state {
+                session.set_tool_visibility_state(state).map_err(|err| {
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to replace dummy visibility state: {err}"
+                    ))
+                })
+            } else {
+                session.remove_metadata(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
+                Ok(())
+            }
         }
 
         fn session_id(&self) -> SessionId {
@@ -3836,6 +3922,133 @@ mod tests {
         assert!(
             exported.session_metadata().unwrap().keep_alive,
             "should roll back to true after failed true→false (not flip to false)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_session_tool_filter_persists_to_store() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        let filter =
+            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
+
+        service
+            .set_session_tool_filter(&id, filter.clone())
+            .await
+            .expect("set_session_tool_filter should succeed");
+
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        let exported_state = exported
+            .tool_visibility_state()
+            .expect("live session should carry visibility state after staging");
+        assert_eq!(exported_state.staged_filter, filter);
+        assert_eq!(exported_state.active_filter, meerkat_core::ToolFilter::All);
+        assert_eq!(exported_state.staged_revision, 1);
+        assert_eq!(exported_state.active_revision, 0);
+
+        let persisted = store.load(&id).await.unwrap().unwrap();
+        let persisted_state = persisted
+            .tool_visibility_state()
+            .expect("persisted session should carry visibility state after staging");
+        assert_eq!(persisted_state, exported_state);
+    }
+
+    #[tokio::test]
+    async fn test_set_session_tool_filter_rolls_back_on_store_failure() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let service =
+            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        let baseline = service.export_session_with_labels(&id).await.unwrap();
+        assert!(
+            baseline.tool_visibility_state().is_none(),
+            "new sessions should not materialize visibility metadata before updates"
+        );
+
+        let filter =
+            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect());
+
+        fail_store.set_fail_save(true);
+        let result = service.set_session_tool_filter(&id, filter).await;
+        assert!(
+            result.is_err(),
+            "store failure should abort the filter update"
+        );
+        fail_store.set_fail_save(false);
+
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        assert_eq!(
+            exported.tool_visibility_state(),
+            baseline.tool_visibility_state(),
+            "live session should roll back to the pre-mutation visibility state"
+        );
+
+        let persisted = fail_store.inner.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted.tool_visibility_state(),
+            baseline.tool_visibility_state(),
+            "store should retain the pre-mutation visibility state after rollback"
+        );
+    }
+
+    #[test]
+    fn rollback_snapshot_recovers_legacy_filter_metadata_when_canonical_state_is_absent() {
+        let mut session = Session::new();
+        session.set_metadata(
+            meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(meerkat_core::ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .unwrap(),
+        );
+        session.set_metadata(
+            meerkat_core::tool_scope::INHERITED_TOOL_FILTER_METADATA_KEY,
+            serde_json::to_value(meerkat_core::ToolFilter::Allow(
+                ["visible".to_string()].into_iter().collect(),
+            ))
+            .unwrap(),
+        );
+
+        let snapshot = rollback_tool_visibility_state_snapshot(&session)
+            .expect("legacy-only metadata should still produce a rollback snapshot");
+
+        assert_eq!(
+            snapshot.active_filter,
+            meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect())
+        );
+        assert_eq!(
+            snapshot.staged_filter,
+            meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect())
+        );
+        assert_eq!(
+            snapshot.inherited_base_filter,
+            meerkat_core::ToolFilter::Allow(["visible".to_string()].into_iter().collect())
         );
     }
 

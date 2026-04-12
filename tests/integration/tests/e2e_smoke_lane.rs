@@ -46,6 +46,10 @@ smoke_suite!(
 );
 smoke_suite!(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
 smoke_suite!(
+    e2e_smoke_rpc_deferred_catalog_session,
+    "rpc-deferred-catalog-session"
+);
+smoke_suite!(
     e2e_smoke_cli_background_job_active_turn,
     "cli-background-job-active-turn"
 );

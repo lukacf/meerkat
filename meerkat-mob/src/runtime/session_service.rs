@@ -1,5 +1,10 @@
 use super::*;
+use meerkat_core::AgentExecutionSnapshot;
+use meerkat_core::CommsCapabilityError;
+use meerkat_core::ExternalToolSurfaceSnapshot;
+use meerkat_core::PeerIngressRuntimeSnapshot;
 use meerkat_core::Session;
+use meerkat_core::ToolScopeSnapshot;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -133,6 +138,34 @@ pub trait MobSessionService:
         None
     }
 
+    async fn execution_snapshot(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<AgentExecutionSnapshot>, SessionError> {
+        Ok(None)
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<ToolScopeSnapshot>, SessionError> {
+        Ok(None)
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<ExternalToolSurfaceSnapshot>, SessionError> {
+        Ok(None)
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<PeerIngressRuntimeSnapshot>, SessionError> {
+        Ok(None)
+    }
+
     /// Whether a listed session belongs to the given mob for reconciliation.
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
         false
@@ -195,6 +228,44 @@ where
             key,
             || Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
         ))
+    }
+
+    async fn execution_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<AgentExecutionSnapshot>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::execution_snapshot(self, session_id).await
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ToolScopeSnapshot>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::tool_scope_snapshot(self, session_id).await
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ExternalToolSurfaceSnapshot>, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::external_tool_surface_snapshot(
+            self, session_id,
+        )
+        .await
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<PeerIngressRuntimeSnapshot>, SessionError> {
+        let Some(runtime) = self.comms_runtime(session_id).await else {
+            return Ok(None);
+        };
+
+        match runtime.peer_ingress_runtime_snapshot().await {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(CommsCapabilityError::Unsupported(_)) => Ok(None),
+        }
     }
 
     async fn subscribe_session_events(
@@ -270,6 +341,44 @@ where
                     ))
                 })
             })
+        }
+    }
+
+    async fn execution_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<AgentExecutionSnapshot>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::execution_snapshot(self, session_id).await
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ToolScopeSnapshot>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::tool_scope_snapshot(self, session_id).await
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ExternalToolSurfaceSnapshot>, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::external_tool_surface_snapshot(
+            self, session_id,
+        )
+        .await
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<PeerIngressRuntimeSnapshot>, SessionError> {
+        let Some(runtime) = self.comms_runtime(session_id).await else {
+            return Ok(None);
+        };
+
+        match runtime.peer_ingress_runtime_snapshot().await {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(CommsCapabilityError::Unsupported(_)) => Ok(None),
         }
     }
 

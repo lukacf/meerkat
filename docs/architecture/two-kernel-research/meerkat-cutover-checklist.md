@@ -10,6 +10,15 @@ It remains useful as the audit trail that produced the implementation baseline.
 The target-state machine is now frozen separately in
 `meerkat-machine-freeze.md`.
 
+Post-freeze alignment note:
+
+- the current branch exact-current freeze still stands as written
+- a rebase probe against `origin/main` showed concentrated upstream drift in
+  the `tools` region
+- that drift is recorded in `meerkat-upstream-tool-alignment.md`
+- the next full rebase should therefore reopen `MeerkatMachine.tools`
+  deliberately rather than treating those conflicts as generic merge noise
+
 It is derived from:
 
 - `cutover-gate.md`
@@ -71,7 +80,9 @@ What no longer blocks semantic freeze:
 - turn/ops/barrier coupling now has an exact-current freeze note
 - peer-ingress lifecycle is frozen as a live queue/authority seam, including
   the explicit absence of durable queue replay
-- tool-surface lifecycle is frozen as the live router-authority snapshot seam
+- the rebased tools region is now frozen as:
+  - durable `tool_visibility`
+  - live router-authority `tool_surface`
 - drain / keep-alive lifecycle is frozen as the live adapter-owned seam
 - the Meerkat input/effect alphabet exists
 - the Meerkat lowering map exists
@@ -104,7 +115,7 @@ Current `K2` read:
 | K2 | Freeze detached-wake and continuation interaction | Done | Exact current detached-wake and continuation behavior is now frozen, including canonical feed-backed behavior and the legacy compatibility fallback | `meerkat-detached-wake-freeze.md` exists; feed-backed idle/post-drain continuation injection has direct machine proofs; non-quiescent defer behavior is captured; completion-kind filtering is captured; legacy `DetachedWakeState` behavior is explicitly classified as compatibility fallback |
 | K3 | Freeze turn / ops / barrier coupling | Done | Barrier satisfaction and turn/ops coupling are now frozen as exact-current live semantics | `meerkat-turn-ops-barrier-freeze.md` exists; authority proofs, live runner lowering, and joined validator proofs exist |
 | K4 | Freeze peer-ingress lifecycle and recovery | Done | Peer-ingress lifecycle is now frozen as the exact current live queue/authority seam, including the explicit absence of durable queue replay | `meerkat-peer-ingress-freeze.md` exists; trust/classification/runtime-snapshot proofs exist; exact-current recovery classification is explicit |
-| K5 | Freeze external tool-surface lifecycle and recovery | Done | Tool-surface lifecycle is now frozen as the exact current live router-authority snapshot seam | `meerkat-tool-surface-freeze.md` exists; staged/apply/finalize/router proofs and joined Meerkat proof exist |
+| K5 | Freeze external tool visibility / surface lifecycle and recovery | Done | The rebased exact-current tools region is now frozen as durable `tool_visibility` plus live router-authority `tool_surface` | `meerkat-tool-visibility-freeze.md` exists; `meerkat-tool-surface-freeze.md` exists; staged/apply/finalize/router proofs and joined Meerkat proof exist; current exact-current ownership split is explicit |
 | K6 | Freeze drain and keep-alive lifecycle | Done | Drain lifecycle is now frozen as the exact current live adapter-owned seam | `meerkat-drain-freeze.md` exists; adapter, joined Meerkat, and seam-classification proofs exist |
 | K7 | Write and freeze the Meerkat input/effect alphabet | Done | The exact current Meerkat alphabet now exists | `meerkat-input-effect-alphabet.md` exists and explicitly classifies live inputs/effects vs excluded target-state verbs |
 | K8 | Write the Meerkat lowering map | Done | The exact current lowerings from real code into machine inputs/effects are now explicit | `meerkat-lowering-map.md` exists and maps the live code paths |
@@ -123,3 +134,12 @@ The next active step is:
 4. extend the existing target-state TLC scaffold in `tla/`, which now passes
    bounded base and stress TLC runs, into the full proof model
 5. review implementation-vs-target deltas before any write-side switch planning
+
+If the next full rebase is attempted before cutover work, use:
+
+- `meerkat-upstream-tool-alignment.md`
+- `meerkat-tool-visibility-upstream-baseline.md`
+- `meerkat-tools-realignment-plan.md`
+- `meerkat-tools-merge-strategy.md`
+
+as the machine-led source of truth for the tools region.

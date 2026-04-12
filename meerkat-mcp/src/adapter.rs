@@ -44,9 +44,6 @@ impl McpRouterAdapter {
             catalog_cache: StdRwLock::new(catalog),
             pending_sources_cache: StdRwLock::new(pending_sources),
             surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
-            catalog_cache: StdRwLock::new(catalog),
-            pending_sources_cache: StdRwLock::new(pending_sources),
-            surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
         }
     }
 

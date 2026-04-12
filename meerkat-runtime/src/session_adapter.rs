@@ -952,11 +952,8 @@ impl RuntimeSessionAdapter {
     /// with a non-None comms runtime for this session (e.g., via
     /// `SessionRuntime::enable_comms_drain`).
     pub async fn session_has_comms(&self, session_id: &SessionId) -> bool {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(|entry| entry.comms_runtime.is_some())
-            .unwrap_or(false)
+        let slots = self.comms_drain_slots.read().await;
+        slots.contains_key(session_id)
     }
 
     /// Cancel the currently-running turn for a registered session.

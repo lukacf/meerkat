@@ -244,6 +244,24 @@ pub struct HelperResult {
     pub session_id: Option<meerkat_core::types::SessionId>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MeerkatShadowInputsSnapshot {
+    /// Best-effort live execution snapshot from the underlying session service.
+    ///
+    /// This is present only when the service owns a canonical live agent-task
+    /// diagnostic path. Runtime-adapter-backed mock services may legitimately
+    /// return `None`.
+    pub execution: Option<meerkat_core::AgentExecutionSnapshot>,
+    /// Best-effort live tool-scope snapshot from the underlying session service.
+    pub tool_scope: Option<meerkat_core::ToolScopeSnapshot>,
+    /// Best-effort live external tool-surface snapshot from the underlying
+    /// session service.
+    pub tool_surface: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
+    /// Best-effort live peer-ingress runtime snapshot from the underlying
+    /// session service or comms runtime.
+    pub peer_ingress: Option<meerkat_core::PeerIngressRuntimeSnapshot>,
+}
+
 /// Target for a wire operation from a local mob member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1452,6 +1470,37 @@ impl MobHandle {
             .iter()
             .map(|(meerkat_id, diagnostic)| (meerkat_id.clone(), diagnostic.clone()))
             .collect()
+    }
+
+    pub(crate) fn diagnostic_runtime_adapter(
+        &self,
+    ) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        self.session_service.runtime_adapter()
+    }
+
+    pub(crate) async fn diagnostic_has_live_session(&self, session_id: &SessionId) -> bool {
+        self.session_service
+            .has_live_session(session_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub(crate) async fn diagnostic_meerkat_shadow_inputs(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MeerkatShadowInputsSnapshot, SessionError> {
+        Ok(MeerkatShadowInputsSnapshot {
+            execution: self.session_service.execution_snapshot(session_id).await?,
+            tool_scope: self.session_service.tool_scope_snapshot(session_id).await?,
+            tool_surface: self
+                .session_service
+                .external_tool_surface_snapshot(session_id)
+                .await?,
+            peer_ingress: self
+                .session_service
+                .peer_ingress_runtime_snapshot(session_id)
+                .await?,
+        })
     }
 
     /// Set or clear the spawn policy for automatic member provisioning.

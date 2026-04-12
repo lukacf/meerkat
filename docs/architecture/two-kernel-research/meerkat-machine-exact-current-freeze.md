@@ -32,6 +32,7 @@ The full exact-current `MeerkatMachine` boundary includes:
 - async operations and `wait_all`
 - detached wake / continuation injection
 - peer ingress
+- tool visibility
 - external tool surface
 - drain / keep-alive lifecycle
 
@@ -41,6 +42,7 @@ The exact-current freeze assets that compose this machine are:
 - `meerkat-detached-wake-freeze.md`
 - `meerkat-turn-ops-barrier-freeze.md`
 - `meerkat-peer-ingress-freeze.md`
+- `meerkat-tool-visibility-freeze.md`
 - `meerkat-tool-surface-freeze.md`
 - `meerkat-drain-freeze.md`
 - `meerkat-input-effect-alphabet.md`
@@ -58,6 +60,7 @@ That means it intentionally includes:
 - current plain vs attached lifecycle differences
 - current steer-lane differences between retire, reset, stop, and destroy
 - current public peer-ingress and drain seams
+- current durable tool-visibility owner and projection seam
 - current published tool-surface snapshot scope
 - current compatibility fallback for detached wake when no completion feed is
   present

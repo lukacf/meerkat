@@ -1,17 +1,30 @@
 # Mob-Meerkat Bridge Alphabet
 
-Status: working draft
+Status: frozen seam alphabet
 
 ## Purpose
 
-This document defines the exact semantic alphabet for the `MobMachine <-> MeerkatMachine` seam.
+This document defines the exact semantic alphabet for the `MobMachine <->
+MeerkatMachine` seam.
 
 It refines:
 
 - `abstract-member-contract.md`
 - `owned-facts-ledger.md`
 
-The goal is to make the seam small enough to prove, but explicit enough that we do not recreate hidden state by accident.
+The goal is to make the seam small enough to prove, but explicit enough that we
+do not recreate hidden state by accident.
+
+This alphabet is now part of the frozen composition package rather than an open
+draft. The exact-current implementation may still lower into this alphabet
+through older runtime/session entry points, but the target seam itself is no
+longer provisional.
+
+See also:
+
+- `mob-meerkat-composition-freeze.md`
+- `mob-meerkat-composition-proof-handoff.md`
+- `abstract-member-contract.md`
 
 ## Design Rules
 
@@ -24,8 +37,10 @@ The goal is to make the seam small enough to prove, but explicit enough that we 
 - No raw wire or unwire command exists in this alphabet.
 - Public addressability policy is not part of this alphabet; internal work dispatch must not depend on it.
 - No raw session-local identifiers, runtime epoch identifiers, queue depth, barrier state, or wake/drain internals may cross the seam.
-- `WorkRef` and `WorkSpec` are proposed new seam abstractions. Current code still expresses this behavior through raw turn-delivery paths.
-- Hiding `SessionId` is target-state migration work. Current roster and tooling surfaces still leak it.
+- `WorkRef` and `WorkSpec` are canonical seam abstractions. Current code may
+  still express parts of this behavior through raw turn-delivery paths.
+- Hiding `SessionId` is still target-state refinement work. Current roster and
+  tooling surfaces still leak it.
 
 ## Semantic Entities
 
@@ -82,14 +97,16 @@ The bridge alphabet is smaller than that:
 - `RetireMember` lowers to `RetireIncarnation`.
 - `DestroyMember` lowers to `DestroyIncarnation`.
 
-This keeps reset and respawn semantics owned by `MobMachine` while keeping the cross-kernel command surface compact.
+This keeps reset and respawn semantics owned by `MobMachine` while keeping the
+cross-kernel command surface compact.
 
 Higher-level Mob APIs may still exist above this seam. For example:
 
 - `ReconcileRoster` can stay a Mob API that lowers to lifecycle and topology operations.
 - `run_flow`, `flow_status`, and `cancel_flow` can stay Mob APIs that lower to work-lane activity.
 
-Those APIs do not need one-to-one bridge primitives as long as their lowering is explicit.
+Those APIs do not need one-to-one bridge primitives as long as their lowering is
+explicit.
 
 ## Command Alphabet
 

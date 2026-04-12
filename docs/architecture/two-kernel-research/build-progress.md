@@ -17,6 +17,127 @@ Historical note:
 - read the old slice labels as historical shorthand only, not as the current
   milestone scheme
 
+## 2026-04-12 — Slice 242: rebase probe isolates upstream drift to the Meerkat tools seam
+
+Ran the first honest rebase probe against `origin/main` after the machine
+freeze / proof work and then aborted it after the first conflict wave was
+mapped.
+
+The useful result is architectural, not mechanical:
+
+- the first replayed machine commit collided immediately in:
+  - `meerkat-core/src/tool_scope.rs`
+  - `meerkat-core/src/gateway.rs`
+  - `meerkat-mcp/src/adapter.rs`
+  - `meerkat-session/src/ephemeral.rs`
+  - plus export / example fallout in `meerkat-core/src/lib.rs` and
+    `examples/035-mdm-tux-rs/src/bin/target.rs`
+- `origin/main` has materially moved toward durable tool visibility state,
+  exact catalog support, and explicit session-task visibility mutation seams
+- the semantic drift is concentrated in `MeerkatMachine.tools`, not spread
+  uniformly across Meerkat or Mob
+
+That means the next rebase must be machine-led in the `tools` region rather
+than conflict-led. The alignment note is now:
+
+- `meerkat-upstream-tool-alignment.md`
+
+Honest read after this slice:
+
+- the current branch freeze still describes the current branch honestly
+- the next full rebase should deliberately reopen the Meerkat `tools` region
+  against upstream ownership drift
+- the Mob freeze / proof package does not appear to be the primary rebase risk
+
+## 2026-04-12 — Slice 243: tool-region realignment plan replaces generic rebase anxiety
+
+Turned the rebase probe into a concrete machine-alignment plan:
+
+- added `meerkat-tools-realignment-plan.md`
+
+The plan makes the next work explicit:
+
+- split the exact-current tools freeze into:
+  - durable visibility ownership
+  - external tool-surface lifecycle
+- revisit the target `MeerkatMachine.tools` region because the current target
+  schema is probably too small for the upstream visibility/catalog move
+- update the Meerkat input/effect alphabet and target TLA scaffold only after
+  the exact-current seam is re-understood
+
+This is a useful step because it converts “the rebase is scary” into a
+bounded ownership problem with a concrete order of attack.
+
+## 2026-04-12 — Slice 244: upstream tool-visibility baseline is now explicit
+
+Added a concrete upstream-baseline note:
+
+- `meerkat-tool-visibility-upstream-baseline.md`
+
+This closes an important gap in the earlier alignment work. Before this slice,
+the plan said the tools seam had drifted, but a reviewer still had to infer the
+actual new ownership shape from raw `origin/main` code. The new note makes the
+machine-level read explicit:
+
+- upstream now has durable visibility ownership (`SessionToolVisibilityState`)
+- upstream `ToolScope` is already more projection-like than the current-branch
+  freeze story
+- exact catalog support is entering the gateway / adapter seam
+- a session-task visibility mutation seam now exists
+
+That means the next rebase no longer starts from “tool conflicts.” It starts
+from a named upstream baseline for the `tool_visibility` subregion and a
+separate `tool_surface` lifecycle subregion.
+
+## 2026-04-12 — Slice 245: file-by-file tools merge strategy replaces generic conflict handling
+
+Added:
+
+- `meerkat-tools-merge-strategy.md`
+
+This closes the remaining operational gap in the alignment work. Before this
+slice, we knew the tools seam had drifted and we had a realignment plan, but
+the next rebase still depended on ad hoc judgment inside the conflict wave.
+
+The merge strategy now makes the intended source of truth explicit:
+
+- `tool_scope.rs`: upstream ownership, branch projection helpers only
+- `gateway.rs`: upstream exact-catalog semantics
+- `adapter.rs`: upstream exact-catalog and pending-source projection
+- `ephemeral.rs`: upstream session-task visibility mutation seam
+
+That means the next rebase can now be evaluated against a machine-led merge
+plan rather than just “did the code compile afterwards?”
+
+## 2026-04-12 — Slice 246: target tools-region delta is now explicit
+
+Added:
+
+- `meerkat-tools-target-delta.md`
+
+This closes the last conceptual gap in the alignment work so far. Before this
+slice, we had:
+
+- an upstream baseline for the richer tools seam
+- an exact-current realignment plan
+- a file-by-file merge strategy
+
+But we still did not have an explicit target-state read of what that upstream
+ownership move likely means for the frozen `MeerkatMachine.tools` region.
+
+The new note makes that explicit:
+
+- the target `tools` region should likely be treated as
+  `tool_visibility + tool_surface`
+- durable visibility owner state, exact-catalog capability, committed
+  publication revision, dormant missing intent, and ownership witnesses are the
+  main candidate additions
+
+That means the next rebase can now be judged against both sides of the machine:
+
+- the rebased exact-current baseline
+- the re-frozen target-state `tools` region
+
 ## 2026-04-09 — Slice 172: TLC target scaffold caught destroyed-rebind ambiguity
 
 The first executable TLC pass on the target-state `MeerkatMachine` scaffold
@@ -137,6 +258,51 @@ Why this matters:
   recoverable from the transition catalog and coverage matrix
 - implementation refinement no longer depends on remembering the current
   actor/handle paths from code spelunking alone
+
+## 2026-04-12 — Slice 261: Mob-side Meerkat diagnostic bridge lands as best-effort surface
+
+Extended the Mob runtime-facing diagnostic bridge so `MobHandle` can query
+Meerkat-side diagnostic inputs for a live member session through the session
+service when those surfaces are actually available.
+
+What landed in code:
+
+- `meerkat-mob/src/runtime/session_service.rs`
+  - added best-effort diagnostic snapshot methods on `MobSessionService`:
+    - `execution_snapshot(...)`
+    - `tool_scope_snapshot(...)`
+    - `external_tool_surface_snapshot(...)`
+    - `peer_ingress_runtime_snapshot(...)`
+  - wired the real `EphemeralSessionService` / `PersistentSessionService`
+    implementations through to their canonical diagnostic paths
+- `meerkat-mob/src/runtime/handle.rs`
+  - added `MeerkatShadowInputsSnapshot`
+  - added `diagnostic_meerkat_shadow_inputs(...)`
+- `meerkat-mob/src/runtime/tests.rs`
+  - added a live runtime-adapter-backed probe proving the bridge becomes
+    queryable once a member session is live
+
+The useful backtrack was semantic, not mechanical:
+
+- the first test incorrectly assumed a mock-backed runtime-adapter session
+  service must surface a full `AgentExecutionSnapshot`
+- that is not honest: `MockSessionService` owns no canonical live agent-task
+  diagnostic path
+- the bridge is therefore frozen as a best-effort diagnostic surface:
+  real session services may return execution/tool snapshots, while mock-backed
+  runtime-adapter services may legitimately return `None`
+
+Verification:
+
+- focused bridge probe passed
+- full `cargo test -p meerkat-mob --lib` passed
+
+Why this matters:
+
+- the Mob side now has an honest query surface for Meerkat diagnostic inputs
+  when the underlying session service actually owns them
+- we avoided baking a fake “all live members always have execution snapshots”
+  rule into the pre-cutover alignment work
 - the remaining target-state ownership choices are now frozen instead of being
   spread implicitly across older architecture notes
 
@@ -14545,3 +14711,790 @@ Result:
   - flow-step progress
 - wider full-`FairSpec` liveness remains exploratory and is no longer carrying
   canonical proof weight by accident
+
+## Slice 240 - Mob/Meerkat seam composition model proves the small bridge contract
+
+Goal:
+
+- move from isolated machine proofs to the first honest "together" proof
+  surface
+
+What landed:
+
+- added the executable seam model:
+  - `tla/MobMeerkatCompositionTarget.tla`
+- added canonical configs:
+  - `tla/MobMeerkatCompositionTarget.cfg`
+  - `tla/MobMeerkatCompositionTargetStress.cfg`
+  - `tla/MobMeerkatCompositionTargetLifecycleLiveness.cfg`
+  - `tla/MobMeerkatCompositionTargetFlowWorkLiveness.cfg`
+- added handoff docs:
+  - `mob-meerkat-composition-freeze.md`
+  - `mob-meerkat-composition-proof-handoff.md`
+- updated:
+  - `README.md`
+  - `tla/README.md`
+
+Why this slice matters:
+
+- the single-machine proofs establish that `MeerkatMachine` and `MobMachine`
+  are individually coherent, but not yet that `MobMachine` depends only on the
+  small seam contract
+- this composition model proves exactly that reduced claim instead of trying to
+  brute-force the full product of both detailed machines
+- TLC forced two real seam corrections:
+  - pending submit may legally remain targeted at a superseded retiring
+    runtime/fence during reprovision, so the invariant had to be weakened to
+    "matches bound work target" rather than "targets current ready runtime"
+  - `DestroyMember` had to be tightened so destroy cannot be reissued after the
+    bridge has already destroyed the runtime and is waiting on the terminal
+    event
+
+Result:
+
+- base safety passes:
+  - `173` generated / `47` distinct / depth `8`
+- widened safety passes:
+  - `589` generated / `152` distinct / depth `10`
+- lifecycle liveness passes:
+  - `407` generated / `197` distinct / depth `15`
+- flow/work liveness passes:
+  - `25` generated / `19` distinct / depth `13`
+- we now have a first honest proof surface for "machines together" at the seam
+  abstraction, not just in isolation
+
+## Slice 241 - Seam composition package gets review-ready closeout
+
+Goal:
+
+- make the new composition proof surface reviewable as a closed package instead
+  of a bare model plus TLC outputs
+
+What landed:
+
+- added:
+  - `mob-meerkat-composition-closeout.md`
+  - `mob-meerkat-composition-package-audit.md`
+- updated:
+  - `README.md`
+
+Why this slice matters:
+
+- the single-machine proof packages already had explicit closeout and audit
+  surfaces
+- without the same treatment, the composition proof could still look
+  second-class even though it is now the key “machines together” artifact
+
+Result:
+
+- the seam composition proof is now packaged as a closed review surface, not
+  just a passing TLA model
+
+## Slice 242 - Rebased machine baseline restored after upstream tool-visibility drift
+
+Goal:
+
+- bring the frozen `MeerkatMachine` / `MobMachine` / seam proof baseline
+  forward onto `origin/main` without losing machine honesty
+
+What happened:
+
+- rebased `codex/machines-redux` onto `origin/main`
+- the only real semantic conflict cluster was the expected tools seam:
+  - `meerkat-core/src/tool_scope.rs`
+  - `meerkat-core/src/gateway.rs`
+  - `meerkat-mcp/src/adapter.rs`
+  - `meerkat-session/src/ephemeral.rs`
+- resolved those files machine-first:
+  - upstream exact-catalog and durable visibility ownership won
+  - branch-side machine diagnostic/projection surfaces were retained only where
+    they are still genuinely consumed
+- two post-rebase code fixes were required:
+  - `ToolScopeSnapshot` now projects from `SessionToolVisibilityState`
+    instead of pre-upstream `ToolScopeState` filter fields
+  - `RuntimeSessionAdapter::session_has_comms(...)` now reads the
+    adapter-owned comms-drain slot presence instead of a removed
+    `RuntimeSessionEntry.comms_runtime` field
+  - `McpRouterAdapter::new(...)` duplicate cache initialization from the merge
+    was removed
+
+Verification:
+
+- `git diff --check` clean
+- no conflict markers remain outside `specs/**`
+- `cargo check --workspace --all-targets --quiet` passes
+- `cargo test --workspace --lib --quiet` passes
+- `cargo test --workspace --tests --quiet` passes
+- canonical Meerkat TLC safety lanes pass:
+  - base: `56,757` generated / `14,954` distinct / depth `6`
+  - stress: `432,922` generated / `110,144` distinct / depth `7`
+- canonical Mob TLC lanes pass:
+  - base safety: `10,821` / `1,110` / depth `6`
+  - stress safety: `388,822` / `25,481` / depth `8`
+  - lifecycle liveness: `922` / `437` / depth `15`
+  - provisioning liveness: `207,110` / `48,862` / depth `26`
+  - recovery liveness: `44` / `18` / depth `7`
+  - task liveness: `9` / `7` / depth `5`
+  - work liveness: `63` / `46` / depth `14`
+  - flow liveness: `1,911` / `1,010` / depth `17`
+- canonical seam composition lanes pass:
+  - base safety: `173` / `47` / depth `8`
+  - stress safety: `589` / `152` / depth `10`
+  - lifecycle liveness: `407` / `197` / depth `15`
+  - flow/work liveness: `25` / `19` / depth `13`
+
+Result:
+
+- the rebased branch is back to a real frozen/proven pre-cutover baseline
+- upstream drift materially advanced `MeerkatMachine.tools`, but did not
+  invalidate `MobMachine` or the seam proof story
+- the active blocker is again cutover/refinement work, not rebase fallout
+
+## Slice 243 - Seam contract docs aligned to the proven composition package
+
+Goal:
+
+- stop leaving the Mob-Meerkat seam prose behind the actual composition proof
+
+What landed:
+
+- upgraded:
+  - `abstract-member-contract.md`
+  - `bridge-alphabet.md`
+- updated:
+  - `mob-meerkat-composition-freeze.md`
+  - `README.md`
+
+Why this slice matters:
+
+- the seam composition model and proof package were already frozen and green,
+  but the underlying seam docs still described themselves as working drafts
+- that made the architecture story weaker than the proof surface actually is
+
+Result:
+
+- the abstract member contract is now explicitly the frozen composition-facing
+  seam contract
+- the bridge alphabet is now explicitly the frozen seam alphabet
+- the composition freeze now states that those seam docs are frozen supporting
+  artifacts rather than open drafts
+
+## Slice 244 - Refinement/cutover program replaces ad hoc "next steps"
+
+Goal:
+
+- turn the now-frozen machine and seam packages into one explicit
+  pre-cutover execution plan
+
+What landed:
+
+- added:
+  - `two-kernel-refinement-program.md`
+- updated:
+  - `README.md`
+
+Why this slice matters:
+
+- the repo already had the frozen machine packages, the frozen seam package,
+  and the cutover gate, but the next action after proof completion was still
+  spread across multiple notes
+- that made it too easy to drift back into ad hoc repair instead of deliberate
+  refinement and cutover preparation
+
+Result:
+
+- the active program is now explicit:
+  - re-freeze the rebased exact-current `MeerkatMachine.tools` seam
+  - write the exact-current seam refinement delta
+  - build lowering maps for `MeerkatMachine` and `MobMachine`
+  - shadow-validate
+  - hard-cut `MeerkatMachine`, then `MobMachine`
+
+## Slice 245 - Rebased exact-current tools seam re-frozen and seam refinement delta opened
+
+Goal:
+
+- bring the rebased exact-current `MeerkatMachine.tools` region and the proven
+  Mob-Meerkat seam into one aligned pre-cutover story
+
+What landed:
+
+- added:
+  - `meerkat-tool-visibility-freeze.md`
+  - `mob-meerkat-composition-refinement-delta.md`
+- updated:
+  - `meerkat-machine-exact-current-freeze.md`
+  - `meerkat-cutover-checklist.md`
+  - `mob-meerkat-composition-proof-handoff.md`
+  - `README.md`
+
+Why this slice matters:
+
+- after the successful rebase, the exact-current branch no longer honestly
+  supports the older tools story that only `tool_surface` is frozen while
+  richer visibility ownership remains purely upstream
+- at the same time, the composition proof package was still leaving the
+  implementation refinement gap implicit
+
+Result:
+
+- the rebased exact-current `MeerkatMachine.tools` region is now explicitly
+  frozen as:
+  - `tool_visibility`
+  - `tool_surface`
+- the Mob-Meerkat seam now has an explicit refinement-delta note, so the
+  remaining gap is clearly classified as implementation lowering work rather
+  than target-machine uncertainty
+
+## Slice 246 - Meerkat implementation delta made explicit for cutover work
+
+Goal:
+
+- stop leaving the Meerkat implementation-vs-target gap spread across multiple
+  freeze notes and machine commitments
+
+What landed:
+
+- added:
+  - `meerkat-machine-refinement-delta.md`
+- updated:
+  - `two-kernel-refinement-program.md`
+  - `README.md`
+
+Why this slice matters:
+
+- the branch now has:
+  - a frozen exact-current `MeerkatMachine`
+  - a frozen target `MeerkatMachine`
+  - a rebased exact-current tools split
+- but the remaining implementation-side gap was still implicit across the
+  target freeze, exact-current freeze, lowering map, and ownership decisions
+
+Result:
+
+- the remaining Meerkat cutover work is now classified explicitly as:
+  - accepted target cleanup
+  - required implementation work
+  - target promotions not yet lowered
+- the refinement program no longer describes the exact-current tools/seam work
+  as future tense; it now points to the concrete alignment artifacts already in
+  the tree
+
+## Slice 247 - Cutover lowering inventories added for both kernels
+
+Goal:
+
+- stop leaving the next pre-cutover work as “lowering, somehow” and turn it
+  into explicit machine-facing inventories for both kernels
+
+What landed:
+
+- added:
+  - `meerkat-cutover-lowering-inventory.md`
+  - `mob-cutover-lowering-inventory.md`
+- updated:
+  - `two-kernel-refinement-program.md`
+  - `README.md`
+
+Why this slice matters:
+
+- both machines already had frozen lowering maps, but those were still
+  comparison handoffs rather than active cutover execution documents
+- the next real work needs canonical-ready vs helper-rich vs target-only
+  classification, not just a list of code paths
+
+Result:
+
+- `MeerkatMachine` and `MobMachine` now have parallel pre-cutover lowering
+  inventories
+- the refinement program can now move from freeze alignment into shadow
+  validation planning with one explicit source of truth per kernel
+
+## Slice 248 - Shadow-validation plans added for both kernels and the seam
+
+Goal:
+
+- turn the new cutover-lowering inventories into the first concrete validation
+  program against the real implementation
+
+What landed:
+
+- added:
+  - `meerkat-shadow-validation-plan.md`
+  - `mob-shadow-validation-plan.md`
+  - `mob-meerkat-seam-shadow-checks.md`
+- updated:
+  - `two-kernel-refinement-program.md`
+  - `README.md`
+
+Why this slice matters:
+
+- the branch already had frozen machines, frozen seam, refinement deltas, and
+  cutover lowering inventories
+- but there was still no explicit plan for the first short-lived
+  shadow-read/shadow-validate pass against the real system
+
+Result:
+
+- `MeerkatMachine`, `MobMachine`, and the Mob↔Meerkat seam now each have an
+  explicit pre-cutover shadow-validation plan
+- the next active work is implementation of those hooks/checks, not more
+  freeze/proof alignment
+
+## Slice 249 - Shadow hook inventories mapped to live code
+
+Goal:
+
+- stop leaving the new shadow-validation plans at the level of “compare these
+  concepts somehow” and identify the exact live hook points we can wire first
+
+What landed:
+
+- added:
+  - `meerkat-shadow-hook-inventory.md`
+  - `mob-shadow-hook-inventory.md`
+  - `mob-meerkat-seam-hook-inventory.md`
+- updated:
+  - `two-kernel-refinement-program.md`
+  - `README.md`
+
+Why this slice matters:
+
+- we already had the machine plans
+- the next blocker was practical: which live snapshots, diagnostics, and bridge
+  helpers actually anchor those plans
+
+Result:
+
+- the next pre-cutover work is now concrete:
+  - Meerkat shadow hooks
+  - Mob shadow hooks
+  - seam shadow hooks
+- both machine tracks remain aligned in structure: freeze -> proof -> lowering
+  inventory -> shadow plan -> hook inventory
+
+## Slice 250 - First shadow implementation plan fixes host files and output shape
+
+Goal:
+
+- stop leaving the transition from hook inventories to code as an implied step
+
+What landed:
+
+- added:
+  - `two-kernel-shadow-implementation-plan.md`
+- updated:
+  - `two-kernel-refinement-program.md`
+  - `README.md`
+
+Why this slice matters:
+
+- we already knew what to validate and which live hooks existed
+- the remaining ambiguity was practical: which files should the first patches
+  actually touch and what should they emit
+
+Result:
+
+- the first shadow implementation wave now has:
+  - concrete host files
+  - concrete helper names
+  - concrete scenarios
+  - one shared mismatch output shape
+- the next step can be the first code patch rather than more alignment prose
+
+## Slice 251 - First Meerkat lifecycle/control shadow lane lands in code
+
+Goal:
+
+- move the shadow program from plans/hook inventories into the first actual
+  machine helper without inventing a second validator stack
+
+What landed:
+
+- added typed shadow output in `meerkat/src/meerkat_machine.rs`:
+  - `MeerkatShadowLane`
+  - `ShadowMismatchTriage`
+  - `MeerkatShadowMismatch`
+  - `MeerkatShadowReport`
+- added:
+  - `capture_meerkat_shadow_report(...)`
+  - lifecycle/control mismatch lifting built directly on
+    `validate_meerkat_machine_snapshot(...)`
+- added focused tests proving:
+  - healthy live runtime-backed sessions report no lifecycle/control mismatches
+  - seeded lifecycle/control drift is surfaced with structured mismatch output
+
+Why this slice matters:
+
+- it proves the shadow-validation program can reuse the frozen machine
+  validator instead of forking a second interpretation layer
+- it turns the first step of the pre-cutover program into a real code path
+- it gives the rest of the shadow work one concrete typed output shape to copy
+
+Result:
+
+- the Meerkat lifecycle/control lane is now implemented, not just planned
+- the next shadow target is the Meerkat tools lane, followed by the first Mob
+  provisioning/lifecycle lane
+
+## Slice 252 - Meerkat tools shadow lane lands in code
+
+Goal:
+
+- extend the first shadow implementation from lifecycle/control into the
+  rebased tools seam without inventing tool-specific shadow semantics
+
+What landed:
+
+- extended `meerkat/src/meerkat_machine.rs` with:
+  - `MeerkatShadowLane::Tools`
+  - tool-surface mismatch lifting built directly on
+    `validate_meerkat_machine_snapshot(...)`
+- added focused tests proving:
+  - healthy live runtime-backed sessions report no tool mismatches
+  - seeded tool-surface drift is surfaced as structured shadow mismatches
+
+Why this slice matters:
+
+- it proves the rebased `tool_visibility + tool_surface` seam can use the same
+  shadow-report pattern as lifecycle/control
+- it turns the first Meerkat shadow wave into two real implemented lanes
+- it makes the next pre-cutover implementation target unambiguous: Mob
+  provisioning/lifecycle
+
+Result:
+
+- the Meerkat shadow implementation now has:
+  - lifecycle/control shadow reporting
+  - tools shadow reporting
+- the next shadow target is the first Mob provisioning/lifecycle lane
+
+## Slice 253 - First Mob provisioning/lifecycle shadow lane lands in code
+
+Goal:
+
+- move `MobMachine` shadow validation from plans into the first live lane
+  without inventing a second Mob interpretation layer
+
+What landed:
+
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `MobShadowLane`
+  - `MobShadowMismatch`
+  - `MobShadowReport`
+  - `capture_mob_shadow_report(...)`
+- added provisioning/lifecycle mismatch lifting built directly on
+  `validate_mob_machine_snapshot(...)`
+- added focused tests proving:
+  - seeded provisioning/lifecycle drift is surfaced as structured mismatch
+    output
+  - healthy live Mob state reports no provisioning/lifecycle mismatches
+
+Why this slice matters:
+
+- it proves the Mob side can reuse the frozen machine validator the same way
+  Meerkat already does
+- it turns the first Mob shadow lane into real code instead of a plan
+- it fixes the output shape for all later Mob lanes
+
+Result:
+
+- the Mob shadow implementation now has:
+  - provisioning/lifecycle shadow reporting
+- the next shadow target is the seam lifecycle/supersession lane
+
+## Slice 254 - Seam lifecycle/supersession shadow lane lands in code
+
+Goal:
+
+- land the first bridge-level shadow checks between frozen `MobMachine` and
+  frozen `MeerkatMachine` without leaking internal Meerkat mechanics into Mob
+
+What landed:
+
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `CompositionShadowLane`
+  - `CompositionShadowMismatch`
+  - `CompositionShadowReport`
+  - `capture_composition_shadow_report(...)`
+- added lifecycle/supersession mismatch lifting that compares:
+  - projected Mob member ownership
+  - live session liveness
+  - live Meerkat runtime phase
+  - current projected bridge session identity
+- added focused tests proving:
+  - duplicate bridge ownership and terminal Meerkat binding drift are surfaced
+    as structured mismatches
+  - healthy live Mob↔Meerkat seam state reports no lifecycle/supersession
+    mismatches
+
+Why this slice matters:
+
+- it turns the first seam validation lane into real code
+- it keeps the seam checks on the frozen bridge abstraction instead of letting
+  Mob reason about hidden Meerkat internals
+- it makes the next Mob shadow target unambiguous: flow/frame/loop
+
+Result:
+
+- the shadow implementation now includes:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Mob provisioning/lifecycle
+  - seam lifecycle/supersession
+- the next shadow target is the Mob flow/frame/loop lane
+
+## Slice 255 - Mob flow/frame/loop shadow lane lands in code
+
+Goal:
+
+- extend `MobMachine` shadow validation from provisioning into the tracked
+  run/frame/loop surface without creating flow-specific shadow semantics
+
+What landed:
+
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `MobShadowLane::FlowFrameLoop`
+  - tracked-run / flow-tracker / frame-loop mismatch lifting built directly on
+    `validate_mob_machine_snapshot(...)`
+- added focused tests proving:
+  - seeded malformed tracked-run state is surfaced as structured
+    flow/frame/loop shadow mismatches
+  - healthy live single-step flow state reports no flow/frame/loop shadow
+    mismatches
+- reran the full `meerkat-mob --lib` lane successfully after landing the new
+  shadow lane
+
+Why this slice matters:
+
+- it proves the Mob flow surface can use the same frozen-machine shadow pattern
+  as provisioning/lifecycle
+- it lands the first live Mob flow-aware shadow lane
+- it leaves the next pre-cutover target clear: the first Meerkat
+  turn/ops/barrier shadow lane, followed by peer/drain and seam work bridge
+
+Result:
+
+- the implemented shadow lanes are now:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Mob provisioning/lifecycle
+  - Mob flow/frame/loop
+  - seam lifecycle/supersession
+- the next shadow target is the Meerkat turn/ops/barrier lane
+
+## Slice 256 - Meerkat turn/ops/barrier shadow lane lands in code
+
+Goal:
+
+- extend `MeerkatMachine` shadow validation from lifecycle/tools into the
+  frozen turn / ops / barrier seam without inventing a second turn model
+
+What landed:
+
+- extended `meerkat/src/meerkat_machine.rs` with:
+  - `MeerkatShadowLane::TurnOpsBarrier`
+  - turn / ops / wait-all / barrier mismatch lifting built directly on
+    `validate_meerkat_machine_snapshot(...)`
+- added focused tests proving:
+  - healthy live runtime-backed sessions emit no turn/ops/barrier shadow
+    mismatches
+  - seeded malformed turn/ops/barrier state is surfaced as structured shadow
+    mismatches
+- reran the full `meerkat --lib` lane successfully after landing the new
+  shadow lane
+
+Why this slice matters:
+
+- it lands the first live Meerkat execution-aware shadow lane beyond lifecycle
+  and tools
+- it keeps shadow reporting machine-led by reusing the frozen
+  `MeerkatMachine` validator rather than inventing parallel turn semantics
+- it leaves the next pre-cutover targets clear: Meerkat peer/drain, Mob
+  task/history/recovery, and the seam work-bridge lane
+
+Result:
+
+- the implemented shadow lanes are now:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Meerkat turn/ops/barrier
+  - Mob provisioning/lifecycle
+  - Mob flow/frame/loop
+  - seam lifecycle/supersession
+- the next shadow targets are:
+  - Meerkat peer/drain
+  - Mob task/history/recovery
+  - seam work bridge
+
+## Slice 257 - Meerkat peer/drain shadow lane lands in code
+
+Goal:
+
+- extend `MeerkatMachine` shadow validation into peer-ingress and comms-drain
+  state without inventing a second transport/drain model
+
+What landed:
+
+- extended `meerkat/src/meerkat_machine.rs` with:
+  - `MeerkatShadowLane::PeerDrain`
+  - peer authority / peer queue / drain mismatch lifting built directly on
+    `validate_meerkat_machine_snapshot(...)`
+- added focused tests proving:
+  - healthy live runtime-backed sessions emit no peer/drain shadow mismatches
+  - seeded malformed peer/drain state is surfaced as structured shadow
+    mismatches
+- reran the full `meerkat --lib` lane successfully after landing the new
+  shadow lane
+
+Why this slice matters:
+
+- it completes the first Meerkat shadow sweep across lifecycle, tools,
+  execution, peer ingress, and drain
+- it keeps the peer/drain lane machine-led by reusing frozen invariant truth
+  instead of inventing transport-specific shadow semantics
+- it leaves the next pre-cutover targets clear: Mob task/history/recovery and
+  the seam work-bridge lane
+
+Result:
+
+- the implemented shadow lanes are now:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Meerkat turn/ops/barrier
+  - Meerkat peer/drain
+  - Mob provisioning/lifecycle
+  - Mob flow/frame/loop
+  - seam lifecycle/supersession
+- the next shadow targets are:
+  - Mob task/history/recovery
+  - seam work bridge
+
+## Slice 258 - Mob task/history/recovery shadow lane lands in code
+
+Goal:
+
+- extend `MobMachine` shadow validation into task-ledger, restore-failure, and
+  history/finality state without inventing a second recovery model
+
+What landed:
+
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `MobShadowLane::TaskHistoryRecovery`
+  - task/history/recovery mismatch lifting built directly on frozen
+    `MobMachine` projection truth
+- added focused tests proving:
+  - healthy live mob state emits no task/history/recovery shadow mismatches
+  - seeded malformed restore/task/history state is surfaced as structured
+    shadow mismatches
+- reran the full `meerkat-mob --lib` lane successfully after landing the new
+  shadow lane
+
+Why this slice matters:
+
+- it completes the first Mob shadow sweep across provisioning/lifecycle,
+  flow/frame/loop, and task/history/recovery
+- it keeps the lane machine-led by reusing existing durable projection truth
+  instead of inventing actor-local recovery semantics
+- it leaves the next pre-cutover target clear: the seam work-bridge lane
+
+Result:
+
+- the implemented shadow lanes are now:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Meerkat turn/ops/barrier
+  - Meerkat peer/drain
+  - Mob provisioning/lifecycle
+  - Mob flow/frame/loop
+  - Mob task/history/recovery
+  - seam lifecycle/supersession
+- the next shadow target is:
+  - seam work bridge
+
+## Slice 259 - Seam work-bridge shadow lane lands in code
+
+Goal:
+
+- extend the frozen Mob↔Meerkat seam shadowing beyond lifecycle/supersession
+  into a narrow, honest bridge-work check
+
+What landed:
+
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `CompositionShadowLane::WorkBridge`
+  - work-bridge mismatch lifting based on observable Meerkat work posture
+    rather than invented run-to-member coupling
+- added focused tests proving:
+  - healthy live seam state emits no work-bridge mismatches
+  - seeded nonterminal Mob work without any observable Meerkat work posture is
+    surfaced as a structured seam mismatch
+- reran the full `meerkat-mob --lib` lane successfully after landing the new
+  seam lane
+
+Why this slice matters:
+
+- it completes the first seam shadow sweep across:
+  - lifecycle/supersession
+  - work bridge
+- it keeps the seam lane honest by checking only data the rebased branch
+  already projects cleanly
+- it moves the next pre-cutover step from “author more lanes” to “collect and
+  triage shadow reports from real scenarios”
+
+Result:
+
+- the implemented shadow lanes are now:
+  - Meerkat lifecycle/control
+  - Meerkat tools
+  - Meerkat turn/ops/barrier
+  - Meerkat peer/drain
+  - Mob provisioning/lifecycle
+  - Mob flow/frame/loop
+  - Mob task/history/recovery
+  - seam lifecycle/supersession
+  - seam work bridge
+- the next shadow target is:
+  - a shared shadow-report sink / scenario runner
+
+## Slice 260 - Aggregate shadow suite helpers land in code
+
+Goal:
+
+- stop treating the shadow lanes as isolated helper surfaces and make them
+  usable as one real pre-cutover scenario report
+
+What landed:
+
+- extended `meerkat/src/meerkat_machine.rs` with:
+  - `MeerkatShadowSuiteReport`
+  - `capture_all_meerkat_shadow_reports(...)`
+- extended `meerkat-mob/src/mob_machine.rs` with:
+  - `MobShadowSuiteReport`
+  - `capture_mob_shadow_suite_report(...)`
+- added focused tests proving:
+  - healthy live `MeerkatMachine` sessions emit no aggregate mismatches across
+    all landed Meerkat lanes
+  - healthy live `MobMachine + Meerkat seam` scenarios emit no aggregate
+    mismatches across all landed Mob and seam lanes
+- reran full `meerkat --lib` and `meerkat-mob --lib` lanes successfully after
+  landing the aggregate helpers
+
+Why this slice matters:
+
+- it turns the shadow plan from “many lane helpers” into a real scenario-level
+  collection path
+- it keeps the first aggregate step honest by avoiding a fake all-in-one
+  backdoor from `MobHandle` into joined `MeerkatMachine` snapshots
+- it leaves the next refinement target clear: use the aggregate helpers in real
+  pre-cutover shadow runs, then add a shared sink/export path only if the live
+  mismatch volume justifies it
+
+Result:
+
+- the implemented shadow surfaces are now:
+  - `capture_all_meerkat_shadow_reports(...)`
+  - `capture_mob_shadow_suite_report(...)`
+  - all previously landed lane-level helpers
+- the next shadow target is:
+  - first real end-to-end shadow scenario run using the aggregate suite helpers

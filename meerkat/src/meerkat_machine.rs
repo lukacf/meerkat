@@ -44,6 +44,44 @@ pub(crate) struct MeerkatMachineSnapshot {
     pub peer: Option<PeerIngressRuntimeSnapshot>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MeerkatShadowLane {
+    LifecycleControl,
+    Tools,
+    TurnOpsBarrier,
+    PeerDrain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ShadowMismatchTriage {
+    ImplementationDetail,
+    SemanticGap,
+    DogmaViolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeerkatShadowMismatch {
+    pub lane: MeerkatShadowLane,
+    pub region: &'static str,
+    pub entity_id: Option<String>,
+    pub expected_summary: String,
+    pub observed_summary: String,
+    pub triage: ShadowMismatchTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeerkatShadowReport {
+    pub lane: MeerkatShadowLane,
+    pub mismatches: Vec<MeerkatShadowMismatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeerkatShadowSuiteReport {
+    pub session_id: SessionId,
+    pub reports: Vec<MeerkatShadowReport>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MeerkatMachineSnapshotError {
     #[error(transparent)]
@@ -418,6 +456,856 @@ fn contributor_lifecycle_is_valid(lifecycle: Option<meerkat_runtime::InputLifecy
                 | meerkat_runtime::InputLifecycleState::AppliedPendingConsumption
         )
     )
+}
+
+fn lifecycle_control_shadow_mismatch_from_violation(
+    violation: MeerkatMachineInvariantViolation,
+) -> Option<MeerkatShadowMismatch> {
+    match violation {
+        MeerkatMachineInvariantViolation::CurrentRunInIllegalControlPhase { phase } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "control",
+                entity_id: None,
+                expected_summary: "current_run_id is only present while the runtime is Running"
+                    .into(),
+                observed_summary: format!("control phase {phase:?} still carries current_run_id"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::RunningWithoutCurrentRun => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "control",
+            entity_id: None,
+            expected_summary: "Running runtimes always carry a current run binding".into(),
+            observed_summary: "runtime is Running with no current_run_id".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ControlInputsRunMismatch {
+            control_run_id,
+            inputs_run_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "control.inputs",
+            entity_id: None,
+            expected_summary: "control and ingress agree on the active run binding".into(),
+            observed_summary: format!(
+                "control current_run_id = {control_run_id:?}, inputs current_run_id = {inputs_run_id:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::DestroyedIngressStillHasCurrentRun { run_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: Some(format!("{run_id:?}")),
+                expected_summary: "destroyed ingress clears active run binding".into(),
+                observed_summary: "destroyed ingress still has current_run_id".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::DestroyedIngressStillHasContributors {
+            contributor_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "inputs",
+            entity_id: None,
+            expected_summary: "destroyed ingress clears contributor bindings".into(),
+            observed_summary: format!(
+                "destroyed ingress still carries {contributor_count} contributor bindings"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::CurrentRunWithoutContributors { run_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: Some(format!("{run_id:?}")),
+                expected_summary: "active runs retain contributor bindings".into(),
+                observed_summary: "current_run_id is present with no contributors".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::ContributorsWithoutCurrentRun { contributor_count } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: None,
+                expected_summary: "contributor bindings imply an active run".into(),
+                observed_summary: format!(
+                    "{contributor_count} contributor bindings remain without current_run_id"
+                ),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::CurrentRunContributorRunMismatch {
+            input_id,
+            current_run_id,
+            last_run_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "inputs",
+            entity_id: Some(format!("{input_id:?}")),
+            expected_summary: "current-run contributors are bound to the active run".into(),
+            observed_summary: format!(
+                "input last_run_id = {last_run_id:?}, active current_run_id = {current_run_id:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::CurrentRunBoundInputMissingContributor {
+            input_id,
+            current_run_id,
+            lifecycle,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "inputs",
+            entity_id: Some(format!("{input_id:?}")),
+            expected_summary:
+                "run-bound staged/applied inputs remain represented in current_run_contributors"
+                    .into(),
+            observed_summary: format!(
+                "input with lifecycle {lifecycle:?} is still bound to current_run_id {current_run_id:?} but missing from contributors"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasQueuedWork { queue, count } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: Some(queue.to_string()),
+                expected_summary: "destroyed runtimes clear queued work immediately".into(),
+                observed_summary: format!("destroyed runtime still has {count} queued inputs"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::DestroyedRuntimeStillHasCompletionWaiters {
+            waiter_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "completion_waiters",
+            entity_id: None,
+            expected_summary: "destroyed runtimes clear input completion waiters".into(),
+            observed_summary: format!(
+                "destroyed runtime still has {waiter_count} completion waiters"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::RetiredRuntimeStillHasCompletionWaiters {
+            waiter_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "completion_waiters",
+            entity_id: None,
+            expected_summary: "settled retired runtimes clear input completion waiters".into(),
+            observed_summary: format!(
+                "retired runtime still has {waiter_count} completion waiters"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::StoppedRuntimeStillHasQueuedWork { queue, count } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: Some(queue.to_string()),
+                expected_summary: "stopped runtimes clear queued work immediately".into(),
+                observed_summary: format!("stopped runtime still has {count} queued inputs"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::StoppedRuntimeStillHasCompletionWaiters {
+            waiter_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::LifecycleControl,
+            region: "completion_waiters",
+            entity_id: None,
+            expected_summary: "stopped runtimes clear input completion waiters".into(),
+            observed_summary: format!(
+                "stopped runtime still has {waiter_count} completion waiters"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::AttachedRuntimeStillHasSteerQueuedWork { count } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                entity_id: Some("steer_queue".into()),
+                expected_summary:
+                    "settled attached runtimes do not retain ordinary steered queued work".into(),
+                observed_summary: format!(
+                    "attached runtime still exposes {count} queued steered inputs"
+                ),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn capture_lifecycle_control_shadow_mismatches(
+    snapshot: &MeerkatMachineSnapshot,
+) -> Vec<MeerkatShadowMismatch> {
+    validate_meerkat_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(lifecycle_control_shadow_mismatch_from_violation)
+        .collect()
+}
+
+fn tools_shadow_mismatch_from_violation(
+    violation: MeerkatMachineInvariantViolation,
+) -> Option<MeerkatShadowMismatch> {
+    match violation {
+        MeerkatMachineInvariantViolation::ToolSurfaceVisibleBaseMismatch {
+            surface_id,
+            visible,
+            base_state,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary: "tool surface visibility matches whether the surface is Active"
+                .into(),
+            observed_summary: format!("visible = {visible}, base_state = {base_state:?}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfacePendingBaseMismatch {
+            surface_id,
+            base_state,
+            pending_op,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary:
+                "pending tool-surface operations stay compatible with the current base state".into(),
+            observed_summary: format!("base_state = {base_state:?}, pending_op = {pending_op:?}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfaceRemovalTimingMismatch {
+            surface_id,
+            base_state,
+            has_removal_timing,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary: "removal timing is present iff the tool surface is Removing".into(),
+            observed_summary: format!(
+                "base_state = {base_state:?}, has_removal_timing = {has_removal_timing}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfaceInflightBaseMismatch {
+            surface_id,
+            base_state,
+            inflight_call_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary: "inflight tool calls only exist for Active or Removing tool surfaces"
+                .into(),
+            observed_summary: format!(
+                "base_state = {base_state:?}, inflight_call_count = {inflight_call_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfaceForcedPhaseWithoutRemoveDelta {
+            surface_id,
+            last_delta_operation,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary: "forced tool-surface delta phases only arise from remove lineage"
+                .into(),
+            observed_summary: format!("last_delta_operation = {last_delta_operation:?}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfaceStagedSequenceMismatch {
+            surface_id,
+            staged_op,
+            staged_intent_sequence,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary:
+                "staged tool-surface operations carry a matching staged intent sequence".into(),
+            observed_summary: format!(
+                "staged_op = {staged_op:?}, staged_intent_sequence = {staged_intent_sequence}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ToolSurfacePendingSequenceMismatch {
+            surface_id,
+            pending_op,
+            pending_task_sequence,
+            pending_lineage_sequence,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::Tools,
+            region: "tool_surface",
+            entity_id: Some(surface_id),
+            expected_summary:
+                "pending tool-surface operations publish both task and lineage sequences together"
+                    .into(),
+            observed_summary: format!(
+                "pending_op = {pending_op:?}, pending_task_sequence = {pending_task_sequence}, pending_lineage_sequence = {pending_lineage_sequence}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        _ => None,
+    }
+}
+
+fn capture_tools_shadow_mismatches(
+    snapshot: &MeerkatMachineSnapshot,
+) -> Vec<MeerkatShadowMismatch> {
+    validate_meerkat_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(tools_shadow_mismatch_from_violation)
+        .collect()
+}
+
+fn turn_ops_barrier_shadow_mismatch_from_violation(
+    violation: MeerkatMachineInvariantViolation,
+) -> Option<MeerkatShadowMismatch> {
+    match violation {
+        MeerkatMachineInvariantViolation::TurnRunMismatch {
+            turn_phase,
+            control_run_id,
+            turn_run_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "turn",
+            entity_id: None,
+            expected_summary: "turn state and control state agree on the active run binding".into(),
+            observed_summary: format!(
+                "turn_phase = {turn_phase:?}, control_run_id = {control_run_id:?}, turn_run_id = {turn_run_id:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::WaitingForOpsWithoutPendingOperations => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn",
+                entity_id: None,
+                expected_summary:
+                    "WaitingForOps turns always retain at least one pending operation".into(),
+                observed_summary: "turn is WaitingForOps with no pending operations".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::WaitingForOpsWithoutToolCalls => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn",
+                entity_id: None,
+                expected_summary: "WaitingForOps turns retain at least one pending tool call"
+                    .into(),
+                observed_summary: "turn is WaitingForOps with tool_calls_pending = 0".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::PendingOperationsOutsideWaitingPhase {
+            turn_phase,
+            pending_operation_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "turn",
+            entity_id: None,
+            expected_summary:
+                "pending operation ids are only exposed while the turn is WaitingForOps".into(),
+            observed_summary: format!(
+                "turn_phase = {turn_phase:?}, pending_operation_count = {pending_operation_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::BarrierFlagWithoutOperations => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.barrier",
+                entity_id: None,
+                expected_summary:
+                    "barrier flags only appear when barrier operation ids are present".into(),
+                observed_summary: "turn exposes has_barrier_ops with no barrier operations".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::BarrierOperationsWithoutFlag {
+            barrier_operation_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "turn.barrier",
+            entity_id: None,
+            expected_summary:
+                "barrier operation ids imply the turn is marked as having barrier ops".into(),
+            observed_summary: format!(
+                "barrier_operation_count = {barrier_operation_count} with has_barrier_ops = false"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::UnsatisfiedBarrierWithoutBarrierOps => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.barrier",
+                entity_id: None,
+                expected_summary:
+                    "unsatisfied barrier state only appears when barrier ops are present".into(),
+                observed_summary:
+                    "turn reports barrier_satisfied = false with no barrier operations".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::PendingOperationUnknown { operation_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.ops",
+                entity_id: Some(format!("{operation_id:?}")),
+                expected_summary:
+                    "pending operation ids resolve to known operation-lifecycle records".into(),
+                observed_summary: "pending operation id is missing from ops registry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::BarrierOperationUnknown { operation_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.barrier",
+                entity_id: Some(format!("{operation_id:?}")),
+                expected_summary:
+                    "barrier operation ids resolve to known operation-lifecycle records".into(),
+                observed_summary: "barrier operation id is missing from ops registry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::BarrierOperationNotPending { operation_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.barrier",
+                entity_id: Some(format!("{operation_id:?}")),
+                expected_summary: "barrier operation ids are a subset of pending operation ids"
+                    .into(),
+                observed_summary: "barrier operation id is not listed in pending_operation_ids"
+                    .into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MeerkatMachineInvariantViolation::OpsOperationCountMismatch {
+            operation_count,
+            operations_len,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops",
+            entity_id: None,
+            expected_summary:
+                "ops.operation_count matches the number of surfaced operation records".into(),
+            observed_summary: format!(
+                "operation_count = {operation_count}, operations_len = {operations_len}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ActiveOpsExceedsOperationCount {
+            active_count,
+            operation_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops",
+            entity_id: None,
+            expected_summary: "active ops count never exceeds total operation count".into(),
+            observed_summary: format!(
+                "active_count = {active_count}, operation_count = {operation_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::ActiveOpsStatusCountMismatch {
+            active_count,
+            nonterminal_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops",
+            entity_id: None,
+            expected_summary: "active ops count matches the number of nonterminal operations"
+                .into(),
+            observed_summary: format!(
+                "active_count = {active_count}, nonterminal_count = {nonterminal_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::WaitOperationIdsWithoutWaitRequest {
+            wait_operation_count,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops.wait_all",
+            entity_id: None,
+            expected_summary:
+                "wait-all target operation ids only appear with an active wait request".into(),
+            observed_summary: format!(
+                "wait_operation_count = {wait_operation_count} with no wait_request_id"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PendingWaitCarrierShapeMismatch {
+            pending_wait_present,
+            pending_wait_request_id_present,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops.wait_all",
+            entity_id: None,
+            expected_summary:
+                "pending wait carrier flag and pending wait request id appear together".into(),
+            observed_summary: format!(
+                "pending_wait_present = {pending_wait_present}, pending_wait_request_id_present = {pending_wait_request_id_present}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PendingWaitCarrierWithoutWaitRequest => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "ops.wait_all",
+                entity_id: None,
+                expected_summary: "pending wait carriers only exist while a wait request is active"
+                    .into(),
+                observed_summary: "pending wait carrier is present with no wait_request_id".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::WaitRequestWithoutTrackedOperations {
+            wait_request_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops.wait_all",
+            entity_id: Some(format!("{wait_request_id:?}")),
+            expected_summary: "active wait requests retain at least one tracked target operation"
+                .into(),
+            observed_summary: "wait_request_id is present with no wait_operation_ids".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::WaitRequestMissingPendingWaitCarrier {
+            wait_request_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops.wait_all",
+            entity_id: Some(format!("{wait_request_id:?}")),
+            expected_summary:
+                "active wait requests retain the pending wait carrier until settlement".into(),
+            observed_summary: "wait_request_id is present with no pending wait carrier".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PendingWaitCarrierRequestMismatch {
+            wait_request_id,
+            pending_wait_request_id,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::TurnOpsBarrier,
+            region: "ops.wait_all",
+            entity_id: Some(format!("{wait_request_id:?}")),
+            expected_summary: "pending wait carrier request id matches the active wait request id"
+                .into(),
+            observed_summary: format!(
+                "wait_request_id = {wait_request_id:?}, pending_wait_request_id = {pending_wait_request_id:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::WaitRequestAlreadySatisfied { wait_request_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "ops.wait_all",
+                entity_id: Some(format!("{wait_request_id:?}")),
+                expected_summary:
+                    "wait requests clear once all tracked target operations are terminal".into(),
+                observed_summary:
+                    "wait_request_id still present though all targets are already satisfied".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::WaitTargetsUnknownOperation { operation_id } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "ops.wait_all",
+                entity_id: Some(format!("{operation_id:?}")),
+                expected_summary:
+                    "wait-all target operation ids resolve to known operation records".into(),
+                observed_summary: "wait target operation id is missing from ops registry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn capture_turn_ops_barrier_shadow_mismatches(
+    snapshot: &MeerkatMachineSnapshot,
+) -> Vec<MeerkatShadowMismatch> {
+    validate_meerkat_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(turn_ops_barrier_shadow_mismatch_from_violation)
+        .collect()
+}
+
+fn peer_drain_shadow_mismatch_from_violation(
+    violation: MeerkatMachineInvariantViolation,
+) -> Option<MeerkatShadowMismatch> {
+    match violation {
+        MeerkatMachineInvariantViolation::PeerAuthorityQueueMismatch {
+            authority_phase,
+            submission_queue_len,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.authority",
+            entity_id: None,
+            expected_summary: "peer authority phase and submission queue length stay coherent"
+                .into(),
+            observed_summary: format!(
+                "authority_phase = {authority_phase:?}, submission_queue_len = {submission_queue_len}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerAuthorityTrackedEntryCountMismatch {
+            submission_queue_len,
+            queued_authority_entries,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.authority",
+            entity_id: None,
+            expected_summary: "peer authority tracked-entry count matches queued authority entries"
+                .into(),
+            observed_summary: format!(
+                "submission_queue_len = {submission_queue_len}, queued_authority_entries = {queued_authority_entries}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::PeerQueueCountMismatch {
+            field,
+            recorded,
+            computed,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.queue",
+            entity_id: Some(field.to_string()),
+            expected_summary: "peer queue counters match the queued entry projection".into(),
+            observed_summary: format!("recorded = {recorded}, computed = {computed}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryKindClassMismatch {
+            raw_item_id,
+            kind,
+            class,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary: "peer entry kind and class stay coherent".into(),
+            observed_summary: format!("kind = {kind:?}, class = {class:?}"),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryLifecyclePeerMismatch {
+            raw_item_id,
+            class,
+            lifecycle_peer_present,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary:
+                "peer lifecycle entries expose lifecycle_peer only for lifecycle classes".into(),
+            observed_summary: format!(
+                "class = {class:?}, lifecycle_peer_present = {lifecycle_peer_present}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryRequestIdMismatch {
+            raw_item_id,
+            kind,
+            request_id_present,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary:
+                "request/response/ack peer entries expose request ids exactly when required".into(),
+            observed_summary: format!("kind = {kind:?}, request_id_present = {request_id_present}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryFromPeerMismatch {
+            raw_item_id,
+            kind,
+            from_peer_present,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary: "non-plain peer ingress entries always retain from_peer identity"
+                .into(),
+            observed_summary: format!("kind = {kind:?}, from_peer_present = {from_peer_present}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryTrustedSnapshotPresenceMismatch {
+            raw_item_id,
+            kind,
+            trusted_snapshot_present,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary: "trusted snapshots appear only for non-plain peer ingress entries"
+                .into(),
+            observed_summary: format!(
+                "kind = {kind:?}, trusted_snapshot_present = {trusted_snapshot_present}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::PeerEntryUntrustedWhileAuthRequired {
+            raw_item_id,
+            kind,
+        } => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "peer.entry",
+            entity_id: Some(raw_item_id),
+            expected_summary:
+                "auth-required peer ingress does not admit untrusted non-plain entries".into(),
+            observed_summary: format!("kind = {kind:?} admitted with trusted_snapshot = false"),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MeerkatMachineInvariantViolation::DrainSlotMissingPhase => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "drain",
+            entity_id: None,
+            expected_summary: "drain slots always expose a phase when present".into(),
+            observed_summary: "slot_present = true with phase = None".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::DrainPhaseWithoutSlot { phase } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                entity_id: None,
+                expected_summary: "drain phase only appears when a drain slot is present".into(),
+                observed_summary: format!("slot_present = false with phase = {phase:?}"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::DrainModeWithoutSlot { mode } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                entity_id: None,
+                expected_summary: "drain mode only appears when a drain slot is present".into(),
+                observed_summary: format!("slot_present = false with mode = {mode:?}"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::DrainHandleWithoutSlot => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "drain",
+            entity_id: None,
+            expected_summary: "drain handles only appear when a drain slot is present".into(),
+            observed_summary: "slot_present = false with handle_present = true".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::DrainPhaseMissingMode { phase } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                entity_id: None,
+                expected_summary: "non-inactive drain phases carry an explicit drain mode".into(),
+                observed_summary: format!("phase = {phase:?}, mode = None"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::DrainInactiveWithMode { mode } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                entity_id: None,
+                expected_summary: "inactive drain phases do not retain a drain mode".into(),
+                observed_summary: format!("phase = Inactive, mode = {mode:?}"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MeerkatMachineInvariantViolation::DrainInactiveWithHandle => Some(MeerkatShadowMismatch {
+            lane: MeerkatShadowLane::PeerDrain,
+            region: "drain",
+            entity_id: None,
+            expected_summary: "inactive drain phases do not retain a live handle".into(),
+            observed_summary: "phase = Inactive with handle_present = true".into(),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MeerkatMachineInvariantViolation::DrainTerminalPhaseWithHandle { phase } => {
+            Some(MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                entity_id: None,
+                expected_summary: "terminal drain phases do not retain a live drain handle".into(),
+                observed_summary: format!("phase = {phase:?} with handle_present = true"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn capture_peer_drain_shadow_mismatches(
+    snapshot: &MeerkatMachineSnapshot,
+) -> Vec<MeerkatShadowMismatch> {
+    validate_meerkat_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(peer_drain_shadow_mismatch_from_violation)
+        .collect()
+}
+
+pub(crate) async fn capture_meerkat_shadow_report<S>(
+    runtime_adapter: &RuntimeSessionAdapter,
+    service: &S,
+    session_id: &SessionId,
+    lane: MeerkatShadowLane,
+) -> Result<Option<MeerkatShadowReport>, MeerkatMachineSnapshotError>
+where
+    S: MeerkatExecutionSnapshotSource + ?Sized,
+{
+    let Some(snapshot) =
+        capture_meerkat_machine_snapshot(runtime_adapter, service, session_id).await?
+    else {
+        return Ok(None);
+    };
+
+    let mismatches = match lane {
+        MeerkatShadowLane::LifecycleControl => {
+            capture_lifecycle_control_shadow_mismatches(&snapshot)
+        }
+        MeerkatShadowLane::Tools => capture_tools_shadow_mismatches(&snapshot),
+        MeerkatShadowLane::TurnOpsBarrier => capture_turn_ops_barrier_shadow_mismatches(&snapshot),
+        MeerkatShadowLane::PeerDrain => capture_peer_drain_shadow_mismatches(&snapshot),
+    };
+
+    Ok(Some(MeerkatShadowReport { lane, mismatches }))
+}
+
+pub(crate) async fn capture_all_meerkat_shadow_reports<S>(
+    runtime_adapter: &RuntimeSessionAdapter,
+    service: &S,
+    session_id: &SessionId,
+) -> Result<Option<MeerkatShadowSuiteReport>, MeerkatMachineSnapshotError>
+where
+    S: MeerkatExecutionSnapshotSource + ?Sized,
+{
+    let mut reports = Vec::new();
+    for lane in [
+        MeerkatShadowLane::LifecycleControl,
+        MeerkatShadowLane::Tools,
+        MeerkatShadowLane::TurnOpsBarrier,
+        MeerkatShadowLane::PeerDrain,
+    ] {
+        let Some(report) =
+            capture_meerkat_shadow_report(runtime_adapter, service, session_id, lane).await?
+        else {
+            return Ok(None);
+        };
+        reports.push(report);
+    }
+
+    Ok(Some(MeerkatShadowSuiteReport {
+        session_id: session_id.clone(),
+        reports,
+    }))
 }
 
 /// Validate the currently joined MeerkatMachine snapshot against a small set
@@ -1775,9 +2663,10 @@ mod tests {
     use meerkat_core::comms::TrustedPeerSpec;
     use meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase;
     use meerkat_core::lifecycle::{InputId, RunId, WaitRequestId};
-    use meerkat_core::ops::OperationId;
+    use meerkat_core::ops::{OperationId, OperationResult};
     use meerkat_core::ops_lifecycle::{
         OperationKind, OperationLifecycleSnapshot, OperationPeerHandle, OperationStatus,
+        OperationTerminalOutcome,
     };
     use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
     #[cfg(feature = "comms")]
@@ -1947,6 +2836,640 @@ mod tests {
             violations.is_empty(),
             "expected valid MeerkatMachine snapshot, found violations: {violations:#?}"
         );
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_returns_empty_for_live_lifecycle_control()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let report = capture_meerkat_shadow_report(
+            &runtime_adapter,
+            &service,
+            &session_id,
+            MeerkatShadowLane::LifecycleControl,
+        )
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| {
+            "live session should produce a lifecycle/control shadow report".to_string()
+        })?;
+
+        assert_eq!(report.lane, MeerkatShadowLane::LifecycleControl);
+        assert!(
+            report.mismatches.is_empty(),
+            "expected no lifecycle/control mismatches for healthy live session, got: {:#?}",
+            report.mismatches
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_reports_lifecycle_control_mismatches()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let run_id = RunId::new();
+        let input_id = InputId::new();
+        let mut queued_input =
+            invalid_input_snapshot(input_id.clone(), Some(InputLifecycleState::Queued), None);
+        queued_input.content_shape = Some(
+            meerkat_runtime::runtime_ingress_authority::ContentShape("text".into()),
+        );
+        queued_input.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
+        queued_input.last_run_id = Some(run_id.clone());
+
+        snapshot.spine.control.phase = RuntimeState::Retired;
+        snapshot.spine.control.current_run_id = Some(run_id.clone());
+        snapshot.spine.inputs.current_run_id = Some(run_id.clone());
+        snapshot.spine.inputs.current_run_contributors.clear();
+        snapshot.spine.inputs.queue = vec![input_id];
+        snapshot.spine.inputs.steer_queue.clear();
+        snapshot.spine.inputs.admission_order = vec![queued_input];
+        snapshot.spine.completion_waiters.input_count = 1;
+        snapshot.spine.completion_waiters.waiter_count = 1;
+        snapshot.spine.completion_waiters.waiting_inputs = vec![MeerkatCompletionWaiterSnapshot {
+            input_id: InputId::new(),
+            waiter_count: 1,
+        }];
+
+        let mismatches = capture_lifecycle_control_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "control",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("Retired")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "inputs",
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if mismatch.expected_summary.contains("active runs retain contributor bindings")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::LifecycleControl,
+                region: "completion_waiters",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("retired runtime still has 1 completion waiters")
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_returns_empty_for_live_tools() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let report = capture_meerkat_shadow_report(
+            &runtime_adapter,
+            &service,
+            &session_id,
+            MeerkatShadowLane::Tools,
+        )
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "live session should produce a tools shadow report".to_string())?;
+
+        assert_eq!(report.lane, MeerkatShadowLane::Tools);
+        assert!(
+            report.mismatches.is_empty(),
+            "expected no tools mismatches for healthy live session, got: {:#?}",
+            report.mismatches
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_reports_tool_mismatches() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let mut removed_reload = invalid_tool_surface_entry(
+            "shadow-invalid-removed-reload",
+            false,
+            ExternalToolSurfaceBaseState::Removed,
+        );
+        removed_reload.pending_op = ExternalToolSurfacePendingOp::Reload;
+        removed_reload.pending_task_sequence = 1;
+        removed_reload.pending_lineage_sequence = 1;
+
+        let mut removing_without_timing = invalid_tool_surface_entry(
+            "shadow-invalid-removing-timing",
+            false,
+            ExternalToolSurfaceBaseState::Removing,
+        );
+        removing_without_timing.has_removal_timing = false;
+
+        snapshot.tool_surface = Some(ExternalToolSurfaceSnapshot {
+            phase: meerkat_core::ExternalToolSurfaceGlobalPhase::Operating,
+            snapshot_epoch: 0,
+            snapshot_aligned_epoch: 0,
+            entries: vec![removed_reload, removing_without_timing],
+        });
+
+        let mismatches = capture_tools_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::Tools,
+                region: "tool_surface",
+                entity_id: Some(surface_id),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if surface_id == "shadow-invalid-removed-reload"
+                && mismatch
+                    .expected_summary
+                    .contains("pending tool-surface operations stay compatible")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::Tools,
+                region: "tool_surface",
+                entity_id: Some(surface_id),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if surface_id == "shadow-invalid-removing-timing"
+                && mismatch
+                    .observed_summary
+                    .contains("has_removal_timing = false")
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_returns_empty_for_live_turn_ops_barrier()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let report = capture_meerkat_shadow_report(
+            &runtime_adapter,
+            &service,
+            &session_id,
+            MeerkatShadowLane::TurnOpsBarrier,
+        )
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| {
+            "live session should produce a turn/ops/barrier shadow report".to_string()
+        })?;
+
+        assert_eq!(report.lane, MeerkatShadowLane::TurnOpsBarrier);
+        assert!(
+            report.mismatches.is_empty(),
+            "expected no turn/ops/barrier mismatches for healthy live session, got: {:#?}",
+            report.mismatches
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_reports_turn_ops_barrier_mismatches()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        let pending_only_id = OperationId::new();
+        let barrier_only_id = OperationId::new();
+        let completed_op_id = OperationId::new();
+        let wait_request_id = WaitRequestId::new();
+        let mismatched_pending_wait_request_id = WaitRequestId::new();
+
+        let turn = snapshot
+            .turn
+            .as_mut()
+            .ok_or_else(|| "live session should expose execution snapshot".to_string())?;
+        turn.turn_phase = TurnPhase::WaitingForOps;
+        turn.tool_calls_pending = 0;
+        turn.pending_operation_ids = Some(vec![pending_only_id.clone()]);
+        turn.barrier_operation_ids = vec![barrier_only_id.clone()];
+        turn.has_barrier_ops = false;
+        turn.barrier_satisfied = false;
+
+        snapshot.spine.ops.operations = vec![OperationLifecycleSnapshot {
+            completed_at_ms: Some(2),
+            terminal_outcome: Some(OperationTerminalOutcome::Completed(OperationResult {
+                id: completed_op_id.clone(),
+                content: String::new(),
+                is_error: false,
+                duration_ms: 0,
+                tokens_used: 0,
+            })),
+            ..invalid_operation_snapshot(
+                completed_op_id.clone(),
+                OperationKind::BackgroundToolOp,
+                OperationStatus::Completed,
+            )
+        }];
+        snapshot.spine.ops.operation_count = 1;
+        snapshot.spine.ops.active_count = 0;
+        snapshot.spine.ops.wait_request_id = Some(wait_request_id);
+        snapshot.spine.ops.pending_wait_present = true;
+        snapshot.spine.ops.pending_wait_request_id = Some(mismatched_pending_wait_request_id);
+        snapshot.spine.ops.wait_operation_ids = vec![barrier_only_id.clone()];
+
+        let mismatches = capture_turn_ops_barrier_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .expected_summary
+                .contains("WaitingForOps turns retain at least one pending tool call")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.barrier",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .expected_summary
+                .contains("barrier operation ids imply the turn is marked as having barrier ops")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "turn.ops",
+                entity_id: Some(operation_id),
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if operation_id == &format!("{pending_only_id:?}")
+                && mismatch.observed_summary.contains("missing from ops registry")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "ops.wait_all",
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("pending_wait_request_id")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::TurnOpsBarrier,
+                region: "ops.wait_all",
+                entity_id: Some(operation_id),
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if operation_id == &format!("{barrier_only_id:?}")
+                && mismatch
+                    .observed_summary
+                    .contains("missing from ops registry")
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_returns_empty_for_live_peer_drain() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let report = capture_meerkat_shadow_report(
+            &runtime_adapter,
+            &service,
+            &session_id,
+            MeerkatShadowLane::PeerDrain,
+        )
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "live session should produce a peer/drain shadow report".to_string())?;
+
+        assert_eq!(report.lane, MeerkatShadowLane::PeerDrain);
+        assert!(
+            report.mismatches.is_empty(),
+            "expected no peer/drain mismatches for healthy live session, got: {:#?}",
+            report.mismatches
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_meerkat_shadow_report_reports_peer_drain_mismatches() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut snapshot =
+            capture_meerkat_machine_snapshot(&runtime_adapter, &service, &session_id)
+                .await
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| {
+                    "live runtime-backed session should produce a Meerkat snapshot".to_string()
+                })?;
+
+        snapshot.peer = Some(PeerIngressRuntimeSnapshot {
+            self_peer_id: "self-peer".into(),
+            auth_required: true,
+            authority_phase: PeerIngressAuthorityPhase::Received,
+            trusted_peers: Vec::new(),
+            submission_queue_len: 2,
+            queue: PeerIngressQueueSnapshot {
+                total_count: 1,
+                actionable_count: 0,
+                response_count: 1,
+                lifecycle_count: 0,
+                silent_request_count: 0,
+                ack_count: 0,
+                plain_event_count: 1,
+                queued_entries: vec![
+                    PeerIngressEntrySnapshot {
+                        raw_item_id: "shadow-invalid-peer-message".into(),
+                        interaction_id: None,
+                        class: PeerInputClass::Response,
+                        kind: PeerIngressKind::Message,
+                        from_peer: Some("ally".into()),
+                        lifecycle_peer: None,
+                        request_id: None,
+                        trusted_snapshot: None,
+                    },
+                    PeerIngressEntrySnapshot {
+                        raw_item_id: "shadow-invalid-peer-plain".into(),
+                        interaction_id: None,
+                        class: PeerInputClass::PlainEvent,
+                        kind: PeerIngressKind::PlainEvent,
+                        from_peer: Some("tcp".into()),
+                        lifecycle_peer: None,
+                        request_id: None,
+                        trusted_snapshot: Some(false),
+                    },
+                ],
+            },
+        });
+
+        snapshot.spine.drain.slot_present = false;
+        snapshot.spine.drain.phase = Some(CommsDrainPhase::Running);
+        snapshot.spine.drain.mode = Some(CommsDrainMode::PersistentHost);
+        snapshot.spine.drain.handle_present = true;
+
+        let mismatches = capture_peer_drain_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "peer.authority",
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if mismatch
+                .expected_summary
+                .contains("tracked-entry count matches queued authority entries")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "peer.entry",
+                entity_id: Some(raw_item_id),
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if raw_item_id == "shadow-invalid-peer-message"
+                && mismatch.expected_summary.contains("kind and class stay coherent")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "peer.entry",
+                entity_id: Some(raw_item_id),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if raw_item_id == "shadow-invalid-peer-plain"
+                && mismatch.observed_summary.contains("from_peer_present = true")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("slot_present = false with phase = Running")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MeerkatShadowMismatch {
+                lane: MeerkatShadowLane::PeerDrain,
+                region: "drain",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("slot_present = false with handle_present = true")
+        )));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_all_meerkat_shadow_reports_returns_empty_for_healthy_live_session()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let service = build_runtime_backed_ephemeral_service(&temp);
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|err| err.to_string())?;
+
+        service
+            .create_session(runtime_backed_request(session, bindings))
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let report = capture_all_meerkat_shadow_reports(&runtime_adapter, &service, &session_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .expect("live session should produce joined shadow report");
+
+        assert_eq!(report.session_id, session_id);
+        assert_eq!(report.reports.len(), 4);
+        assert_eq!(
+            report
+                .reports
+                .iter()
+                .map(|entry| entry.lane)
+                .collect::<Vec<_>>(),
+            vec![
+                MeerkatShadowLane::LifecycleControl,
+                MeerkatShadowLane::Tools,
+                MeerkatShadowLane::TurnOpsBarrier,
+                MeerkatShadowLane::PeerDrain,
+            ]
+        );
+        assert!(
+            report
+                .reports
+                .iter()
+                .all(|entry| entry.mismatches.is_empty()),
+            "healthy live session should emit no aggregate Meerkat shadow mismatches: {report:#?}"
+        );
+
+        Ok(())
     }
 
     struct FakeDrainRuntime {

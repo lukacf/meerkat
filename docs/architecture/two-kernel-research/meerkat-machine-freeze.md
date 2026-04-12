@@ -213,6 +213,18 @@ This is explicit target machine state, not an unmodeled support carrier.
 
 ### `tools`
 
+The target tools region is now best read as one top-level region with two
+tightly coupled internal subregions:
+
+- `tool_visibility`
+- `tool_surface`
+
+The current frozen bullets below remain the compact target summary. The active
+target-delta note records the likely growth needed after absorbing the richer
+upstream visibility/catalog ownership baseline:
+
+- `meerkat-tools-target-delta.md`
+
 - known surfaces
 - visible surfaces
 - staged intents

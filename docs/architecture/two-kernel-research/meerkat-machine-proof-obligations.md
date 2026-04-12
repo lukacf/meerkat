@@ -219,6 +219,13 @@ trying to infer replay uniqueness from transient backlog shape alone.
 21. Staged tool-surface state cannot outrun the last applied boundary.
 22. Inflight tool-call state is compatible with machine-owned surface phase.
 
+The active target-delta review for this region is captured in:
+
+- `meerkat-tools-target-delta.md`
+
+That review is expected to expand the obligation set so `tools` is treated as
+`tool_visibility + tool_surface` rather than only surface lifecycle.
+
 ### Epoch continuity
 
 23. `ResetRuntime` rotates `epoch_id`.

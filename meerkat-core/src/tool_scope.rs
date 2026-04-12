@@ -304,13 +304,13 @@ impl ToolScope {
         Some(ToolScopeSnapshot {
             known_base_names: sorted_names(&state.known_base_names),
             visible_names: Self::visible_names_for_state(&state),
-            base_filter: state.base_filter.clone(),
-            active_external_filter: state.active_external_filter.clone(),
+            base_filter: state.durable_state.inherited_base_filter.clone(),
+            active_external_filter: state.durable_state.active_filter.clone(),
             active_turn_allow: state.active_turn_allow.as_ref().map(sorted_names),
             active_turn_deny: sorted_names(&state.active_turn_deny),
-            active_revision: state.active_revision,
-            staged_external_filter: state.staged_external_filter.clone(),
-            staged_revision: state.staged_revision,
+            active_revision: ToolScopeRevision(state.durable_state.active_revision),
+            staged_external_filter: state.durable_state.staged_filter.clone(),
+            staged_revision: ToolScopeRevision(state.durable_state.staged_revision),
         })
     }
 
@@ -867,9 +867,9 @@ fn sorted_names(names: &HashSet<String>) -> Vec<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::ToolScopeRevision;
     use super::{ToolFilter, ToolScope, ToolScopeStageError};
     use crate::types::{ToolDef, ToolProvenance, ToolSourceKind};
-    use super::ToolScopeRevision;
     use std::collections::HashSet;
     use std::sync::Arc;
 

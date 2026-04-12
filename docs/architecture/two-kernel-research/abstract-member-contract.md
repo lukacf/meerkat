@@ -1,6 +1,6 @@
 # Identity-Native Abstract Member Contract
 
-Status: working draft
+Status: frozen seam contract
 
 ## Purpose
 
@@ -31,17 +31,27 @@ The intended replacement is:
 - `AgentRuntimeId` as the current incarnation handle
 - `SessionId` and `MemberRef` remaining internal to `MeerkatMachine`
 
-## Target-State Note
+## Freeze Note
 
-This document describes the intended seam, not the current API surface.
+This document is the semantic seam contract used by the target composition
+proof, not a claim that the exact-current implementation already exposes this
+surface directly.
 
-Today:
+The exact-current branch still leaks some today-state details, especially:
 
-- `SessionId` still leaks through current roster and tool surfaces.
-- work submission is still expressed through raw turn-delivery paths such as `internal_turn`, `start_turn`, and `start_flow_step`.
-- topology and addressability policy still carry some today-state coupling to mob/runtime plumbing.
+- `SessionId` through current roster and tooling surfaces
+- raw turn-delivery entry points such as `internal_turn`, `start_turn`, and
+  `start_flow_step`
+- some addressability and topology-adjacent plumbing
 
-That means the contract below is partly a migration target, not a claim that the current code already has these semantics.
+Those are implementation and lowering concerns. They do not change the target
+Mob-visible seam that is now frozen and composition-proven.
+
+See also:
+
+- `mob-meerkat-composition-freeze.md`
+- `mob-meerkat-composition-proof-handoff.md`
+- `bridge-alphabet.md`
 
 ## Contract Entities
 
@@ -67,11 +77,13 @@ That means the contract below is partly a migration target, not a claim that the
   - Describes desired communication relationships without exposing `PeerId`, trusted-peer specs, or transport mechanics.
 - `WorkRef`
   - Mob-owned handle for a unit of work assigned to a member.
-  - Proposed new seam abstraction rather than a name that already exists in the current codebase.
+  - Canonical seam key, regardless of how the current codebase internally
+    realizes work submission.
 - `WorkSpec`
   - Abstract description of the work to execute.
   - Authored by `MobMachine`, interpreted by `MeerkatMachine`.
-  - Proposed new seam abstraction that lowers current raw turn and flow-step delivery into an explicit contract unit.
+  - Canonical seam payload, regardless of whether the current implementation
+    still lowers through raw turn-delivery helpers.
 
 ### Hidden from `MobMachine`
 
@@ -91,7 +103,8 @@ That means the contract below is partly a migration target, not a claim that the
 
 These may exist inside `MeerkatMachine`, but they are not part of the Mob-facing contract.
 
-Current code still leaks some of these details, especially `SessionId`; hiding them is explicit migration work.
+Current code still leaks some of these details, especially `SessionId`; hiding
+them remains explicit refinement/cutover work.
 
 ## Ownership Matrix
 
@@ -173,6 +186,8 @@ That means an old half-dead incarnation and a newly respawned incarnation can sh
 - `AgentRuntimeId`
 
 The `FenceToken` is what separates "current owner" from "stale ghost."
+
+This is now part of the proven seam shape, not only a design preference.
 
 ## Lifecycle Lane
 

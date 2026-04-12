@@ -33,6 +33,8 @@ direct executable scaffold for the frozen target machine in:
 - `../mob-machine-coverage-matrix.md`
 - `../mob-machine-fairness-assumptions.md`
 - `../mob-machine-refinement-delta.md`
+- `../mob-meerkat-composition-freeze.md`
+- `../mob-meerkat-composition-proof-handoff.md`
 
 Files:
 
@@ -51,6 +53,15 @@ Files:
 - `MobMachineTargetWorkLiveness.cfg`: focused work-ledger liveness harness
 - `MobMachineTargetFlowLiveness.cfg`: focused flow-step liveness harness
 - `MobMachineTargetLiveness.cfg`: wider full-`FairSpec` liveness exploration
+- `MobMeerkatCompositionTarget.tla`: target seam composition model between the
+  abstract Mob and Meerkat kernels
+- `MobMeerkatCompositionTarget.cfg`: bounded seam safety configuration
+- `MobMeerkatCompositionTargetStress.cfg`: widened bounded seam safety
+  configuration
+- `MobMeerkatCompositionTargetLifecycleLiveness.cfg`: focused seam lifecycle
+  liveness harness
+- `MobMeerkatCompositionTargetFlowWorkLiveness.cfg`: focused seam flow/work
+  liveness harness
 
 For both machines, bounded TLC runs use `StateConstraint == step_count <= MaxSteps`.
 Configs that explore bounded safety only may disable TLC deadlock checking so the
@@ -78,6 +89,11 @@ Current status:
   termination due to continuing state explosion
 - `MobMachineTargetLiveness` is retained as a wider exploratory `FairSpec`
   liveness pass, not the canonical freeze gate
+- `MobMeerkatCompositionTarget` passes bounded base and widened stress TLC
+- `MobMeerkatCompositionTargetLifecycleLiveness` passes focused seam lifecycle
+  temporal checks
+- `MobMeerkatCompositionTargetFlowWorkLiveness` passes focused seam flow/work
+  temporal checks
 - the target Mob alphabet coverage audit is clean
 - the target Mob derived-predicate coverage audit is clean
 - the strengthened safety sets have already forced honest corrections into the

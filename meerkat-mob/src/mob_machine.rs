@@ -12,6 +12,8 @@ use crate::runtime::{
     MobHandle, MobKernelDiagnosticSnapshot, MobMemberListEntry, MobMemberStatus,
     MobOrchestratorSnapshot, MobState,
 };
+use meerkat_runtime::identifiers::LogicalRuntimeId;
+use meerkat_runtime::{MeerkatMachineSpineSnapshot, RuntimeState};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Joined diagnostic view over the current mob lifecycle state plus the live
@@ -24,6 +26,65 @@ pub(crate) struct MobMachineSnapshot {
     pub members: Vec<MobMemberListEntry>,
     pub restore_failures: BTreeMap<MeerkatId, RestoreFailureSnapshot>,
     pub tracked_runs: BTreeMap<RunId, TrackedRunSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MobShadowLane {
+    ProvisioningLifecycle,
+    FlowFrameLoop,
+    TaskHistoryRecovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ShadowMismatchTriage {
+    ImplementationDetail,
+    SemanticGap,
+    DogmaViolation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MobShadowMismatch {
+    pub lane: MobShadowLane,
+    pub region: &'static str,
+    pub entity_id: Option<String>,
+    pub expected_summary: String,
+    pub observed_summary: String,
+    pub triage: ShadowMismatchTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MobShadowReport {
+    pub lane: MobShadowLane,
+    pub mismatches: Vec<MobShadowMismatch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompositionShadowLane {
+    LifecycleSupersession,
+    WorkBridge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompositionShadowMismatch {
+    pub lane: CompositionShadowLane,
+    pub region: &'static str,
+    pub entity_id: Option<String>,
+    pub expected_summary: String,
+    pub observed_summary: String,
+    pub triage: ShadowMismatchTriage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompositionShadowReport {
+    pub lane: CompositionShadowLane,
+    pub mismatches: Vec<CompositionShadowMismatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MobShadowSuiteReport {
+    pub mob: Vec<MobShadowReport>,
+    pub composition: Vec<CompositionShadowReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +649,833 @@ pub(crate) fn validate_mob_machine_snapshot(
     violations
 }
 
+fn provisioning_lifecycle_shadow_mismatch_from_violation(
+    violation: MobMachineInvariantViolation,
+) -> Option<MobShadowMismatch> {
+    match violation {
+        MobMachineInvariantViolation::LifecyclePhaseMismatch {
+            public_phase,
+            lifecycle_phase,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "lifecycle",
+            entity_id: None,
+            expected_summary: "public mob phase matches lifecycle authority phase".into(),
+            observed_summary: format!(
+                "public phase = {public_phase:?}, lifecycle phase = {lifecycle_phase:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::LifecycleTerminalPhaseHasActiveRuns {
+            phase,
+            active_run_count,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "lifecycle",
+            entity_id: None,
+            expected_summary: "terminal lifecycle phases have no active runs".into(),
+            observed_summary: format!(
+                "phase = {phase:?}, active_run_count = {active_run_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::LifecycleCleanupPendingInIllegalPhase { phase } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "lifecycle",
+                entity_id: None,
+                expected_summary:
+                    "cleanup_pending is only visible while the mob is Stopped or Completed"
+                        .into(),
+                observed_summary: format!("phase = {phase:?} with cleanup_pending = true"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::OrchestratorPhaseMismatch {
+            public_phase,
+            orchestrator_phase,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "orchestrator",
+            entity_id: None,
+            expected_summary: "public mob phase matches orchestrator phase".into(),
+            observed_summary: format!(
+                "public phase = {public_phase:?}, orchestrator phase = {orchestrator_phase:?}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::OrchestratorTerminalPhaseHasInFlightWork {
+            phase,
+            pending_spawn_count,
+            active_flow_count,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "orchestrator",
+            entity_id: None,
+            expected_summary: "terminal orchestrator phases have no in-flight spawn or flow work"
+                .into(),
+            observed_summary: format!(
+                "phase = {phase:?}, pending_spawn_count = {pending_spawn_count}, active_flow_count = {active_flow_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::DestroyedOrchestratorStillBound {
+            coordinator_bound,
+            supervisor_active,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "orchestrator",
+            entity_id: None,
+            expected_summary:
+                "destroyed orchestrators are unbound and have no active supervisor".into(),
+            observed_summary: format!(
+                "coordinator_bound = {coordinator_bound}, supervisor_active = {supervisor_active}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::TopologyCoordinatorBindingMismatch {
+            orchestrator_bound,
+            topology_bound,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "topology",
+            entity_id: None,
+            expected_summary:
+                "topology coordinator binding matches orchestrator coordinator binding".into(),
+            observed_summary: format!(
+                "orchestrator_bound = {orchestrator_bound}, topology_bound = {topology_bound}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::TopologyRevisionMismatch {
+            orchestrator_revision,
+            topology_revision,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "topology",
+            entity_id: None,
+            expected_summary: "topology revision matches orchestrator topology revision".into(),
+            observed_summary: format!(
+                "orchestrator_revision = {orchestrator_revision}, topology_revision = {topology_revision}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::PendingSpawnCountMismatch {
+            pending_spawn_count,
+            lineage_count,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "pending_spawns",
+            entity_id: None,
+            expected_summary:
+                "orchestrator pending_spawn_count matches visible pending lineage size".into(),
+            observed_summary: format!(
+                "pending_spawn_count = {pending_spawn_count}, lineage_count = {lineage_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::PendingSpawnTicketAlignmentMismatch {
+            metadata_ticket_ids,
+            task_ticket_ids,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::ProvisioningLifecycle,
+            region: "pending_spawns",
+            entity_id: None,
+            expected_summary: "pending spawn metadata and task tickets stay aligned".into(),
+            observed_summary: format!(
+                "metadata_ticket_ids = {metadata_ticket_ids:?}, task_ticket_ids = {task_ticket_ids:?}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::PendingSpawnDuplicateMember { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "pending_spawns",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary: "pending spawn lineage stages each member identity at most once"
+                    .into(),
+                observed_summary: "duplicate pending spawn member identity".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::PendingSpawnMemberAlreadyInRoster { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "pending_spawns",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "pending spawn members do not materialize in the roster before finalization"
+                        .into(),
+                observed_summary: "pending spawn member already present in roster".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::PendingSpawnMemberAlreadyProjected { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "pending_spawns",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "pending spawn members do not materialize in projected member status before finalization"
+                        .into(),
+                observed_summary: "pending spawn member already present in projection".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::PendingSpawnPartialProvisionBinding { ticket } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "pending_spawns",
+                entity_id: Some(ticket.to_string()),
+                expected_summary:
+                    "pending spawn progress never exposes partial session or operation binding"
+                        .into(),
+                observed_summary: "ticket still has partial provision binding".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::KickoffPendingMemberOverlapsPendingSpawn { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "kickoff_barrier",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "kickoff-tracked members are already past pending-spawn lineage".into(),
+                observed_summary: "kickoff pending member still overlaps pending-spawn lineage".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::KickoffPendingMemberMissingRosterEntry { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "kickoff_barrier",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "kickoff pending members already exist in the canonical roster".into(),
+                observed_summary: "kickoff pending member missing roster entry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::KickoffPendingMemberMissingProjectedEntry { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "kickoff_barrier",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "kickoff pending members are visible in projected member status".into(),
+                observed_summary: "kickoff pending member missing projected entry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::KickoffPendingMemberMissingSessionBinding { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "kickoff_barrier",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "kickoff pending members already carry a live session binding".into(),
+                observed_summary: "kickoff pending member missing session binding".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::KickoffPendingMemberBroken { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "kickoff_barrier",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "kickoff pending members are not already projected as Broken".into(),
+                observed_summary: "kickoff pending member projected as Broken".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureMissingRosterEntry { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failures remain attached to canonical roster members".into(),
+                observed_summary: "restore failure missing roster entry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureMissingProjectedMember { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failures remain visible in projected member status".into(),
+                observed_summary: "restore failure missing projected member".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureProjectedStatusMismatch { meerkat_id, status } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failure projections surface as Broken members".into(),
+                observed_summary: format!("projected status = {status:?}"),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureProjectedSessionMismatch { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failure projections keep the same session binding as the diagnostic record"
+                        .into(),
+                observed_summary: "projected session binding mismatches restore failure record".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureProjectedReasonMismatch { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failure projections keep the same failure reason as the diagnostic record"
+                        .into(),
+                observed_summary: "projected failure reason mismatches restore failure record".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::ProjectedBrokenMemberMissingRestoreFailure { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "projected Broken members always have a matching restore-failure record"
+                        .into(),
+                observed_summary: "Broken projected member missing restore-failure record".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn capture_provisioning_lifecycle_shadow_mismatches(
+    snapshot: &MobMachineSnapshot,
+) -> Vec<MobShadowMismatch> {
+    validate_mob_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(provisioning_lifecycle_shadow_mismatch_from_violation)
+        .collect()
+}
+
+fn flow_frame_loop_shadow_mismatch_from_violation(
+    violation: MobMachineInvariantViolation,
+) -> Option<MobShadowMismatch> {
+    match violation {
+        MobMachineInvariantViolation::OrchestratorFlowTrackerCountMismatch {
+            active_flow_count,
+            run_task_count,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "flow_trackers",
+            entity_id: None,
+            expected_summary:
+                "orchestrator active_flow_count matches actor-owned tracked flow tasks".into(),
+            observed_summary: format!(
+                "active_flow_count = {active_flow_count}, run_task_count = {run_task_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::FlowTaskTokenMismatch {
+            run_task_ids,
+            cancel_token_ids,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "flow_trackers",
+            entity_id: None,
+            expected_summary: "tracked flow tasks and cancel tokens cover the same active run ids"
+                .into(),
+            observed_summary: format!(
+                "run_task_ids = {run_task_ids:?}, cancel_token_ids = {cancel_token_ids:?}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::FlowStreamWithoutTrackedRun { run_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "flow_trackers",
+                entity_id: Some(run_id.to_string()),
+                expected_summary: "flow-scoped event streams only exist for actor-tracked runs"
+                    .into(),
+                observed_summary: "stream tracked without an actor-owned run task".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunMissingStoreEntry { run_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary:
+                    "every actor-tracked flow run resolves to durable tracked-run state".into(),
+                observed_summary: "run tracker exists but durable tracked-run snapshot is missing"
+                    .into(),
+                triage: ShadowMismatchTriage::SemanticGap,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunFlowIdMismatch {
+            run_id,
+            tracker_flow_id,
+            store_flow_id,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "actor-owned run tracking and durable tracked-run store agree on flow identity"
+                    .into(),
+            observed_summary: format!(
+                "tracker_flow_id = {tracker_flow_id}, store_flow_id = {store_flow_id}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::TrackedRunMalformed { run_id, reason } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary:
+                    "tracked runs deserialize into canonical durable run-kernel shape".into(),
+                observed_summary: format!("malformed tracked run snapshot: {reason}"),
+                triage: ShadowMismatchTriage::SemanticGap,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunCompletionTimestampMismatch {
+            run_id,
+            status,
+            completed_at_present,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "terminal tracked runs carry completed_at and non-terminal tracked runs do not"
+                    .into(),
+            observed_summary: format!(
+                "status = {status:?}, completed_at_present = {completed_at_present}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunMissingOrderedSteps { run_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary: "tracked runs preserve a non-empty ordered step sequence".into(),
+                observed_summary: "tracked run has no ordered steps".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunOrderedStepsDuplicate { run_id, step_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary:
+                    "tracked run ordered steps contain each step identity at most once".into(),
+                observed_summary: format!("duplicate ordered step id = {step_id}"),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunDependencyMapUnknownStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunDependencyModeMapUnknownStep {
+            run_id,
+            step_id,
+        }
+        | MobMachineInvariantViolation::TrackedRunConditionFlagUnknownStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunBranchUnknownStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunCollectionPolicyUnknownStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunQuorumThresholdUnknownStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunStepStatusUnknownStep { run_id, step_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary: "tracked-run step maps only reference kernel-known ordered steps"
+                    .into(),
+                observed_summary: format!("unknown step id in tracked-run projection = {step_id}"),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunDependencyMapMissingOrderedStep {
+            run_id,
+            step_id,
+        }
+        | MobMachineInvariantViolation::TrackedRunDependencyModeMissingOrderedStep {
+            run_id,
+            step_id,
+        }
+        | MobMachineInvariantViolation::TrackedRunConditionFlagMissingOrderedStep {
+            run_id,
+            step_id,
+        }
+        | MobMachineInvariantViolation::TrackedRunBranchMissingOrderedStep { run_id, step_id }
+        | MobMachineInvariantViolation::TrackedRunCollectionPolicyMissingOrderedStep {
+            run_id,
+            step_id,
+        }
+        | MobMachineInvariantViolation::TrackedRunQuorumThresholdMissingOrderedStep {
+            run_id,
+            step_id,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "tracked-run maps cover every ordered step in the durable kernel projection".into(),
+            observed_summary: format!("missing ordered step entry for {step_id}"),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::TrackedRunAnyDependencyModeWithoutBranchDependency {
+            run_id,
+            step_id,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "depends_on_mode=any steps depend on at least one branch-labelled step".into(),
+            observed_summary: format!(
+                "step {step_id} uses DependencyMode::Any without branch-backed dependencies"
+            ),
+            triage: ShadowMismatchTriage::SemanticGap,
+        }),
+        MobMachineInvariantViolation::TrackedRunBranchWithoutCondition {
+            run_id,
+            step_id,
+            branch_id,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "branch-labelled steps remain condition-backed in tracked-run state"
+                .into(),
+            observed_summary: format!(
+                "step {step_id} carries branch {branch_id} without condition state"
+            ),
+            triage: ShadowMismatchTriage::SemanticGap,
+        }),
+        MobMachineInvariantViolation::TrackedRunBranchConflictingDependencies {
+            run_id,
+            branch_id,
+            ..
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "steps in the same branch group preserve matching dependency sets"
+                .into(),
+            observed_summary: format!("branch group {branch_id} has conflicting dependency sets"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunBranchGroupTooSmall {
+            run_id, branch_id, ..
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "branch groups contain at least two branch-labelled steps".into(),
+            observed_summary: format!("branch group {branch_id} contains fewer than two steps"),
+            triage: ShadowMismatchTriage::SemanticGap,
+        }),
+        MobMachineInvariantViolation::TrackedRunQuorumThresholdShapeMismatch {
+            run_id,
+            step_id,
+            policy_kind,
+            quorum_threshold,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "quorum threshold shape matches the tracked collection policy".into(),
+            observed_summary: format!(
+                "step {step_id} uses {policy_kind:?} with quorum threshold {quorum_threshold}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunDependencyUnknownStep {
+            run_id,
+            step_id,
+            dependency_step_id,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "tracked-run dependencies only point at kernel-known ordered steps"
+                .into(),
+            observed_summary: format!(
+                "step {step_id} depends on unknown step {dependency_step_id}"
+            ),
+            triage: ShadowMismatchTriage::DogmaViolation,
+        }),
+        MobMachineInvariantViolation::TrackedRunDuplicateDependency {
+            run_id, step_id, ..
+        }
+        | MobMachineInvariantViolation::TrackedRunSelfDependency { run_id, step_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::FlowFrameLoop,
+                region: "tracked_runs",
+                entity_id: Some(run_id.to_string()),
+                expected_summary:
+                    "tracked-run dependency sets are de-duplicated and acyclic at self edges".into(),
+                observed_summary: format!(
+                    "step {step_id} carries duplicate or self dependency state"
+                ),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::TrackedRunTerminalRunHasDispatchedStep {
+            run_id,
+            step_id,
+            status,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "terminal tracked runs do not retain dispatched step statuses".into(),
+            observed_summary: format!(
+                "terminal run status {status:?} still has dispatched step {step_id}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunCompletedRunHasNonCompletedStep {
+            run_id,
+            step_id,
+            step_status,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "completed tracked runs only preserve Completed or Skipped step statuses".into(),
+            observed_summary: format!(
+                "completed tracked run still shows step {step_id} in status {step_status:?}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunConsecutiveFailureCountExceedsFailureCount {
+            run_id,
+            failure_count,
+            consecutive_failure_count,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "consecutive failure count does not exceed total failure count"
+                .into(),
+            observed_summary: format!(
+                "failure_count = {failure_count}, consecutive_failure_count = {consecutive_failure_count}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::TrackedRunLoopIterationWithoutLoopStructure {
+            run_id,
+            loop_iteration_count,
+            ..
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "loop iteration ledger rows only exist when the run projects loop structure".into(),
+            observed_summary: format!(
+                "loop_iteration_count = {loop_iteration_count} without loop structure"
+            ),
+            triage: ShadowMismatchTriage::SemanticGap,
+        }),
+        MobMachineInvariantViolation::TrackedRunLoopWithoutFrameStructure {
+            run_id,
+            loop_count,
+            ..
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary:
+                "loop structure only exists when the run also projects frame structure".into(),
+            observed_summary: format!("loop_count = {loop_count} without frame structure"),
+            triage: ShadowMismatchTriage::SemanticGap,
+        }),
+        MobMachineInvariantViolation::TrackedRunStructuredStateWithLegacySchemaVersion {
+            run_id,
+            schema_version,
+            ..
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::FlowFrameLoop,
+            region: "tracked_runs",
+            entity_id: Some(run_id.to_string()),
+            expected_summary: "frame/loop-aware tracked runs use the modern durable schema version"
+                .into(),
+            observed_summary: format!("schema_version = {schema_version}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        _ => None,
+    }
+}
+
+fn capture_flow_frame_loop_shadow_mismatches(
+    snapshot: &MobMachineSnapshot,
+) -> Vec<MobShadowMismatch> {
+    validate_mob_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(flow_frame_loop_shadow_mismatch_from_violation)
+        .collect()
+}
+
+fn task_history_recovery_shadow_mismatch_from_violation(
+    violation: MobMachineInvariantViolation,
+) -> Option<MobShadowMismatch> {
+    match violation {
+        MobMachineInvariantViolation::RestoreFailureMissingRosterEntry { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failures remain attached to canonical roster members".into(),
+                observed_summary: "restore failure missing roster entry".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureMissingProjectedMember { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failures remain visible in projected member status".into(),
+                observed_summary: "restore failure missing projected member".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureProjectedStatusMismatch {
+            meerkat_id,
+            status,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::TaskHistoryRecovery,
+            region: "restore_failures",
+            entity_id: Some(meerkat_id.to_string()),
+            expected_summary: "restore failure projections surface as Broken members".into(),
+            observed_summary: format!("projected status = {status:?}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::RestoreFailureProjectedSessionMismatch { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failure projections keep the same session binding as the diagnostic record"
+                        .into(),
+                observed_summary: "projected session binding mismatches restore failure record".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::RestoreFailureProjectedReasonMismatch { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "restore failure projections keep the same failure reason as the diagnostic record"
+                        .into(),
+                observed_summary: "projected failure reason mismatches restore failure record".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::ProjectedBrokenMemberMissingRestoreFailure { meerkat_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                entity_id: Some(meerkat_id.to_string()),
+                expected_summary:
+                    "projected Broken members always have a matching restore-failure record"
+                        .into(),
+                observed_summary: "Broken projected member missing restore-failure record".into(),
+                triage: ShadowMismatchTriage::DogmaViolation,
+            })
+        }
+        MobMachineInvariantViolation::FlowTaskTokenMismatch {
+            run_task_ids,
+            cancel_token_ids,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::TaskHistoryRecovery,
+            region: "task_ledger",
+            entity_id: None,
+            expected_summary:
+                "tracked flow tasks and cancel tokens cover the same active run ids".into(),
+            observed_summary: format!(
+                "run_task_ids = {run_task_ids:?}, cancel_token_ids = {cancel_token_ids:?}"
+            ),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        MobMachineInvariantViolation::FlowStreamWithoutTrackedRun { run_id } => {
+            Some(MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "task_ledger",
+                entity_id: Some(run_id.to_string()),
+                expected_summary:
+                    "flow-scoped event streams only exist for actor-tracked runs".into(),
+                observed_summary: "stream tracked without an actor-owned run task".into(),
+                triage: ShadowMismatchTriage::ImplementationDetail,
+            })
+        }
+        MobMachineInvariantViolation::MemberFinalityMismatch {
+            meerkat_id,
+            status,
+            is_final,
+        } => Some(MobShadowMismatch {
+            lane: MobShadowLane::TaskHistoryRecovery,
+            region: "history",
+            entity_id: Some(meerkat_id.to_string()),
+            expected_summary:
+                "projected member finality matches the terminal/member-status surface".into(),
+            observed_summary: format!("status = {status:?}, is_final = {is_final}"),
+            triage: ShadowMismatchTriage::ImplementationDetail,
+        }),
+        _ => None,
+    }
+}
+
+fn capture_task_history_recovery_shadow_mismatches(
+    snapshot: &MobMachineSnapshot,
+) -> Vec<MobShadowMismatch> {
+    validate_mob_machine_snapshot(snapshot)
+        .into_iter()
+        .filter_map(task_history_recovery_shadow_mismatch_from_violation)
+        .collect()
+}
+
+pub(crate) async fn capture_mob_shadow_report(
+    handle: &MobHandle,
+    lane: MobShadowLane,
+) -> MobShadowReport {
+    let snapshot = capture_mob_machine_snapshot(handle).await;
+    let mismatches = match lane {
+        MobShadowLane::ProvisioningLifecycle => {
+            capture_provisioning_lifecycle_shadow_mismatches(&snapshot)
+        }
+        MobShadowLane::FlowFrameLoop => capture_flow_frame_loop_shadow_mismatches(&snapshot),
+        MobShadowLane::TaskHistoryRecovery => {
+            capture_task_history_recovery_shadow_mismatches(&snapshot)
+        }
+    };
+    MobShadowReport { lane, mismatches }
+}
+
 fn push_orchestrator_mismatches(
     violations: &mut Vec<MobMachineInvariantViolation>,
     public_phase: MobState,
@@ -624,6 +1512,304 @@ fn push_orchestrator_mismatches(
             },
         );
     }
+}
+
+fn composition_lifecycle_supersession_mismatch(
+    region: &'static str,
+    entity_id: impl Into<Option<String>>,
+    expected_summary: impl Into<String>,
+    observed_summary: impl Into<String>,
+    triage: ShadowMismatchTriage,
+) -> CompositionShadowMismatch {
+    CompositionShadowMismatch {
+        lane: CompositionShadowLane::LifecycleSupersession,
+        region,
+        entity_id: entity_id.into(),
+        expected_summary: expected_summary.into(),
+        observed_summary: observed_summary.into(),
+        triage,
+    }
+}
+
+fn composition_work_bridge_mismatch(
+    region: &'static str,
+    entity_id: impl Into<Option<String>>,
+    expected_summary: impl Into<String>,
+    observed_summary: impl Into<String>,
+    triage: ShadowMismatchTriage,
+) -> CompositionShadowMismatch {
+    CompositionShadowMismatch {
+        lane: CompositionShadowLane::WorkBridge,
+        region,
+        entity_id: entity_id.into(),
+        expected_summary: expected_summary.into(),
+        observed_summary: observed_summary.into(),
+        triage,
+    }
+}
+
+fn spine_has_observable_work_posture(spine: &MeerkatMachineSpineSnapshot) -> bool {
+    spine.control.current_run_id.is_some()
+        || !spine.inputs.queue.is_empty()
+        || !spine.inputs.steer_queue.is_empty()
+        || spine.completion_waiters.waiter_count != 0
+}
+
+fn tracked_run_is_nonterminal(run: &TrackedRunSnapshot) -> bool {
+    match run {
+        TrackedRunSnapshot::Present(snapshot) => !snapshot.status.is_terminal(),
+        TrackedRunSnapshot::Malformed(snapshot) => !snapshot.status.is_terminal(),
+        TrackedRunSnapshot::Missing => false,
+    }
+}
+
+fn capture_composition_work_bridge_shadow_mismatches(
+    snapshot: &MobMachineSnapshot,
+    runtime_spines: &HashMap<meerkat_core::types::SessionId, Option<MeerkatMachineSpineSnapshot>>,
+) -> Vec<CompositionShadowMismatch> {
+    let mut mismatches = Vec::new();
+    let mut work_visible_members = Vec::new();
+
+    for member in &snapshot.members {
+        let Some(session_id) = &member.current_session_id else {
+            continue;
+        };
+        let Some(spine) = runtime_spines
+            .get(session_id)
+            .and_then(|snapshot| snapshot.as_ref())
+        else {
+            continue;
+        };
+
+        if spine_has_observable_work_posture(spine) {
+            work_visible_members.push(member.meerkat_id.clone());
+            if matches!(
+                member.status,
+                MobMemberStatus::Completed | MobMemberStatus::Broken | MobMemberStatus::Unknown
+            ) {
+                mismatches.push(composition_work_bridge_mismatch(
+                    "work",
+                    Some(member.meerkat_id.to_string()),
+                    "terminal or broken Mob members should not retain observable Meerkat work posture",
+                    format!(
+                        "status={:?}, current_run_id={:?}, queue_len={}, steer_queue_len={}, waiter_count={}",
+                        member.status,
+                        spine.control.current_run_id,
+                        spine.inputs.queue.len(),
+                        spine.inputs.steer_queue.len(),
+                        spine.completion_waiters.waiter_count
+                    ),
+                    ShadowMismatchTriage::ImplementationDetail,
+                ));
+            }
+        }
+    }
+
+    let nonterminal_tracked_runs: Vec<_> = snapshot
+        .tracked_runs
+        .iter()
+        .filter_map(|(run_id, run)| tracked_run_is_nonterminal(run).then_some(run_id.clone()))
+        .collect();
+
+    if !nonterminal_tracked_runs.is_empty() && work_visible_members.is_empty() {
+        mismatches.push(composition_work_bridge_mismatch(
+            "work",
+            None,
+            "nonterminal Mob work should surface at least one observable Meerkat work posture",
+            format!("nonterminal_runs={nonterminal_tracked_runs:?}, work_visible_members=[]"),
+            ShadowMismatchTriage::SemanticGap,
+        ));
+    }
+
+    mismatches
+}
+
+fn capture_composition_lifecycle_supersession_shadow_mismatches(
+    snapshot: &MobMachineSnapshot,
+    session_live: &HashMap<meerkat_core::types::SessionId, bool>,
+    runtime_spines: &HashMap<meerkat_core::types::SessionId, Option<MeerkatMachineSpineSnapshot>>,
+) -> Vec<CompositionShadowMismatch> {
+    let mut mismatches = Vec::new();
+    let mut session_owners: HashMap<meerkat_core::types::SessionId, Vec<MeerkatId>> =
+        HashMap::new();
+
+    for member in &snapshot.members {
+        if let Some(session_id) = &member.current_session_id {
+            session_owners
+                .entry(session_id.clone())
+                .or_default()
+                .push(member.meerkat_id.clone());
+        }
+    }
+
+    for (session_id, owners) in session_owners {
+        if owners.len() > 1 {
+            mismatches.push(composition_lifecycle_supersession_mismatch(
+                "supersession",
+                Some(session_id.to_string()),
+                "one Mob member should own a bridge session at a time",
+                format!("multiple members project the same bridge session: {owners:?}"),
+                ShadowMismatchTriage::DogmaViolation,
+            ));
+        }
+    }
+
+    for member in &snapshot.members {
+        let Some(session_id) = &member.current_session_id else {
+            if member.state == MemberState::Active && member.status == MobMemberStatus::Active {
+                mismatches.push(composition_lifecycle_supersession_mismatch(
+                    "lifecycle",
+                    Some(member.meerkat_id.to_string()),
+                    "active members should project a current bridge session",
+                    "no current bridge session projected".to_string(),
+                    ShadowMismatchTriage::DogmaViolation,
+                ));
+            }
+            continue;
+        };
+
+        if member.member_ref.session_id() != Some(session_id) {
+            mismatches.push(composition_lifecycle_supersession_mismatch(
+                "supersession",
+                Some(member.meerkat_id.to_string()),
+                "projected bridge session should match canonical roster member_ref",
+                format!(
+                    "member_ref session {:?} != projected current_session_id {}",
+                    member.member_ref.session_id(),
+                    session_id
+                ),
+                ShadowMismatchTriage::DogmaViolation,
+            ));
+        }
+
+        let live = session_live.get(session_id).copied().unwrap_or(false);
+        let spine = runtime_spines
+            .get(session_id)
+            .and_then(|snapshot| snapshot.as_ref());
+
+        if matches!(
+            member.status,
+            MobMemberStatus::Completed | MobMemberStatus::Unknown
+        ) && (live || spine.is_some())
+        {
+            mismatches.push(composition_lifecycle_supersession_mismatch(
+                "lifecycle",
+                Some(member.meerkat_id.to_string()),
+                "terminal or unknown members should not retain a live Meerkat bridge",
+                format!(
+                    "status={:?}, live_session={}, runtime_snapshot_present={}",
+                    member.status,
+                    live,
+                    spine.is_some()
+                ),
+                ShadowMismatchTriage::ImplementationDetail,
+            ));
+        }
+
+        if member.state == MemberState::Active && member.status == MobMemberStatus::Active {
+            if !live && spine.is_none() {
+                mismatches.push(composition_lifecycle_supersession_mismatch(
+                    "lifecycle",
+                    Some(member.meerkat_id.to_string()),
+                    "active members should retain an observable Meerkat runtime bridge",
+                    format!("bridge session {session_id} is neither live nor snapshotted"),
+                    ShadowMismatchTriage::DogmaViolation,
+                ));
+            }
+            if let Some(spine) = spine {
+                if spine.binding.session_id != *session_id {
+                    mismatches.push(composition_lifecycle_supersession_mismatch(
+                        "supersession",
+                        Some(member.meerkat_id.to_string()),
+                        "runtime snapshot should be keyed by the projected bridge session",
+                        format!(
+                            "runtime snapshot session {} != projected current_session_id {}",
+                            spine.binding.session_id, session_id
+                        ),
+                        ShadowMismatchTriage::DogmaViolation,
+                    ));
+                }
+
+                if matches!(
+                    spine.control.phase,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
+                ) {
+                    mismatches.push(composition_lifecycle_supersession_mismatch(
+                        "lifecycle",
+                        Some(member.meerkat_id.to_string()),
+                        "active members should not point at a terminal or stopped Meerkat runtime",
+                        format!("projected runtime phase is {:?}", spine.control.phase),
+                        ShadowMismatchTriage::ImplementationDetail,
+                    ));
+                }
+            }
+        }
+    }
+
+    mismatches
+}
+
+pub(crate) async fn capture_composition_shadow_report(
+    handle: &MobHandle,
+    lane: CompositionShadowLane,
+) -> CompositionShadowReport {
+    let snapshot = capture_mob_machine_snapshot(handle).await;
+    let session_ids: Vec<_> = snapshot
+        .members
+        .iter()
+        .filter_map(|member| member.current_session_id.clone())
+        .collect();
+    let mut session_live = HashMap::new();
+    let mut runtime_spines = HashMap::new();
+    let runtime_adapter = handle.diagnostic_runtime_adapter();
+    for session_id in session_ids {
+        let live = handle.diagnostic_has_live_session(&session_id).await;
+        session_live.insert(session_id.clone(), live);
+        let spine = match runtime_adapter.as_ref() {
+            Some(adapter) => adapter.meerkat_machine_spine_snapshot(&session_id).await,
+            None => None,
+        };
+        runtime_spines.insert(session_id, spine);
+    }
+
+    match lane {
+        CompositionShadowLane::LifecycleSupersession => CompositionShadowReport {
+            lane,
+            mismatches: capture_composition_lifecycle_supersession_shadow_mismatches(
+                &snapshot,
+                &session_live,
+                &runtime_spines,
+            ),
+        },
+        CompositionShadowLane::WorkBridge => CompositionShadowReport {
+            lane,
+            mismatches: capture_composition_work_bridge_shadow_mismatches(
+                &snapshot,
+                &runtime_spines,
+            ),
+        },
+    }
+}
+
+pub(crate) async fn capture_mob_shadow_suite_report(handle: &MobHandle) -> MobShadowSuiteReport {
+    let mut mob = Vec::new();
+    for lane in [
+        MobShadowLane::ProvisioningLifecycle,
+        MobShadowLane::FlowFrameLoop,
+        MobShadowLane::TaskHistoryRecovery,
+    ] {
+        mob.push(capture_mob_shadow_report(handle, lane).await);
+    }
+
+    let mut composition = Vec::new();
+    for lane in [
+        CompositionShadowLane::LifecycleSupersession,
+        CompositionShadowLane::WorkBridge,
+    ] {
+        composition.push(capture_composition_shadow_report(handle, lane).await);
+    }
+
+    MobShadowSuiteReport { mob, composition }
 }
 
 fn push_topology_mismatches(
@@ -1431,6 +2617,70 @@ mod tests {
         }
     }
 
+    fn active_meerkat_spine(
+        session_id: &SessionId,
+        phase: RuntimeState,
+    ) -> MeerkatMachineSpineSnapshot {
+        MeerkatMachineSpineSnapshot {
+            binding: meerkat_runtime::MeerkatBindingSnapshot {
+                session_id: session_id.clone(),
+                runtime_id: LogicalRuntimeId::new(format!("runtime-{session_id}")),
+                driver_kind: meerkat_runtime::MeerkatDriverKind::Ephemeral,
+                driver_present: true,
+                completions_present: true,
+                ops_registry_present: true,
+                attachment_live: false,
+                detached_wake_present: false,
+                epoch_id: meerkat_core::RuntimeEpochId::new(),
+                cursor_state: meerkat_runtime::MeerkatCursorSnapshot {
+                    agent_applied_cursor: 0,
+                    runtime_observed_seq: 0,
+                    runtime_last_injected_seq: 0,
+                },
+            },
+            control: meerkat_runtime::MeerkatControlSnapshot {
+                phase,
+                current_run_id: None,
+                pre_run_phase: None,
+                wake_pending: false,
+                process_pending: false,
+            },
+            inputs: meerkat_runtime::MeerkatInputsSnapshot {
+                ingress_phase: meerkat_runtime::runtime_ingress_authority::IngressPhase::Active,
+                admission_order: Vec::new(),
+                queue: Vec::new(),
+                steer_queue: Vec::new(),
+                current_run_id: None,
+                current_run_contributors: Vec::new(),
+                wake_requested: false,
+                process_requested: false,
+                silent_intent_overrides: Vec::new(),
+            },
+            completion_waiters: meerkat_runtime::MeerkatCompletionWaitersSnapshot {
+                input_count: 0,
+                waiter_count: 0,
+                waiting_inputs: Vec::new(),
+            },
+            ops: meerkat_runtime::MeerkatOpsSnapshot {
+                operation_count: 0,
+                active_count: 0,
+                wait_request_id: None,
+                pending_wait_present: false,
+                pending_wait_request_id: None,
+                wait_operation_ids: Vec::new(),
+                operations: Vec::new(),
+                detached_wake_pending: None,
+                detached_wake_signaled: None,
+            },
+            drain: meerkat_runtime::MeerkatDrainSnapshot {
+                slot_present: false,
+                phase: None,
+                mode: None,
+                handle_present: false,
+            },
+        }
+    }
+
     #[test]
     fn validate_mob_machine_snapshot_reports_projection_violations() {
         let mut roster = Roster::new();
@@ -1732,6 +2982,416 @@ mod tests {
                 .and_then(|entry| entry.member_ref.session_id()),
             Some(&worker_sid)
         );
+    }
+
+    #[test]
+    fn capture_mob_shadow_report_reports_provisioning_lifecycle_mismatches() {
+        let mut roster = Roster::new();
+        let worker_sid = add_member(&mut roster, "worker-broken");
+        let mut projected = projected_entry(&roster, "worker-broken");
+        projected.status = MobMemberStatus::Retiring;
+        projected.current_session_id = None;
+
+        let mut kernel = valid_kernel_snapshot();
+        kernel.lifecycle.phase = MobState::Completed;
+        kernel.lifecycle.active_run_count = 1;
+        let orchestrator = kernel
+            .orchestrator
+            .as_mut()
+            .expect("synthetic kernel snapshot should include orchestrator");
+        orchestrator.phase = MobState::Destroyed;
+        orchestrator.pending_spawn_count = 1;
+        orchestrator.active_flow_count = 1;
+        orchestrator.coordinator_bound = true;
+        orchestrator.supervisor_active = true;
+
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel,
+            roster,
+            members: vec![projected],
+            restore_failures: BTreeMap::from([(
+                MeerkatId::from("worker-broken"),
+                RestoreFailureSnapshot {
+                    session_id: worker_sid,
+                    reason: "restore failed".into(),
+                },
+            )]),
+            tracked_runs: BTreeMap::new(),
+        };
+
+        let mismatches = capture_provisioning_lifecycle_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "lifecycle",
+                triage: ShadowMismatchTriage::DogmaViolation,
+                ..
+            } if mismatch.expected_summary.contains("public mob phase matches lifecycle authority phase")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "orchestrator",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("pending_spawn_count = 1")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::ProvisioningLifecycle,
+                region: "restore_failures",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("projected status = Retiring")
+        )));
+    }
+
+    #[test]
+    fn capture_mob_shadow_report_reports_flow_frame_loop_mismatches() {
+        let flow_run_id = crate::ids::RunId::new();
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                lifecycle: crate::runtime::MobLifecycleSnapshot {
+                    phase: MobState::Running,
+                    active_run_count: 1,
+                    cleanup_pending: false,
+                },
+                orchestrator: Some(MobOrchestratorSnapshot {
+                    phase: MobState::Running,
+                    coordinator_bound: true,
+                    pending_spawn_count: 0,
+                    active_flow_count: 1,
+                    topology_revision: 1,
+                    supervisor_active: true,
+                }),
+                topology: crate::runtime::MobTopologySnapshot {
+                    coordinator_bound: true,
+                    revision: 1,
+                },
+                pending_spawns: crate::runtime::MobPendingSpawnLineageSnapshot::default(),
+                kickoff_barrier: crate::runtime::MobKickoffBarrierSnapshot::default(),
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([flow_run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([flow_run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(flow_run_id.clone(), FlowId::from("demo"))]),
+                },
+            },
+            roster: Roster::new(),
+            members: Vec::new(),
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                flow_run_id.clone(),
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: vec![StepId::from("start"), StepId::from("start")],
+                    step_dependencies: BTreeMap::from([(
+                        StepId::from("start"),
+                        vec![
+                            StepId::from("missing"),
+                            StepId::from("start"),
+                            StepId::from("start"),
+                        ],
+                    )]),
+                    step_dependency_modes: BTreeMap::from([(
+                        StepId::from("start"),
+                        DependencyMode::All,
+                    )]),
+                    step_has_conditions: BTreeMap::from([(StepId::from("start"), false)]),
+                    step_branches: BTreeMap::from([(StepId::from("start"), None)]),
+                    step_collection_policy_kinds: BTreeMap::from([(
+                        StepId::from("start"),
+                        RunCollectionPolicyKind::All,
+                    )]),
+                    step_quorum_thresholds: BTreeMap::from([(StepId::from("start"), 0)]),
+                    step_statuses: BTreeMap::from([(
+                        StepId::from("missing"),
+                        StepRunStatus::Dispatched,
+                    )]),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let mismatches = capture_flow_frame_loop_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.lane == MobShadowLane::FlowFrameLoop
+                && mismatch.region == "tracked_runs"
+                && mismatch.observed_summary.contains("duplicate ordered step")
+        }));
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.lane == MobShadowLane::FlowFrameLoop
+                && mismatch.region == "tracked_runs"
+                && mismatch
+                    .observed_summary
+                    .contains("depends on unknown step")
+        }));
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.lane == MobShadowLane::FlowFrameLoop
+                && mismatch.region == "tracked_runs"
+                && mismatch
+                    .observed_summary
+                    .contains("duplicate or self dependency state")
+        }));
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.lane == MobShadowLane::FlowFrameLoop
+                && mismatch.region == "tracked_runs"
+                && mismatch
+                    .observed_summary
+                    .contains("unknown step id in tracked-run projection")
+        }));
+    }
+
+    #[test]
+    fn capture_mob_shadow_report_reports_task_history_recovery_mismatches() {
+        let mut roster = Roster::new();
+        let broken_sid = add_member(&mut roster, "worker-broken");
+
+        let mut broken_projected = projected_entry(&roster, "worker-broken");
+        broken_projected.status = MobMemberStatus::Retiring;
+        broken_projected.error = Some("projected reason".into());
+        broken_projected.is_final = true;
+        broken_projected.current_session_id = Some(meerkat_core::types::SessionId::new());
+
+        let flow_run_id = RunId::new();
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([flow_run_id.clone()]),
+                    cancel_token_ids: BTreeSet::new(),
+                    stream_ids: BTreeSet::from([RunId::new()]),
+                    tracked_flows: BTreeMap::from([(flow_run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster,
+            members: vec![broken_projected],
+            restore_failures: BTreeMap::from([(
+                MeerkatId::from("worker-broken"),
+                RestoreFailureSnapshot {
+                    session_id: broken_sid,
+                    reason: "restore failed".into(),
+                },
+            )]),
+            tracked_runs: BTreeMap::from([(flow_run_id, TrackedRunSnapshot::Missing)]),
+        };
+
+        let mismatches = capture_task_history_recovery_shadow_mismatches(&snapshot);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("projected status = Retiring")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("projected session binding mismatches restore failure record")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "restore_failures",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("projected failure reason mismatches restore failure record")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "task_ledger",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("cancel_token_ids = []")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "task_ledger",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch
+                .observed_summary
+                .contains("stream tracked without an actor-owned run task")
+        )));
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            MobShadowMismatch {
+                lane: MobShadowLane::TaskHistoryRecovery,
+                region: "history",
+                triage: ShadowMismatchTriage::ImplementationDetail,
+                ..
+            } if mismatch.observed_summary.contains("status = Retiring, is_final = true")
+        )));
+    }
+
+    #[test]
+    fn capture_composition_shadow_report_reports_lifecycle_supersession_mismatches() {
+        let mut roster = Roster::new();
+        let worker_sid = add_member(&mut roster, "worker-1");
+        let _other_sid = add_member(&mut roster, "worker-2");
+
+        let projected = projected_entry(&roster, "worker-1");
+        let mut duplicate = projected_entry(&roster, "worker-2");
+        duplicate.current_session_id = Some(worker_sid.clone());
+
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: valid_kernel_snapshot(),
+            roster,
+            members: vec![projected, duplicate],
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::new(),
+        };
+
+        let mut session_live = HashMap::new();
+        session_live.insert(worker_sid.clone(), false);
+
+        let mut runtime_spines = HashMap::new();
+        runtime_spines.insert(
+            worker_sid.clone(),
+            Some(active_meerkat_spine(&worker_sid, RuntimeState::Destroyed)),
+        );
+
+        let mismatches = capture_composition_lifecycle_supersession_shadow_mismatches(
+            &snapshot,
+            &session_live,
+            &runtime_spines,
+        );
+
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.region == "supersession"
+                && mismatch
+                    .expected_summary
+                    .contains("one Mob member should own a bridge session")
+        }));
+        assert!(mismatches.iter().any(|mismatch| {
+            mismatch.region == "lifecycle"
+                && mismatch.expected_summary.contains(
+                    "active members should not point at a terminal or stopped Meerkat runtime",
+                )
+        }));
+    }
+
+    #[test]
+    fn capture_composition_shadow_report_reports_work_bridge_mismatches() {
+        let mut roster = Roster::new();
+        let worker_sid = add_member(&mut roster, "worker-1");
+        let projected = projected_entry(&roster, "worker-1");
+        let run_id = RunId::new();
+
+        let snapshot = MobMachineSnapshot {
+            phase: MobState::Running,
+            kernel: MobKernelDiagnosticSnapshot {
+                lifecycle: crate::runtime::MobLifecycleSnapshot {
+                    phase: MobState::Running,
+                    active_run_count: 1,
+                    cleanup_pending: false,
+                },
+                orchestrator: Some(MobOrchestratorSnapshot {
+                    phase: MobState::Running,
+                    coordinator_bound: true,
+                    pending_spawn_count: 0,
+                    active_flow_count: 1,
+                    topology_revision: 1,
+                    supervisor_active: true,
+                }),
+                flow_trackers: crate::runtime::MobFlowTrackerSnapshot {
+                    run_task_ids: BTreeSet::from([run_id.clone()]),
+                    cancel_token_ids: BTreeSet::from([run_id.clone()]),
+                    stream_ids: BTreeSet::new(),
+                    tracked_flows: BTreeMap::from([(run_id.clone(), FlowId::from("demo"))]),
+                },
+                ..valid_kernel_snapshot()
+            },
+            roster,
+            members: vec![projected],
+            restore_failures: BTreeMap::new(),
+            tracked_runs: BTreeMap::from([(
+                run_id,
+                TrackedRunSnapshot::Present(TrackedRunStoreSnapshot {
+                    flow_id: FlowId::from("demo"),
+                    schema_version: 4,
+                    status: MobRunStatus::Running,
+                    completed_at_present: false,
+                    frame_count: 0,
+                    loop_count: 0,
+                    loop_iteration_count: 0,
+                    ordered_steps: vec![StepId::from("start")],
+                    step_dependencies: BTreeMap::from([(StepId::from("start"), Vec::new())]),
+                    step_dependency_modes: BTreeMap::from([(
+                        StepId::from("start"),
+                        DependencyMode::All,
+                    )]),
+                    step_has_conditions: BTreeMap::from([(StepId::from("start"), false)]),
+                    step_branches: BTreeMap::from([(StepId::from("start"), None)]),
+                    step_collection_policy_kinds: BTreeMap::from([(
+                        StepId::from("start"),
+                        RunCollectionPolicyKind::All,
+                    )]),
+                    step_quorum_thresholds: BTreeMap::from([(StepId::from("start"), 0)]),
+                    step_statuses: BTreeMap::from([(
+                        StepId::from("start"),
+                        StepRunStatus::Dispatched,
+                    )]),
+                    failure_count: 0,
+                    consecutive_failure_count: 0,
+                    max_step_retries: 0,
+                    escalation_threshold: 0,
+                }),
+            )]),
+        };
+
+        let runtime_spines = HashMap::from([(
+            worker_sid.clone(),
+            Some(active_meerkat_spine(&worker_sid, RuntimeState::Idle)),
+        )]);
+        let mismatches =
+            capture_composition_work_bridge_shadow_mismatches(&snapshot, &runtime_spines);
+
+        assert!(mismatches.iter().any(|mismatch| matches!(
+            mismatch,
+            CompositionShadowMismatch {
+                lane: CompositionShadowLane::WorkBridge,
+                region: "work",
+                triage: ShadowMismatchTriage::SemanticGap,
+                ..
+            } if mismatch
+                .expected_summary
+                .contains("nonterminal Mob work should surface at least one observable Meerkat work posture")
+        )));
     }
 
     #[test]

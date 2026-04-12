@@ -16083,6 +16083,410 @@ async fn test_capture_mob_machine_snapshot_joins_live_roster_and_member_projecti
 }
 
 #[tokio::test]
+async fn test_capture_mob_shadow_report_returns_empty_for_live_provisioning_lifecycle() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let report = crate::mob_machine::capture_mob_shadow_report(
+        &handle,
+        crate::mob_machine::MobShadowLane::ProvisioningLifecycle,
+    )
+    .await;
+
+    assert_eq!(
+        report.lane,
+        crate::mob_machine::MobShadowLane::ProvisioningLifecycle
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "healthy live mob should not emit provisioning/lifecycle shadow mismatches: {:#?}",
+        report.mismatches
+    );
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_report_returns_empty_for_live_flow_frame_loop() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(1_000, 1)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked single-step run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let report = crate::mob_machine::capture_mob_shadow_report(
+        &handle,
+        crate::mob_machine::MobShadowLane::FlowFrameLoop,
+    )
+    .await;
+
+    assert_eq!(
+        report.lane,
+        crate::mob_machine::MobShadowLane::FlowFrameLoop
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "healthy live flow/frame/loop state should not emit shadow mismatches: {:#?}",
+        report.mismatches
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_report_returns_empty_for_live_task_history_recovery() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_single_step_flow(1_000, 1)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        if matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for tracked single-step run to appear in MobMachine snapshot"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let report = crate::mob_machine::capture_mob_shadow_report(
+        &handle,
+        crate::mob_machine::MobShadowLane::TaskHistoryRecovery,
+    )
+    .await;
+
+    assert_eq!(
+        report.lane,
+        crate::mob_machine::MobShadowLane::TaskHistoryRecovery
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "healthy live task/history/recovery state should not emit shadow mismatches: {:#?}",
+        report.mismatches
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_composition_shadow_report_returns_empty_for_live_lifecycle_supersession() {
+    let (handle, _service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+
+    let report = crate::mob_machine::capture_composition_shadow_report(
+        &handle,
+        crate::mob_machine::CompositionShadowLane::LifecycleSupersession,
+    )
+    .await;
+
+    assert_eq!(
+        report.lane,
+        crate::mob_machine::CompositionShadowLane::LifecycleSupersession
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "healthy live mob/meerkat seam should not emit lifecycle/supersession mismatches: {:#?}",
+        report.mismatches
+    );
+}
+
+#[tokio::test]
+async fn test_capture_composition_shadow_report_returns_empty_for_live_work_bridge() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(1_000, 1))
+            .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for seam shadow checks");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == MeerkatId::from("w-1"))
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for live seam work posture to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let report = crate::mob_machine::capture_composition_shadow_report(
+        &handle,
+        crate::mob_machine::CompositionShadowLane::WorkBridge,
+    )
+    .await;
+
+    assert_eq!(
+        report.lane,
+        crate::mob_machine::CompositionShadowLane::WorkBridge
+    );
+    assert!(
+        report.mismatches.is_empty(),
+        "healthy live mob/meerkat seam should not emit work-bridge mismatches: {:#?}",
+        report.mismatches
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_capture_mob_shadow_suite_report_returns_empty_for_live_system() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(1_000, 1))
+            .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let runtime_adapter = handle
+        .diagnostic_runtime_adapter()
+        .expect("runtime adapter should be present for aggregate shadow checks");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == MeerkatId::from("w-1"))
+            .cloned();
+        let run_present = matches!(
+            snapshot.tracked_runs.get(&run_id),
+            Some(crate::mob_machine::TrackedRunSnapshot::Present(_))
+        );
+
+        let work_visible = if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                runtime_adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .map(|spine| {
+                        spine.control.current_run_id.is_some()
+                            || !spine.inputs.queue.is_empty()
+                            || !spine.inputs.steer_queue.is_empty()
+                            || spine.completion_waiters.waiter_count != 0
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if run_present && work_visible {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for aggregate live shadow posture to appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let report = crate::mob_machine::capture_mob_shadow_suite_report(&handle).await;
+
+    assert_eq!(report.mob.len(), 3);
+    assert_eq!(report.composition.len(), 2);
+    assert!(
+        report.mob.iter().all(|entry| entry.mismatches.is_empty()),
+        "healthy live system should not emit Mob aggregate shadow mismatches: {:#?}",
+        report.mob
+    );
+    assert!(
+        report
+            .composition
+            .iter()
+            .all(|entry| entry.mismatches.is_empty()),
+        "healthy live system should not emit seam aggregate shadow mismatches: {:#?}",
+        report.composition
+    );
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_diagnostic_meerkat_shadow_inputs_returns_best_effort_live_member_state() {
+    let (handle, service) =
+        create_test_mob_with_runtime_adapter(sample_definition_with_single_step_flow(1_000, 1))
+            .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_delay_ms(150);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run single-step flow");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let session_id = loop {
+        let snapshot = crate::mob_machine::capture_mob_machine_snapshot(&handle).await;
+        let worker = snapshot
+            .members
+            .iter()
+            .find(|member| member.meerkat_id == MeerkatId::from("w-1"))
+            .cloned();
+
+        if let Some(worker) = worker {
+            if let Some(session_id) = worker.current_session_id {
+                if !handle.diagnostic_has_live_session(&session_id).await {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for a live member session to appear"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+
+                let inputs = handle
+                    .diagnostic_meerkat_shadow_inputs(&session_id)
+                    .await
+                    .expect("diagnostic meerkat inputs");
+                let _execution_seen = inputs
+                    .execution
+                    .as_ref()
+                    .map(|snapshot| snapshot.loop_state.clone());
+                let _tool_scope_seen = inputs
+                    .tool_scope
+                    .as_ref()
+                    .map(|snapshot| snapshot.visible_names.len());
+                let _tool_surface_seen = inputs
+                    .tool_surface
+                    .as_ref()
+                    .map(|snapshot| snapshot.entries.len());
+                let _peer_ingress_seen = inputs
+                    .peer_ingress
+                    .as_ref()
+                    .map(|snapshot| snapshot.queue.total_count);
+                break session_id;
+            }
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for live Meerkat shadow inputs to become queryable"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let inputs = handle
+        .diagnostic_meerkat_shadow_inputs(&session_id)
+        .await
+        .expect("diagnostic meerkat inputs");
+    let _execution_seen = inputs
+        .execution
+        .as_ref()
+        .map(|snapshot| snapshot.loop_state.clone());
+    let _tool_scope_seen = inputs
+        .tool_scope
+        .as_ref()
+        .map(|snapshot| snapshot.visible_names.len());
+    let _tool_surface_seen = inputs
+        .tool_surface
+        .as_ref()
+        .map(|snapshot| snapshot.entries.len());
+    let _peer_ingress_seen = inputs
+        .peer_ingress
+        .as_ref()
+        .map(|snapshot| snapshot.queue.total_count);
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+}
+
+#[tokio::test]
 async fn test_capture_mob_machine_snapshot_tracks_live_topology_coherence() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 

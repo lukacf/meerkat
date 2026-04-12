@@ -17,6 +17,7 @@ Likely artifacts to keep here:
 - Meerkat detached-wake freeze note
 - Meerkat turn / ops / barrier freeze note
 - Meerkat peer-ingress freeze note
+- Meerkat tool-visibility freeze note
 - Meerkat tool-surface freeze note
 - Meerkat drain / keep-alive freeze note
 - Meerkat input/effect alphabet
@@ -24,6 +25,10 @@ Likely artifacts to keep here:
 - Meerkat ownership decisions
 - top-level exact-current MeerkatMachine freeze note
 - top-level target-state MeerkatMachine freeze note
+- Meerkat implementation-vs-target refinement delta
+- Meerkat cutover lowering inventory
+- Meerkat shadow-validation plan
+- Meerkat shadow hook inventory
 - Meerkat proof-obligations handoff for TLA+
 - Meerkat transition catalog for target-state proof work
 - Meerkat state schema and canonical initial state
@@ -31,10 +36,18 @@ Likely artifacts to keep here:
 - Meerkat coverage matrix for target alphabet and regions
 - Meerkat glossary for frozen target terminology
 - Meerkat fairness assumptions for target-state liveness work
+- Meerkat upstream alignment note for the tools seam
+- Meerkat upstream baseline note for tool visibility ownership
+- Meerkat tools realignment plan before the next full rebase
+- Meerkat file-by-file tools merge strategy for the next rebase
+- Meerkat target-state tools delta note for re-freezing the tools region
 - top-level exact-current MobMachine freeze note
 - top-level target-state MobMachine freeze note
 - Mob input/effect alphabet
 - Mob lowering map
+- Mob cutover lowering inventory
+- Mob shadow-validation plan
+- Mob shadow hook inventory
 - Mob ownership decisions
 - Mob cutover checklist
 - Mob proof-obligations handoff for TLA+
@@ -43,6 +56,17 @@ Likely artifacts to keep here:
 - Mob final package audit
 - Mob target self-containment audit
 - Mob final traceability audit
+- Mob-Meerkat seam composition freeze note
+- Mob-Meerkat seam proof handoff
+- Mob-Meerkat seam closeout
+- Mob-Meerkat seam package audit
+- Mob-Meerkat seam refinement delta
+- Mob-Meerkat seam shadow checks
+- Mob-Meerkat seam hook inventory
+- two-kernel shadow implementation plan
+- frozen abstract member contract for the seam
+- frozen bridge alphabet for the seam
+- two-kernel refinement and cutover program
 - Mob proof-coverage handoff for TLA+
 - Mob effect-coverage handoff for target effects
 - Mob flow-family coverage handoff for target flows
@@ -74,6 +98,11 @@ Current freeze status:
 
 - `M1 = MeerkatMachine` has a frozen target package plus bounded TLC base and
   stress passes
+- the next Meerkat rebase risk is concentrated in the `tools` region and is
+  recorded in `meerkat-upstream-tool-alignment.md`, with the concrete upstream
+  baseline captured in `meerkat-tool-visibility-upstream-baseline.md`; the
+  rebased exact-current branch itself now freezes the tools region as
+  `tool_visibility + tool_surface`
 - `M2 = MobMachine` now also has a frozen target package plus bounded TLC base
   and stress passes, including flow dependency-ready dispatch, explicit
   work/step coupling, explicit quorum contribution state, terminal run work
@@ -82,3 +111,14 @@ Current freeze status:
   checklist, explicit proof / effect / refinement coverage handoffs, and an
   explicit proof handoff that distinguishes canonical bounded passes from a
   wider exploratory audit envelope
+- the `MobMachine <-> MeerkatMachine` seam now also has a bounded target-state
+  composition proof package with base safety, widened safety, lifecycle
+  liveness, and flow/work liveness passes against the abstract seam contract
+- the abstract seam contract and bridge alphabet are now aligned to that
+  composition package rather than remaining open working drafts
+- the remaining seam gap is now explicit as implementation refinement work in
+  `mob-meerkat-composition-refinement-delta.md`, not as target-machine
+  uncertainty
+- the next active work is refinement/cutover preparation, not additional
+  freeze authoring, and is now captured in
+  `two-kernel-refinement-program.md`

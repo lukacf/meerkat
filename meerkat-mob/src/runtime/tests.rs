@@ -2449,6 +2449,14 @@ async fn wait_for_run_terminal(
     }
 }
 
+/// Build a test RuntimeBinding::External for a given meerkat_id.
+fn test_external_binding(meerkat_id: &str) -> crate::RuntimeBinding {
+    crate::RuntimeBinding::External {
+        peer_id: format!("test-key:{meerkat_id}"),
+        address: format!("tcp://test.invalid/{meerkat_id}"),
+    }
+}
+
 /// Create a MobHandle using the mock session service.
 async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
@@ -6419,11 +6427,11 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
         .await
         .expect("create mob");
     handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-ext"),
         )
         .await
         .expect("spawn external");
@@ -6496,11 +6504,11 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .expect("session-backed")
         .clone();
     handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-ext"),
         )
         .await
         .expect("spawn external");
@@ -7024,23 +7032,27 @@ async fn test_spawn_supports_session_and_external_backends() {
     );
 
     let external_ref = handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-ext"),
         )
         .await
         .expect("spawn external backend");
     match external_ref {
         MemberRef::BackendPeer {
+            peer_id,
             address,
             session_id,
-            ..
         } => {
-            assert!(
-                address.starts_with("https://backend.example.invalid/mesh/"),
-                "external backend should use configured address base"
+            assert_eq!(
+                peer_id, "test-key:w-ext",
+                "external backend should use real peer_id from RuntimeBinding"
+            );
+            assert_eq!(
+                address, "tcp://test.invalid/w-ext",
+                "external backend should use real address from RuntimeBinding"
             );
             assert!(
                 session_id.is_some(),
@@ -7055,11 +7067,11 @@ async fn test_spawn_supports_session_and_external_backends() {
 async fn test_external_backend_rejects_invalid_peer_name_components() {
     let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
     let result = handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("../w-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("../w-ext"),
         )
         .await;
     assert!(
@@ -7073,20 +7085,20 @@ async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
     let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
 
     let member_a = handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-a"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-a"),
         )
         .await
         .expect("spawn external w-a");
     let member_b = handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-b"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-b"),
         )
         .await
         .expect("spawn external w-b");
@@ -10344,16 +10356,15 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
 #[tokio::test]
 async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
     let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
-    handle
-        .spawn_with_options(
-            ProfileName::from("lead"),
-            MeerkatId::from("l-ext-turn"),
-            None,
-            Some(crate::MobRuntimeMode::TurnDriven),
-            Some(MobBackendKind::External),
-        )
-        .await
-        .expect("spawn external turn-driven lead");
+    {
+        let mut spec = SpawnMemberSpec::new("lead", "l-ext-turn");
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        spec.binding = Some(test_external_binding("l-ext-turn"));
+        handle
+            .spawn_spec(spec)
+            .await
+            .expect("spawn external turn-driven lead");
+    }
     let baseline_start_turn = service.start_turn_call_count();
 
     handle
@@ -10386,26 +10397,24 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
         address_base: "https://backend.example.invalid/mesh".to_string(),
     });
     let (handle, service) = create_test_mob(definition).await;
-    handle
-        .spawn_with_options(
-            ProfileName::from("lead"),
-            MeerkatId::from("l-ext-auto"),
-            None,
-            Some(crate::MobRuntimeMode::AutonomousHost),
-            Some(MobBackendKind::External),
-        )
-        .await
-        .expect("spawn external autonomous lead");
-    handle
-        .spawn_with_options(
-            ProfileName::from("worker"),
-            MeerkatId::from("w-ext-auto"),
-            None,
-            Some(crate::MobRuntimeMode::AutonomousHost),
-            Some(MobBackendKind::External),
-        )
-        .await
-        .expect("spawn external autonomous worker");
+    {
+        let mut spec = SpawnMemberSpec::new("lead", "l-ext-auto");
+        spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+        spec.binding = Some(test_external_binding("l-ext-auto"));
+        handle
+            .spawn_spec(spec)
+            .await
+            .expect("spawn external autonomous lead");
+    }
+    {
+        let mut spec = SpawnMemberSpec::new("worker", "w-ext-auto");
+        spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+        spec.binding = Some(test_external_binding("w-ext-auto"));
+        handle
+            .spawn_spec(spec)
+            .await
+            .expect("spawn external autonomous worker");
+    }
     let baseline_non_host_start_turn = service
         .start_turn_call_count()
         .saturating_sub(service.keep_alive_start_turn_call_count());
@@ -10435,20 +10444,20 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
     let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
 
     handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("lead"),
             MeerkatId::from("l-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("l-ext"),
         )
         .await
         .expect("spawn external lead");
     handle
-        .spawn_with_backend(
+        .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            Some(MobBackendKind::External),
+            test_external_binding("w-ext"),
         )
         .await
         .expect("spawn external worker");
@@ -15125,6 +15134,136 @@ async fn test_name_filtered_dispatcher() {
     assert!(
         filtered.capabilities().ops_lifecycle,
         "should delegate capabilities().ops_lifecycle to inner"
+    );
+}
+
+// ── RuntimeBinding TDD tests ────────────────────────────────────────────
+//
+// These tests define the expected behavior for RuntimeBinding — the first
+// step toward identity-first mobs. They verify that external members carry
+// real process identity, not phantom placeholder comms keys.
+
+#[tokio::test]
+async fn test_external_spawn_with_binding_uses_real_identity() {
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-real");
+    spec.binding = Some(crate::RuntimeBinding::External {
+        peer_id: "ed25519:REAL_TARGET_KEY_abc123".to_string(),
+        address: "tcp://192.168.0.180:4800".to_string(),
+    });
+
+    let member_ref = handle.spawn_spec(spec).await.expect("spawn with binding");
+
+    match member_ref {
+        MemberRef::BackendPeer {
+            peer_id,
+            address,
+            session_id,
+        } => {
+            assert_eq!(
+                peer_id, "ed25519:REAL_TARGET_KEY_abc123",
+                "BackendPeer.peer_id must be the real external process key, not the placeholder"
+            );
+            assert_eq!(
+                address, "tcp://192.168.0.180:4800",
+                "BackendPeer.address must be the real external process address"
+            );
+            assert!(
+                session_id.is_some(),
+                "bridge session should still exist for lifecycle ops"
+            );
+        }
+        other => panic!("expected BackendPeer member ref, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_external_spawn_without_binding_errors() {
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    // Bare MobBackendKind::External without RuntimeBinding must fail — you
+    // can't spawn an external member without saying who the real process is.
+    let mut spec = SpawnMemberSpec::new("worker", "w-bare");
+    spec.backend = Some(MobBackendKind::External);
+    // No binding set.
+
+    let result = handle.spawn_spec(spec).await;
+
+    assert!(
+        result.is_err(),
+        "external backend without RuntimeBinding must be rejected: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_session_spawn_default_binding() {
+    // Regression guard: session backend spawns continue to work with no binding.
+    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    let member_ref = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-session"),
+            None,
+        )
+        .await
+        .expect("spawn session member");
+
+    assert!(
+        matches!(member_ref, MemberRef::Session { .. }),
+        "default spawn should produce session member ref"
+    );
+}
+
+#[tokio::test]
+async fn test_trusted_peer_spec_uses_bridge_not_real_identity() {
+    // After spawning an external member with real identity, the trust spec
+    // used for wiring must use the bridge session's comms key (for transport),
+    // NOT the real external process key (which is canonical identity).
+    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-bridge");
+    spec.binding = Some(crate::RuntimeBinding::External {
+        peer_id: "ed25519:REAL_EXTERNAL_KEY".to_string(),
+        address: "tcp://10.0.0.1:5000".to_string(),
+    });
+    let _member_ref = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn with real binding");
+
+    // Wire to orchestrator to trigger trust spec resolution
+    let lead_ref = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .wire(MeerkatId::from("lead-1"), MeerkatId::from("w-bridge"))
+        .await
+        .expect("wire lead to external member");
+
+    // Check what trust was added to the lead's comms runtime.
+    let lead_sid = lead_ref.session_id().cloned().expect("lead session id");
+    let trusted_addresses = service.trusted_peer_addresses(&lead_sid).await;
+
+    // The trust spec should use inproc:// bridge transport, not the real
+    // tcp://10.0.0.1:5000 address. The real address is the member's identity,
+    // not the bridge's transport address.
+    assert!(
+        trusted_addresses
+            .iter()
+            .all(|addr| addr.starts_with("inproc://")),
+        "trust specs must use bridge transport addresses (inproc://), \
+         not real external addresses. Got: {trusted_addresses:?}"
+    );
+
+    // The real identity should NOT appear in comms trust.
+    assert!(
+        !trusted_addresses
+            .iter()
+            .any(|addr| addr.contains("10.0.0.1")),
+        "real external address must not leak into bridge comms trust: {trusted_addresses:?}"
     );
 }
 

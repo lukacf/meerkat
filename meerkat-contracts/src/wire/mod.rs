@@ -28,7 +28,7 @@ pub use mob::{
     MobStepOutputFormatInput, MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput,
     MobTopologySpecInput, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
     MobWiringRulesInput, WireHandlingMode, WireMobBackendKind, WireMobRuntimeMode, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireTrustedPeerSpec,
+    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerSpec,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,

@@ -49,7 +49,7 @@ pub use wire::{
     WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent, WireHandlingMode,
     WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireMobBackendKind,
     WireMobRuntimeMode, WireModelProfile, WireModelTier, WireProviderMeta, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRunResult, WireRuntimeState, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
-    WireToolResult, WireToolResultContent, WireTrustedPeerSpec, WireUsage,
+    WireRenderMetadata, WireRenderSalience, WireRunResult, WireRuntimeBinding, WireRuntimeState,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason,
+    WireToolCall, WireToolResult, WireToolResultContent, WireTrustedPeerSpec, WireUsage,
 };

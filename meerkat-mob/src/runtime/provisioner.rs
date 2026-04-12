@@ -1,5 +1,5 @@
 use super::*;
-use crate::MobBackendKind;
+use crate::RuntimeBinding;
 use crate::definition::ExternalBackendConfig;
 use crate::event::MemberRef;
 use crate::runtime::handle::MemberSpawnReceipt;
@@ -29,7 +29,7 @@ type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat
 
 pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
-    pub backend: MobBackendKind,
+    pub binding: RuntimeBinding,
     pub peer_name: String,
     pub owner_session_id: Option<SessionId>,
     pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
@@ -592,7 +592,7 @@ impl MobProvisioner for SessionBackend {
         mut req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
         tracing::debug!(
-            backend = ?req.backend,
+            binding = ?req.binding,
             peer_name = %req.peer_name,
             "SessionBackend::provision_member start"
         );
@@ -945,15 +945,14 @@ impl MobProvisioner for SessionBackend {
 
 pub struct ExternalBackend {
     session_service: Arc<dyn MobSessionService>,
-    address_base: String,
 }
 
 impl ExternalBackend {
-    pub fn new(session_service: Arc<dyn MobSessionService>, config: ExternalBackendConfig) -> Self {
-        Self {
-            session_service,
-            address_base: config.address_base.trim_end_matches('/').to_string(),
-        }
+    pub fn new(
+        session_service: Arc<dyn MobSessionService>,
+        _config: ExternalBackendConfig,
+    ) -> Self {
+        Self { session_service }
     }
 }
 
@@ -1010,6 +1009,8 @@ impl MultiBackendProvisioner {
         peer_name: String,
         owner_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
+        real_peer_id: String,
+        real_address: String,
     ) -> Result<MemberSpawnReceipt, MobError> {
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
@@ -1100,26 +1101,17 @@ impl MultiBackendProvisioner {
             session_id = %created.session_id,
             "ExternalBackend::external_member_ref created session"
         );
-        let comms = external
-            .session_service
-            .comms_runtime(&created.session_id)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "external backend missing comms runtime for '{peer_name}'"
-                ))
-            })?;
-        let peer_id = comms.public_key().ok_or_else(|| {
-            MobError::WiringError(format!(
-                "external backend missing public key for '{peer_name}'"
-            ))
-        })?;
-        let address = format!("{}/{}", external.address_base, peer_name);
+        // Use the real external process identity provided by the caller via
+        // RuntimeBinding::External. The bridge session's comms identity is
+        // infrastructure — it stays hidden and is used only for lifecycle
+        // transport within the orchestrator process.
         tracing::debug!(
-            peer_id = %peer_id,
-            address = %address,
-            "ExternalBackend::external_member_ref success"
+            peer_id = %real_peer_id,
+            address = %real_address,
+            "ExternalBackend::external_member_ref success (real identity)"
         );
+        let peer_id = real_peer_id;
+        let address = real_address;
         Ok(MemberSpawnReceipt {
             member_ref: MemberRef::BackendPeer {
                 peer_id,
@@ -1138,24 +1130,26 @@ impl MobProvisioner for MultiBackendProvisioner {
         &self,
         req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError> {
-        match req.backend {
-            MobBackendKind::Session => {
+        match req.binding {
+            RuntimeBinding::Session => {
                 self.session
                     .provision_member(ProvisionMemberRequest {
                         create_session: req.create_session,
-                        backend: MobBackendKind::Session,
+                        binding: RuntimeBinding::Session,
                         peer_name: req.peer_name,
                         owner_session_id: req.owner_session_id,
                         ops_registry: req.ops_registry,
                     })
                     .await
             }
-            MobBackendKind::External => {
+            RuntimeBinding::External { peer_id, address } => {
                 self.external_member_ref(
                     req.create_session,
                     req.peer_name,
                     req.owner_session_id,
                     req.ops_registry,
+                    peer_id,
+                    address,
                 )
                 .await
             }
@@ -1222,9 +1216,13 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id,
             } => {
                 if let Some(session_id) = session_id {
-                    // External members still keep a local session bridge; use a sendable
-                    // transport address for trust wiring while preserving backend identity
-                    // in MemberRef::BackendPeer.address.
+                    // External members keep a local bridge session for lifecycle
+                    // transport (notifications, kickoff events). The trust spec
+                    // uses the bridge session's comms identity — NOT the real
+                    // external peer_id — because the bridge signs lifecycle
+                    // messages with its own keypair. The caller-provided
+                    // `fallback_peer_id` is the bridge's `comms.public_key()`,
+                    // set by `do_wire`'s key resolution path.
                     return self
                         .session
                         .trusted_peer_spec(
@@ -1232,10 +1230,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                                 session_id: session_id.clone(),
                             },
                             fallback_name,
-                            peer_id,
+                            fallback_peer_id,
                         )
                         .await;
                 }
+                // No bridge — use the real BackendPeer identity directly.
                 TrustedPeerSpec::new(fallback_name, peer_id.clone(), address.clone())
                     .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
             }

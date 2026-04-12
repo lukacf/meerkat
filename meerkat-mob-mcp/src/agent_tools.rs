@@ -41,6 +41,8 @@ const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
 const TOOL_MOB_LIST: &str = "mob_list";
+const TOOL_MOB_WIRE: &str = "mob_wire";
+const TOOL_MOB_UNWIRE: &str = "mob_unwire";
 const TOOL_MOB_PROFILE_CREATE: &str = "mob_profile_create";
 const TOOL_MOB_PROFILE_GET: &str = "mob_profile_get";
 const TOOL_MOB_PROFILE_LIST: &str = "mob_profile_list";
@@ -850,6 +852,42 @@ impl AgentMobToolSurface {
         Self::encode_result(call, json!({"mobs": mob_list}))
     }
     // ─── Profile CRUD dispatch ────────────────────────────────────────
+    // ─── Wire / Unwire ────────────────────────────────────────────────
+
+    async fn dispatch_mob_wire(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: WireArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        let local = meerkat_mob::MeerkatId::from(args.member_id.as_str());
+        let target = peer_target_from_args(args.peer);
+        self.state
+            .mob_wire(&mob_id, local, target)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(call, json!({ "wired": true }))
+    }
+
+    async fn dispatch_mob_unwire(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: WireArgs = call
+            .parse_args()
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+        let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
+        let local = meerkat_mob::MeerkatId::from(args.member_id.as_str());
+        let target = peer_target_from_args(args.peer);
+        self.state
+            .mob_unwire(&mob_id, local, target)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
+        Self::encode_result(call, json!({ "unwired": true }))
+    }
+
     // TODO: Profile mutation authority. Currently gated on mob capability + store
     // availability. Per-profile authority checks are a follow-up concern for
     // multi-tenant realm scenarios.
@@ -1068,6 +1106,8 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members(call).await,
             TOOL_MOB_LIST => self.dispatch_mob_list(call).await,
+            TOOL_MOB_WIRE => self.dispatch_mob_wire(call).await,
+            TOOL_MOB_UNWIRE => self.dispatch_mob_unwire(call).await,
             TOOL_MOB_PROFILE_CREATE => self.dispatch_mob_profile_create(call).await,
             TOOL_MOB_PROFILE_GET => self.dispatch_mob_profile_get(call).await,
             TOOL_MOB_PROFILE_LIST => self.dispatch_mob_profile_list(call).await,
@@ -1356,6 +1396,93 @@ fn build_tool_defs_with_profile_support(
                 "properties": {}
             }),
         ),
+        tool_def(
+            TOOL_MOB_WIRE,
+            "Wire a mob member to another local member or an external peer.\n\n\
+             Creates a comms trust relationship so the wired members can exchange messages. \
+             For local members (both in the same mob roster), wiring is bidirectional. \
+             For external peers (outside the roster), trust is added on the local member's side.\n\n\
+             PEER TARGET TYPES:\n\
+             - {\"local\": \"member-id\"} — another member in the same mob roster.\n\
+             - {\"external\": {\"name\": \"peer-name\", \"peer_id\": \"ed25519:...\", \
+               \"address\": \"tcp://host:port\"}} — a trusted peer outside the roster.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mob_id": {"type": "string", "description": "Mob identifier"},
+                    "member_id": {"type": "string", "description": "Local member to wire from"},
+                    "peer": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "local": {"type": "string", "description": "Another member in this mob"}
+                                },
+                                "required": ["local"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "external": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "peer_id": {"type": "string"},
+                                            "address": {"type": "string"}
+                                        },
+                                        "required": ["name", "peer_id", "address"]
+                                    }
+                                },
+                                "required": ["external"]
+                            }
+                        ],
+                        "description": "Target peer: local member or external trusted peer"
+                    }
+                },
+                "required": ["mob_id", "member_id", "peer"]
+            }),
+        ),
+        tool_def(
+            TOOL_MOB_UNWIRE,
+            "Remove a wiring relationship between a mob member and a peer.\n\n\
+             Removes the comms trust relationship established by mob_wire. \
+             Same peer target format as mob_wire.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mob_id": {"type": "string", "description": "Mob identifier"},
+                    "member_id": {"type": "string", "description": "Local member to unwire from"},
+                    "peer": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "local": {"type": "string"}
+                                },
+                                "required": ["local"]
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "external": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "peer_id": {"type": "string"},
+                                            "address": {"type": "string"}
+                                        },
+                                        "required": ["name", "peer_id", "address"]
+                                    }
+                                },
+                                "required": ["external"]
+                            }
+                        ],
+                        "description": "Target peer to unwire"
+                    }
+                },
+                "required": ["mob_id", "member_id", "peer"]
+            }),
+        ),
     ];
 
     if has_profile_store {
@@ -1550,6 +1677,42 @@ struct SpawnMemberArgs {
 struct MemberArgs {
     mob_id: String,
     member_id: String,
+}
+
+#[derive(Deserialize)]
+struct WireArgs {
+    mob_id: String,
+    member_id: String,
+    peer: WirePeerArg,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WirePeerArg {
+    Local { local: String },
+    External { external: ExternalPeerArg },
+}
+
+#[derive(Deserialize)]
+struct ExternalPeerArg {
+    name: String,
+    peer_id: String,
+    address: String,
+}
+
+fn peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
+    match peer {
+        WirePeerArg::Local { local } => {
+            meerkat_mob::PeerTarget::Local(meerkat_mob::MeerkatId::from(local.as_str()))
+        }
+        WirePeerArg::External { external } => {
+            meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
+                name: external.name,
+                peer_id: external.peer_id,
+                address: external.address,
+            })
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2122,7 +2285,7 @@ mod tests {
     #[test]
     fn test_all_tool_definitions_present() {
         let defs = build_tool_defs();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 10);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"delegate"));
         assert!(names.contains(&"mob_create"));
@@ -2132,6 +2295,8 @@ mod tests {
         assert!(names.contains(&"mob_check_member"));
         assert!(names.contains(&"mob_list_members"));
         assert!(names.contains(&"mob_list"));
+        assert!(names.contains(&"mob_wire"));
+        assert!(names.contains(&"mob_unwire"));
     }
 
     #[test]

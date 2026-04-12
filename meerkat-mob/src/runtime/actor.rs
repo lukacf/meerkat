@@ -54,6 +54,31 @@ impl InitialTurnHandle {
 const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
+/// Resolve the runtime binding for a spawn request.
+///
+/// `RuntimeBinding` takes precedence over the legacy `backend` tag. When neither
+/// is provided, resolves from profile/definition defaults. `External` without
+/// a concrete `RuntimeBinding` is an error — you cannot spawn an external
+/// member without declaring the real process identity.
+fn resolve_binding(
+    binding: Option<crate::RuntimeBinding>,
+    backend: Option<crate::MobBackendKind>,
+    profile_backend: Option<crate::MobBackendKind>,
+    definition_default: crate::MobBackendKind,
+    meerkat_id: &MeerkatId,
+) -> Result<crate::RuntimeBinding, MobError> {
+    if let Some(b) = binding {
+        return Ok(b);
+    }
+    let kind = backend.or(profile_backend).unwrap_or(definition_default);
+    match kind {
+        crate::MobBackendKind::Session => Ok(crate::RuntimeBinding::Session),
+        crate::MobBackendKind::External => Err(MobError::WiringError(format!(
+            "external backend requires explicit RuntimeBinding for '{meerkat_id}'"
+        ))),
+    }
+}
+
 /// Render forked conversation messages as a text context block for the new member.
 fn render_fork_context(
     source_member_id: &MeerkatId,
@@ -175,6 +200,9 @@ struct RespawnSnapshot {
     labels: std::collections::BTreeMap<String, String>,
     old_session_id: meerkat_core::types::SessionId,
     restore_wiring: RestoreWiringPlan,
+    /// Runtime binding extracted from the old roster entry's member_ref.
+    /// Preserves real external identity across respawns.
+    binding: crate::RuntimeBinding,
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
@@ -1860,6 +1888,7 @@ impl MobActor {
             initial_message,
             runtime_mode,
             backend,
+            binding,
             context,
             labels,
             launch_mode,
@@ -2040,13 +2069,17 @@ impl MobActor {
                         ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
                     });
                     let req = build::to_create_session_request(&config, prompt.clone());
-                    let selected_backend = backend
-                        .or(profile.backend)
-                        .unwrap_or(self.definition.backend.default);
+                    let selected_binding = resolve_binding(
+                        binding.clone(),
+                        backend,
+                        profile.backend,
+                        self.definition.backend.default,
+                        &meerkat_id,
+                    )?;
                     let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
-                        backend: selected_backend,
+                        binding: selected_binding,
                         peer_name,
                         owner_session_id: owner_session_id.clone(),
                         ops_registry: ops_registry.clone(),
@@ -2169,13 +2202,17 @@ impl MobActor {
                 base_prompt
             };
             let req = build::to_create_session_request(&config, prompt.clone());
-            let selected_backend = backend
-                .or(profile.backend)
-                .unwrap_or(self.definition.backend.default);
+            let selected_binding = resolve_binding(
+                binding,
+                backend,
+                profile.backend,
+                self.definition.backend.default,
+                &meerkat_id,
+            )?;
             let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
-                backend: selected_backend,
+                binding: selected_binding,
                 peer_name,
                 owner_session_id: owner_session_id.clone(),
                 ops_registry: ops_registry.clone(),
@@ -2567,11 +2604,17 @@ impl MobActor {
 
         let prompt = ContentInput::from(self.fallback_spawn_prompt(&profile_name, meerkat_id));
         let req = build::to_create_session_request(&config, prompt.clone());
-        let selected_backend = profile.backend.unwrap_or(self.definition.backend.default);
+        let selected_binding = resolve_binding(
+            None,
+            None,
+            profile.backend,
+            self.definition.backend.default,
+            meerkat_id,
+        )?;
         let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
         let provision_request = ProvisionMemberRequest {
             create_session: req,
-            backend: selected_backend,
+            binding: selected_binding,
             peer_name,
             owner_session_id: None,
             ops_registry: None,
@@ -3105,6 +3148,15 @@ impl MobActor {
                     member_id: meerkat_id.clone(),
                 }
             })?;
+            let binding = match &entry.member_ref {
+                crate::event::MemberRef::BackendPeer {
+                    peer_id, address, ..
+                } => crate::RuntimeBinding::External {
+                    peer_id: peer_id.clone(),
+                    address: address.clone(),
+                },
+                crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
+            };
             RespawnSnapshot {
                 profile_name: entry.profile.clone(),
                 runtime_mode: entry.runtime_mode,
@@ -3119,6 +3171,7 @@ impl MobActor {
                         .collect(),
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
+                binding,
                 effective_profile_override: entry.effective_profile_override,
             }
         };
@@ -3159,14 +3212,13 @@ impl MobActor {
             config.llm_client_override = Some(client.clone());
         }
         let req = build::to_create_session_request(&config, prompt.clone());
-        let selected_backend = profile.backend.unwrap_or(self.definition.backend.default);
         let peer_name = format!(
             "{}/{}/{}",
             self.definition.id, snapshot.profile_name, meerkat_id
         );
         let provision_request = ProvisionMemberRequest {
             create_session: req,
-            backend: selected_backend,
+            binding: snapshot.binding.clone(),
             peer_name,
             owner_session_id: None,
             ops_registry: None,

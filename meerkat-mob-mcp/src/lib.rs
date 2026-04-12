@@ -1889,6 +1889,8 @@ struct MobSpawnMeerkatArgs {
     #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
+    binding: Option<meerkat_mob::RuntimeBinding>,
+    #[serde(default)]
     runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
     resume_session_id: Option<String>,
@@ -2153,6 +2155,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         s.initial_message = spec.initial_message;
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
+                        s.binding = spec.binding;
                         s.context = spec.context;
                         s.labels = spec.labels;
                         if let Some(sid_str) = spec.resume_session_id {
@@ -3744,7 +3747,7 @@ mod tests {
             "meerkat_spawn",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "worker", "meerkat_id": "w-ext", "backend": "external"}]
+                "specs": [{"profile": "worker", "meerkat_id": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
             }),
         )
         .await;

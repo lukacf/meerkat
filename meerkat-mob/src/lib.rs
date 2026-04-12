@@ -56,7 +56,7 @@ pub mod tasks;
 pub mod validate;
 
 // Re-exports for convenience
-pub use backend::MobBackendKind;
+pub use backend::{MobBackendKind, RuntimeBinding};
 pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};

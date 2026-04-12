@@ -19,6 +19,18 @@ pub enum WireMobBackendKind {
     External,
 }
 
+/// Runtime binding for spawn requests.
+///
+/// First step toward identity-first mobs. Carries backend-specific binding
+/// details at spawn time. `External` requires real process identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireRuntimeBinding {
+    Session,
+    External { peer_id: String, address: String },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]

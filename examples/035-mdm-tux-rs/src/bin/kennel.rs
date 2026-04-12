@@ -14,7 +14,7 @@ use mdm_tux::{
 };
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Profile, ProfileBinding,
-    ProfileName, ToolConfig,
+    ProfileName, RuntimeBinding, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, SessionCleanupPolicy, WiringRules};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
@@ -521,17 +521,19 @@ async fn handle_connection(
                         }
 
                         // Spawn target as external mob member in the hive fleet.
+                        // RuntimeBinding::External carries the real target identity
+                        // so the mob roster has the correct peer_id and address.
                         if let Some(mob_id) = &hive_mob_id {
-                            let member_id =
-                                MeerkatId::from(name.clone());
+                            let mut spec = SpawnMemberSpec::new(
+                                ProfileName::from("target"),
+                                MeerkatId::from(name.clone()),
+                            );
+                            spec.binding = Some(RuntimeBinding::External {
+                                peer_id: pubkey.clone(),
+                                address: direct_addr.clone(),
+                            });
                             match hive_mob_state
-                                .mob_spawn(
-                                    mob_id,
-                                    ProfileName::from("target"),
-                                    member_id,
-                                    None,
-                                    Some(MobBackendKind::External),
-                                )
+                                .mob_spawn_spec(mob_id, spec)
                                 .await
                             {
                                 Ok(_) => {

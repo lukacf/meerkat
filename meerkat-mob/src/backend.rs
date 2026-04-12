@@ -18,3 +18,35 @@ impl MobBackendKind {
         }
     }
 }
+
+/// Concrete runtime binding for a specific member spawn.
+///
+/// [`MobBackendKind`] says *what kind* of backend (definition/profile level).
+/// `RuntimeBinding` says *which specific runtime* (spawn/provision level).
+///
+/// First step toward identity-first mobs: the mob's roster is keyed by
+/// identity ([`crate::MeerkatId`]). Everything in `RuntimeBinding` is a
+/// hidden binding detail — how to reach the member's runtime, not who it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeBinding {
+    /// Member runtime is a local session managed by the session service.
+    Session,
+    /// Member runtime is an external process with known comms identity.
+    External {
+        /// Real comms public key of the external process.
+        peer_id: String,
+        /// Real comms transport address of the external process.
+        address: String,
+    },
+}
+
+impl RuntimeBinding {
+    /// Returns the backend kind tag for this binding.
+    pub fn kind(&self) -> MobBackendKind {
+        match self {
+            Self::Session => MobBackendKind::Session,
+            Self::External { .. } => MobBackendKind::External,
+        }
+    }
+}

@@ -356,6 +356,10 @@ pub struct SpawnMemberSpec {
     pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
+    /// Runtime binding for this member. When set, takes precedence over
+    /// `backend` and carries concrete binding details (e.g., external process
+    /// comms identity). First step toward identity-first mobs.
+    pub binding: Option<crate::RuntimeBinding>,
     /// Opaque application context passed through to the agent build pipeline.
     pub context: Option<serde_json::Value>,
     /// Application-defined labels for this member.
@@ -394,6 +398,7 @@ impl SpawnMemberSpec {
             initial_message: None,
             runtime_mode: None,
             backend: None,
+            binding: None,
             context: None,
             labels: None,
             launch_mode: crate::launch::MemberLaunchMode::Fresh,
@@ -954,6 +959,20 @@ impl MobHandle {
     ) -> Result<MemberRef, MobError> {
         self.spawn_with_options(profile_name, meerkat_id, initial_message, None, None)
             .await
+    }
+
+    /// Spawn a new member with an explicit runtime binding.
+    pub async fn spawn_with_binding(
+        &self,
+        profile_name: ProfileName,
+        meerkat_id: MeerkatId,
+        initial_message: Option<ContentInput>,
+        binding: crate::RuntimeBinding,
+    ) -> Result<MemberRef, MobError> {
+        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id);
+        spec.initial_message = initial_message;
+        spec.binding = Some(binding);
+        self.spawn_spec(spec).await
     }
 
     /// Spawn a new member from a profile with explicit backend override.

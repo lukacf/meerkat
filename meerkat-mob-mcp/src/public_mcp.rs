@@ -1,7 +1,7 @@
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, MobPeerTarget, MobUnwireParams, MobWireParams,
-    WireContentInput, WireMobBackendKind, WireMobRuntimeMode,
+    WireContentInput, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
 };
 use meerkat_core::error::invalid_session_id_message;
 use schemars::{JsonSchema, schema_for};
@@ -38,6 +38,8 @@ struct MeerkatMobSpawnInput {
     #[serde(default)]
     backend: Option<WireMobBackendKind>,
     #[serde(default)]
+    binding: Option<WireRuntimeBinding>,
+    #[serde(default)]
     resume_session_id: Option<String>,
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
@@ -65,6 +67,8 @@ struct MeerkatMobSpawnInputSpec {
     runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default)]
     backend: Option<WireMobBackendKind>,
+    #[serde(default)]
+    binding: Option<WireRuntimeBinding>,
     #[serde(default)]
     resume_session_id: Option<String>,
     #[serde(default)]
@@ -446,6 +450,7 @@ pub async fn handle_public_tools_call(
                 input.initial_message,
                 input.runtime_mode,
                 input.backend,
+                input.binding,
                 input.resume_session_id,
                 input.labels,
                 input.context,
@@ -475,6 +480,7 @@ pub async fn handle_public_tools_call(
                         spec.initial_message,
                         spec.runtime_mode,
                         spec.backend,
+                        spec.binding,
                         spec.resume_session_id,
                         spec.labels,
                         spec.context,
@@ -824,6 +830,7 @@ fn build_spawn_spec(
     initial_message: Option<WireContentInput>,
     runtime_mode: Option<WireMobRuntimeMode>,
     backend: Option<WireMobBackendKind>,
+    binding: Option<WireRuntimeBinding>,
     resume_session_id: Option<String>,
     labels: Option<BTreeMap<String, String>>,
     context: Option<Value>,
@@ -832,7 +839,33 @@ fn build_spawn_spec(
     let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), meerkat_id.as_str());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
     spec.runtime_mode = runtime_mode.map(runtime_mode_from_wire);
-    spec.backend = backend.map(backend_kind_from_wire);
+    // Resolve binding: explicit binding takes precedence over legacy backend tag.
+    // Conflicting backend + binding is rejected.
+    spec.binding = match (binding, backend) {
+        (Some(wb), None) => Some(runtime_binding_from_wire(wb)),
+        (Some(wb), Some(bk)) => {
+            let resolved = runtime_binding_from_wire(wb);
+            if resolved.kind() != backend_kind_from_wire(bk) {
+                return Err(McpToolError::invalid_params(
+                    "conflicting 'backend' and 'binding' fields",
+                ));
+            }
+            Some(resolved)
+        }
+        (None, Some(bk)) => {
+            let kind = backend_kind_from_wire(bk);
+            match kind {
+                meerkat_mob::MobBackendKind::Session => Some(meerkat_mob::RuntimeBinding::Session),
+                meerkat_mob::MobBackendKind::External => {
+                    // Bare external without binding — let the actor reject it
+                    // with a clear error about requiring RuntimeBinding.
+                    spec.backend = Some(kind);
+                    None
+                }
+            }
+        }
+        (None, None) => None,
+    };
     spec.labels = labels;
     spec.context = context;
     spec.additional_instructions = additional_instructions;
@@ -843,6 +876,15 @@ fn build_spawn_spec(
         spec = spec.with_resume_session_id(parsed);
     }
     Ok(spec)
+}
+
+fn runtime_binding_from_wire(wb: WireRuntimeBinding) -> meerkat_mob::RuntimeBinding {
+    match wb {
+        WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
+        WireRuntimeBinding::External { peer_id, address } => {
+            meerkat_mob::RuntimeBinding::External { peer_id, address }
+        }
+    }
 }
 
 #[cfg(test)]

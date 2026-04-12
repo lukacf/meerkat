@@ -731,6 +731,57 @@ async fn rpc_command_loop(
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
                 tokio::spawn(async move {
+                    // Hive is the orchestrator session, not a mob member.
+                    // /new on hive archives the current session and creates
+                    // a fresh one. For regular targets, mob/respawn is used.
+                    if target_name == "hive" {
+                        let client = {
+                            let map = clients.lock().await;
+                            map.get("hive").cloned()
+                        };
+                        let Some(client) = client else {
+                            let _ = event_tx
+                                .send(TuiEvent::RpcError {
+                                    target_id: target_name,
+                                    message: "no hive RPC connection".into(),
+                                })
+                                .await;
+                            return;
+                        };
+                        // Archive current session, then create fresh one.
+                        let _ = client
+                            .request("session/archive", serde_json::json!({}))
+                            .await;
+                        match client
+                            .request("session/create", serde_json::json!({
+                                "prompt": "You are the hive orchestrator. Use peers, send_request, send_message, mob_wire, mob_unwire, and mob_list_members to manage the fleet."
+                            }))
+                            .await
+                        {
+                            Ok(result) => {
+                                let sid = result
+                                    .get("session_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let _ = event_tx
+                                    .send(TuiEvent::RpcResponse {
+                                        target_id: target_name,
+                                        body: format!("new hive session: {sid}"),
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(TuiEvent::RpcError {
+                                        target_id: target_name,
+                                        message: format!("session/create failed: {e}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                        return;
+                    }
+
                     // mob/respawn routes to the hive (kennel mode) or the
                     // target itself (direct mode — target has its own mob).
                     let (client, mob_id) = {

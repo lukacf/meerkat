@@ -346,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
+            owner_session_id: hive_session_id.clone(),
             session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: false,
         };

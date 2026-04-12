@@ -67,10 +67,10 @@ Examples:
 ```bash
 rkat "summarize this repository"
 cat story.txt | rkat "summarize the story"
-git diff | rkat --json "review these changes"
-tail -f app.log | rkat --stdin lines "watch for incidents"
-rkat -t workspace "fix the failing test"
-rkat --yolo --param temperature=0.2 "take the gloves off"
+git diff | rkat run --json "review these changes"
+tail -f app.log | rkat run --stdin lines "watch for incidents"
+rkat run -t workspace "fix the failing test"
+rkat run --yolo --param temperature=0.2 "take the gloves off"
 ```
 
 ### Common run flags
@@ -152,7 +152,7 @@ cat notes.txt | rkat "extract action items" | rkat "group these by owner"
 Live line mode:
 
 ```bash
-tail -f app.log | rkat --stdin lines "watch for incidents and call them out"
+tail -f app.log | rkat run --stdin lines "watch for incidents and call them out"
 ```
 
 `--line-format json` treats each incoming line as JSON instead of plain text.

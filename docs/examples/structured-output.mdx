@@ -13,7 +13,7 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run --output-schema '{
+    rkat run --schema '{
       "type": "object",
       "properties": {
         "city": {"type": "string"},
@@ -148,7 +148,7 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
 The CLI can load a schema from a JSON file instead of inline.
 
 ```bash
-rkat run --output-schema ./schemas/city.json "Tell me about Tokyo"
+rkat run --schema ./schemas/city.json "Tell me about Tokyo"
 ```
 
 The CLI detects files by checking if the value is an existing path. The file can contain a raw JSON Schema or the [wrapper format](/guides/structured-output#outputschema) with explicit `name`, `strict`, `compat`, and `format` fields.
@@ -160,7 +160,7 @@ When validation fails, the agent retries the extraction turn with error feedback
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run --output-schema ./schema.json --structured-output-retries 5 "Extract entities"
+    rkat run --schema ./schema.json "Extract entities"
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -249,10 +249,9 @@ Schemas are normalized across providers. The `compat` setting controls how unsup
 
 ```bash
 # Lossy (default): unsupported features are dropped with warnings
-rkat run --output-schema ./schema.json --output-schema-compat lossy "Extract data"
+rkat run --schema ./schema.json "Extract data"
 
-# Strict: reject schemas with unsupported features
-rkat run --output-schema ./schema.json --output-schema-compat strict "Extract data"
+# For explicit `compat` control, use a wrapper schema file or a non-CLI surface
 ```
 
 | Mode | Behavior |
@@ -270,7 +269,7 @@ The structured output appears in the response alongside the raw text.
   <Tab title="CLI">
     ```bash
     # --output json returns the full result including structured_output
-    rkat run --output json --output-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}' "What is 2+2?"
+    rkat run --output json --schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}' "What is 2+2?"
     # stdout: {"session_id":"...","text":"...","structured_output":{"answer":"4"}}
     ```
   </Tab>

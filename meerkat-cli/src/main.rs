@@ -581,7 +581,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
 #[command(
-    after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> --help` for more details."
+    after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> --help` for more details."
 )]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
@@ -633,7 +633,7 @@ enum Commands {
     /// Initialize local project config from the global template
     Init,
     #[command(
-        after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat --json \"review these changes\"\n  tail -f app.log | rkat --stdin lines \"watch for incidents\"\n  rkat -t workspace \"fix the failing test\"\n  rkat --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
+        after_help = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
     )]
     /// Run an agent with a prompt
     Run {

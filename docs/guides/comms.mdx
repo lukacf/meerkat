@@ -661,8 +661,8 @@ Read newline-delimited events from stdin. Each line is parsed as JSON (extractin
 # Keep-alive with stdin events
 rkat run "You are a monitoring agent." \
   --comms-name monitor \
-  --keep-alive --stdin \
-  --enable-builtins
+  --keep-alive --stdin lines \
+  --tools safe
 
 # Then type or pipe events:
 echo '{"body":"deployment failed on prod"}' | ...

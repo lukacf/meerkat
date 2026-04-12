@@ -45,20 +45,20 @@ impl AgentToolDispatcher for MathTools {
 
 ## Enable built-in tools
 
-Built-in tool categories: builtins (`enable_builtins`, including task tools plus utility helpers like `datetime`, `apply_patch`, and `view_image`), shell (`enable_shell`), semantic memory (`enable_memory`), and mob orchestration (`enable_mob`).
+Built-in tool categories: builtins, shell, semantic memory, and mob orchestration. On the CLI, these are selected with tool presets. Other surfaces expose per-category booleans such as `enable_builtins`, `enable_shell`, `enable_memory`, and `enable_mob`.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
     # Enable builtins + shell
-    rkat run --enable-builtins --enable-shell "List files in /tmp"
+    rkat run --tools workspace "List files in /tmp"
 
-    # Short flags: -b for builtins, -x for shell (implies builtins)
-    rkat run -x "List files in /tmp"
+    # Short flag form
+    rkat run -t workspace "List files in /tmp"
 
-    # Enable mob orchestration tools (-M short flag)
-    rkat run -x --enable-mob "Coordinate the team"
-    rkat run -x -M "Coordinate the team"
+    # Enable mob orchestration too
+    rkat run --tools full "Coordinate the team"
+    rkat run --yolo "Coordinate the team"
 
     ```
   </Tab>

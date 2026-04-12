@@ -232,19 +232,13 @@ Schema warnings are collected during compilation and included in `RunResult.sche
   <Tab title="CLI">
     ```bash
     # Inline JSON schema
-    rkat run "Analyze this code" --output-schema '{"type":"object","properties":{"bugs":{"type":"array","items":{"type":"string"}}},"required":["bugs"]}'
+    rkat run "Analyze this code" --schema '{"type":"object","properties":{"bugs":{"type":"array","items":{"type":"string"}}},"required":["bugs"]}'
 
     # Schema from file
-    rkat run "Analyze this code" --output-schema schema.json
-
-    # With compatibility mode
-    rkat run "Analyze this code" --output-schema schema.json --output-schema-compat strict
-
-    # With custom retries
-    rkat run "Analyze this code" --output-schema schema.json --structured-output-retries 5
+    rkat run "Analyze this code" --schema schema.json
     ```
 
-    The `--output-schema` flag accepts either a file path or inline JSON. The CLI detects files by checking if the value is an existing path.
+    The `--schema` flag accepts either a file path or inline JSON. The CLI detects files by checking if the value is an existing path.
   </Tab>
   <Tab title="JSON-RPC">
     Via `session/create` and `turn/start`:

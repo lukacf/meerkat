@@ -319,7 +319,7 @@ let schedule = service.create(CreateScheduleRequest {
 ```bash
 rkat "What is Rust?"                     # "run" is the default subcommand
 rkat run "What is Rust?"                 # equivalent explicit form
-rkat --realm team-alpha run "Create a todo app" --enable-builtins --enable-shell --stream -v
+rkat --realm team-alpha run "Create a todo app" --tools workspace --stream -v
 # Global flags: --realm, --isolated, --instance, --realm-backend, --state-root, --context-root, --user-config-root
 rkat resume last "keep going"             # resume most recent session
 rkat resume 019c8b99 "continue"          # resume by short prefix
@@ -327,11 +327,11 @@ rkat continue "next step"                # shortcut for resume last
 rkat --realm team-alpha resume sid_abc123 "Now add error handling"
 # Batch context: pipe finite content as context
 cat document.txt | rkat run "Summarize this document"
-git diff | rkat run "Review these changes" --enable-builtins
+git diff | rkat run "Review these changes" --tools safe
 # Chained pipes: each rkat reads stdin, writes response to stdout
 cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
 # Live streaming: --keep-alive --stdin reads stdin line-by-line as events
-tail -f app.log | rkat run --keep-alive --stdin "Monitor and alert on anomalies"
+tail -f app.log | rkat run --keep-alive --stdin lines "Monitor and alert on anomalies"
 rkat mob create --definition ./mobs/coding-swarm.toml
 rkat mob list
 ```

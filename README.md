@@ -60,10 +60,10 @@ rkat run "What is the capital of France?"
 rkat run --model gpt-5.2 "Explain async/await"
 ```
 
-**Give it tools and let it work.** Enable shell access and mob orchestration, then let the agent coordinate delegated work through mob members and flows:
+**Give it tools and let it work.** Enable shell access and mob orchestration with the `full` tool preset, then let the agent coordinate delegated work through mob members and flows:
 
 ```bash
-rkat run --enable-builtins --enable-shell --enable-mob \
+rkat run --tools full \
   "Create a small mob to inspect src/ for functions longer than 50 lines. \
    Ask the members to suggest refactors, then collect and summarize the results."
 ```
@@ -71,8 +71,8 @@ rkat run --enable-builtins --enable-shell --enable-mob \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-sonnet-4-5 --enable-builtins --enable-shell \
-  --output-schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
+rkat run --model claude-sonnet-4-5 --tools workspace \
+  --schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
 ```
@@ -299,7 +299,7 @@ mesh = [{ a = "analyst", b = "writer" }]
 ```
 
 ```bash
-rkat run --enable-builtins --enable-shell \
+rkat run --tools workspace \
   "Use a mob with the definition in audit-team.toml to audit the payments module. \
    The analyst should examine error handling and edge cases. The writer should \
    produce a prioritized remediation plan. Use the mob_* tools to coordinate."

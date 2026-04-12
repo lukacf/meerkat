@@ -137,7 +137,7 @@ Tools from different sources (custom, MCP, built-in) are composed into a single 
 Mob tools (`mob_*`) are provided by the `meerkat-mob-mcp` dispatcher and composed
 through `SessionBuildOptions.external_tools`.
 
-- CLI `run` composes this dispatcher when `--enable-mob` (`-M`) is passed (opt-in, disabled by default).
+- CLI `run` composes this dispatcher when the `full` tool preset is selected (`--tools full` or `--yolo`).
 - `rkat mob ...` remains the explicit direct lifecycle surface.
 - Other session-driven surfaces can grant the same agent-side `mob_*` capability
   by composing `MobMcpDispatcher` into their session build path.

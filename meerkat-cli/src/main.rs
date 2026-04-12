@@ -8560,7 +8560,7 @@ mod tests {
         let top = render_help(Cli::command());
         assert!(top.contains("Usage: rkat [OPTIONS] <PROMPT>"));
         assert!(top.contains("cat story.txt | rkat \"summarize the story\""));
-        assert!(top.contains("tail -f app.log | rkat --stdin lines"));
+        assert!(top.contains("tail -f app.log | rkat run --stdin lines"));
 
         let run = render_help(Cli::command().find_subcommand("run").unwrap().clone());
         assert!(run.contains("--tools <TOOLS>"));

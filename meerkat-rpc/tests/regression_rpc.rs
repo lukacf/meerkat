@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
+use meerkat_contracts::ContractVersion;
 use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
@@ -790,10 +791,11 @@ async fn initialize_methods_list_complete() {
     send_request(&mut writer, &req).await;
     let resp = read_response(&mut reader).await;
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
+    let expected_contract_version = ContractVersion::CURRENT.to_string();
 
     assert_eq!(
         resp["result"]["contract_version"].as_str(),
-        Some("0.5.1"),
+        Some(expected_contract_version.as_str()),
         "initialize must report the current contract version"
     );
 

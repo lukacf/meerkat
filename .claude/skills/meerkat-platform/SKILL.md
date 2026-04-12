@@ -61,6 +61,19 @@ Use this mental model when helping users:
 - **runtime-backed**: CLI, REST, RPC, MCP server, long-lived mob/member surfaces, keep-alive, comms drain, runtime wake/recovery
 - **standalone/embedded**: direct in-memory substrate, WASM embedded sessions, examples/tests that intentionally do not want runtime-owned semantics
 
+## Mob runtime binding (identity-first)
+
+`RuntimeBinding` separates "what kind of backend" from "which specific runtime":
+
+- `MobBackendKind` (definition/profile level): `Session` or `External` — declares what kind of backend a mob uses
+- `RuntimeBinding` (spawn/provision level): `Session` or `External { peer_id, address }` — binds a specific member to a concrete runtime
+
+External members must provide `RuntimeBinding::External` at spawn time with the real process comms identity. The provisioner uses this for `MemberRef::BackendPeer.peer_id` and `.address` instead of deriving from the placeholder session.
+
+The bridge session (placeholder) still exists for lifecycle transport (notifications, kickoff events) within the orchestrator process. `trusted_peer_spec` uses the bridge key for transport trust, not `BackendPeer.peer_id` (which is the real identity).
+
+This is the first step toward identity-first mobs where `MeerkatId` is the durable identity and everything else (session, comms, runtime) is a hidden binding detail.
+
 ## Surfaces
 
 | Surface | Protocol | Use Case |
@@ -86,7 +99,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
 - Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The previous exclusive-handle mob store has been removed.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
-- Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage sub-agents through implicit session-owned mobs.
+- Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage sub-agents through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
 
 ### Mob lifecycle (standard/default usage)

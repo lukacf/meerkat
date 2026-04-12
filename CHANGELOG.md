@@ -5,9 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.2] - 2026-04-12
 
 ### Added
+
+#### Self-hosted model registry
+- Two-tier model registry: server definitions (`[self_hosted.servers.<id>]`) and model aliases (`[self_hosted.models.<alias>]`).
+- OpenAI-compatible transport with `chat_completions` and `responses` API styles — works with Ollama, vLLM, LM Studio, and any `/v1/chat/completions` endpoint.
+- Self-hosted aliases merge into the runtime model catalog as first-class models. Provider inferred by exact alias match before prefix inference.
+- `rkat doctor` validates server reachability, bearer token resolution, and remote model availability.
+- `rkat models catalog` shows self-hosted models under the `self_hosted` provider group with backing server metadata.
+- Per-model capability flags: `vision`, `supports_thinking`, `supports_reasoning`, `supports_web_search`, `context_window`, `max_output_tokens`, `call_timeout_secs`.
+- Bearer token resolution via environment variable reference (`bearer_token_env`) — no literal tokens in config.
+- Self-hosted models work identically across all surfaces (CLI, REST, RPC, MCP, SDKs).
+
+#### RuntimeBinding — first step toward identity-first mobs
+- New `RuntimeBinding` enum (`Session` | `External { peer_id, address }`) separates backend kind (definition/profile level) from runtime binding (spawn/provision level).
+- External mob members now carry real process comms identity instead of phantom placeholder session keys.
+- `SpawnMemberSpec.binding` field on all spawn surfaces; `ProvisionMemberRequest.binding` replaces bare `MobBackendKind` tag at provisioner level.
+- `WireRuntimeBinding` wire type in `meerkat-contracts` for public MCP and RPC spawn inputs.
+- Respawn preserves binding from old roster entry, maintaining real identity across incarnations.
+- Bare `MobBackendKind::External` without `RuntimeBinding` is rejected — external members must declare their process identity at spawn time.
+- Conflict handling: `backend` + `binding` on the same request is rejected if they disagree.
+
+#### mob_wire / mob_unwire agent tools
+- `mob_wire` and `mob_unwire` tools added to `AgentMobToolSurface` — agents can now create and remove comms trust relationships between mob members.
+- Supports both local peers (within the same mob roster) and external peers (outside the roster with explicit identity).
+- Reuses the existing `MobMcpState::mob_wire()` / `mob_unwire()` state API.
+
+#### Hive agent (example 035)
+- Full `SessionRuntime` + RPC server in the kennel binary for the hive agent.
+- Hive mob created on startup with external-backend target profiles; targets spawned as members on registration.
+- `PeerWire` / `PeerUnwire` kennel payloads for target-to-target comms mesh wiring.
+- Kennel sends `PeerWire` at registration time — all-to-all mesh so targets can communicate directly.
+- Target handles `PeerWire` by adding the other target as a trusted comms peer.
+- `TargetRegistered` includes hive pubkey + comms address for bidirectional trust.
+- Hive system prompt updated with `mob_wire`, `mob_unwire`, `mob_list_members` guidance.
+
+#### Deferred tool catalog
+- Adaptive deferred catalog discovery: tools from MCP servers and other async sources are discovered in the background and become available as each source completes.
+- Typed schemas for catalog control tools.
+- Deferred catalog composition and exactness hardened.
+
+#### TCP RPC server
+- `serve_tcp` and `serve_tcp_connection` in `meerkat-rpc` for JSON-RPC over TCP.
+- `--tcp` flag on `rkat-rpc` binary for network listener mode.
+- TCP e2e tests that spawn the real `rkat-rpc` binary.
+- Concurrent connection handling (spawns each connection independently).
 
 #### Default-on provider web search
 - Web search enabled by default for all verified catalog models: Anthropic (`web_search_20250305`), OpenAI (`web_search`), Gemini (`google_search`).
@@ -93,6 +137,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - WASM `async_trait` on schedule dispatcher fixed.
 - TUX scheduler delivery and tool guidance fixed.
 - CI prereqs for wasm and shared-realm e2e lanes fixed.
+- Inert session bug in MCP/mob/RPC ingress: `contains_session` replaced with `session_has_executor` to prevent turn/start hangs on sessions without a runtime loop.
+- Executor notification sink staleness: sink is now read at apply time from `RwLock`, not captured at construction.
+- `MethodRouter::new()` preserves existing mob state instead of overwriting per TCP connection.
+- `serve_tcp` spawns connections concurrently instead of sequentially.
+- `start_turn_via_runtime` no longer downgrades externally-configured comms drain.
+- `trusted_peer_spec` for external members uses bridge comms key (transport) instead of `BackendPeer.peer_id` (identity) — fixes identity/transport conflation.
+- External member phantom identity: `BackendPeer.peer_id` is now the real external process key, not the placeholder session's comms key.
+- Self-hosted model switching: `config_runtime` set and provider inferred correctly.
+- Hot-swap filter persistence and audit lane hardened.
+- Projector replay writes hardened.
+- Web and shared-realm test flows stabilized.
 
 ## [0.5.1] - 2026-04-06
 

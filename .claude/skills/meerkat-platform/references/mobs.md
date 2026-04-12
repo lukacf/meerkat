@@ -425,6 +425,8 @@ Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolS
 | `mob_check_member` | Check a member's execution status and output |
 | `mob_list_members` | List members of a mob |
 | `mob_list` | List all mobs |
+| `mob_wire` | Wire a member to a local or external peer (creates comms trust) |
+| `mob_unwire` | Remove a wiring relationship between a member and a peer |
 
 These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime; ambient mob enablement alone does not surface operator tools on resume.
 

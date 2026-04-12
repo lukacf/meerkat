@@ -36,7 +36,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
 | | Meerkat | Claude Code / Codex CLI / Gemini CLI |
 |---|---|---|
 | **Design** | Library-first -- embed in your service | CLI-first -- interactive terminal tool |
-| **Providers** | Anthropic, OpenAI, Gemini through one interface | Single provider |
+| **Providers** | Anthropic, OpenAI, Gemini + self-hosted (Ollama, vLLM, LM Studio) | Single provider |
 | **Modularity** | Opt-in subsystems, from bare agent loop to full harness | All-or-nothing |
 | **Surfaces** | CLI, REST, JSON-RPC, MCP server, Rust/Python/TS SDKs | CLI + SDK |
 | **Agent infra** | Hooks, skills, semantic memory across sessions | File-based context |
@@ -79,6 +79,34 @@ rkat run --model claude-sonnet-4-5 --enable-builtins --enable-shell \
 
 The agent loops autonomously -- calling tools, reading results, reasoning, calling more tools -- until the task is done or the budget runs out. All three examples use the same binary; provider is inferred from the model name.
 
+### Self-hosted models
+
+Run local models through any OpenAI-compatible server (Ollama, vLLM, LM Studio). Add to `.rkat/config.toml`:
+
+```toml
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+
+[self_hosted.models.gemma-4-27b]
+server = "local"
+remote_model = "gemma4:27b"
+display_name = "Gemma 4 27B"
+family = "gemma-4"
+context_window = 128000
+vision = true
+```
+
+Then use it like any other model:
+
+```bash
+rkat run -m gemma-4-27b "Explain the code in main.rs"
+rkat doctor  # validate server connectivity
+```
+
+Self-hosted models work across all surfaces -- CLI, REST, RPC, MCP, and SDKs. See the [self-hosted guide](https://docs.rkat.ai/guides/self-hosted) for Ollama, vLLM, and LM Studio recipes.
+
 ## Testing
 
 Meerkat’s repo-wide test lanes are intentionally named by execution model:
@@ -112,6 +140,8 @@ Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider l
 ## Capabilities
 
 **Providers and streaming.** Anthropic, OpenAI, and Gemini through a unified streaming interface. Provider is inferred from the model name -- switch models with a flag, not a code change.
+
+**Self-hosted models.** Run local models through Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint. Self-hosted models are first-class -- once configured, they work identically to cloud models across all surfaces (CLI, REST, RPC, MCP, SDKs). `rkat doctor` validates server connectivity and model availability.
 
 **Sessions and memory.** Persistent sessions (SQLite or JSONL), automatic context compaction for long conversations, and semantic memory with HNSW indexing for recall across sessions.
 

@@ -284,7 +284,8 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 ### Agent-Facing Delegation Tools
 
-- `AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, and `mob_list`.
+- `AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, and `mob_unwire`.
+- `mob_wire`/`mob_unwire` create and remove comms trust relationships between mob members (local or external peers). Reuses `MobMcpState::mob_wire()` / `mob_unwire()` state API.
 - `owner_session_id` and `is_implicit` on `MobDefinition` are canonical for session-scoped access control, resume lookup, and cleanup.
 - `destroy_session_mobs()` is the canonical archive cleanup seam. Tool building and cleanup must share the same hydrated `MobMcpState`; parallel shadow registries are a bug.
 - Operator capabilities are runtime-injected. `MobToolAccessContext::OperatorCapabilitiesPresent` / `override_mob == Some(true)` is the authoritative signal; ambient mob enablement alone must not resurrect operator tools on resume.
@@ -303,11 +304,17 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 `SessionBackend::runtime_session_state()` is the canonical owner of session registration + runtime-loop attachment for mob members. Autonomous readiness helpers should only do autonomous-specific work (drain startup, capability checks), not duplicate registration.
 
+**RuntimeBinding**: `SpawnMemberSpec.binding: Option<RuntimeBinding>` separates backend kind (definition level) from concrete runtime binding (spawn level). `RuntimeBinding::External { peer_id, address }` carries the real external process identity. The provisioner dispatches on `ProvisionMemberRequest.binding` (required `RuntimeBinding`, not optional). `resolve_binding()` in the actor translates `SpawnMemberSpec.binding` / legacy `backend` into `RuntimeBinding`, rejecting bare `External` without explicit binding.
+
+**External member identity**: `BackendPeer.peer_id` is the real external process comms key, not the placeholder session's key. The bridge session still exists for lifecycle transport. `trusted_peer_spec()` uses the bridge key (from `comms.public_key()`, passed as `fallback_peer_id`) for transport trust, keeping identity and transport separate.
+
 ### Wiring
 
 Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobActor` computes wiring targets and establishes bidirectional trust via comms.
 
 `delegate` auto-wiring is capability-based, not a promise. Report actual wired/not-wired results and never claim bidirectional comms unless both trust edges were established.
+
+`mob_wire` / `mob_unwire` agent tools: create and remove peer-to-peer comms trust between mob members. For local members (both in roster), wiring is bidirectional. For external members, trust is exchanged between bridge sessions (inproc transport). Real external process wiring requires host-level relay (e.g., kennel `PeerWire` payloads).
 
 ### Flows
 

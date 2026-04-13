@@ -3853,7 +3853,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(spawned["member_ref"]["kind"], "backend_peer");
+        assert_eq!(spawned["agent_identity"], "w-ext");
     }
 
     #[tokio::test]

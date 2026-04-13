@@ -2875,13 +2875,13 @@ mod tests {
             .expect("in-scope spawn should succeed");
         let spawn_payload: serde_json::Value =
             serde_json::from_str(&spawn_result.result.text_content()).unwrap();
-        assert_eq!(
-            spawn_payload["session_id"], spawn_payload["bridge_session_id"],
-            "Mob-MCP operator results must keep compatibility session_id aligned with bridge bindings"
+        assert!(
+            spawn_payload["agent_identity"].is_string(),
+            "Mob-MCP operator results should surface the canonical agent identity"
         );
         assert!(
-            spawn_payload["bridge_session_id"].is_string(),
-            "Mob-MCP operator results should surface the canonical bridge binding"
+            spawn_payload["agent_runtime_id"].is_object(),
+            "Mob-MCP operator results should surface the canonical agent runtime id"
         );
 
         let handle = state.handle_for(&mob_id).await.expect("handle");

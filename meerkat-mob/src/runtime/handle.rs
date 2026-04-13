@@ -43,6 +43,10 @@ enum SessionObservationProjection {
 pub struct MobMemberSnapshot {
     /// Current lifecycle status.
     pub status: MobMemberStatus,
+    /// Identity-native runtime ID for this incarnation.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the current incarnation.
+    pub fence_token: FenceToken,
     /// Preview of the last assistant output (if any).
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
@@ -88,35 +92,42 @@ impl MobMemberSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberListEntry {
-    pub meerkat_id: MeerkatId,
-    pub profile: ProfileName,
-    pub(crate) member_ref: MemberRef,
+    /// Canonical member identity.
+    pub agent_identity: AgentIdentity,
+    /// Identity-native runtime ID for this incarnation.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the current incarnation.
+    pub fence_token: FenceToken,
+    /// Member role (profile name).
+    pub role: ProfileName,
     pub runtime_mode: MobRuntimeMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_id: Option<String>,
     #[serde(default)]
     pub state: crate::roster::MemberState,
-    pub wired_to: BTreeSet<MeerkatId>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
+    pub wired_to: BTreeSet<AgentIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     pub status: MobMemberStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub is_final: bool,
-    /// Compatibility alias for the active member's current bridge session
-    /// binding, retained for older session-centric payloads.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_session_id: Option<SessionId>,
-    /// Canonical current bridge session ID for the active member binding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_bridge_session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    // --- Bridge internals (pub(crate)) ---
+    #[serde(skip)]
+    pub(crate) meerkat_id: MeerkatId,
+    #[serde(skip)]
+    pub(crate) member_ref: MemberRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_session_id: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_bridge_session_id: Option<SessionId>,
 }
 
 impl MobMemberListEntry {
@@ -141,12 +152,19 @@ impl MobMemberListEntry {
             .or(self.current_bridge_session_id.as_ref())
     }
 
+    /// Bridge session ID from the member reference.
     pub fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()
     }
 
+    /// Bridge session ID (alias).
     pub fn session_id(&self) -> Option<&SessionId> {
         self.bridge_session_id()
+    }
+
+    /// Bridge-internal meerkat ID.
+    pub fn meerkat_id(&self) -> &MeerkatId {
+        &self.meerkat_id
     }
 }
 
@@ -189,7 +207,7 @@ pub enum MobMemberStatus {
 #[non_exhaustive]
 pub struct MemberRespawnReceipt {
     /// The member identity that was respawned.
-    pub member_id: MeerkatId,
+    pub identity: AgentIdentity,
     /// Compatibility alias for the retired member's old bridge session ID.
     pub old_session_id: Option<SessionId>,
     /// Canonical retired member old bridge session ID.
@@ -203,26 +221,18 @@ pub struct MemberRespawnReceipt {
 }
 
 impl MemberRespawnReceipt {
-    pub fn from_bridge_session_ids(
-        member_id: MeerkatId,
+    pub fn new(
+        identity: AgentIdentity,
         old_bridge_session_id: Option<SessionId>,
         new_bridge_session_id: Option<SessionId>,
     ) -> Self {
         Self {
-            member_id,
+            identity,
             old_session_id: old_bridge_session_id.clone(),
             old_bridge_session_id,
             new_session_id: new_bridge_session_id.clone(),
             new_bridge_session_id,
         }
-    }
-
-    pub fn new(
-        member_id: MeerkatId,
-        old_session_id: Option<SessionId>,
-        new_session_id: Option<SessionId>,
-    ) -> Self {
-        Self::from_bridge_session_ids(member_id, old_session_id, new_session_id)
     }
 
     pub fn set_old_bridge_session_id(&mut self, bridge_session_id: Option<SessionId>) {
@@ -269,22 +279,22 @@ pub(crate) struct CanonicalOpsOwnerContext {
 #[non_exhaustive]
 pub enum MobRespawnError {
     /// Member has no current session bridge to retire.
-    #[error("no current session bridge for member {member_id}")]
-    NoSessionBridge { member_id: MeerkatId },
+    #[error("no current session bridge for member {identity}")]
+    NoSessionBridge { identity: AgentIdentity },
 
     /// Spawn failed after the old member was retired.
-    #[error("spawn failed after retire for member {member_id}: {reason}")]
+    #[error("spawn failed after retire for member {identity}: {reason}")]
     SpawnAfterRetire {
-        member_id: MeerkatId,
+        identity: AgentIdentity,
         reason: String,
     },
 
     /// Topology restore failed after replacement spawn.
     /// The replacement receipt is carried so callers can still use the new session.
-    #[error("topology restore failed for member {}: {} peer(s) failed", receipt.member_id, failed_peer_ids.len())]
+    #[error("topology restore failed for member {}: {} peer(s) failed", receipt.identity, failed_peer_ids.len())]
     TopologyRestoreFailed {
         receipt: MemberRespawnReceipt,
-        failed_peer_ids: Vec<MeerkatId>,
+        failed_peer_ids: Vec<AgentIdentity>,
     },
 
     /// An underlying mob error occurred before mutation.
@@ -296,8 +306,8 @@ pub enum MobRespawnError {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MemberDeliveryReceipt {
-    /// The member that received the message.
-    pub member_id: MeerkatId,
+    /// The member identity.
+    pub identity: AgentIdentity,
     /// Compatibility alias for the bridge session the message was delivered to.
     pub session_id: SessionId,
     /// Canonical bridge session ID the message was delivered to.
@@ -327,7 +337,7 @@ pub struct WorkDeliveryReceipt {
 #[non_exhaustive]
 pub struct MemberSessionRef {
     /// The member identity.
-    pub member_id: MeerkatId,
+    pub identity: AgentIdentity,
     /// Compatibility alias for the current bridge session ID.
     pub session_id: SessionId,
     /// Canonical current bridge session ID.
@@ -493,7 +503,7 @@ pub struct SpawnMemberSpec {
     /// When `tooling` is present it controls model/tool resolution;
     /// `role_name` remains a roster/topology label.
     pub role_name: ProfileName,
-    pub meerkat_id: MeerkatId,
+    pub identity: AgentIdentity,
     pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
@@ -532,10 +542,10 @@ pub struct SpawnMemberSpec {
 }
 
 impl SpawnMemberSpec {
-    pub fn new(profile: impl Into<ProfileName>, meerkat_id: impl Into<MeerkatId>) -> Self {
+    pub fn new(profile: impl Into<ProfileName>, identity: impl Into<AgentIdentity>) -> Self {
         Self {
             role_name: profile.into(),
-            meerkat_id: meerkat_id.into(),
+            identity: identity.into(),
             initial_message: None,
             runtime_mode: None,
             backend: None,
@@ -664,7 +674,9 @@ impl MobEventsView {
             .await?
         {
             MobMachineCommandResult::MobEvents(events) => Ok(events),
-            _ => unreachable!("poll_events returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -675,7 +687,9 @@ impl MobEventsView {
             .await?
         {
             MobMachineCommandResult::MobEvents(events) => Ok(events),
-            _ => unreachable!("replay_all returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 }
@@ -1155,7 +1169,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::MobEvents(events) => Ok(events),
-            _ => unreachable!("poll_events returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1181,7 +1197,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::RosterSnapshot(roster)) => roster,
-            Ok(_) => unreachable!("roster returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => Roster::new(),
         }
     }
@@ -1282,7 +1301,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::ListMembers(entries)) => entries,
-            Ok(_) => unreachable!("list_members returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -1299,7 +1321,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::ListMembersIncludingRetiring(entries)) => entries,
-            Ok(_) => unreachable!("list_members_including_retiring returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -1318,17 +1343,16 @@ impl MobHandle {
             let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
             projected.push(
                 MobMemberListEntry {
+                    agent_identity: entry.agent_identity,
+                    agent_runtime_id: entry.agent_runtime_id,
+                    fence_token: entry.fence_token,
+                    role: entry.role,
                     meerkat_id: entry.meerkat_id,
-                    profile: entry.role,
                     member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
                     state: entry.state,
-                    wired_to: entry
-                        .wired_to
-                        .iter()
-                        .map(|id| MeerkatId::from(id.as_str()))
-                        .collect(),
+                    wired_to: entry.wired_to,
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
                     status: snapshot.status,
@@ -1370,7 +1394,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::ListAllMembers(entries)) => entries,
-            Ok(_) => unreachable!("list_all_members returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -1433,6 +1460,16 @@ impl MobHandle {
                 restore_failure: Some(diag.reason),
                 output_preview: None,
                 tokens_used: 0,
+                agent_runtime_id: roster_entry
+                    .as_ref()
+                    .map(|e| e.agent_runtime_id.clone())
+                    .unwrap_or_else(|| {
+                        AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()))
+                    }),
+                fence_token: roster_entry
+                    .as_ref()
+                    .map(|e| e.fence_token)
+                    .unwrap_or(FenceToken::new(0)),
                 current_bridge_session_id: Some(diag.bridge_session_id),
                 peer_connectivity: None,
                 kickoff: roster_entry
@@ -1449,6 +1486,8 @@ impl MobHandle {
                 restore_failure: None,
                 output_preview: None,
                 tokens_used: 0,
+                agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str())),
+                fence_token: FenceToken::new(0),
                 current_bridge_session_id: None,
                 peer_connectivity: None,
                 kickoff: None,
@@ -1461,6 +1500,16 @@ impl MobHandle {
                     restore_failure: None,
                     output_preview: None,
                     tokens_used: 0,
+                    agent_runtime_id: roster_entry
+                        .as_ref()
+                        .map(|e| e.agent_runtime_id.clone())
+                        .unwrap_or_else(|| {
+                            AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()))
+                        }),
+                    fence_token: roster_entry
+                        .as_ref()
+                        .map(|e| e.fence_token)
+                        .unwrap_or(FenceToken::new(0)),
                     current_bridge_session_id: None,
                     peer_connectivity: None,
                     kickoff: roster_entry
@@ -1535,6 +1584,16 @@ impl MobHandle {
                     restore_failure: None,
                     output_preview,
                     tokens_used,
+                    agent_runtime_id: roster_entry
+                        .as_ref()
+                        .map(|e| e.agent_runtime_id.clone())
+                        .unwrap_or_else(|| {
+                            AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()))
+                        }),
+                    fence_token: roster_entry
+                        .as_ref()
+                        .map(|e| e.fence_token)
+                        .unwrap_or(FenceToken::new(0)),
                     current_bridge_session_id: Some(bridge_session_id),
                     peer_connectivity,
                     kickoff: roster_entry.and_then(|entry| entry.kickoff),
@@ -1551,7 +1610,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::GetMember(entry)) => entry,
-            Ok(_) => unreachable!("get_member returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => None,
         }
     }
@@ -1608,7 +1670,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("record_operator_action_provenance returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1630,7 +1694,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::EventStream(stream) => Ok(stream),
-            _ => unreachable!("subscribe_agent_events returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1648,7 +1714,10 @@ impl MobHandle {
                 .into_iter()
                 .map(|(mid, stream)| (AgentIdentity::from(mid.as_str()), stream))
                 .collect(),
-            Ok(_) => unreachable!("subscribe_all_agent_events returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -1674,7 +1743,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::MobEventRouter(handle)) => handle,
-            Ok(_) => unreachable!("subscribe_mob_events returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant for subscribe_mob_events");
+                super::event_router::spawn_event_router(self.clone(), config)
+            }
             Err(_) => super::event_router::spawn_event_router(self.clone(), config),
         }
     }
@@ -1686,7 +1758,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::McpServerStates(states)) => states,
-            Ok(_) => unreachable!("mcp_server_states returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => BTreeMap::new(),
         }
     }
@@ -1716,7 +1791,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::RunId(run_id) => Ok(run_id),
-            _ => unreachable!("run_flow returned non-run-id result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1727,7 +1804,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("cancel_flow returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1738,7 +1817,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::FlowStatus(status) => Ok(status),
-            _ => unreachable!("flow_status returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1841,7 +1922,7 @@ impl MobHandle {
     }
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
-    pub(crate) async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
+    pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spec: Box::new(spec),
@@ -1850,7 +1931,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::SpawnReceipt(receipt) => Ok(receipt.member_ref),
-            _ => unreachable!("spawn_spec returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1867,14 +1950,16 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::SpawnReceipt(receipt) => Ok(receipt),
-            _ => unreachable!("spawn_spec_receipt returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
     /// Spawn multiple members in parallel.
     ///
     /// Results preserve input order.
-    pub(crate) async fn spawn_many(
+    pub async fn spawn_many(
         &self,
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {
@@ -1902,7 +1987,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("retire returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1929,7 +2016,11 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Respawn(reply) => reply,
-            _ => unreachable!("respawn returned wrong result type"),
+            _ => {
+                return Err(MobRespawnError::from(MobError::Internal(
+                    "unexpected command result variant".into(),
+                )));
+            }
         };
         let mut receipt = match reply {
             Ok(receipt) => receipt,
@@ -1940,8 +2031,9 @@ impl MobHandle {
                 if receipt.old_bridge_session_id().is_none() {
                     receipt.set_old_bridge_session_id(old_session_id_before);
                 }
+                let receipt_meerkat_id = MeerkatId::from(receipt.identity.as_str());
                 let post_material = self
-                    .canonical_member_list_material(&receipt.member_id)
+                    .canonical_member_list_material(&receipt_meerkat_id)
                     .await;
                 if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
                     receipt.set_new_bridge_session_id(post_material.current_bridge_session_id);
@@ -1956,8 +2048,9 @@ impl MobHandle {
         if receipt.old_bridge_session_id().is_none() {
             receipt.set_old_bridge_session_id(old_session_id_before);
         }
+        let receipt_meerkat_id = MeerkatId::from(receipt.identity.as_str());
         let post_material = self
-            .canonical_member_list_material(&receipt.member_id)
+            .canonical_member_list_material(&receipt_meerkat_id)
             .await;
         if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
             receipt.set_new_bridge_session_id(post_material.current_bridge_session_id);
@@ -1972,7 +2065,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("retire_all returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -1989,7 +2084,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("wire returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2006,7 +2103,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("unwire returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2024,7 +2123,7 @@ impl MobHandle {
             .internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
         Ok(MemberDeliveryReceipt {
-            member_id: meerkat_id,
+            identity,
             session_id: session_id.clone(),
             bridge_session_id: session_id,
             handling_mode: HandlingMode::Queue,
@@ -2048,7 +2147,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => unreachable!("external_turn returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2065,7 +2166,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => unreachable!("internal_turn returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2102,7 +2205,9 @@ impl MobHandle {
                 work_ref: ref_out,
                 runtime_id,
             }),
-            _ => unreachable!("submit_work returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2117,7 +2222,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("cancel_work returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2137,7 +2244,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("cancel_all_work returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2148,7 +2257,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("stop returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2159,7 +2270,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("resume returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2170,7 +2283,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("complete returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2184,7 +2299,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("reset returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2195,7 +2312,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("destroy returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2215,7 +2334,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::TaskId(task_id) => Ok(task_id),
-            _ => unreachable!("task_create returned wrong result type"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2224,7 +2345,7 @@ impl MobHandle {
         &self,
         task_id: TaskId,
         status: TaskStatus,
-        owner: Option<MeerkatId>,
+        owner: Option<AgentIdentity>,
     ) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::TaskUpdate {
@@ -2235,7 +2356,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("task_update returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2246,7 +2369,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::TaskList(tasks) => Ok(tasks),
-            _ => unreachable!("task_list returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2259,7 +2384,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::TaskGet(task) => Ok(task),
-            _ => unreachable!("task_get returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2270,7 +2397,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::FlowTrackerCounts(counts) => Ok(counts),
-            _ => unreachable!("debug_flow_tracker_counts returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2283,7 +2412,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::OrchestratorSnapshot(snapshot) => Ok(snapshot),
-            _ => unreachable!("debug_orchestrator_snapshot returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2295,7 +2426,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::DiagnosticKernelSnapshot(snapshot) => Ok(snapshot),
-            _ => unreachable!("diagnostic_kernel_snapshot returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2307,7 +2440,10 @@ impl MobHandle {
             .await
         {
             Ok(MobMachineCommandResult::RestoreFailuresSnapshot(diagnostics)) => diagnostics,
-            Ok(_) => unreachable!("diagnostic_restore_failures_snapshot returned wrong result"),
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
             Err(_) => BTreeMap::new(),
         }
     }
@@ -2325,7 +2461,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("set_spawn_policy returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2336,7 +2474,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("shutdown returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2352,7 +2492,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
-            _ => unreachable!("force_cancel_member returned non-unit result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2365,7 +2507,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::KickoffBarrierSnapshot(waiters) => Ok(waiters),
-            _ => unreachable!("snapshot_kickoff_waiters returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2467,7 +2611,9 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::MemberStatus(snapshot) => Ok(snapshot),
-            _ => unreachable!("member_status returned wrong result"),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
         }
     }
 
@@ -2574,7 +2720,7 @@ impl MobHandle {
     /// snapshot, not full member terminality in the mob lifecycle.
     pub async fn spawn_helper(
         &self,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         task: impl Into<String>,
         options: HelperOptions,
     ) -> Result<HelperResult, MobError> {
@@ -2585,7 +2731,8 @@ impl MobHandle {
                 MobError::Internal("no profile specified and definition has no profiles".into())
             })?;
         let task_text = task.into();
-        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
+        let meerkat_id = MeerkatId::from(identity.as_str());
+        let mut spec = SpawnMemberSpec::new(profile_name, identity.clone());
         spec.initial_message = Some(task_text.into());
         spec.runtime_mode = Some(
             options
@@ -2598,7 +2745,7 @@ impl MobHandle {
 
         self.spawn_spec(spec).await?;
         let helper_material = self.canonical_member_list_material(&meerkat_id).await;
-        let _ = self.retire(AgentIdentity::from(meerkat_id.as_str())).await;
+        let _ = self.retire(identity).await;
 
         Ok(helper_material.to_helper_result())
     }
@@ -2609,8 +2756,8 @@ impl MobHandle {
     /// conversation context with the source member.
     pub async fn fork_helper(
         &self,
-        source_member_id: &MeerkatId,
-        meerkat_id: MeerkatId,
+        source_identity: &AgentIdentity,
+        identity: AgentIdentity,
         task: impl Into<String>,
         fork_context: crate::launch::ForkContext,
         options: HelperOptions,
@@ -2622,7 +2769,9 @@ impl MobHandle {
                 MobError::Internal("no profile specified and definition has no profiles".into())
             })?;
         let task_text = task.into();
-        let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
+        let meerkat_id = MeerkatId::from(identity.as_str());
+        let source_member_id = MeerkatId::from(source_identity.as_str());
+        let mut spec = SpawnMemberSpec::new(profile_name, identity.clone());
         spec.initial_message = Some(task_text.into());
         spec.runtime_mode = Some(
             options
@@ -2633,13 +2782,13 @@ impl MobHandle {
         spec.tool_access_policy = options.tool_access_policy;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
-            source_member_id: source_member_id.clone(),
+            source_member_id,
             fork_context,
         };
 
         self.spawn_spec(spec).await?;
         let helper_material = self.canonical_member_list_material(&meerkat_id).await;
-        let _ = self.retire(AgentIdentity::from(meerkat_id.as_str())).await;
+        let _ = self.retire(identity).await;
 
         Ok(helper_material.to_helper_result())
     }
@@ -2683,7 +2832,7 @@ impl MemberHandle {
             )
             .await?;
         Ok(MemberDeliveryReceipt {
-            member_id: self.meerkat_id.clone(),
+            identity: self.identity(),
             session_id: session_id.clone(),
             bridge_session_id: session_id,
             handling_mode,
@@ -2700,7 +2849,7 @@ impl MemberHandle {
             .internal_turn_for_member(self.meerkat_id.clone(), content.into())
             .await?;
         Ok(MemberDeliveryReceipt {
-            member_id: self.meerkat_id.clone(),
+            identity: self.identity(),
             session_id: session_id.clone(),
             bridge_session_id: session_id,
             handling_mode: HandlingMode::Queue,
@@ -2724,7 +2873,7 @@ impl MemberHandle {
             .current_bridge_session_id()
             .await?
             .map(|session_id| MemberSessionRef {
-                member_id: self.meerkat_id.clone(),
+                identity: self.identity(),
                 session_id: session_id.clone(),
                 bridge_session_id: session_id,
             }))
@@ -2752,6 +2901,8 @@ mod tests {
 
         let snapshot = MobMemberSnapshot {
             status: MobMemberStatus::Active,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
+            fence_token: FenceToken::new(0),
             output_preview: None,
             error: None,
             tokens_used: 0,
@@ -2768,8 +2919,11 @@ mod tests {
         assert_eq!(snapshot_value["current_bridge_session_id"], sid.to_string());
 
         let entry = MobMemberListEntry {
+            agent_identity: AgentIdentity::from("worker"),
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
+            fence_token: FenceToken::new(0),
+            role: ProfileName::from("default"),
             meerkat_id: MeerkatId::from("worker"),
-            profile: ProfileName::from("default"),
             member_ref: MemberRef::from_bridge_session_id(sid.clone()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             peer_id: None,
@@ -2800,6 +2954,8 @@ mod tests {
             error: None,
             output_preview: None,
             tokens_used: 0,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
+            fence_token: FenceToken::new(0),
             current_bridge_session_id: Some(sid.clone()),
             peer_connectivity: None,
             kickoff: None,
@@ -2816,8 +2972,8 @@ mod tests {
     fn member_receipt_types_serialize_additive_bridge_session_fields() {
         let old_sid = SessionId::new();
         let new_sid = SessionId::new();
-        let receipt = MemberRespawnReceipt::from_bridge_session_ids(
-            MeerkatId::from("worker"),
+        let receipt = MemberRespawnReceipt::new(
+            AgentIdentity::from("worker"),
             Some(old_sid.clone()),
             Some(new_sid.clone()),
         );
@@ -2829,7 +2985,7 @@ mod tests {
         assert_eq!(receipt_value["new_bridge_session_id"], new_sid.to_string());
 
         let delivery = MemberDeliveryReceipt {
-            member_id: MeerkatId::from("worker"),
+            identity: AgentIdentity::from("worker"),
             session_id: new_sid.clone(),
             bridge_session_id: new_sid.clone(),
             handling_mode: HandlingMode::Queue,
@@ -2840,7 +2996,7 @@ mod tests {
         assert_eq!(delivery_value["bridge_session_id"], new_sid.to_string());
 
         let session_ref = MemberSessionRef {
-            member_id: MeerkatId::from("worker"),
+            identity: AgentIdentity::from("worker"),
             session_id: new_sid.clone(),
             bridge_session_id: new_sid.clone(),
         };

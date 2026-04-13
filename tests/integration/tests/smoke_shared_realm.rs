@@ -2380,8 +2380,8 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
         )
         .await?;
     assert!(
-        spawned["session_id"].as_str().is_some(),
-        "worker spawn missing session_id: {spawned}"
+        spawned["agent_identity"].as_str().is_some(),
+        "worker spawn missing agent_identity: {spawned}"
     );
 
     let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);

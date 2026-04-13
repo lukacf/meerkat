@@ -3,7 +3,7 @@
 use super::session::WireContentInput;
 use meerkat_core::OutputSchema;
 use meerkat_core::{
-    HandlingMode, SessionId,
+    HandlingMode,
     types::{RenderClass, RenderMetadata, RenderSalience},
 };
 use serde::{Deserialize, Serialize};
@@ -489,7 +489,7 @@ pub struct MobUnwireResult {
 #[serde(deny_unknown_fields)]
 pub struct MobMemberSendParams {
     pub mob_id: String,
-    pub meerkat_id: String,
+    pub agent_identity: String,
     pub content: WireContentInput,
     #[serde(default)]
     pub handling_mode: WireHandlingMode,

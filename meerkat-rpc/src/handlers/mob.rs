@@ -540,7 +540,7 @@ pub async fn handle_member_send(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let meerkat_id = AgentIdentity::from(params.meerkat_id.as_str());
+    let agent_identity = AgentIdentity::from(params.agent_identity.as_str());
     let content = match ContentInput::try_from(params.content) {
         Ok(content) => content,
         Err(error) => return invalid_params(id, error),
@@ -548,7 +548,7 @@ pub async fn handle_member_send(
     match state
         .mob_member_send(
             &mob_id,
-            meerkat_id.clone(),
+            agent_identity.clone(),
             content,
             params.handling_mode.into(),
             params.render_metadata.map(Into::into),

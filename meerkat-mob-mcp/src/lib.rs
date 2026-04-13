@@ -530,7 +530,7 @@ impl MobMcpState {
         identity: AgentIdentity,
         runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
-    ) -> Result<meerkat_mob::MemberRef, MobError> {
+    ) -> Result<meerkat_mob::SpawnResult, MobError> {
         let mut spec = SpawnMemberSpec::new(profile, identity);
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
@@ -541,16 +541,15 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         spec: SpawnMemberSpec,
-    ) -> Result<meerkat_mob::MemberRef, MobError> {
-        let member_ref = self.handle_for(mob_id).await?.spawn_spec(spec).await?;
-        Ok(member_ref)
+    ) -> Result<meerkat_mob::SpawnResult, MobError> {
+        self.handle_for(mob_id).await?.spawn_spec(spec).await
     }
 
     pub async fn mob_spawn_many(
         &self,
         mob_id: &MobId,
         specs: Vec<SpawnMemberSpec>,
-    ) -> Result<Vec<Result<meerkat_mob::MemberRef, MobError>>, MobError> {
+    ) -> Result<Vec<Result<meerkat_mob::SpawnResult, MobError>>, MobError> {
         Ok(self.handle_for(mob_id).await?.spawn_many(specs).await)
     }
 
@@ -703,16 +702,15 @@ impl MobMcpState {
         identity: &AgentIdentity,
         req: AppendSystemContextRequest,
     ) -> Result<(SessionId, AppendSystemContextResult), SessionControlError> {
-        let members: Vec<meerkat_mob::runtime::MobMemberListEntry> = self
-            .mob_list_members(mob_id)
+        let handle =
+            self.handle_for(mob_id)
+                .await
+                .map_err(|error| SessionControlError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        let bridge_session_id = handle
+            .resolve_bridge_session_id(identity)
             .await
-            .map_err(|error| SessionControlError::InvalidRequest {
-                message: error.to_string(),
-            })?;
-        let bridge_session_id = members
-            .into_iter()
-            .find(|member| &member.agent_identity == identity)
-            .and_then(|member| member.bridge_session_id().cloned())
             .ok_or_else(|| SessionControlError::InvalidRequest {
                 message: format!("member has no session: {identity}"),
             })?;
@@ -2256,13 +2254,13 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         Ok(s)
                     })
                     .collect::<Result<Vec<_>, ToolError>>()?;
-                // Single-spec fast path returns flat member_ref; multi-spec returns results array.
+                // Single-spec fast path returns flat result; multi-spec returns results array.
                 if specs.len() == 1 {
                     // SAFETY: len checked above
                     let Some(spec) = specs.into_iter().next() else {
                         unreachable!()
                     };
-                    let member_ref = self
+                    let spawn_result = self
                         .state
                         .mob_spawn_spec(&MobId::from(args.mob_id), spec)
                         .await
@@ -2271,9 +2269,9 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         call,
                         json!({
                             "ok": true,
-                            "member_ref": member_ref,
-                            "session_id": member_ref.bridge_session_id(),
-                            "bridge_session_id": member_ref.bridge_session_id(),
+                            "agent_identity": spawn_result.agent_identity,
+                            "agent_runtime_id": spawn_result.agent_runtime_id,
+                            "fence_token": spawn_result.fence_token,
                         }),
                     )
                 } else {
@@ -2284,18 +2282,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map_err(|e| map_mob_err(call, e))?;
                     let results = results
                         .into_iter()
-                        .map(|result| match result {
-                            Ok(member_ref) => json!({
-                                "ok": true,
-                                "member_ref": member_ref,
-                                "session_id": member_ref.bridge_session_id(),
-                                "bridge_session_id": member_ref.bridge_session_id(),
-                            }),
-                            Err(error) => json!({
-                                "ok": false,
-                                "error": error.to_string(),
-                            }),
-                        })
+                        .map(
+                            |result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| {
+                                match result {
+                                    Ok(spawn_result) => json!({
+                                        "ok": true,
+                                        "agent_identity": spawn_result.agent_identity,
+                                        "agent_runtime_id": spawn_result.agent_runtime_id,
+                                        "fence_token": spawn_result.fence_token,
+                                    }),
+                                    Err(error) => json!({
+                                        "ok": false,
+                                        "error": error.to_string(),
+                                    }),
+                                }
+                            },
+                        )
                         .collect::<Vec<_>>();
                     encode(call, json!({"results": results}))
                 }
@@ -4329,8 +4331,13 @@ mod tests {
             .await
             .expect("restore member status");
         assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
+        // Verify the member has a live bridge-session binding via the handle.
+        let handle = restored.handle_for(&mob_id).await.expect("mob handle");
         assert!(
-            status.current_bridge_session_id().is_some(),
+            handle
+                .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+                .await
+                .is_some(),
             "restored member should still have a live bridge-session binding"
         );
 

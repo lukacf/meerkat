@@ -11,7 +11,7 @@
 //! Streams for retired members end naturally when sessions are archived.
 
 use crate::event::AttributedEvent;
-use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, MeerkatId, ProfileName};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -117,9 +117,21 @@ async fn run_event_router(
 
             // Forward attributed events from member streams.
             Some((meerkat_id, profile, envelope)) = merged.next() => {
+                let identity = AgentIdentity::from(meerkat_id.as_str());
+                let (runtime_id, fence) = {
+                    let roster = handle.roster().await;
+                    match roster.get_by_identity(&identity) {
+                        Some(entry) => (entry.agent_runtime_id.clone(), entry.fence_token),
+                        None => (
+                            AgentRuntimeId::new(identity, Generation::INITIAL),
+                            FenceToken::new(0),
+                        ),
+                    }
+                };
                 let attributed = AttributedEvent {
-                    source: meerkat_id,
-                    profile,
+                    source: runtime_id,
+                    source_fence_token: fence,
+                    role: profile,
                     envelope,
                 };
                 if event_tx.send(attributed).await.is_err() {

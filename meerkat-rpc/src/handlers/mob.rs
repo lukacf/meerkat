@@ -14,8 +14,8 @@ use meerkat_contracts::{MobCreateParams, MobCreateResult};
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::{
-    AgentIdentity, FlowId, MemberRef, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
-    MobRuntimeMode, RunId, SpawnMemberSpec,
+    AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
+    MobRuntimeMode, RunId, SpawnMemberSpec, SpawnResult,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -34,33 +34,18 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
     Ok(MobId::from(raw))
 }
 
-fn insert_bridge_session_aliases(payload: &mut Value, bridge_session_id: Option<&SessionId>) {
-    let Some(payload) = payload.as_object_mut() else {
-        return;
-    };
-    let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
-    payload.insert(
-        "session_id".to_string(),
-        serde_json::json!(bridge_session_id),
-    );
-    payload.insert(
-        "bridge_session_id".to_string(),
-        serde_json::json!(bridge_session_id),
-    );
-}
-
-fn member_ref_result_payload(
+fn spawn_result_payload(
     mob_id: &MobId,
     meerkat_id: &str,
-    member_ref: &MemberRef,
+    result: &SpawnResult,
 ) -> serde_json::Value {
-    let mut payload = serde_json::json!({
+    serde_json::json!({
         "mob_id": mob_id,
         "meerkat_id": meerkat_id,
-        "member_ref": member_ref,
-    });
-    insert_bridge_session_aliases(&mut payload, member_ref.bridge_session_id());
-    payload
+        "agent_identity": result.agent_identity,
+        "agent_runtime_id": result.agent_runtime_id,
+        "fence_token": result.fence_token,
+    })
 }
 
 pub async fn handle_create(
@@ -212,9 +197,9 @@ pub async fn handle_spawn(
     }
     spec.additional_instructions = params.additional_instructions;
     match state.mob_spawn_spec(&mob_id, spec).await {
-        Ok(member_ref) => RpcResponse::success(
+        Ok(spawn_result) => RpcResponse::success(
             id,
-            member_ref_result_payload(&mob_id, &params.meerkat_id, &member_ref),
+            spawn_result_payload(&mob_id, &params.meerkat_id, &spawn_result),
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -257,11 +242,11 @@ pub struct MobSpawnSpecParams {
 struct SpawnManyResultEntry {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    member_ref: Option<serde_json::Value>,
+    agent_identity: Option<meerkat_mob::AgentIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
+    agent_runtime_id: Option<meerkat_mob::AgentRuntimeId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bridge_session_id: Option<String>,
+    fence_token: Option<meerkat_mob::FenceToken>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -318,22 +303,18 @@ pub async fn handle_spawn_many(
             let entries: Vec<SpawnManyResultEntry> = results
                 .into_iter()
                 .map(|r| match r {
-                    Ok(member_ref) => SpawnManyResultEntry {
+                    Ok(spawn_result) => SpawnManyResultEntry {
                         ok: true,
-                        session_id: member_ref
-                            .bridge_session_id()
-                            .map(std::string::ToString::to_string),
-                        bridge_session_id: member_ref
-                            .bridge_session_id()
-                            .map(std::string::ToString::to_string),
-                        member_ref: serde_json::to_value(&member_ref).ok(),
+                        agent_identity: Some(spawn_result.agent_identity),
+                        agent_runtime_id: Some(spawn_result.agent_runtime_id),
+                        fence_token: Some(spawn_result.fence_token),
                         error: None,
                     },
                     Err(err) => SpawnManyResultEntry {
                         ok: false,
-                        member_ref: None,
-                        session_id: None,
-                        bridge_session_id: None,
+                        agent_identity: None,
+                        agent_runtime_id: None,
+                        fence_token: None,
                         error: Some(err.to_string()),
                     },
                 })
@@ -615,15 +596,14 @@ pub async fn handle_append_system_context(
         )
         .await
     {
-        Ok((bridge_session_id, result)) => {
-            let mut payload = serde_json::json!({
+        Ok((_bridge_session_id, result)) => RpcResponse::success(
+            id,
+            serde_json::json!({
                 "mob_id": mob_id,
                 "meerkat_id": meerkat_id,
                 "status": result.status,
-            });
-            insert_bridge_session_aliases(&mut payload, Some(&bridge_session_id));
-            RpcResponse::success(id, payload)
-        }
+            }),
+        ),
         Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
 }

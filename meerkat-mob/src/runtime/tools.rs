@@ -447,6 +447,14 @@ impl MobOperatorToolDispatcher {
         })
     }
 
+    fn spawn_result_payload(result: &super::SpawnResult) -> serde_json::Value {
+        json!({
+            "agent_identity": result.agent_identity,
+            "agent_runtime_id": result.agent_runtime_id,
+            "fence_token": result.fence_token,
+        })
+    }
+
     fn member_list_entry_result_payload(entry: &MobMemberListEntry) -> serde_json::Value {
         let bridge_session_id = entry.bridge_session_id().cloned();
         let current_bridge_session_id = entry.current_bridge_session_id().cloned();
@@ -677,12 +685,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         (result, vec![AsyncOpRef::detached(receipt.operation_id)])
                     }
                     _ => {
-                        let member_ref = self
+                        let spawn_result = self
                             .handle
                             .spawn_spec(spec)
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
-                        let result = Self::member_ref_result_payload(&member_ref);
+                        let result = Self::spawn_result_payload(&spawn_result);
                         (result, Vec::new())
                     }
                 };
@@ -765,8 +773,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .await
                             .into_iter()
                             .map(|result| match result {
-                                Ok(member_ref) => {
-                                    let mut payload = Self::member_ref_result_payload(&member_ref);
+                                Ok(spawn_result) => {
+                                    let mut payload = Self::spawn_result_payload(&spawn_result);
                                     payload["ok"] = json!(true);
                                     payload
                                 }

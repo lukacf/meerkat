@@ -437,10 +437,12 @@ pub enum MobEventKind {
 /// with mob-level attribution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributedEvent {
-    /// The meerkat that produced this event.
-    pub source: MeerkatId,
-    /// Profile name of the source meerkat.
-    pub profile: ProfileName,
+    /// Identity-native runtime ID of the member that produced this event.
+    pub source: AgentRuntimeId,
+    /// Fence token for the emitting incarnation.
+    pub source_fence_token: FenceToken,
+    /// Profile name (role) of the source member.
+    pub role: ProfileName,
     /// The original enveloped agent event from the session stream.
     pub envelope: EventEnvelope<AgentEvent>,
 }

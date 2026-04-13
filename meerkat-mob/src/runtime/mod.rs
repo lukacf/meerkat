@@ -115,6 +115,7 @@ pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
     MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
     MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
+    SpawnResult,
 };
 pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;

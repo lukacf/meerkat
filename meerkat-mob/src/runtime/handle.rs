@@ -55,12 +55,12 @@ pub struct MobMemberSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
-    /// Compatibility alias for the current bridge session ID, retained for
-    /// older session-centric payloads.
-    pub current_session_id: Option<SessionId>,
-    /// Canonical current bridge session ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_bridge_session_id: Option<SessionId>,
+    /// Bridge-internal session binding — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) current_session_id: Option<SessionId>,
+    /// Bridge-internal session binding — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) current_bridge_session_id: Option<SessionId>,
     /// Live comms connectivity for currently wired peers, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_connectivity: Option<MobPeerConnectivitySnapshot>,
@@ -79,13 +79,13 @@ impl MobMemberSnapshot {
         self
     }
 
-    pub fn current_bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
         self.current_bridge_session_id
             .as_ref()
             .or(self.current_session_id.as_ref())
     }
 
-    pub fn current_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn current_session_id(&self) -> Option<&SessionId> {
         self.current_session_id
             .as_ref()
             .or(self.current_bridge_session_id.as_ref())
@@ -140,25 +140,25 @@ impl MobMemberListEntry {
         self
     }
 
-    pub fn current_bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
         self.current_bridge_session_id
             .as_ref()
             .or(self.current_session_id.as_ref())
     }
 
-    pub fn current_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn current_session_id(&self) -> Option<&SessionId> {
         self.current_session_id
             .as_ref()
             .or(self.current_bridge_session_id.as_ref())
     }
 
     /// Bridge session ID from the member reference.
-    pub fn bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()
     }
 
     /// Bridge session ID (alias).
-    pub fn session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn session_id(&self) -> Option<&SessionId> {
         self.bridge_session_id()
     }
 
@@ -270,6 +270,20 @@ pub(crate) struct MemberSpawnReceipt {
     pub(crate) member_ref: MemberRef,
     /// Canonical mob child operation for the spawned member lifecycle.
     pub(crate) operation_id: OperationId,
+}
+
+/// Public result from a successful member spawn.
+///
+/// Carries identity-native fields only — no session IDs or internal refs.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct SpawnResult {
+    /// Stable member identity.
+    pub agent_identity: AgentIdentity,
+    /// Identity-native runtime ID for this incarnation.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for stale-command rejection.
+    pub fence_token: FenceToken,
 }
 
 #[derive(Clone)]
@@ -1631,6 +1645,17 @@ impl MobHandle {
             .await
     }
 
+    /// Resolve the bridge session ID for a member by identity.
+    ///
+    /// This is an internal routing helper for surfaces that need to call
+    /// `SessionService` methods on a member's backing session. Returns `None`
+    /// if the member is not found or has no bridge session binding.
+    pub async fn resolve_bridge_session_id(&self, identity: &AgentIdentity) -> Option<SessionId> {
+        self.get_member(identity)
+            .await
+            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+    }
+
     /// Acquire a capability-bearing handle for a specific active member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
         let meerkat_id = MeerkatId::from(identity.as_str());
@@ -1854,7 +1879,7 @@ impl MobHandle {
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id);
         spec.initial_message = initial_message;
         spec.binding = Some(binding);
-        self.spawn_spec(spec).await
+        self.spawn_spec_internal(spec).await
     }
 
     /// Spawn a new member from a profile with explicit backend override.
@@ -1882,7 +1907,7 @@ impl MobHandle {
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        self.spawn_spec(spec).await
+        self.spawn_spec_internal(spec).await
     }
 
     /// Attach an existing session by reusing the mob spawn control-plane path.
@@ -1900,7 +1925,7 @@ impl MobHandle {
         };
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        self.spawn_spec(spec).await
+        self.spawn_spec_internal(spec).await
     }
 
     /// Attach an existing session as the mob orchestrator.
@@ -1926,7 +1951,29 @@ impl MobHandle {
     }
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
-    pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
+    pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<SpawnResult, MobError> {
+        let identity = spec.identity.clone();
+        self.spawn_spec_internal(spec).await?;
+        // The roster is updated synchronously during spawn finalization,
+        // so the entry is guaranteed to be present by the time the reply
+        // arrives.
+        let entry = self.get_member(&identity).await.ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawn succeeded but roster entry missing for '{identity}'"
+            ))
+        })?;
+        Ok(SpawnResult {
+            agent_identity: entry.agent_identity,
+            agent_runtime_id: entry.agent_runtime_id,
+            fence_token: entry.fence_token,
+        })
+    }
+
+    /// Internal spawn that returns the raw `MemberRef` for crate-internal callers.
+    pub(crate) async fn spawn_spec_internal(
+        &self,
+        spec: SpawnMemberSpec,
+    ) -> Result<MemberRef, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spec: Box::new(spec),
@@ -1966,7 +2013,7 @@ impl MobHandle {
     pub async fn spawn_many(
         &self,
         specs: Vec<SpawnMemberSpec>,
-    ) -> Vec<Result<MemberRef, MobError>> {
+    ) -> Vec<Result<SpawnResult, MobError>> {
         futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec(spec))).await
     }
 

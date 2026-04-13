@@ -16,8 +16,8 @@ use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
 use meerkat_mob::{
-    AgentIdentity, MeerkatId, MemberRef, MobBackendKind, MobDefinition, MobError, MobId,
-    MobRuntimeMode, ProfileName, SpawnMemberSpec,
+    AgentIdentity, MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode,
+    ProfileName, SpawnMemberSpec, SpawnResult,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -238,12 +238,11 @@ impl AgentMobToolSurface {
         })
     }
 
-    fn member_ref_result_payload(member_ref: &MemberRef) -> serde_json::Value {
-        let bridge_session_id = member_ref.bridge_session_id().cloned();
+    fn spawn_result_payload(result: &SpawnResult) -> serde_json::Value {
         json!({
-            "member_ref": member_ref,
-            "session_id": bridge_session_id,
-            "bridge_session_id": bridge_session_id,
+            "agent_identity": result.agent_identity,
+            "agent_runtime_id": result.agent_runtime_id,
+            "fence_token": result.fence_token,
         })
     }
 
@@ -625,7 +624,7 @@ impl AgentMobToolSurface {
         spec.override_profile = resolved.override_profile;
 
         // Spawn via MobMcpState
-        let member_ref = self
+        let spawn_result = self
             .state
             .mob_spawn_spec(&mob_id, spec)
             .await
@@ -638,7 +637,7 @@ impl AgentMobToolSurface {
             .wire_delegate_helper_to_creator(&mob_id, &identity)
             .await;
 
-        let mut result = Self::member_ref_result_payload(&member_ref);
+        let mut result = Self::spawn_result_payload(&spawn_result);
         result["mob_id"] = json!(mob_id);
         result["meerkat_id"] = json!(identity);
         result["wired"] = json!(wired);
@@ -755,7 +754,7 @@ impl AgentMobToolSurface {
             spec.override_profile = resolved.override_profile;
         }
 
-        let member_ref = self
+        let spawn_result = self
             .state
             .mob_spawn_spec(&mob_id, spec)
             .await
@@ -764,7 +763,7 @@ impl AgentMobToolSurface {
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
 
-        Self::encode_result(call, Self::member_ref_result_payload(&member_ref))
+        Self::encode_result(call, Self::spawn_result_payload(&spawn_result))
     }
 
     async fn dispatch_mob_retire_member(
@@ -2939,7 +2938,7 @@ mod tests {
         let helper_id = AgentIdentity::from("helper-1");
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), helper_id.clone());
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
-        let member_ref = state
+        let spawn_result = state
             .mob_spawn_spec(&mob_id, spec)
             .await
             .expect("spawn helper for delegate wiring test");
@@ -2951,9 +2950,10 @@ mod tests {
             "delegate wiring should succeed when creator comms are present"
         );
 
-        let helper_bridge_session_id = member_ref
-            .bridge_session_id()
-            .cloned()
+        let handle = state.handle_for(&mob_id).await.expect("mob handle");
+        let helper_bridge_session_id = handle
+            .resolve_bridge_session_id(&spawn_result.agent_identity)
+            .await
             .expect("helper bridge session id");
         let helper_comms = service
             .real_comms(&helper_bridge_session_id)

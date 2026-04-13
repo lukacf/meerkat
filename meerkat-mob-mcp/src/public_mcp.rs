@@ -11,24 +11,12 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-fn insert_bridge_session_aliases(
-    value: &mut Value,
-    bridge_session_id: Option<&meerkat_core::types::SessionId>,
-) {
-    let Some(payload) = value.as_object_mut() else {
-        return;
-    };
-    let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
-    payload.insert("session_id".to_string(), json!(bridge_session_id));
-    payload.insert("bridge_session_id".to_string(), json!(bridge_session_id));
-}
-
-fn member_ref_result_payload(member_ref: &meerkat_mob::MemberRef) -> Value {
-    let mut payload = json!({
-        "member_ref": member_ref,
-    });
-    insert_bridge_session_aliases(&mut payload, member_ref.bridge_session_id());
-    payload
+fn spawn_result_payload(result: &meerkat_mob::SpawnResult) -> Value {
+    json!({
+        "agent_identity": result.agent_identity,
+        "agent_runtime_id": result.agent_runtime_id,
+        "fence_token": result.fence_token,
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -480,11 +468,11 @@ pub async fn handle_public_tools_call(
                 input.context,
                 input.additional_instructions,
             )?;
-            let member_ref = state
+            let spawn_result = state
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = member_ref_result_payload(&member_ref);
+            let mut payload = spawn_result_payload(&spawn_result);
             payload["mob_id"] = json!(mob_id);
             payload["meerkat_id"] = json!(input.meerkat_id);
             Ok(payload)
@@ -516,9 +504,9 @@ pub async fn handle_public_tools_call(
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
-                "results": results.into_iter().map(|result| match result {
-                    Ok(member_ref) => {
-                        let mut payload = member_ref_result_payload(&member_ref);
+                "results": results.into_iter().map(|result: Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>| match result {
+                    Ok(spawn_result) => {
+                        let mut payload = spawn_result_payload(&spawn_result);
                         payload["ok"] = json!(true);
                         payload
                     }
@@ -614,19 +602,17 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = json!({
+            Ok(json!({
                 "mob_id": mob_id,
                 "member_id": receipt.identity,
                 "handling_mode": input.handling_mode,
-            });
-            insert_bridge_session_aliases(&mut payload, Some(receipt.bridge_session_id()));
-            Ok(payload)
+            }))
         }
         "meerkat_mob_append_system_context" => {
             let input: MeerkatMobAppendSystemContextInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
             let meerkat_id = meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str());
-            let (bridge_session_id, result) = state
+            let (_bridge_session_id, result) = state
                 .mob_append_system_context(
                     &mob_id,
                     &meerkat_id,
@@ -638,13 +624,11 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let mut payload = json!({
+            Ok(json!({
                 "mob_id": mob_id,
                 "meerkat_id": meerkat_id,
                 "status": result.status,
-            });
-            insert_bridge_session_aliases(&mut payload, Some(&bridge_session_id));
-            Ok(payload)
+            }))
         }
         "meerkat_mob_events" => {
             let input: MeerkatMobEventsInput = parse_args(arguments)?;

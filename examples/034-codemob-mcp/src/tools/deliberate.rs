@@ -607,7 +607,7 @@ async fn run_comms(
                 // Always update on RunCompleted (even empty) so we know the
                 // orchestrator ran. Prefer non-empty results; TextComplete
                 // overwrites if it carries content.
-                if attributed.source.as_str() == orchestrator {
+                if attributed.source.identity.as_str() == orchestrator {
                     match &attributed.envelope.payload {
                         AgentEvent::RunCompleted { result, .. } => {
                             if !result.is_empty() {

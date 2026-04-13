@@ -536,34 +536,16 @@ where
     with_runtime_state(|state| f(state.mob_state.clone()))
 }
 
-fn insert_bridge_session_aliases(
-    value: &mut serde_json::Value,
-    bridge_session_id: Option<&meerkat_core::types::SessionId>,
-) {
-    let Some(payload) = value.as_object_mut() else {
-        return;
-    };
-    let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
-    payload.insert(
-        "session_id".to_string(),
-        serde_json::json!(bridge_session_id),
-    );
-    payload.insert(
-        "bridge_session_id".to_string(),
-        serde_json::json!(bridge_session_id),
-    );
+fn spawn_result_payload(result: &meerkat_mob::SpawnResult) -> serde_json::Value {
+    serde_json::json!({
+        "agent_identity": result.agent_identity,
+        "agent_runtime_id": result.agent_runtime_id,
+        "fence_token": result.fence_token,
+    })
 }
 
-fn member_ref_result_payload(member_ref: &meerkat_mob::MemberRef) -> serde_json::Value {
-    let mut payload = serde_json::json!({
-        "member_ref": member_ref,
-    });
-    insert_bridge_session_aliases(&mut payload, member_ref.bridge_session_id());
-    payload
-}
-
-fn spawn_member_result_payload(member_ref: &meerkat_mob::MemberRef) -> serde_json::Value {
-    let mut payload = member_ref_result_payload(member_ref);
+fn spawn_member_result_payload(result: &meerkat_mob::SpawnResult) -> serde_json::Value {
+    let mut payload = spawn_result_payload(result);
     if let Some(object) = payload.as_object_mut() {
         object.insert("status".to_string(), serde_json::json!("ok"));
     }
@@ -640,26 +622,17 @@ async fn resolve_mob_member_bridge_session_id(
     mob_id: &MobId,
     meerkat_id: &MeerkatId,
 ) -> Result<meerkat_core::SessionId, JsValue> {
-    let members = mob_state.mob_list_members(mob_id).await.map_err(err_mob)?;
-    let entry = members
-        .iter()
-        .find(|m| m.meerkat_id() == meerkat_id)
-        .ok_or_else(|| {
-            err_js(
-                "member_not_found",
-                &format!("meerkat '{meerkat_id}' not in mob '{mob_id}'"),
-            )
-        })?;
-
-    entry
-        .bridge_session_id()
+    let handle = mob_state.handle_for(mob_id).await.map_err(err_mob)?;
+    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
+    handle
+        .resolve_bridge_session_id(&identity)
+        .await
         .ok_or_else(|| {
             err_js(
                 "no_session",
                 &format!("meerkat '{meerkat_id}' has no bridge session"),
             )
         })
-        .cloned()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1993,30 +1966,34 @@ pub async fn wire_cross_mob(
 ) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
 
-    // Get bridge session IDs from both mobs' rosters.
-    let members_a = mob_state
-        .mob_list_members(&MobId::from(mob_a))
+    // Resolve roster entries and bridge session IDs via mob handles.
+    let identity_a = meerkat_mob::AgentIdentity::from(meerkat_a);
+    let identity_b = meerkat_mob::AgentIdentity::from(meerkat_b);
+
+    let handle_a = mob_state
+        .handle_for(&MobId::from(mob_a))
         .await
         .map_err(err_mob)?;
-    let entry_a = members_a
-        .iter()
-        .find(|m| *m.meerkat_id() == MeerkatId::from(meerkat_a))
-        .ok_or_else(|| err_js("not_found", &format!("{meerkat_a} not in {mob_a}")))?;
-
-    let members_b = mob_state
-        .mob_list_members(&MobId::from(mob_b))
+    let entry_a = handle_a
+        .get_member(&identity_a)
         .await
-        .map_err(err_mob)?;
-    let entry_b = members_b
-        .iter()
-        .find(|m| *m.meerkat_id() == MeerkatId::from(meerkat_b))
-        .ok_or_else(|| err_js("not_found", &format!("{meerkat_b} not in {mob_b}")))?;
-
-    let sid_a = entry_a
-        .bridge_session_id()
+        .ok_or_else(|| err_js("no_member", meerkat_a))?;
+    let sid_a = handle_a
+        .resolve_bridge_session_id(&identity_a)
+        .await
         .ok_or_else(|| err_js("no_session", meerkat_a))?;
-    let sid_b = entry_b
-        .bridge_session_id()
+
+    let handle_b = mob_state
+        .handle_for(&MobId::from(mob_b))
+        .await
+        .map_err(err_mob)?;
+    let entry_b = handle_b
+        .get_member(&identity_b)
+        .await
+        .ok_or_else(|| err_js("no_member", meerkat_b))?;
+    let sid_b = handle_b
+        .resolve_bridge_session_id(&identity_b)
+        .await
         .ok_or_else(|| err_js("no_session", meerkat_b))?;
 
     // Get comms runtimes from the shared session service
@@ -2029,11 +2006,11 @@ pub async fn wire_cross_mob(
     })?;
 
     let comms_a = svc
-        .comms_runtime(sid_a)
+        .comms_runtime(&sid_a)
         .await
         .ok_or_else(|| err_js("no_comms", &format!("{meerkat_a} has no comms runtime")))?;
     let comms_b = svc
-        .comms_runtime(sid_b)
+        .comms_runtime(&sid_b)
         .await
         .ok_or_else(|| err_js("no_comms", &format!("{meerkat_b} has no comms runtime")))?;
 
@@ -2529,7 +2506,7 @@ mod tests {
         init_runtime_from_config,
     };
     #[cfg(not(target_arch = "wasm32"))]
-    use super::{helper_result_payload, member_ref_result_payload, spawn_member_result_payload};
+    use super::{helper_result_payload, spawn_member_result_payload, spawn_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat::SessionServiceControlExt;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2676,7 +2653,7 @@ mod tests {
             .await
             .expect("create mob");
 
-        let spawn_results = mob_state
+        let _spawn_results = mob_state
             .mob_spawn_many(
                 &mob_id,
                 vec![
@@ -2686,11 +2663,10 @@ mod tests {
             )
             .await
             .expect("spawn worker");
-        let bridge_session_id = spawn_results[0]
-            .as_ref()
-            .expect("spawn result")
-            .bridge_session_id()
-            .cloned()
+        let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+        let bridge_session_id = handle
+            .resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from("worker-1"))
+            .await
             .expect("member bridge session id");
 
         let append = service
@@ -2756,25 +2732,24 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_member_result_payload_returns_additive_bridge_session_id() {
-        let session_id = SessionId::new();
-        let member_ref = meerkat_mob::MemberRef::from_bridge_session_id(session_id.clone());
+    fn spawn_member_result_payload_returns_identity_native_fields() {
+        let identity = meerkat_mob::AgentIdentity::from("test-member");
+        let runtime_id = meerkat_mob::AgentRuntimeId::initial(identity.clone());
+        let fence = meerkat_mob::FenceToken::new(1);
+        let result = meerkat_mob::SpawnResult {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id,
+            fence_token: fence,
+        };
 
-        let member_ref_payload = member_ref_result_payload(&member_ref);
-        assert_eq!(member_ref_payload["session_id"], session_id.to_string());
-        assert_eq!(
-            member_ref_payload["bridge_session_id"],
-            session_id.to_string()
-        );
-        assert_eq!(
-            member_ref_payload["member_ref"]["session_id"],
-            session_id.to_string()
-        );
+        let payload = spawn_result_payload(&result);
+        assert_eq!(payload["agent_identity"], "test-member");
+        assert!(!payload["agent_runtime_id"].is_null());
+        assert!(!payload["fence_token"].is_null());
 
-        let spawn_payload = spawn_member_result_payload(&member_ref);
+        let spawn_payload = spawn_member_result_payload(&result);
         assert_eq!(spawn_payload["status"], "ok");
-        assert_eq!(spawn_payload["session_id"], session_id.to_string());
-        assert_eq!(spawn_payload["bridge_session_id"], session_id.to_string());
+        assert_eq!(spawn_payload["agent_identity"], "test-member");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

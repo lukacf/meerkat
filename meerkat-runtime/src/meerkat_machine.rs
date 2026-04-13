@@ -13163,4 +13163,177 @@ mod tests {
             "expected Destroyed, got {err:?}"
         );
     }
+
+    // ---------------------------------------------------------------
+    // A6: Deep invariant region validation via spine snapshot
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_register() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after register");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_queued_input() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let input = make_prompt("queued input");
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("prompt should be accepted");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after queued input");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_destroy() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let input = make_prompt("will be destroyed");
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("prompt should be accepted");
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist after destroy");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after destroy");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_retire() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let input = make_prompt("will be retired");
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("prompt should be accepted");
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+            .await
+            .expect("retire should succeed");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist after retire");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after retire");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_reset() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let input = make_prompt("will be reset");
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("prompt should be accepted");
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::reset(&adapter, &runtime_id)
+            .await
+            .expect("reset should succeed");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist after reset");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after reset");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_recycle() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let input = make_prompt("will be recycled");
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("prompt should be accepted");
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+            .await
+            .expect("recycle should succeed");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist after recycle");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after recycle");
+    }
+
+    #[tokio::test]
+    async fn spine_invariants_hold_after_steered_input() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let steered = Input::Prompt(crate::input::PromptInput::new(
+            "steered input",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, _handle) = adapter
+            .accept_input_with_completion(&session_id, steered)
+            .await
+            .expect("steered prompt should be accepted");
+
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist");
+        snapshot
+            .validate_spine_invariants()
+            .expect("all invariants should hold after steered input");
+    }
 }

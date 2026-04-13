@@ -2512,8 +2512,6 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::Config;
     use meerkat_core::time_compat::{Duration, SystemTime};
-    #[cfg(not(target_arch = "wasm32"))]
-    use meerkat_core::types::SessionId;
     use meerkat_core::{
         PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
         SessionSystemContextState,

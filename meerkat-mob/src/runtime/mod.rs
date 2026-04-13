@@ -16,7 +16,10 @@ use crate::build;
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
-use crate::ids::{AgentIdentity, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+use crate::ids::{
+    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, MobId, ProfileName, RunId,
+    StepId, TaskId, WorkOrigin, WorkRef, WorkSpec,
+};
 use crate::roster::{Roster, RosterEntry};
 use crate::run::{FlowRunConfig, MobRun};
 use crate::storage::MobStorage;

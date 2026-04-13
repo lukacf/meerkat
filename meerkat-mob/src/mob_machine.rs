@@ -5,7 +5,9 @@
 //! remain useful for inspection and follow-up work.
 
 use crate::definition::DependencyMode;
-use crate::ids::{BranchId, FlowId, MeerkatId, RunId, StepId};
+use crate::ids::{
+    AgentRuntimeId, BranchId, FenceToken, FlowId, MeerkatId, RunId, StepId, WorkRef, WorkSpec,
+};
 use crate::roster::{Roster, RosterEntry};
 use crate::run::{MobRun, MobRunStatus, RunCollectionPolicyKind, StepRunStatus};
 #[cfg(test)]
@@ -74,6 +76,22 @@ pub(crate) enum MobMachineCommand {
         meerkat_id: MeerkatId,
         content: meerkat_core::types::ContentInput,
     },
+    /// Submit a unit of work to a mob member, validated by fence token.
+    SubmitWork {
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        work_ref: WorkRef,
+        spec: WorkSpec,
+    },
+    /// Cancel a previously submitted unit of work.
+    CancelWork {
+        work_ref: WorkRef,
+    },
+    /// Cancel all in-flight work for a mob member, validated by fence token.
+    CancelAllWork {
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+    },
     Stop,
     Resume,
     Complete,
@@ -141,6 +159,10 @@ pub(crate) enum MobMachineCommand {
 pub(crate) enum MobMachineCommandResult {
     Unit,
     RunId(RunId),
+    WorkReceipt {
+        work_ref: WorkRef,
+        bridge_session_id: meerkat_core::types::SessionId,
+    },
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),
     Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),

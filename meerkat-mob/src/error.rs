@@ -1,6 +1,6 @@
 //! Error types for mob operations.
 
-use crate::ids::{FlowId, MeerkatId, ProfileName};
+use crate::ids::{AgentRuntimeId, FenceToken, FlowId, MeerkatId, ProfileName, WorkRef};
 use crate::runtime::MobState;
 use crate::validate::Diagnostic;
 use crate::{MobId, RunId, StepId};
@@ -129,6 +129,18 @@ pub enum MobError {
         tool_name: String,
         args: serde_json::Value,
     },
+
+    /// The fence token does not match the member's current incarnation.
+    #[error("stale fence token for {runtime_id}: expected {expected}, got {actual}")]
+    StaleFenceToken {
+        runtime_id: AgentRuntimeId,
+        expected: FenceToken,
+        actual: FenceToken,
+    },
+
+    /// The referenced work unit does not exist.
+    #[error("work not found: {0}")]
+    WorkNotFound(WorkRef),
 
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
@@ -302,6 +314,14 @@ mod tests {
             ))),
             MobError::SessionError(meerkat_core::service::SessionError::PersistenceDisabled),
             MobError::CommsError(meerkat_core::comms::SendError::PeerOffline),
+            MobError::StaleFenceToken {
+                runtime_id: crate::ids::AgentRuntimeId::initial(crate::ids::AgentIdentity::from(
+                    "m",
+                )),
+                expected: FenceToken::new(1),
+                actual: FenceToken::new(0),
+            },
+            MobError::WorkNotFound(WorkRef::new()),
             MobError::Internal("i".to_string()),
             MobError::NotYetImplemented("storage cas".to_string()),
         ];

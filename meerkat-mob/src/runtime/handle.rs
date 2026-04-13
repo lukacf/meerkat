@@ -312,6 +312,16 @@ impl MemberDeliveryReceipt {
     }
 }
 
+/// Receipt confirming that a unit of work was accepted by the work lane.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct WorkDeliveryReceipt {
+    /// The work reference for the submitted unit.
+    pub work_ref: WorkRef,
+    /// The runtime ID of the target member.
+    pub runtime_id: AgentRuntimeId,
+}
+
 /// Reference to a member's current session bridge.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -826,6 +836,82 @@ impl MobHandle {
                     })
                     .await??;
                 Ok(MobMachineCommandResult::BridgeSessionId(bridge_session_id))
+            }
+            MobMachineCommand::SubmitWork {
+                runtime_id,
+                fence_token,
+                work_ref,
+                spec,
+            } => {
+                let meerkat_id = MeerkatId::from(runtime_id.identity.as_str());
+                let entry = self
+                    .roster
+                    .read()
+                    .await
+                    .entry(&meerkat_id)
+                    .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                if entry.fence_token != fence_token {
+                    return Err(MobError::StaleFenceToken {
+                        runtime_id,
+                        expected: entry.fence_token,
+                        actual: fence_token,
+                    });
+                }
+                let content = meerkat_core::types::ContentInput::from(spec.content);
+                let bridge_session_id = match spec.origin {
+                    WorkOrigin::External => {
+                        self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
+                            meerkat_id,
+                            content,
+                            handling_mode: HandlingMode::Queue,
+                            render_metadata: None,
+                            reply_tx,
+                        })
+                        .await??
+                    }
+                    WorkOrigin::Internal => {
+                        self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
+                            meerkat_id,
+                            content,
+                            reply_tx,
+                        })
+                        .await??
+                    }
+                };
+                Ok(MobMachineCommandResult::WorkReceipt {
+                    work_ref,
+                    bridge_session_id,
+                })
+            }
+            MobMachineCommand::CancelWork { work_ref } => {
+                // Work tracking ledger is introduced in C7. Until then,
+                // individual work cancellation is not supported.
+                Err(MobError::WorkNotFound(work_ref))
+            }
+            MobMachineCommand::CancelAllWork {
+                runtime_id,
+                fence_token,
+            } => {
+                let meerkat_id = MeerkatId::from(runtime_id.identity.as_str());
+                let entry = self
+                    .roster
+                    .read()
+                    .await
+                    .entry(&meerkat_id)
+                    .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                if entry.fence_token != fence_token {
+                    return Err(MobError::StaleFenceToken {
+                        runtime_id,
+                        expected: entry.fence_token,
+                        actual: fence_token,
+                    });
+                }
+                self.send_actor_command(|reply_tx| MobCommand::ForceCancel {
+                    meerkat_id,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Stop => {
                 self.send_actor_command(|reply_tx| MobCommand::Stop { reply_tx })
@@ -1980,6 +2066,78 @@ impl MobHandle {
         {
             MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
             _ => unreachable!("internal_turn returned wrong result type"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Work lane
+    // -----------------------------------------------------------------
+
+    /// Submit a unit of work to a mob member.
+    ///
+    /// The fence token is validated against the member's current incarnation at
+    /// the dispatch boundary. If the token is stale (i.e., the member has been
+    /// respawned or reset since the caller obtained the token), the submission
+    /// is rejected with [`MobError::StaleFenceToken`].
+    pub async fn submit_work(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        work_ref: WorkRef,
+        spec: WorkSpec,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::SubmitWork {
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                work_ref: work_ref.clone(),
+                spec,
+            })
+            .await?
+        {
+            MobMachineCommandResult::WorkReceipt {
+                work_ref: ref_out,
+                bridge_session_id: _,
+            } => Ok(WorkDeliveryReceipt {
+                work_ref: ref_out,
+                runtime_id,
+            }),
+            _ => unreachable!("submit_work returned wrong result type"),
+        }
+    }
+
+    /// Cancel a previously submitted unit of work.
+    ///
+    /// Returns `Ok(())` if the work was found and cancellation was initiated.
+    /// Returns [`MobError::WorkNotFound`] if no in-flight work with the given
+    /// reference exists.
+    pub async fn cancel_work(&self, work_ref: WorkRef) -> Result<(), MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::CancelWork { work_ref })
+            .await?
+        {
+            MobMachineCommandResult::Unit => Ok(()),
+            _ => unreachable!("cancel_work returned wrong result type"),
+        }
+    }
+
+    /// Cancel all in-flight work for a mob member.
+    ///
+    /// The fence token is validated before cancellation proceeds.
+    pub async fn cancel_all_work(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+    ) -> Result<(), MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::CancelAllWork {
+                runtime_id,
+                fence_token,
+            })
+            .await?
+        {
+            MobMachineCommandResult::Unit => Ok(()),
+            _ => unreachable!("cancel_all_work returned wrong result type"),
         }
     }
 

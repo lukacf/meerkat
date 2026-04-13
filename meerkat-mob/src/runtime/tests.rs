@@ -16756,3 +16756,162 @@ async fn test_spawn_realm_ref_without_store_returns_error() {
         "expected Internal error for missing store, got: {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Work lane (C5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_submit_work_internal_origin_succeeds() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member exists");
+    let runtime_id = entry.agent_runtime_id.clone();
+    let fence = entry.fence_token;
+
+    let receipt = handle
+        .submit_work(
+            runtime_id.clone(),
+            fence,
+            WorkRef::new(),
+            WorkSpec::new("do work".to_string(), WorkOrigin::Internal),
+        )
+        .await
+        .expect("submit_work should succeed with valid fence token");
+    assert_eq!(receipt.runtime_id, runtime_id);
+}
+
+#[tokio::test]
+async fn test_submit_work_external_origin_succeeds() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("member exists");
+
+    let receipt = handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("user message".to_string(), WorkOrigin::External),
+        )
+        .await
+        .expect("submit_work external should succeed for externally addressable member");
+    assert_eq!(receipt.runtime_id, entry.agent_runtime_id);
+}
+
+#[tokio::test]
+async fn test_submit_work_stale_fence_token_rejected() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member exists");
+    let runtime_id = entry.agent_runtime_id.clone();
+    let stale_fence = FenceToken::new(entry.fence_token.get() + 999);
+
+    let result = handle
+        .submit_work(
+            runtime_id,
+            stale_fence,
+            WorkRef::new(),
+            WorkSpec::new("stale work".to_string(), WorkOrigin::Internal),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MobError::StaleFenceToken { .. })),
+        "submit_work must reject stale fence token: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_submit_work_unknown_member_fails() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let runtime_id = AgentRuntimeId::initial(AgentIdentity::from("nonexistent"));
+
+    let result = handle
+        .submit_work(
+            runtime_id,
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new("orphan work".to_string(), WorkOrigin::Internal),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MobError::MeerkatNotFound(_))),
+        "submit_work to nonexistent member must fail: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_work_returns_not_found() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let result = handle.cancel_work(WorkRef::new()).await;
+    assert!(
+        matches!(result, Err(MobError::WorkNotFound(_))),
+        "cancel_work must return WorkNotFound before work tracking is wired: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_all_work_validates_fence_token() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member exists");
+
+    let stale_fence = FenceToken::new(entry.fence_token.get() + 1);
+    let result = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), stale_fence)
+        .await;
+    assert!(
+        matches!(result, Err(MobError::StaleFenceToken { .. })),
+        "cancel_all_work must reject stale fence token: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_all_work_valid_fence_succeeds() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member exists");
+
+    let result = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await;
+    assert!(
+        result.is_ok(),
+        "cancel_all_work with valid fence should succeed: {result:?}"
+    );
+}

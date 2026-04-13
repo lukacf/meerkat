@@ -1,14 +1,21 @@
-//! MeerkatMachine — owns per-session runtime state and command authority.
+//! MeerkatMachine — session-scoped execution kernel.
 //!
-//! It lives in `meerkat-runtime` so `meerkat-session` doesn't need to depend
-//! on runtime execution internals. Surfaces use this authority to get v9
-//! runtime capabilities on top of any `SessionService` implementation.
+//! One of two kernels in the Meerkat two-kernel architecture:
 //!
-//! When a session is registered with a `CoreExecutor`, a background RuntimeLoop
-//! task is spawned per session. `accept_input()` queues the input in the driver
-//! and, if wake is requested, signals the loop. The loop dequeues, stages,
-//! applies via CoreExecutor (which calls SessionService::start_turn()), and
-//! marks inputs as consumed.
+//! - **MeerkatMachine** (this module) owns session-scoped runtime state:
+//!   input ingress, run lifecycle, completion waiters, async-ops registry,
+//!   comms drain, and tool visibility publication. All mutations flow through
+//!   six typed dispatch functions (session, drain, drain-local, control,
+//!   ingress, legacy-run), each gated by TLA+-derived precondition guards.
+//!
+//! - **MobMachine** (`meerkat-mob`) owns mob-scoped orchestration: roster,
+//!   flow frames, delegation, and inter-member wiring.
+//!
+//! MeerkatMachine lives in `meerkat-runtime` so `meerkat-session` does not
+//! depend on runtime execution internals. When a session registers a
+//! `CoreExecutor`, a background `RuntimeLoop` task is spawned. Input acceptance
+//! queues through the driver; wake signals the loop; the loop dequeues, stages,
+//! applies via `CoreExecutor`, and marks inputs consumed.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -434,12 +441,18 @@ fn abort_slot(slot: &mut CommsDrainSlot) {
     }
 }
 
-/// Wraps a SessionService to provide v9 runtime capabilities.
+/// Session-scoped execution kernel for the Meerkat runtime.
 ///
-/// Maintains a per-session RuntimeDriver registry. When sessions are registered
-/// with a `CoreExecutor`, a RuntimeLoop task is spawned that processes queued
-/// inputs by calling `CoreExecutor::apply()` (which triggers
-/// `SessionService::start_turn()` under the hood).
+/// Owns per-session runtime state (driver, ops registry, completion waiters,
+/// comms drain, epoch bindings) and exposes six dispatch functions that gate
+/// all state mutations behind TLA+-derived precondition guards:
+///
+/// - `execute_meerkat_machine_session_command` — session lifecycle
+/// - `execute_meerkat_machine_drain_command` — comms drain lifecycle
+/// - `execute_meerkat_machine_drain_local_command` — local drain ops
+/// - `execute_meerkat_machine_control_command` — control plane (ingest, retire, recycle, reset, destroy)
+/// - `execute_meerkat_machine_ingress_command` — input ingress (accept with/without wake)
+/// - `execute_meerkat_machine_legacy_run_command` — legacy run path (prepare, commit, fail)
 pub struct MeerkatMachine {
     /// Per-session entries.
     sessions: RwLock<HashMap<SessionId, RuntimeSessionEntry>>,

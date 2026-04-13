@@ -6937,10 +6937,13 @@ async fn test_retire_emits_event() {
         .expect("retire");
 
     let events = handle.events().replay_all().await.expect("replay");
-    let retired = events
-        .iter()
-        .find(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. }));
-    assert!(retired.is_some(), "should have MeerkatRetired event");
+    let retired = events.iter().find(|e| {
+        matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )
+    });
+    assert!(retired.is_some(), "should have retire event");
 }
 
 #[tokio::test]
@@ -7017,9 +7020,10 @@ async fn test_retire_archive_failure_is_not_silent() {
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "retire event should be persisted before archive so cleanup remains retryable"
     );
 }
@@ -7067,9 +7071,10 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "retire event should persist even when trust-removal cleanup fails"
     );
 }
@@ -7123,9 +7128,10 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "retire event should persist even when notification cleanup fails"
     );
 }
@@ -7133,7 +7139,7 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
 #[tokio::test]
 async fn test_retire_append_failure_is_retryable_without_side_effects() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
-    events.fail_appends_for("MeerkatRetired").await;
+    events.fail_appends_for("MemberRetired").await;
     let (handle, service) = create_test_mob_with_events(sample_definition(), events).await;
 
     handle
@@ -7177,9 +7183,10 @@ async fn test_retire_append_failure_is_retryable_without_side_effects() {
 
     let recorded = handle.events().replay_all().await.expect("replay");
     assert!(
-        !recorded
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        !recorded.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "failed retire append must not persist MeerkatRetired"
     );
 }
@@ -9118,9 +9125,10 @@ async fn test_spawn_rollback_archive_failure_keeps_spawned_entry_and_persists_re
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "rollback must persist MeerkatRetired before side-effect cleanup so retries stay replay-safe"
     );
 }
@@ -12583,7 +12591,7 @@ async fn test_supervisor_escalation_times_out_when_turn_hangs() {
 #[tokio::test]
 async fn test_supervisor_force_reset_reports_aggregate_retire_errors() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
-    events.fail_appends_for("MeerkatRetired").await;
+    events.fail_appends_for("MemberRetired").await;
     let (handle, _service) = create_test_mob_with_events(sample_definition(), events).await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -14950,9 +14958,10 @@ async fn test_retire_returns_err_when_archive_fails() {
     // Retire event was persisted before disposal (event-first).
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+        )),
         "retire event must persist regardless of archive outcome"
     );
 }

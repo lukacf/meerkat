@@ -559,10 +559,6 @@ impl MobActor {
         }
     }
 
-    fn pending_spawn_tickets(&self) -> std::collections::BTreeSet<u64> {
-        self.pending_spawns.tickets()
-    }
-
     fn take_pending_spawn_slot(
         &mut self,
         spawn_ticket: u64,
@@ -1155,14 +1151,6 @@ impl MobActor {
             .collect()
     }
 
-    async fn kickoff_barrier_snapshot(&self) -> super::MobKickoffBarrierSnapshot {
-        let mut turns = self.autonomous_initial_turns.lock().await;
-        turns.retain(|_, entry| !entry.is_finished());
-        super::MobKickoffBarrierSnapshot {
-            pending_member_ids: turns.keys().cloned().collect(),
-        }
-    }
-
     /// Ensure all autonomous roster members have their runtime ready.
     ///
     /// Called on mob startup and resume. Does NOT fire synthetic kickoff turns —
@@ -1498,18 +1486,6 @@ impl MobActor {
                         MobOrchestratorSnapshot::default,
                         super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
                     ));
-                }
-                MobCommand::DiagnosticKernelSnapshot { reply_tx } => {
-                    let _ = reply_tx.send(super::MobKernelDiagnosticSnapshot {
-                        lifecycle: self.lifecycle_authority.snapshot(),
-                        orchestrator: self.orchestrator.as_ref().map(
-                            super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
-                        ),
-                        topology: self.flow_engine.topology_snapshot(),
-                        pending_spawns: self.pending_spawns.snapshot(),
-                        kickoff_barrier: self.kickoff_barrier_snapshot().await,
-                        flow_trackers: self.flow_tracker_snapshot().await,
-                    });
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {

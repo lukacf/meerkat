@@ -14685,14 +14685,14 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
         .expect("member status");
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
     assert_eq!(
-        snapshot.current_session_id.as_ref(),
+        snapshot.current_bridge_session_id.as_ref(),
         Some(receipt.bridge_session_id().expect("session-backed")),
         "machine-routed member_status should preserve the active session binding"
     );
 }
 
 #[tokio::test]
-async fn test_member_handle_session_helpers_round_trip_through_machine_projection_surface() {
+async fn test_member_handle_bridge_session_helper_round_trips_through_machine_projection_surface() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let receipt = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -14704,23 +14704,14 @@ async fn test_member_handle_session_helpers_round_trip_through_machine_projectio
         .await
         .expect("member handle");
 
-    let current_session_id = member
-        .current_session_id()
+    let current_bridge_session_id = member
+        .current_bridge_session_id()
         .await
         .expect("current session id");
     assert_eq!(
-        current_session_id.as_ref(),
+        current_bridge_session_id.as_ref(),
         Some(receipt.bridge_session_id().expect("session-backed")),
         "member handle should expose the machine-routed current session binding"
-    );
-
-    let session_ref = member.session_ref().await.expect("session ref");
-    assert_eq!(
-        session_ref
-            .as_ref()
-            .map(|session| &session.bridge_session_id),
-        Some(receipt.bridge_session_id().expect("session-backed")),
-        "member handle session_ref should follow the same machine-routed binding"
     );
 }
 

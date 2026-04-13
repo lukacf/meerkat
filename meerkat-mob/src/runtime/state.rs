@@ -1,4 +1,3 @@
-use super::MobKernelDiagnosticSnapshot;
 #[cfg(test)]
 use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
@@ -143,9 +142,6 @@ pub(super) enum MobCommand {
     #[cfg(test)]
     OrchestratorSnapshot {
         reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
-    },
-    DiagnosticKernelSnapshot {
-        reply_tx: oneshot::Sender<MobKernelDiagnosticSnapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

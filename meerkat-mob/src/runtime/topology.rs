@@ -22,13 +22,6 @@ pub struct MobTopologyService {
     revision: Arc<AtomicU32>,
 }
 
-/// Observable snapshot of the live topology owner state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MobTopologySnapshot {
-    pub coordinator_bound: bool,
-    pub revision: u32,
-}
-
 impl MobTopologyService {
     pub fn new(spec: Option<TopologySpec>) -> Self {
         Self {
@@ -68,13 +61,6 @@ impl MobTopologyService {
 
     pub fn revision(&self) -> u32 {
         self.revision.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn snapshot(&self) -> MobTopologySnapshot {
-        MobTopologySnapshot {
-            coordinator_bound: self.coordinator_bound(),
-            revision: self.revision(),
-        }
     }
 }
 

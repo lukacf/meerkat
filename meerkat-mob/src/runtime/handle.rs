@@ -55,7 +55,7 @@ pub struct MobMemberSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
-    /// Bridge-internal session binding — not part of the public identity contract.
+    /// Bridge-internal session binding — compatibility alias for the current bridge session.
     #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
     /// Bridge-internal session binding — not part of the public identity contract.
@@ -80,15 +80,7 @@ impl MobMemberSnapshot {
     }
 
     pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
-        self.current_bridge_session_id
-            .as_ref()
-            .or(self.current_session_id.as_ref())
-    }
-
-    pub(crate) fn current_session_id(&self) -> Option<&SessionId> {
-        self.current_session_id
-            .as_ref()
-            .or(self.current_bridge_session_id.as_ref())
+        self.current_bridge_session_id.as_ref()
     }
 }
 
@@ -141,34 +133,12 @@ impl MobMemberListEntry {
     }
 
     pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
-        self.current_bridge_session_id
-            .as_ref()
-            .or(self.current_session_id.as_ref())
-    }
-
-    pub(crate) fn current_session_id(&self) -> Option<&SessionId> {
-        self.current_session_id
-            .as_ref()
-            .or(self.current_bridge_session_id.as_ref())
+        self.current_bridge_session_id.as_ref()
     }
 
     /// Bridge session ID from the member reference.
     pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()
-    }
-
-    /// Bridge session ID (alias).
-    pub(crate) fn session_id(&self) -> Option<&SessionId> {
-        self.bridge_session_id()
-    }
-
-    /// Bridge-internal meerkat ID for transport/routing.
-    ///
-    /// Prefer [`agent_identity`](Self::agent_identity) for the canonical
-    /// identity-first API. This accessor exists for WASM and bridge-layer
-    /// consumers that still need the transport handle.
-    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
-        &self.meerkat_id
     }
 }
 
@@ -333,24 +303,6 @@ pub struct WorkDeliveryReceipt {
     pub runtime_id: AgentRuntimeId,
 }
 
-/// Reference to a member's current session bridge.
-#[derive(Debug, Clone, Serialize)]
-#[non_exhaustive]
-pub(crate) struct MemberSessionRef {
-    /// The member identity.
-    pub identity: AgentIdentity,
-    /// Compatibility alias for the current bridge session ID.
-    pub session_id: SessionId,
-    /// Canonical current bridge session ID.
-    pub bridge_session_id: SessionId,
-}
-
-impl MemberSessionRef {
-    pub fn bridge_session_id(&self) -> &SessionId {
-        &self.bridge_session_id
-    }
-}
-
 /// Options for helper convenience spawns.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -433,10 +385,6 @@ impl MobMemberTerminalClassifier {
                 | MobMemberTerminalClass::TerminalUnknown
                 | MobMemberTerminalClass::TerminalCompleted
         )
-    }
-
-    fn has_canonical_member(material: &CanonicalMemberSnapshotMaterial) -> bool {
-        material.member_present
     }
 }
 
@@ -885,10 +833,8 @@ impl MobHandle {
                         .await??
                     }
                 };
-                Ok(MobMachineCommandResult::WorkReceipt {
-                    work_ref,
-                    bridge_session_id,
-                })
+                let _ = bridge_session_id;
+                Ok(MobMachineCommandResult::WorkReceipt { work_ref })
             }
             MobMachineCommand::CancelWork { work_ref } => {
                 // Work tracking ledger is introduced in C7. Until then,
@@ -1080,18 +1026,6 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::RestoreFailuresSnapshot => {
-                let diagnostics = self
-                    .restore_diagnostics
-                    .read()
-                    .await
-                    .iter()
-                    .map(|(meerkat_id, diagnostic)| (meerkat_id.clone(), diagnostic.clone()))
-                    .collect();
-                Ok(MobMachineCommandResult::RestoreFailuresSnapshot(
-                    diagnostics,
-                ))
-            }
             MobMachineCommand::GetMember { meerkat_id } => {
                 let member = self.roster.read().await.entry(&meerkat_id);
                 Ok(MobMachineCommandResult::GetMember(member))
@@ -1109,14 +1043,6 @@ impl MobHandle {
                     .send_actor_command(|reply_tx| MobCommand::OrchestratorSnapshot { reply_tx })
                     .await?;
                 Ok(MobMachineCommandResult::OrchestratorSnapshot(snapshot))
-            }
-            MobMachineCommand::DiagnosticKernelSnapshot => {
-                let snapshot = self
-                    .send_actor_command(|reply_tx| MobCommand::DiagnosticKernelSnapshot {
-                        reply_tx,
-                    })
-                    .await?;
-                Ok(MobMachineCommandResult::DiagnosticKernelSnapshot(snapshot))
             }
             MobMachineCommand::KickoffBarrierSnapshot { meerkat_ids } => {
                 let waiters = self
@@ -1833,6 +1759,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile and return its member reference.
+    #[cfg(test)]
     pub(crate) async fn spawn(
         &self,
         profile_name: ProfileName,
@@ -1844,6 +1771,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member with an explicit runtime binding.
+    #[cfg(test)]
     pub(crate) async fn spawn_with_binding(
         &self,
         profile_name: ProfileName,
@@ -1858,6 +1786,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile with explicit backend override.
+    #[cfg(test)]
     pub(crate) async fn spawn_with_backend(
         &self,
         profile_name: ProfileName,
@@ -1870,6 +1799,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile with explicit runtime mode/backend overrides.
+    #[cfg(test)]
     pub(crate) async fn spawn_with_options(
         &self,
         profile_name: ProfileName,
@@ -1886,6 +1816,7 @@ impl MobHandle {
     }
 
     /// Attach an existing session by reusing the mob spawn control-plane path.
+    #[cfg(test)]
     pub(crate) async fn attach_existing_session(
         &self,
         profile_name: ProfileName,
@@ -1903,18 +1834,8 @@ impl MobHandle {
         self.spawn_spec_internal(spec).await
     }
 
-    /// Attach an existing session as the mob orchestrator.
-    pub(crate) async fn attach_existing_session_as_orchestrator(
-        &self,
-        profile_name: ProfileName,
-        meerkat_id: MeerkatId,
-        session_id: meerkat_core::types::SessionId,
-    ) -> Result<MemberRef, MobError> {
-        self.attach_existing_session(profile_name, meerkat_id, session_id, None, None)
-            .await
-    }
-
     /// Attach an existing session as a regular mob member.
+    #[cfg(test)]
     pub(crate) async fn attach_existing_session_as_member(
         &self,
         profile_name: ProfileName,
@@ -2190,10 +2111,7 @@ impl MobHandle {
             })
             .await?
         {
-            MobMachineCommandResult::WorkReceipt {
-                work_ref: ref_out,
-                bridge_session_id: _,
-            } => Ok(WorkDeliveryReceipt {
+            MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {
                 work_ref: ref_out,
                 runtime_id,
             }),
@@ -2407,36 +2325,6 @@ impl MobHandle {
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),
-        }
-    }
-
-    pub(crate) async fn diagnostic_kernel_snapshot(
-        &self,
-    ) -> Result<super::MobKernelDiagnosticSnapshot, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::DiagnosticKernelSnapshot)
-            .await?
-        {
-            MobMachineCommandResult::DiagnosticKernelSnapshot(snapshot) => Ok(snapshot),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
-    }
-
-    pub(crate) async fn diagnostic_restore_failures_snapshot(
-        &self,
-    ) -> BTreeMap<MeerkatId, RestoreFailureDiagnostic> {
-        match self
-            .execute_machine_command(MobMachineCommand::RestoreFailuresSnapshot)
-            .await
-        {
-            Ok(MobMachineCommandResult::RestoreFailuresSnapshot(diagnostics)) => diagnostics,
-            Ok(_) => {
-                tracing::error!("unexpected command result variant");
-                Default::default()
-            }
-            Err(_) => BTreeMap::new(),
         }
     }
 
@@ -2792,11 +2680,6 @@ impl MemberHandle {
         AgentIdentity::from(self.meerkat_id.as_str())
     }
 
-    /// Target member id for this capability (bridge).
-    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
-        &self.meerkat_id
-    }
-
     /// Submit external work to this member through the canonical runtime path.
     pub async fn send(
         &self,
@@ -2855,26 +2738,10 @@ impl MemberHandle {
     }
 
     /// Current bridge session ID for this member, if a session bridge exists.
+    #[cfg(test)]
     pub(crate) async fn current_bridge_session_id(&self) -> Result<Option<SessionId>, MobError> {
         let status = self.status().await?;
         Ok(status.current_bridge_session_id().cloned())
-    }
-
-    /// Current session ID for this member, if a session bridge exists.
-    pub(crate) async fn current_session_id(&self) -> Result<Option<SessionId>, MobError> {
-        self.current_bridge_session_id().await
-    }
-
-    /// Session reference for this member, if a session bridge exists.
-    pub(crate) async fn session_ref(&self) -> Result<Option<MemberSessionRef>, MobError> {
-        Ok(self
-            .current_bridge_session_id()
-            .await?
-            .map(|session_id| MemberSessionRef {
-                identity: self.identity(),
-                session_id: session_id.clone(),
-                bridge_session_id: session_id,
-            }))
     }
 
     /// Get a point-in-time execution snapshot for this member.
@@ -2915,7 +2782,6 @@ mod tests {
         let snapshot_value =
             serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
         // 0.6 clean break: session fields are #[serde(skip)] and must not appear
-        assert!(snapshot_value.get("current_session_id").is_none());
         assert!(snapshot_value.get("current_bridge_session_id").is_none());
         // Identity-native fields must be present
         assert!(!snapshot_value["agent_runtime_id"].is_null());
@@ -2923,7 +2789,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_member_material_populates_compatibility_session_alias_from_bridge_binding() {
+    fn canonical_member_material_populates_bridge_binding_from_canonical_state() {
         let sid = SessionId::new();
         let snapshot = CanonicalMemberSnapshotMaterial {
             member_present: true,
@@ -2941,15 +2807,12 @@ mod tests {
         .to_snapshot();
 
         assert_eq!(snapshot.current_bridge_session_id(), Some(&sid));
-        assert_eq!(snapshot.current_session_id(), Some(&sid));
-        assert_eq!(snapshot.current_session_id, Some(sid.clone()));
         assert_eq!(snapshot.current_bridge_session_id, Some(sid));
     }
 
     #[test]
     fn member_receipt_types_omit_bridge_session_fields_in_serialized_output() {
         let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(1));
-        let new_sid = SessionId::new();
         let receipt = MemberRespawnReceipt::new(
             AgentIdentity::from("worker"),
             runtime_id.clone(),
@@ -2976,16 +2839,6 @@ mod tests {
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
         assert_eq!(delivery_value["identity"], "worker");
         assert_eq!(delivery_value["fence_token"], 8);
-
-        let session_ref = MemberSessionRef {
-            identity: AgentIdentity::from("worker"),
-            session_id: new_sid.clone(),
-            bridge_session_id: new_sid.clone(),
-        };
-        let session_ref_value =
-            serde_json::to_value(&session_ref).expect("session ref should serialize to json");
-        assert_eq!(session_ref_value["session_id"], new_sid.to_string());
-        assert_eq!(session_ref_value["bridge_session_id"], new_sid.to_string());
     }
 
     #[test]

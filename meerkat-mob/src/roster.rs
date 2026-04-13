@@ -284,6 +284,7 @@ impl Roster {
     }
 
     /// Resolve a MeerkatId to AgentIdentity via the bridge index.
+    #[cfg(test)]
     pub(crate) fn resolve_identity(&self, meerkat_id: &MeerkatId) -> Option<&AgentIdentity> {
         self.meerkat_index.get(meerkat_id)
     }
@@ -499,15 +500,6 @@ impl Roster {
     pub(crate) fn get_mut(&mut self, meerkat_id: &MeerkatId) -> Option<&mut RosterEntry> {
         let identity = self.meerkat_index.get(meerkat_id)?.clone();
         self.entries.get_mut(&identity)
-    }
-
-    /// Update the member reference for an existing meerkat.
-    pub(crate) fn set_member_ref(&mut self, meerkat_id: &MeerkatId, member_ref: MemberRef) -> bool {
-        if let Some(entry) = self.get_mut(meerkat_id) {
-            entry.member_ref = member_ref;
-            return true;
-        }
-        false
     }
 
     /// Update the bridge session ID while preserving backend-specific identity.

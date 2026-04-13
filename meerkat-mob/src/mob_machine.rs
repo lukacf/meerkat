@@ -4,42 +4,19 @@
 //! command/result surface plus the durable diagnostic snapshot shapes that
 //! remain useful for inspection and follow-up work.
 
-#[cfg(test)]
-use crate::definition::DependencyMode;
 use crate::ids::{
     AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, RunId, WorkRef, WorkSpec,
 };
-#[cfg(test)]
-use crate::ids::{BranchId, StepId};
 use crate::roster::{Roster, RosterEntry};
 use crate::run::MobRun;
-#[cfg(test)]
-use crate::run::{MobRunStatus, RunCollectionPolicyKind, StepRunStatus};
-#[cfg(test)]
-use crate::runtime::MobHandle;
+use crate::runtime::MobMemberListEntry;
 #[cfg(test)]
 use crate::runtime::MobOrchestratorSnapshot;
-#[cfg(test)]
-use crate::runtime::MobState;
-use crate::runtime::{MobKernelDiagnosticSnapshot, MobMemberListEntry};
 use crate::tasks::MobTask;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-/// Joined diagnostic view over the current mob lifecycle state plus the live
-/// roster and member-status projection.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct MobMachineSnapshot {
-    pub phase: MobState,
-    pub kernel: MobKernelDiagnosticSnapshot,
-    pub roster: Roster,
-    pub members: Vec<MobMemberListEntry>,
-    pub restore_failures: BTreeMap<MeerkatId, RestoreFailureSnapshot>,
-    pub tracked_runs: BTreeMap<RunId, TrackedRunSnapshot>,
-}
 
 /// Public Mob mutations route through this single top-level machine command
 /// surface instead of each `MobHandle` method hand-sending actor commands.
@@ -144,7 +121,6 @@ pub(crate) enum MobMachineCommand {
         tool_name: String,
         authority_context: meerkat_core::service::MobToolAuthorityContext,
     },
-    RestoreFailuresSnapshot,
     GetMember {
         meerkat_id: MeerkatId,
     },
@@ -152,7 +128,6 @@ pub(crate) enum MobMachineCommand {
     FlowTrackerCounts,
     #[cfg(test)]
     OrchestratorSnapshot,
-    DiagnosticKernelSnapshot,
     KickoffBarrierSnapshot {
         meerkat_ids: Vec<MeerkatId>,
     },
@@ -170,7 +145,6 @@ pub(crate) enum MobMachineCommandResult {
     RunId(RunId),
     WorkReceipt {
         work_ref: WorkRef,
-        bridge_session_id: meerkat_core::types::SessionId,
     },
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),
@@ -189,157 +163,10 @@ pub(crate) enum MobMachineCommandResult {
     AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
     MobEventRouter(crate::runtime::MobEventRouterHandle),
     MobEvents(Vec<crate::event::MobEvent>),
-    RestoreFailuresSnapshot(BTreeMap<MeerkatId, crate::runtime::RestoreFailureDiagnostic>),
     GetMember(Option<RosterEntry>),
     #[cfg(test)]
     FlowTrackerCounts((usize, usize)),
     #[cfg(test)]
     OrchestratorSnapshot(MobOrchestratorSnapshot),
-    DiagnosticKernelSnapshot(MobKernelDiagnosticSnapshot),
     KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RestoreFailureSnapshot {
-    pub session_id: meerkat_core::types::SessionId,
-    pub bridge_session_id: meerkat_core::types::SessionId,
-    pub reason: String,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TrackedRunStoreSnapshot {
-    pub flow_id: FlowId,
-    pub schema_version: u32,
-    pub status: MobRunStatus,
-    pub completed_at_present: bool,
-    pub frame_count: usize,
-    pub loop_count: usize,
-    pub loop_iteration_count: usize,
-    pub ordered_steps: Vec<StepId>,
-    pub step_dependencies: BTreeMap<StepId, Vec<StepId>>,
-    pub step_dependency_modes: BTreeMap<StepId, DependencyMode>,
-    pub step_has_conditions: BTreeMap<StepId, bool>,
-    pub step_branches: BTreeMap<StepId, Option<BranchId>>,
-    pub step_collection_policy_kinds: BTreeMap<StepId, RunCollectionPolicyKind>,
-    pub step_quorum_thresholds: BTreeMap<StepId, u32>,
-    pub step_statuses: BTreeMap<StepId, StepRunStatus>,
-    pub failure_count: u32,
-    pub consecutive_failure_count: u32,
-    pub max_step_retries: u32,
-    pub escalation_threshold: u32,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TrackedRunMalformedSnapshot {
-    pub flow_id: FlowId,
-    pub status: MobRunStatus,
-    pub completed_at_present: bool,
-    pub reason: String,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum TrackedRunSnapshot {
-    Missing,
-    Present(TrackedRunStoreSnapshot),
-    Malformed(TrackedRunMalformedSnapshot),
-}
-
-#[cfg(test)]
-fn tracked_run_snapshot_from_run(run: &MobRun) -> Result<TrackedRunStoreSnapshot, crate::MobError> {
-    Ok(TrackedRunStoreSnapshot {
-        flow_id: run.flow_id.clone(),
-        schema_version: run.schema_version,
-        status: run.status.clone(),
-        completed_at_present: run.completed_at.is_some(),
-        frame_count: run.frames.len(),
-        loop_count: run.loops.len(),
-        loop_iteration_count: run.loop_iteration_ledger.len(),
-        ordered_steps: run.ordered_steps()?,
-        step_dependencies: run.step_dependencies()?,
-        step_dependency_modes: run.step_dependency_modes()?,
-        step_has_conditions: run.step_has_conditions()?,
-        step_branches: run.step_branches()?,
-        step_collection_policy_kinds: run.step_collection_policy_kinds()?,
-        step_quorum_thresholds: run.step_quorum_thresholds()?,
-        step_statuses: run.step_status_snapshot()?,
-        failure_count: run.failure_count()?,
-        consecutive_failure_count: run.consecutive_failure_count()?,
-        max_step_retries: run.max_step_retries()?,
-        escalation_threshold: run.escalation_threshold()?,
-    })
-}
-
-/// Capture the currently joined MobMachine snapshot from the real handle read
-/// paths.
-#[cfg(test)]
-pub(crate) async fn capture_mob_machine_snapshot(handle: &MobHandle) -> MobMachineSnapshot {
-    let phase = handle.status();
-    let kernel = match handle.diagnostic_kernel_snapshot().await {
-        Ok(snapshot) => snapshot,
-        Err(_) => crate::runtime::MobKernelDiagnosticSnapshot {
-            lifecycle: crate::runtime::MobLifecycleSnapshot {
-                phase,
-                active_run_count: 0,
-                cleanup_pending: false,
-            },
-            orchestrator: None,
-            topology: crate::runtime::MobTopologySnapshot {
-                coordinator_bound: false,
-                revision: 0,
-            },
-            pending_spawns: crate::runtime::MobPendingSpawnLineageSnapshot::default(),
-            kickoff_barrier: crate::runtime::MobKickoffBarrierSnapshot::default(),
-            flow_trackers: crate::runtime::MobFlowTrackerSnapshot::default(),
-        },
-    };
-    let roster = handle.roster().await;
-    let members = handle.list_members_including_retiring().await;
-    let restore_failures = handle
-        .diagnostic_restore_failures_snapshot()
-        .await
-        .iter()
-        .map(|(meerkat_id, diag)| {
-            (
-                meerkat_id.clone(),
-                RestoreFailureSnapshot {
-                    session_id: diag.bridge_session_id.clone(),
-                    bridge_session_id: diag.bridge_session_id.clone(),
-                    reason: diag.reason.clone(),
-                },
-            )
-        })
-        .collect();
-    let mut tracked_run_ids = kernel.flow_trackers.run_task_ids.clone();
-    tracked_run_ids.extend(kernel.flow_trackers.cancel_token_ids.iter().cloned());
-    tracked_run_ids.extend(kernel.flow_trackers.stream_ids.iter().cloned());
-    let mut tracked_runs = BTreeMap::new();
-    for run_id in tracked_run_ids {
-        let projection = handle.flow_status(run_id.clone()).await.ok().flatten();
-        let projection = match projection {
-            None => TrackedRunSnapshot::Missing,
-            Some(run) => match tracked_run_snapshot_from_run(&run) {
-                Ok(snapshot) => TrackedRunSnapshot::Present(snapshot),
-                Err(error) => TrackedRunSnapshot::Malformed(TrackedRunMalformedSnapshot {
-                    flow_id: run.flow_id,
-                    status: run.status,
-                    completed_at_present: run.completed_at.is_some(),
-                    reason: error.to_string(),
-                }),
-            },
-        };
-        tracked_runs.insert(run_id, projection);
-    }
-    MobMachineSnapshot {
-        phase,
-        kernel,
-        roster,
-        members,
-        restore_failures,
-        tracked_runs,
-    }
 }

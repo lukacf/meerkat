@@ -109,7 +109,6 @@ pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
-pub(crate) use handle::RestoreFailureDiagnostic;
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
@@ -117,7 +116,6 @@ pub use handle::{
     MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
     SpawnResult,
 };
-pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};
@@ -126,7 +124,6 @@ use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub use state::MobState;
-pub(crate) use topology::MobTopologySnapshot;
 pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -135,28 +132,4 @@ pub(crate) struct MobFlowTrackerSnapshot {
     pub cancel_token_ids: BTreeSet<RunId>,
     pub stream_ids: BTreeSet<RunId>,
     pub tracked_flows: BTreeMap<RunId, FlowId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct MobPendingSpawnLineageSnapshot {
-    pub metadata_ticket_ids: BTreeSet<u64>,
-    pub task_ticket_ids: BTreeSet<u64>,
-    pub ticket_members: BTreeMap<u64, MeerkatId>,
-    pub provision_bound_ticket_ids: BTreeSet<u64>,
-    pub partial_progress_ticket_ids: BTreeSet<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct MobKickoffBarrierSnapshot {
-    pub pending_member_ids: BTreeSet<MeerkatId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MobKernelDiagnosticSnapshot {
-    pub lifecycle: MobLifecycleSnapshot,
-    pub orchestrator: Option<MobOrchestratorSnapshot>,
-    pub topology: MobTopologySnapshot,
-    pub pending_spawns: MobPendingSpawnLineageSnapshot,
-    pub kickoff_barrier: MobKickoffBarrierSnapshot,
-    pub flow_trackers: MobFlowTrackerSnapshot,
 }

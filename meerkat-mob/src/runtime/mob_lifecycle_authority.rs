@@ -91,17 +91,6 @@ pub(crate) struct MobLifecycleTransition {
     pub effects: Vec<MobLifecycleEffect>,
 }
 
-/// Observable snapshot of MobLifecycle canonical fields.
-///
-/// Returned for diagnostics and joined MobMachine validation. This remains a
-/// read surface over the authority, not a second owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MobLifecycleSnapshot {
-    pub phase: MobState,
-    pub active_run_count: u32,
-    pub cleanup_pending: bool,
-}
-
 // ---------------------------------------------------------------------------
 // Canonical machine state (fields)
 // ---------------------------------------------------------------------------
@@ -176,15 +165,6 @@ impl MobLifecycleAuthority {
     /// Current phase (read from canonical state).
     pub(crate) fn phase(&self) -> MobState {
         self.phase
-    }
-
-    /// Current snapshot of all fields.
-    pub(crate) fn snapshot(&self) -> MobLifecycleSnapshot {
-        MobLifecycleSnapshot {
-            phase: self.phase,
-            active_run_count: self.fields.active_run_count,
-            cleanup_pending: self.fields.cleanup_pending,
-        }
     }
 
     /// Current active_run_count from canonical state.

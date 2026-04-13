@@ -168,41 +168,6 @@ impl PendingSpawnLineage {
         None
     }
 
-    pub(super) fn snapshot(&self) -> super::MobPendingSpawnLineageSnapshot {
-        let mut provision_bound_ticket_ids = BTreeSet::new();
-        let mut partial_progress_ticket_ids = BTreeSet::new();
-
-        for (ticket, pending) in &self.metadata {
-            let progress = pending
-                .progress
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let has_bridge_session_id = progress.bridge_session_id.is_some();
-            let has_operation_id = progress.operation_id.is_some();
-            match (has_bridge_session_id, has_operation_id) {
-                (true, true) => {
-                    provision_bound_ticket_ids.insert(*ticket);
-                }
-                (true, false) | (false, true) => {
-                    partial_progress_ticket_ids.insert(*ticket);
-                }
-                (false, false) => {}
-            }
-        }
-
-        super::MobPendingSpawnLineageSnapshot {
-            metadata_ticket_ids: self.metadata.keys().copied().collect(),
-            task_ticket_ids: self.tasks.keys().copied().collect(),
-            ticket_members: self
-                .metadata
-                .iter()
-                .map(|(&ticket, pending)| (ticket, pending.meerkat_id.clone()))
-                .collect(),
-            provision_bound_ticket_ids,
-            partial_progress_ticket_ids,
-        }
-    }
-
     fn debug_assert_alignment(&self) {
         debug_assert!(
             self.metadata.len() == self.tasks.len(),

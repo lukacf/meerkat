@@ -462,6 +462,10 @@ impl SessionAgent for RealSessionAgent {
         self.agent.cancel();
     }
 
+    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.agent.cancel_after_boundary_handle())
+    }
+
     fn hot_swap_llm_identity(
         &mut self,
         _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
@@ -535,6 +539,10 @@ impl SessionAgent for CompactionSessionAgent {
 
     fn cancel(&mut self) {
         self.agent.cancel();
+    }
+
+    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.agent.cancel_after_boundary_handle())
     }
 
     fn hot_swap_llm_identity(
@@ -1189,6 +1197,42 @@ async fn test_interrupt_cancels_inflight_turn() {
 }
 
 #[tokio::test]
+async fn test_cancel_after_boundary_is_accepted_for_real_inflight_turn() {
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            provider_visible_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            llm_delay_ms: Some(200),
+            hook_engine: None,
+        },
+        10,
+    ));
+
+    let _ = service.create_session(create_req("Hello")).await.unwrap();
+
+    let session_id = service.list(SessionQuery::default()).await.unwrap()[0]
+        .session_id
+        .clone();
+
+    let service_clone = Arc::clone(&service);
+    let sid_clone = session_id.clone();
+    let turn =
+        tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    service
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("boundary cancel should be accepted while running");
+
+    let result = turn.await.expect("turn join should succeed");
+    assert!(
+        result.is_ok(),
+        "simple single-turn runs may still complete when no later cancellable boundary exists"
+    );
+}
+
+#[tokio::test]
 async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
     let overlay_updates = Arc::new(std::sync::Mutex::new(Vec::new()));
     let service = Arc::new(EphemeralSessionService::new(
@@ -1774,6 +1818,28 @@ async fn test_interrupt_when_idle_returns_not_running() {
     let session_id = sessions[0].session_id.clone();
 
     let result = service.interrupt(&session_id).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.code(), "SESSION_NOT_RUNNING");
+}
+
+#[tokio::test]
+async fn test_cancel_after_boundary_when_idle_returns_not_running() {
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            provider_visible_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            llm_delay_ms: None,
+            hook_engine: None,
+        },
+        10,
+    ));
+    let _ = service.create_session(create_req("Hello")).await.unwrap();
+
+    let sessions = service.list(SessionQuery::default()).await.unwrap();
+    let session_id = sessions[0].session_id.clone();
+
+    let result = service.cancel_after_boundary(&session_id).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), "SESSION_NOT_RUNNING");

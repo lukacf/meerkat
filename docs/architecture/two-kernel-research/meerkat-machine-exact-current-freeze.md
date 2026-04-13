@@ -67,7 +67,6 @@ That means it intentionally includes:
 
 It also intentionally excludes or classifies out of scope:
 
-- `cancel_after_boundary` as a live top-level Meerkat action
 - durable replay of peer-ingress queue state
 - a second store-backed tool-surface recovery protocol
 - public lowering of non-`PersistentHost` drain modes
@@ -80,7 +79,7 @@ hidden debt inside the baseline.
 
 Focused freeze lanes:
 
-- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --lib`
 - `cargo test -p meerkat-runtime --test detached_wake_contract`
 - `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations`
 - `cargo test -p meerkat --lib --features comms capture_meerkat_machine_snapshot_joins_live_peer_runtime_state`

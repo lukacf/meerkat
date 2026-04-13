@@ -1832,6 +1832,7 @@ mod scenario_22_runtime_host_comms {
                 session_id: sid_a.clone(),
                 body: "Runtime host mode stress test ping from agent-b".to_string(),
                 blocks: None,
+                stream: meerkat_core::comms::InputStreamMode::None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 source: meerkat_core::comms::InputSource::Rpc,
                 allow_self_session: true,

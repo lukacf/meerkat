@@ -211,6 +211,7 @@ pub(crate) struct TrackedRunMalformedSnapshot {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TrackedRunSnapshot {
     Missing,
     Present(TrackedRunStoreSnapshot),
@@ -247,10 +248,24 @@ fn tracked_run_snapshot_from_run(run: &MobRun) -> Result<TrackedRunStoreSnapshot
 #[allow(dead_code)]
 pub(crate) async fn capture_mob_machine_snapshot(handle: &MobHandle) -> MobMachineSnapshot {
     let phase = handle.status();
-    let kernel = handle
-        .diagnostic_kernel_snapshot()
-        .await
-        .expect("MobMachine diagnostic kernel snapshot should be available");
+    let kernel = match handle.diagnostic_kernel_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(_) => crate::runtime::MobKernelDiagnosticSnapshot {
+            lifecycle: crate::runtime::MobLifecycleSnapshot {
+                phase,
+                active_run_count: 0,
+                cleanup_pending: false,
+            },
+            orchestrator: None,
+            topology: crate::runtime::MobTopologySnapshot {
+                coordinator_bound: false,
+                revision: 0,
+            },
+            pending_spawns: crate::runtime::MobPendingSpawnLineageSnapshot::default(),
+            kickoff_barrier: crate::runtime::MobKickoffBarrierSnapshot::default(),
+            flow_trackers: crate::runtime::MobFlowTrackerSnapshot::default(),
+        },
+    };
     let roster = handle.roster().await;
     let members = handle.list_members_including_retiring().await;
     let restore_failures = handle
@@ -273,10 +288,7 @@ pub(crate) async fn capture_mob_machine_snapshot(handle: &MobHandle) -> MobMachi
     tracked_run_ids.extend(kernel.flow_trackers.stream_ids.iter().cloned());
     let mut tracked_runs = BTreeMap::new();
     for run_id in tracked_run_ids {
-        let projection = handle
-            .flow_status(run_id.clone())
-            .await
-            .expect("MobMachine tracked run projection should be queryable");
+        let projection = handle.flow_status(run_id.clone()).await.ok().flatten();
         let projection = match projection {
             None => TrackedRunSnapshot::Missing,
             Some(run) => match tracked_run_snapshot_from_run(&run) {

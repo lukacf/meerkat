@@ -15,9 +15,9 @@ fn insert_bridge_session_aliases(
     value: &mut Value,
     bridge_session_id: Option<&meerkat_core::types::SessionId>,
 ) {
-    let payload = value
-        .as_object_mut()
-        .expect("bridge session aliases require object payload");
+    let Some(payload) = value.as_object_mut() else {
+        return;
+    };
     let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
     payload.insert("session_id".to_string(), json!(bridge_session_id));
     payload.insert("bridge_session_id".to_string(), json!(bridge_session_id));

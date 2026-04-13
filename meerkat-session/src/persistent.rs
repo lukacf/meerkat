@@ -990,6 +990,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.interrupt(id).await
     }
 
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.cancel_after_boundary(id).await
+    }
+
     async fn set_session_client(
         &self,
         id: &SessionId,

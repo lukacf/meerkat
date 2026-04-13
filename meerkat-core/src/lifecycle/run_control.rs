@@ -17,6 +17,15 @@ pub enum RunControlCommand {
         #[serde(default)]
         reason: String,
     },
+    /// Cancel the current run once it reaches the next turn boundary.
+    ///
+    /// This lets the active turn finish its current primitive and terminate at
+    /// the next boundary rather than aborting immediately.
+    CancelAfterBoundary {
+        /// Why the run should be cancelled after boundary.
+        #[serde(default)]
+        reason: String,
+    },
     /// Stop the runtime executor entirely.
     /// No further runs will be started.
     StopRuntimeExecutor {
@@ -55,6 +64,17 @@ mod tests {
         };
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["command"], "stop_runtime_executor");
+        let parsed: RunControlCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(cmd, parsed);
+    }
+
+    #[test]
+    fn cancel_after_boundary_serde_roundtrip() {
+        let cmd = RunControlCommand::CancelAfterBoundary {
+            reason: "finish current boundary".into(),
+        };
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(json["command"], "cancel_after_boundary");
         let parsed: RunControlCommand = serde_json::from_value(json).unwrap();
         assert_eq!(cmd, parsed);
     }

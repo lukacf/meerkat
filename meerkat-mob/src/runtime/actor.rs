@@ -1768,7 +1768,6 @@ impl MobActor {
                         .read()
                         .await
                         .list()
-                        .into_iter()
                         .filter_map(|entry| {
                             entry
                                 .member_ref

@@ -240,6 +240,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel();
     }
 
+    fn cancel_after_boundary_handle(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        Some(self.agent.cancel_after_boundary_handle())
+    }
+
     fn session_id(&self) -> SessionId {
         self.agent.session().id().clone()
     }

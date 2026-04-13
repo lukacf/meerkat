@@ -17872,6 +17872,41 @@ Validation:
 - `cargo test --workspace --tests --quiet`
 - `git diff --check`
 
+## Slice 344 - CancelAfterBoundary and PublishCommittedVisibleSet are now live seams
+
+Goal: close the last two explicitly deferred Meerkat cutover seams instead of
+leaving them as target-only machine verbs.
+
+What landed:
+- `meerkat-runtime/src/meerkat_machine_types.rs`
+  - `CancelAfterBoundary` now exists on the Meerkat session command surface
+- `meerkat-runtime/src/meerkat_machine.rs`
+  - `MeerkatMachine::cancel_after_boundary(...)` now routes the request through
+    the live attached-loop control seam
+- `meerkat-session/src/ephemeral.rs`
+  - boundary-cancel requests now set a shared live flag and wake the running
+    session task
+- `meerkat/src/service_factory.rs`
+  - real runtime-backed agents now expose the shared boundary-cancel handle
+- `meerkat-core/src/agent/runner.rs`
+  - committed visibility publication is now one explicit helper:
+    `publish_committed_visible_set()`
+- `meerkat-core/src/agent/state.rs`
+  - boundary visibility tests now prove the committed state is persisted into
+    session metadata
+
+Why this matters:
+- `CancelAfterBoundary` is no longer just target-machine truth; it now has a
+  real top-level lowering through the runtime/session authority seam
+- `PublishCommittedVisibleSet` is no longer only an implicit side effect in the
+  runner; it is now a named committed-visibility publication seam
+
+Validation:
+- `cargo test -p meerkat-session --test ephemeral_contract test_cancel_after_boundary -- --nocapture`
+- `cargo test -p meerkat-runtime --lib cancel_after_boundary_ -- --nocapture`
+- `cargo test -p meerkat-core --lib run_loop_boundary_applies_filter_and_emits_tool_config_changed_and_notice -- --nocapture`
+- `git diff --check`
+
 ## Slice 344 - Meerkat authority rename is complete and the full cut is green
 
 Goal: finish the accepted v1 authority rename so the runtime control plane is

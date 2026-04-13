@@ -540,9 +540,9 @@ fn insert_bridge_session_aliases(
     value: &mut serde_json::Value,
     bridge_session_id: Option<&meerkat_core::types::SessionId>,
 ) {
-    let payload = value
-        .as_object_mut()
-        .expect("bridge session aliases require object payload");
+    let Some(payload) = value.as_object_mut() else {
+        return;
+    };
     let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
     payload.insert(
         "session_id".to_string(),
@@ -564,10 +564,9 @@ fn member_ref_result_payload(member_ref: &meerkat_mob::MemberRef) -> serde_json:
 
 fn spawn_member_result_payload(member_ref: &meerkat_mob::MemberRef) -> serde_json::Value {
     let mut payload = member_ref_result_payload(member_ref);
-    payload
-        .as_object_mut()
-        .expect("member ref payload must be object")
-        .insert("status".to_string(), serde_json::json!("ok"));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("status".to_string(), serde_json::json!("ok"));
+    }
     payload
 }
 
@@ -2742,8 +2741,12 @@ mod tests {
             "resume_bridge_session_id": sid,
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("spawn specs should deserialize");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_ok(),
+            "spawn specs should deserialize: {specs_result:?}"
+        );
+        let specs = specs_result.unwrap_or_default();
 
         assert_eq!(specs.len(), 1);
         assert_eq!(

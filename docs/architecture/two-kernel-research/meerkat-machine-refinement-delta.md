@@ -30,21 +30,22 @@ This delta classifies each gap as one of:
 - `accepted_target_cleanup`
 - `required_implementation_work`
 - `target_promotion_not_yet_lowered`
+- `resolved_on_branch`
 
 ## Major deltas
 
-### 1. `CancelAfterBoundary` is target machine truth but not a live top-level lowering
+### 1. `CancelAfterBoundary` is now a live top-level lowering
 
 Classification:
 
-- `target_promotion_not_yet_lowered`
+- `resolved_on_branch`
 
 Current state:
 
-- the exact-current freeze explicitly excludes a discovered live top-level
-  lowering for `CancelAfterBoundary`
-- the concept exists in authority/model terms, but not yet as a full current
-  Meerkat boundary action
+- the runtime authority surface now lowers `CancelAfterBoundary` through:
+  - `MeerkatMachine::cancel_after_boundary(...)`
+  - `SessionService::cancel_after_boundary(...)`
+  - the live boundary-cancel flag observed by the agent runner at safe phases
 
 Target state:
 
@@ -52,8 +53,8 @@ Target state:
 
 Cutover consequence:
 
-- implementation work must surface one canonical lowering before the target
-  alphabet can become write-side truth
+- this item is no longer a write-side blocker; remaining cancel work is about
+  runtime semantics and coverage rather than missing top-level lowering
 
 ### 2. Detached wake still has an exact-current compatibility fallback
 
@@ -90,6 +91,8 @@ Current state:
   - `tool_surface`
 - durable visibility ownership, exact catalog seams, and session-task mutation
   seams now exist in the live branch
+- committed visibility publication now has one explicit helper seam:
+  `Agent::publish_committed_visible_set()`
 
 Target state:
 

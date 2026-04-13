@@ -624,7 +624,7 @@ mod tests {
 
         let transition = authority
             .apply(PeerCommsInput::SubmitTypedPeerInput {
-                raw_item_id: RawItemId(prepared.raw_item_id.clone()),
+                raw_item_id: RawItemId(prepared.raw_item_id),
             })
             .expect("submit prepared envelope");
 
@@ -675,7 +675,7 @@ mod tests {
 
         let transition = authority
             .apply(PeerCommsInput::SubmitTypedPeerInput {
-                raw_item_id: RawItemId(prepared.raw_item_id.clone()),
+                raw_item_id: RawItemId(prepared.raw_item_id),
             })
             .expect("submit prepared auth-open envelope");
 

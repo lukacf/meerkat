@@ -624,14 +624,18 @@ impl MeerkatMachine {
             MeerkatMachineSessionCommand::InterruptCurrentRun { session_id } => self
                 .interrupt_current_run_inner(&session_id)
                 .await
-                .map(|_| MeerkatMachineSessionCommandResult::Unit),
+                .map(|()| MeerkatMachineSessionCommandResult::Unit),
+            MeerkatMachineSessionCommand::CancelAfterBoundary { session_id } => self
+                .cancel_after_boundary_inner(&session_id)
+                .await
+                .map(|()| MeerkatMachineSessionCommandResult::Unit),
             MeerkatMachineSessionCommand::StopRuntimeExecutor {
                 session_id,
                 command,
             } => self
                 .stop_runtime_executor_inner(&session_id, command)
                 .await
-                .map(|_| MeerkatMachineSessionCommandResult::Unit),
+                .map(|()| MeerkatMachineSessionCommandResult::Unit),
             MeerkatMachineSessionCommand::ContainsSession { session_id } => {
                 Ok(MeerkatMachineSessionCommandResult::Bool(
                     self.sessions.read().await.contains_key(&session_id),
@@ -838,12 +842,12 @@ impl MeerkatMachine {
                 {
                     let _ = tx.try_send(());
                 }
-                if signal.should_interrupt_yielding() {
-                    if let Some(ref tx) = control_tx {
-                        let _ = tx.try_send(
-                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-                        );
-                    }
+                if signal.should_interrupt_yielding()
+                    && let Some(ref tx) = control_tx
+                {
+                    let _ = tx.try_send(
+                        meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                    );
                 }
 
                 Ok(MeerkatMachineControlCommandResult::AcceptOutcome(outcome))
@@ -1880,6 +1884,20 @@ impl MeerkatMachine {
         .map(|_| ())
     }
 
+    /// Request cancellation at the next safe boundary for the currently-running turn.
+    pub async fn cancel_after_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_session_command(
+            MeerkatMachineSessionCommand::CancelAfterBoundary {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn interrupt_current_run_inner(
         &self,
         session_id: &SessionId,
@@ -1907,6 +1925,37 @@ impl MeerkatMachine {
             })
             .await
             .map_err(|err| RuntimeDriverError::Internal(format!("failed to send interrupt: {err}")))
+    }
+
+    async fn cancel_after_boundary_inner(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let (driver, control_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.control_sender())
+        };
+
+        let Some(control_tx) = control_tx else {
+            let state = {
+                let driver = driver.lock().await;
+                driver.as_driver().runtime_state()
+            };
+            return Err(RuntimeDriverError::NotReady { state });
+        };
+        control_tx
+            .send(RunControlCommand::CancelAfterBoundary {
+                reason: "boundary cancel".to_string(),
+            })
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!("failed to send cancel_after_boundary: {err}"))
+            })
     }
 
     /// Stop the attached runtime executor through the out-of-band control
@@ -5118,6 +5167,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let err = adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect_err("boundary cancel should reject when no attached loop exists");
+        match err {
+            RuntimeDriverError::NotReady { state } => {
+                assert_eq!(state, RuntimeState::Idle);
+            }
+            other => panic!("expected NotReady(Idle), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes() {
         struct BlockingExecutor {
             apply_calls: Arc<AtomicUsize>,
@@ -5317,6 +5385,150 @@ mod tests {
             cancel_calls.load(Ordering::SeqCst),
             1,
             "queued cancel should reach the executor exactly once after apply finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finishes() {
+        struct BlockingExecutor {
+            apply_calls: Arc<AtomicUsize>,
+            boundary_cancel_calls: Arc<AtomicUsize>,
+            apply_started: Arc<Notify>,
+            apply_finished: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_calls.fetch_add(1, Ordering::SeqCst);
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                self.apply_finished.notify_waiters();
+
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                    run_result: None,
+                })
+            }
+
+            async fn control(
+                &mut self,
+                command: RunControlCommand,
+            ) -> Result<(), CoreExecutorError> {
+                if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
+                    self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+        }
+
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+        let apply_started = Arc::new(Notify::new());
+        let apply_finished = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+
+        adapter
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(BlockingExecutor {
+                    apply_calls: Arc::clone(&apply_calls),
+                    boundary_cancel_calls: Arc::clone(&boundary_cancel_calls),
+                    apply_started: Arc::clone(&apply_started),
+                    apply_finished: Arc::clone(&apply_finished),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await;
+
+        let input = Input::Prompt(crate::input::PromptInput::new(
+            "attached steered deferred boundary cancel",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (outcome, completion_handle) = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("attached steered prompt should be accepted");
+        assert!(outcome.is_accepted());
+        let completion_handle =
+            completion_handle.expect("attached steered prompt should expose a completion waiter");
+
+        tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+            .await
+            .expect("attached steered prompt should request immediate processing");
+
+        adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect("boundary cancel should enqueue against the attached loop");
+
+        let after_request = adapter
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("snapshot should exist after boundary cancel is requested");
+        assert_eq!(after_request.control.phase, RuntimeState::Running);
+        assert!(after_request.control.current_run_id.is_some());
+        assert_eq!(
+            boundary_cancel_calls.load(Ordering::SeqCst),
+            0,
+            "boundary cancel should remain queued until apply returns"
+        );
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .expect("apply should finish after the executor is released");
+
+        match completion_handle.wait().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => panic!(
+                "expected attached queued prompt to complete normally before queued boundary cancel drains, got {other:?}"
+            ),
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .expect("snapshot should exist after apply returns");
+                if snapshot.control.phase == RuntimeState::Attached
+                    && snapshot.control.current_run_id.is_none()
+                    && snapshot.inputs.current_run_id.is_none()
+                    && boundary_cancel_calls.load(Ordering::SeqCst) == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("attached runtime should eventually drain the queued boundary cancel");
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            1,
+            "queued boundary cancel should not replay the already-running attached steered turn"
         );
     }
 
@@ -5552,20 +5764,22 @@ mod tests {
         assert_eq!(settled.completion_waiters.input_count, 0);
         assert_eq!(settled.completion_waiters.waiter_count, 0);
 
-        let event_log = events.lock().expect("events mutex poisoned");
-        let interrupt_index = event_log
-            .iter()
-            .position(|event| *event == "interrupt_yielding")
-            .expect("interrupt control should be delivered");
-        let second_apply_index = event_log
-            .iter()
-            .position(|event| *event == "apply2_start")
-            .expect("queued peer input should eventually start a second apply");
+        let (interrupt_index, second_apply_index) = {
+            let event_log = events.lock().expect("events mutex poisoned");
+            let interrupt_index = event_log
+                .iter()
+                .position(|event| *event == "interrupt_yielding")
+                .expect("interrupt control should be delivered");
+            let second_apply_index = event_log
+                .iter()
+                .position(|event| *event == "apply2_start")
+                .expect("queued peer input should eventually start a second apply");
+            (interrupt_index, second_apply_index)
+        };
         assert!(
             interrupt_index < second_apply_index,
             "interrupt-yielding control must drain before the next queued input starts"
         );
-        drop(event_log);
 
         match completion_handle.wait().await {
             CompletionOutcome::CompletedWithoutResult => {}

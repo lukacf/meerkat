@@ -906,6 +906,15 @@ pub trait SessionService: Send + Sync {
     /// Returns `NotRunning` if no turn is active.
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError>;
 
+    /// Cancel an in-flight turn once it reaches the next boundary.
+    ///
+    /// Returns `NotRunning` if no turn is active. Unsupported by default.
+    async fn cancel_after_boundary(&self, _id: &SessionId) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "cancel_after_boundary".to_string(),
+        ))
+    }
+
     /// Replace the LLM client on a live session.
     ///
     /// Enables mid-session model/provider hot-swap without rebuilding the

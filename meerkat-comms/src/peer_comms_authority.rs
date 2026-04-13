@@ -452,11 +452,10 @@ impl PeerCommsAuthority {
                 }
 
                 // Build effect from state maps
-                let peer_input_class = fields
+                let peer_input_class = *fields
                     .classified_as
                     .get(raw_item_id)
-                    .ok_or_else(|| PeerCommsError::MissingItemState(raw_item_id.clone()))?
-                    .clone();
+                    .ok_or_else(|| PeerCommsError::MissingItemState(raw_item_id.clone()))?;
                 let text_projection = fields
                     .text_projection
                     .get(raw_item_id)
@@ -894,7 +893,7 @@ mod tests {
             RawPeerKind::Message,
         ))
         .unwrap();
-        assert!(auth.fields.classified_as.get(&item("item-1")).is_none());
+        assert!(!auth.fields.classified_as.contains_key(&item("item-1")));
     }
 
     #[test]

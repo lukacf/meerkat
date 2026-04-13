@@ -55,6 +55,9 @@ pub(crate) enum MeerkatMachineSessionCommand {
     InterruptCurrentRun {
         session_id: SessionId,
     },
+    CancelAfterBoundary {
+        session_id: SessionId,
+    },
     StopRuntimeExecutor {
         session_id: SessionId,
         command: RunControlCommand,
@@ -84,6 +87,7 @@ pub(crate) enum MeerkatMachineSessionCommand {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MeerkatMachineSessionCommandResult {
     Unit,
     Bool(bool),
@@ -120,6 +124,7 @@ pub(crate) enum MeerkatMachineDrainLocalCommand {
     Wait { session_id: SessionId },
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MeerkatMachineControlCommand {
     Ingest {
         runtime_id: LogicalRuntimeId,
@@ -190,12 +195,14 @@ pub(crate) struct MeerkatMachineLegacyRunPrepared {
     pub primitive: RunPrimitive,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MeerkatMachineLegacyRunCommandResult {
     Prepared(MeerkatMachineLegacyRunPrepared),
     Unit,
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MeerkatMachineControlCommandResult {
     AcceptOutcome(AcceptOutcome),
     Unit,

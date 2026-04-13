@@ -181,6 +181,13 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 .map_err(|error| CoreExecutorError::ControlFailed {
                     reason: error.to_string(),
                 }),
+            RunControlCommand::CancelAfterBoundary { .. } => self
+                .service
+                .cancel_after_boundary(&self.session_id)
+                .await
+                .map_err(|error| CoreExecutorError::ControlFailed {
+                    reason: error.to_string(),
+                }),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.service.discard_live_session(&self.session_id).await;
                 self.adapter.unregister_session(&self.session_id).await;
@@ -532,6 +539,45 @@ mod tests {
             })
             .await
             .expect_err("cancel without an active run must surface the interrupt error");
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_cancel_after_boundary_surfaces_no_active_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        )
+        .await
+        .expect("materialize session");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        executor
+            .control(RunControlCommand::CancelAfterBoundary {
+                reason: "test boundary cancel".to_string(),
+            })
+            .await
+            .expect_err(
+                "boundary cancel without an active run must surface the session running-state error",
+            );
 
         service
             .discard_live_session(&result.session_id)

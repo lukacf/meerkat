@@ -1569,7 +1569,7 @@ impl MobHandle {
         {
             Ok(MobMachineCommandResult::MobEventRouter(handle)) => handle,
             Ok(_) => unreachable!("subscribe_mob_events returned wrong result"),
-            Err(err) => panic!("subscribe_mob_events machine command failed: {err}"),
+            Err(_) => super::event_router::spawn_event_router(self.clone(), config),
         }
     }
 

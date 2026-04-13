@@ -96,8 +96,8 @@ Current `K1` read:
   conditions
 - there is no distinct current `meerkat-session` interrupt seam inside this
   frozen boundary
-- `cancel_after_boundary` is explicitly classified there as an authority-local
-  or target-state verb until a real lowering exists
+- `cancel_after_boundary` is explicitly classified there as a live
+  runtime/session boundary-cancel lowering
 
 Current `K2` read:
 
@@ -111,7 +111,7 @@ Current `K2` read:
 
 | ID | Item | Status | Why it blocks freeze | Exit criteria |
 | --- | --- | --- | --- | --- |
-| K1 | Freeze interrupt and cancel semantics | Done | Exact current interrupt/cancel semantics are now frozen, and `cancel_after_boundary` is explicitly classified as not yet lowered into the live Meerkat boundary | `meerkat-interrupt-freeze.md` exists; plain and attached runtime proofs exist for `interrupt_current_run`; runtime-adapter `InterruptYielding` delivery is captured; no distinct current session-layer interrupt lowering is discovered; `cancel_after_boundary` is explicitly classified out of exact-current cutover scope until a lowering exists |
+| K1 | Freeze interrupt and cancel semantics | Done | Exact current interrupt/cancel semantics are now frozen, including the live `cancel_after_boundary` lowering | `meerkat-interrupt-freeze.md` exists; plain and attached runtime proofs exist for `interrupt_current_run`; runtime-adapter `InterruptYielding` delivery is captured; no distinct current session-layer interrupt lowering is discovered; `cancel_after_boundary` now has a live runtime/session lowering |
 | K2 | Freeze detached-wake and continuation interaction | Done | Exact current detached-wake and continuation behavior is now frozen, including canonical feed-backed behavior and the legacy compatibility fallback | `meerkat-detached-wake-freeze.md` exists; feed-backed idle/post-drain continuation injection has direct machine proofs; non-quiescent defer behavior is captured; completion-kind filtering is captured; legacy `DetachedWakeState` behavior is explicitly classified as compatibility fallback |
 | K3 | Freeze turn / ops / barrier coupling | Done | Barrier satisfaction and turn/ops coupling are now frozen as exact-current live semantics | `meerkat-turn-ops-barrier-freeze.md` exists; authority proofs, live runner lowering, and joined validator proofs exist |
 | K4 | Freeze peer-ingress lifecycle and recovery | Done | Peer-ingress lifecycle is now frozen as the exact current live queue/authority seam, including the explicit absence of durable queue replay | `meerkat-peer-ingress-freeze.md` exists; trust/classification/runtime-snapshot proofs exist; exact-current recovery classification is explicit |

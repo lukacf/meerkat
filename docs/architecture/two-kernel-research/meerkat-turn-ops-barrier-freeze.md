@@ -33,8 +33,9 @@ This freeze does **not** claim:
 - that arbitrary joined turn + ops snapshots are fully atomic
 - that operation status and turn phase can be compared without regard to the
   authority-owned wait/barrier seam
-- that `cancel_after_boundary` is part of the current live Meerkat boundary
-  (that remains explicitly classified in `meerkat-interrupt-freeze.md`)
+- that `cancel_after_boundary` is fully explained by the barrier model alone;
+  its live lowering exists, but its full semantics remain frozen under
+  `meerkat-interrupt-freeze.md`
 
 ## Exact current semantics
 
@@ -134,7 +135,6 @@ What is explicitly **not** frozen as exact current live behavior:
 
 - a stronger “all barrier ops terminal in the same snapshot where the turn is
   already advanced” rule
-- any live lowering for `cancel_after_boundary`
 - any claim that detached-wake/continuation behavior is already fully absorbed
   into this barrier model
 
@@ -171,7 +171,7 @@ The narrow verification lane for this freeze asset is:
 - `cargo test -p meerkat-core --lib ops_barrier_satisfied_wrong_run_id_rejected`
 - `cargo test -p meerkat-core --lib barrier_satisfied_reset_after_tool_calls_resolved`
 - `cargo test -p meerkat --lib validate_meerkat_machine_snapshot_reports_turn_ops_barrier_violations`
-- `cargo test -p meerkat-runtime --lib session_adapter`
+- `cargo test -p meerkat-runtime --lib`
 
 What a passing review means:
 

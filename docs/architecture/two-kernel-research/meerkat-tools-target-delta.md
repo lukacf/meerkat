@@ -62,6 +62,11 @@ Likely target machine effects:
 - `PublishCatalogProjection`
 - `EmitVisibilityRevisionChanged`
 
+The exact-current branch now has an explicit live lowering for
+`PublishCommittedVisibleSet` through `Agent::publish_committed_visible_set()`.
+What still remains here is any broader unification of provider publication and
+dispatch gating into one fully centralized tools-region authority seam.
+
 Likely target machine invariants:
 
 - provider schema generation and dispatch-time gating observe the same committed

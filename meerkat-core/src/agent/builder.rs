@@ -318,6 +318,7 @@ impl AgentBuilder {
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
+            cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
             extraction_result: None,
@@ -777,40 +778,54 @@ mod tests {
         let barrier_id = OperationId::new();
         let detached_id = OperationId::new();
 
-        agent
+        let start_result = agent
             .turn_authority
             .apply(TurnExecutionInput::StartConversationRun {
                 run_id: run_id.clone(),
-            })
-            .expect("start run should succeed");
-        agent
+            });
+        assert!(
+            start_result.is_ok(),
+            "start run should succeed: {start_result:?}"
+        );
+        let primitive_result = agent
             .turn_authority
             .apply(TurnExecutionInput::PrimitiveApplied {
                 run_id: run_id.clone(),
                 admitted_content_shape: ContentShape("prompt_text".into()),
                 vision_enabled: true,
                 image_tool_results_enabled: true,
-            })
-            .expect("primitive applied should succeed");
-        agent
-            .turn_authority
-            .apply(TurnExecutionInput::LlmReturnedToolCalls {
-                run_id: run_id.clone(),
-                tool_count: 2,
-            })
-            .expect("tool call transition should succeed");
-        agent
-            .turn_authority
-            .apply(TurnExecutionInput::RegisterPendingOps {
-                run_id: run_id.clone(),
-                op_refs: vec![
-                    AsyncOpRef::barrier(barrier_id.clone()),
-                    AsyncOpRef::detached(detached_id.clone()),
-                ],
-                barrier_operation_ids: vec![barrier_id.clone()],
-                has_barrier_ops: true,
-            })
-            .expect("pending ops should register");
+            });
+        assert!(
+            primitive_result.is_ok(),
+            "primitive applied should succeed: {primitive_result:?}"
+        );
+        let tool_call_result =
+            agent
+                .turn_authority
+                .apply(TurnExecutionInput::LlmReturnedToolCalls {
+                    run_id: run_id.clone(),
+                    tool_count: 2,
+                });
+        assert!(
+            tool_call_result.is_ok(),
+            "tool call transition should succeed: {tool_call_result:?}"
+        );
+        let pending_ops_result =
+            agent
+                .turn_authority
+                .apply(TurnExecutionInput::RegisterPendingOps {
+                    run_id: run_id.clone(),
+                    op_refs: vec![
+                        AsyncOpRef::barrier(barrier_id.clone()),
+                        AsyncOpRef::detached(detached_id.clone()),
+                    ],
+                    barrier_operation_ids: vec![barrier_id.clone()],
+                    has_barrier_ops: true,
+                });
+        assert!(
+            pending_ops_result.is_ok(),
+            "pending ops should register: {pending_ops_result:?}"
+        );
         agent.state = crate::state::LoopState::WaitingForOps;
         agent.applied_cursor = 42;
 

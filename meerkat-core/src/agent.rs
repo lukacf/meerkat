@@ -825,6 +825,8 @@ where
         Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
+    /// Shared live flag for cancellation at the next turn boundary.
+    pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).
     /// Consulted at each LLM call for hot-swap-aware profile default resolution.
     pub(crate) model_defaults_resolver:

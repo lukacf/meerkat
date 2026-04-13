@@ -8360,13 +8360,17 @@ mod tests {
             &session_id,
         )
         .expect("peer request reserve_interaction stream should be accepted");
-        let meerkat_core::comms::CommsCommand::PeerRequest {
-            stream,
-            handling_mode,
-            ..
-        } = cmd
-        else {
-            panic!("unexpected command parsed for peer request payload");
+        assert!(
+            matches!(cmd, meerkat_core::comms::CommsCommand::PeerRequest { .. }),
+            "unexpected command parsed for peer request payload: {cmd:?}"
+        );
+        let (stream, handling_mode) = match cmd {
+            meerkat_core::comms::CommsCommand::PeerRequest {
+                stream,
+                handling_mode,
+                ..
+            } => (stream, handling_mode),
+            _ => unreachable!("asserted above"),
         };
         assert_eq!(
             stream,

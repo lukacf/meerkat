@@ -35,9 +35,9 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
 }
 
 fn insert_bridge_session_aliases(payload: &mut Value, bridge_session_id: Option<&SessionId>) {
-    let payload = payload
-        .as_object_mut()
-        .expect("bridge session aliases require object payload");
+    let Some(payload) = payload.as_object_mut() else {
+        return;
+    };
     let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
     payload.insert(
         "session_id".to_string(),

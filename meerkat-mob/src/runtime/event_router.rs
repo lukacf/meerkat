@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Configuration for the [`MobEventRouter`].
+#[derive(Clone, Copy)]
 pub struct MobEventRouterConfig {
     /// How often to poll the mob event store for roster changes.
     pub poll_interval: Duration,

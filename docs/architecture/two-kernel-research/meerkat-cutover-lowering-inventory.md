@@ -37,7 +37,7 @@ Each entry is classified as one of:
 | `RecoverRuntime` | `MeerkatMachine::recover(...)` | `needs_centralization` |
 | `RecycleRuntime` | `MeerkatMachine::recycle(...)` | `needs_centralization` |
 | `DestroyRuntime` | `MeerkatMachine::destroy(...)` | `needs_centralization` |
-| `CancelAfterBoundary` | no honest top-level lowering today | `target_only` |
+| `CancelAfterBoundary` | `MeerkatMachine::cancel_after_boundary(...)` -> session-service boundary-cancel flag | `canonical_ready` |
 
 ## Admission / input ledger
 
@@ -83,7 +83,7 @@ Each entry is classified as one of:
 | `PendingSucceeded` | router completion protocol path | `needs_centralization` |
 | `FinalizeRemovalClean` / `FinalizeRemovalForced` | router removal finalization path | `needs_centralization` |
 | `PublishToolSurfaceSnapshot` | router -> runner -> session -> factory forwarding | `needs_centralization` |
-| `PublishCommittedVisibleSet` | target single committed publication contract | `target_only` |
+| `PublishCommittedVisibleSet` | `Agent::publish_committed_visible_set()` during boundary visibility apply | `canonical_ready` |
 
 ## Drain / keep-alive
 

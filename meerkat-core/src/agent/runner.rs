@@ -138,10 +138,7 @@ where
             })?;
         }
 
-        if visibility_changed
-            && let Ok(visibility_state) = self.tool_scope.visibility_state()
-            && let Err(err) = self.session.set_tool_visibility_state(visibility_state)
-        {
+        if visibility_changed && let Err(err) = self.publish_committed_visible_set() {
             return Err(AgentError::InternalError(format!(
                 "failed to persist session effects into tool visibility state: {err}"
             )));
@@ -184,6 +181,27 @@ where
     /// `run()` / `run_with_events()` call.
     pub fn replace_client(&mut self, client: Arc<C>) {
         self.client = client;
+    }
+
+    /// Shared live control flag for boundary-only cancellation requests.
+    pub fn cancel_after_boundary_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.cancel_after_boundary_requested)
+    }
+
+    /// Persist the currently committed visible tool set into canonical session metadata.
+    pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
+        let visibility_state = self.tool_scope.visibility_state().map_err(|err| {
+            AgentError::InternalError(format!(
+                "failed to snapshot canonical tool visibility state: {err}"
+            ))
+        })?;
+        self.session
+            .set_tool_visibility_state(visibility_state)
+            .map_err(|err| {
+                AgentError::InternalError(format!(
+                    "failed to persist canonical tool visibility state: {err}"
+                ))
+            })
     }
 
     #[cfg(test)]

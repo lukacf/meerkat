@@ -29,6 +29,7 @@ use meerkat_core::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Tokio re-exports: on wasm32, use the crate-level alias (tokio_with_wasm).
 #[cfg(target_arch = "wasm32")]
@@ -180,6 +181,8 @@ struct SessionHandle {
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     /// Wakes the running turn loop when an interrupt is requested.
     interrupt_notify: Arc<tokio::sync::Notify>,
+    /// Shared live flag for cancel-after-boundary requests.
+    cancel_after_boundary_handle: Option<Arc<AtomicBool>>,
     /// Broadcast channel for session-wide event subscription.
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
 }
@@ -321,6 +324,11 @@ pub trait SessionAgent: Send {
 
     /// Cancel the currently running turn.
     fn cancel(&mut self);
+
+    /// Shared live control flag for cancel-after-boundary requests.
+    fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
 
     /// Get the session ID.
     fn session_id(&self) -> SessionId;
@@ -1168,6 +1176,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let event_injector = agent.event_injector();
         let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
+        let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
         let system_context_state = agent.system_context_state();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
@@ -1237,6 +1246,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             system_context_state,
             deferred_turn_state,
             interrupt_notify,
+            cancel_after_boundary_handle,
             session_event_tx,
         };
 
@@ -1547,6 +1557,35 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         )
         .map(|_| ())
         .map_err(|_| SessionError::NotRunning { id: id.clone() })
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+
+        let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
+        else {
+            return Err(SessionError::Unsupported(
+                "cancel_after_boundary".to_string(),
+            ));
+        };
+
+        let phase = {
+            let guard = handle
+                .turn_admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.phase()
+        };
+        if phase != SessionTurnAdmissionPhase::Running {
+            return Err(SessionError::NotRunning { id: id.clone() });
+        }
+
+        cancel_after_boundary_handle.store(true, Ordering::SeqCst);
+        handle.interrupt_notify.notify_waiters();
+        Ok(())
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {

@@ -383,6 +383,38 @@ where
         }
     }
 
+    fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
+        if !self
+            .cancel_after_boundary_requested
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+
+        if self.turn_authority.active_run() != Some(run_id)
+            || self.turn_authority.cancel_after_boundary()
+        {
+            return Ok(());
+        }
+
+        use crate::turn_execution_authority::TurnPhase;
+        match self.turn_authority.phase() {
+            TurnPhase::ApplyingPrimitive
+            | TurnPhase::CallingLlm
+            | TurnPhase::WaitingForOps
+            | TurnPhase::DrainingBoundary
+            | TurnPhase::Extracting
+            | TurnPhase::ErrorRecovery => {
+                self.apply_turn_input(TurnExecutionInput::CancelAfterBoundary {
+                    run_id: run_id.clone(),
+                })?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -430,6 +462,8 @@ where
         }
 
         loop {
+            self.observe_cancel_after_boundary_request(&run_id)?;
+
             // Check turn limit
             if turn_count >= max_turns {
                 self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
@@ -647,10 +681,7 @@ where
                             deferred_tool_names,
                         ) {
                             Ok(applied) => {
-                                if let Ok(visibility_state) = self.tool_scope.visibility_state()
-                                    && let Err(err) =
-                                        self.session.set_tool_visibility_state(visibility_state)
-                                {
+                                if let Err(err) = self.publish_committed_visible_set() {
                                     tracing::warn!(
                                         error = %err,
                                         "failed to persist canonical tool visibility state after boundary apply"
@@ -1077,6 +1108,8 @@ where
                         });
                     }
 
+                    self.observe_cancel_after_boundary_request(&run_id)?;
+
                     // Check if we have tool calls
                     if assistant_msg.has_tool_calls() {
                         // Add assistant message with ordered blocks
@@ -1396,6 +1429,8 @@ where
                             results: tool_results,
                         });
 
+                        self.observe_cancel_after_boundary_request(&run_id)?;
+
                         self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
                             run_id: run_id.clone(),
                             op_refs: pending_op_refs,
@@ -1430,6 +1465,7 @@ where
                         })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
+                        self.observe_cancel_after_boundary_request(&run_id)?;
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
 
                         // Authority: DrainingBoundary -> Extracting for validation
@@ -1556,6 +1592,7 @@ where
                         })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
+                        self.observe_cancel_after_boundary_request(&run_id)?;
 
                         // Emit turn completed only after turn-boundary hooks
                         // accept and boundary side effects are committed.
@@ -1659,6 +1696,7 @@ where
                         )?;
                         self.state = transition.next_phase.to_loop_state();
                     }
+                    self.observe_cancel_after_boundary_request(&run_id)?;
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
                         run_id: run_id.clone(),
                     })?;
@@ -3681,6 +3719,22 @@ mod tests {
         assert!(
             saw_config_event,
             "expected ToolConfigChanged event on boundary visibility change"
+        );
+
+        let visibility_state = agent
+            .session()
+            .tool_visibility_state()
+            .expect("boundary visibility apply should persist committed state");
+        let expected_filter = crate::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+        assert_eq!(visibility_state.active_filter, expected_filter);
+        assert_eq!(
+            visibility_state.staged_filter,
+            visibility_state.active_filter
+        );
+        assert!(visibility_state.active_revision > 0);
+        assert_eq!(
+            visibility_state.staged_revision,
+            visibility_state.active_revision
         );
 
         let notices: Vec<String> = agent

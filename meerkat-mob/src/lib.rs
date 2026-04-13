@@ -62,8 +62,9 @@ pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
-    BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName,
-    RunId, StepId, TaskId,
+    AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
+    LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin,
+    WorkRef, WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};

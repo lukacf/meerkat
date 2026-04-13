@@ -10157,10 +10157,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher_a,
             "t-spawn-a",
-            "meerkat_spawn",
+            "mob_spawn_member",
             serde_json::json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "lead", "meerkat_id": "lead-1", "runtime_mode": "turn_driven"}]
+                "specs": [{"profile": "lead", "member_id": "lead-1", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;

@@ -759,6 +759,47 @@ impl MeerkatMachine {
                     driver.as_driver().active_input_ids(),
                 ))
             }
+            MeerkatMachineSessionCommand::PublishCommittedVisibleSet {
+                session_id,
+                visibility_state,
+            } => {
+                // Guard: session must exist — publishing to an unknown session
+                // has no target.
+                let sessions = self.sessions.read().await;
+                if !sessions.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                drop(sessions);
+
+                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+
+                // Guard: VisibleSurfacesMatchAppliedStateInvariant —
+                // the committed (active) revision must not lag behind the staged
+                // revision. A lagging active revision means the visible set has
+                // not caught up with staged mutations, violating the TLA+
+                // invariant that visible_surfaces == {s : base_state[s] # None}.
+                if visibility_state.active_revision < visibility_state.staged_revision {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "VisibleSurfacesMatchAppliedStateInvariant violated: \
+                             active_revision ({}) < staged_revision ({})",
+                            visibility_state.active_revision, visibility_state.staged_revision,
+                        ),
+                    });
+                }
+
+                Ok(MeerkatMachineSessionCommandResult::VisibilityPublished(
+                    visibility_state,
+                ))
+            }
         }
     }
 
@@ -2010,6 +2051,34 @@ impl MeerkatMachine {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Publish the committed visible tool set through the machine dispatch.
+    ///
+    /// Routes the visibility publication through the canonical command path,
+    /// enforcing session-existence and Destroyed guards per the TLA+
+    /// `VisibleSurfacesMatchAppliedStateInvariant`.
+    ///
+    /// Returns the validated visibility state on success.
+    pub async fn publish_committed_visible_set(
+        &self,
+        session_id: &SessionId,
+        visibility_state: meerkat_core::SessionToolVisibilityState,
+    ) -> Result<meerkat_core::SessionToolVisibilityState, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::PublishCommittedVisibleSet {
+                    session_id: session_id.clone(),
+                    visibility_state,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::VisibilityPublished(state) => Ok(state),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for publish_committed_visible_set: {other:?}"
+            ))),
+        }
     }
 
     async fn interrupt_current_run_inner(
@@ -13335,5 +13404,111 @@ mod tests {
         snapshot
             .validate_spine_invariants()
             .expect("all invariants should hold after steered input");
+    }
+
+    // ---------------------------------------------------------------
+    // A7: PublishCommittedVisibleSet dispatch guards
+    // (TLA+ VisibleSurfacesMatchAppliedStateInvariant)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn publish_committed_visible_set_succeeds_for_registered_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let state = meerkat_core::SessionToolVisibilityState {
+            active_revision: 1,
+            staged_revision: 1,
+            ..Default::default()
+        };
+        let result = adapter
+            .publish_committed_visible_set(&session_id, state.clone())
+            .await;
+        let published = result.expect("publish should succeed for registered session");
+        assert_eq!(
+            published.active_revision, state.active_revision,
+            "returned state should match the submitted state"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_committed_visible_set_rejects_unknown_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        let state = meerkat_core::SessionToolVisibilityState::default();
+        let err = adapter
+            .publish_committed_visible_set(&session_id, state)
+            .await
+            .expect_err("publish should reject an unknown session");
+        assert!(
+            matches!(err, RuntimeDriverError::NotReady { .. }),
+            "expected NotReady, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_committed_visible_set_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let state = meerkat_core::SessionToolVisibilityState::default();
+        let err = adapter
+            .publish_committed_visible_set(&session_id, state)
+            .await
+            .expect_err("publish should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_committed_visible_set_rejects_stale_active_revision() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        // VisibleSurfacesMatchAppliedStateInvariant: active_revision must not
+        // lag behind staged_revision.
+        let state = meerkat_core::SessionToolVisibilityState {
+            active_revision: 1,
+            staged_revision: 3,
+            ..Default::default()
+        };
+        let err = adapter
+            .publish_committed_visible_set(&session_id, state)
+            .await
+            .expect_err("publish should reject stale active revision");
+        assert!(
+            matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+            "expected ValidationFailed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        // active_revision > staged_revision is valid — the active set has
+        // advanced past the last staged projection.
+        let state = meerkat_core::SessionToolVisibilityState {
+            active_revision: 5,
+            staged_revision: 3,
+            ..Default::default()
+        };
+        let result = adapter
+            .publish_committed_visible_set(&session_id, state)
+            .await;
+        result.expect("publish should succeed when active_revision >= staged_revision");
     }
 }

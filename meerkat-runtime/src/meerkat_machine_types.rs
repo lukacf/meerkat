@@ -84,6 +84,15 @@ pub(crate) enum MeerkatMachineSessionCommand {
     ListActiveInputs {
         session_id: SessionId,
     },
+    /// Publish the committed visible tool set through the machine dispatch.
+    ///
+    /// TLA+ source: VisibleSurfacesMatchAppliedStateInvariant —
+    /// the visible-set publication must route through the canonical command
+    /// path and be gated on session existence and non-Destroyed state.
+    PublishCommittedVisibleSet {
+        session_id: SessionId,
+        visibility_state: meerkat_core::SessionToolVisibilityState,
+    },
 }
 
 #[derive(Debug)]
@@ -95,6 +104,7 @@ pub(crate) enum MeerkatMachineSessionCommandResult {
     Bindings(meerkat_core::SessionRuntimeBindings),
     InputState(Option<InputState>),
     ActiveInputs(Vec<InputId>),
+    VisibilityPublished(meerkat_core::SessionToolVisibilityState),
 }
 
 /// Public comms-drain mutations that now route through the Meerkat machine

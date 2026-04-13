@@ -60,7 +60,7 @@ pub mod validate;
 pub use backend::{MobBackendKind, RuntimeBinding};
 pub use definition::MobDefinition;
 pub use error::MobError;
-pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
+pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin,

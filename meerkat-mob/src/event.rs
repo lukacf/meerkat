@@ -4,7 +4,10 @@
 //! are projections rebuilt by replaying events.
 
 use crate::definition::MobDefinition;
-use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+use crate::ids::{
+    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, Generation, MeerkatId, MobId, ProfileName,
+    RunId, StepId, TaskId,
+};
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
@@ -65,11 +68,11 @@ pub struct NewMobEvent {
 
 /// Backend-neutral reference to a mob member.
 ///
-/// Canonical serialization is `{"kind":"...", ...}` with additive
-/// `bridge_session_id` alongside compatibility `session_id`, while
-/// deserialization also accepts legacy session-only payloads.
+/// Legacy bridge-level identity retained for internal dispatch. Not part of
+/// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
+/// for all public surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberRef {
+pub(crate) enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.
@@ -239,6 +242,61 @@ pub enum MobEventKind {
         /// Backend-neutral member identity that was retired.
         member_ref: MemberRef,
     },
+
+    // ---------------------------------------------------------------
+    // Identity-native lifecycle events (0.6)
+    // ---------------------------------------------------------------
+    /// A member was spawned with identity-native metadata.
+    ///
+    /// Replaces `MeerkatSpawned` in the public contract. Carries
+    /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
+    /// [`AgentRuntimeId`] instead of [`MeerkatId`] / [`MemberRef`].
+    MemberSpawned {
+        /// Stable member identity.
+        agent_identity: AgentIdentity,
+        /// Generation counter (0 for initial spawn).
+        generation: Generation,
+        /// Fence token for stale-command rejection.
+        fence_token: FenceToken,
+        /// Composite runtime id.
+        agent_runtime_id: AgentRuntimeId,
+        /// Profile name used to spawn.
+        role: ProfileName,
+        /// Runtime mode for this spawned member.
+        #[serde(default)]
+        runtime_mode: MobRuntimeMode,
+        /// Application-defined labels for this member.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        labels: BTreeMap<String, String>,
+    },
+    /// A member was retired.
+    ///
+    /// Identity-native replacement for `MeerkatRetired`.
+    MemberRetired {
+        /// Stable member identity.
+        agent_identity: AgentIdentity,
+        /// Generation at time of retirement.
+        generation: Generation,
+        /// Profile name of the retired member.
+        role: ProfileName,
+    },
+    /// A member was reset to a new generation.
+    ///
+    /// Preserves the [`AgentIdentity`] but advances the [`Generation`]
+    /// counter and issues a new [`FenceToken`] and [`AgentRuntimeId`].
+    MemberReset {
+        /// Stable member identity (unchanged across reset).
+        agent_identity: AgentIdentity,
+        /// Previous generation before reset.
+        previous_generation: Generation,
+        /// New generation after reset.
+        new_generation: Generation,
+        /// New fence token for the reset incarnation.
+        fence_token: FenceToken,
+        /// New composite runtime id.
+        agent_runtime_id: AgentRuntimeId,
+    },
+
     /// Kickoff state for an existing meerkat changed.
     MeerkatKickoffUpdated {
         /// Meerkat whose kickoff state changed.
@@ -718,5 +776,109 @@ mod tests {
         );
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
+    }
+
+    // --- Identity-native event variant tests ---
+
+    #[test]
+    fn test_member_spawned_roundtrip() {
+        let identity = AgentIdentity::from("researcher");
+        roundtrip(&MobEventKind::MemberSpawned {
+            agent_identity: identity.clone(),
+            generation: Generation::INITIAL,
+            fence_token: FenceToken::new(1),
+            agent_runtime_id: AgentRuntimeId::initial(identity),
+            role: ProfileName::from("worker"),
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            labels: BTreeMap::new(),
+        });
+    }
+
+    #[test]
+    fn test_member_spawned_with_labels_roundtrip() {
+        let identity = AgentIdentity::from("coder");
+        let mut labels = BTreeMap::new();
+        labels.insert("team".to_string(), "backend".to_string());
+        roundtrip(&MobEventKind::MemberSpawned {
+            agent_identity: identity.clone(),
+            generation: Generation::INITIAL,
+            fence_token: FenceToken::new(42),
+            agent_runtime_id: AgentRuntimeId::initial(identity),
+            role: ProfileName::from("coder"),
+            runtime_mode: MobRuntimeMode::TurnDriven,
+            labels,
+        });
+    }
+
+    #[test]
+    fn test_member_spawned_defaults_runtime_mode() {
+        let event: MobEvent = serde_json::from_value(json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "member_spawned",
+                "agent_identity": "researcher",
+                "generation": 0,
+                "fence_token": 1,
+                "agent_runtime_id": {
+                    "identity": "researcher",
+                    "generation": 0
+                },
+                "role": "worker"
+            },
+        }))
+        .expect("member_spawned without runtime_mode should parse");
+        match event.kind {
+            MobEventKind::MemberSpawned { runtime_mode, .. } => {
+                assert_eq!(runtime_mode, MobRuntimeMode::AutonomousHost);
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_member_retired_roundtrip() {
+        roundtrip(&MobEventKind::MemberRetired {
+            agent_identity: AgentIdentity::from("researcher"),
+            generation: Generation::new(2),
+            role: ProfileName::from("worker"),
+        });
+    }
+
+    #[test]
+    fn test_member_reset_roundtrip() {
+        let identity = AgentIdentity::from("worker-1");
+        roundtrip(&MobEventKind::MemberReset {
+            agent_identity: identity.clone(),
+            previous_generation: Generation::new(0),
+            new_generation: Generation::new(1),
+            fence_token: FenceToken::new(2),
+            agent_runtime_id: AgentRuntimeId::new(identity, Generation::new(1)),
+        });
+    }
+
+    #[test]
+    fn test_member_reset_generation_advancement() {
+        let identity = AgentIdentity::from("agent-x");
+        let event = MobEventKind::MemberReset {
+            agent_identity: identity.clone(),
+            previous_generation: Generation::new(3),
+            new_generation: Generation::new(4),
+            fence_token: FenceToken::new(99),
+            agent_runtime_id: AgentRuntimeId::new(identity, Generation::new(4)),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: MobEventKind = serde_json::from_str(&json).unwrap();
+        if let MobEventKind::MemberReset {
+            previous_generation,
+            new_generation,
+            ..
+        } = parsed
+        {
+            assert!(new_generation > previous_generation);
+        } else {
+            panic!("expected MemberReset");
+        }
     }
 }

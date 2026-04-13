@@ -93,7 +93,7 @@ impl MobMemberSnapshot {
 pub struct MobMemberListEntry {
     pub meerkat_id: MeerkatId,
     pub profile: ProfileName,
-    pub member_ref: MemberRef,
+    pub(crate) member_ref: MemberRef,
     pub runtime_mode: MobRuntimeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_id: Option<String>,
@@ -1642,7 +1642,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile and return its member reference.
-    pub async fn spawn(
+    pub(crate) async fn spawn(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1653,7 +1653,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member with an explicit runtime binding.
-    pub async fn spawn_with_binding(
+    pub(crate) async fn spawn_with_binding(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1667,7 +1667,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile with explicit backend override.
-    pub async fn spawn_with_backend(
+    pub(crate) async fn spawn_with_backend(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1679,7 +1679,7 @@ impl MobHandle {
     }
 
     /// Spawn a new member from a profile with explicit runtime mode/backend overrides.
-    pub async fn spawn_with_options(
+    pub(crate) async fn spawn_with_options(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1695,7 +1695,7 @@ impl MobHandle {
     }
 
     /// Attach an existing session by reusing the mob spawn control-plane path.
-    pub async fn attach_existing_session(
+    pub(crate) async fn attach_existing_session(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1713,7 +1713,7 @@ impl MobHandle {
     }
 
     /// Attach an existing session as the mob orchestrator.
-    pub async fn attach_existing_session_as_orchestrator(
+    pub(crate) async fn attach_existing_session_as_orchestrator(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1724,7 +1724,7 @@ impl MobHandle {
     }
 
     /// Attach an existing session as a regular mob member.
-    pub async fn attach_existing_session_as_member(
+    pub(crate) async fn attach_existing_session_as_member(
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
@@ -1735,7 +1735,7 @@ impl MobHandle {
     }
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
-    pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
+    pub(crate) async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spec: Box::new(spec),
@@ -1768,7 +1768,7 @@ impl MobHandle {
     /// Spawn multiple members in parallel.
     ///
     /// Results preserve input order.
-    pub async fn spawn_many(
+    pub(crate) async fn spawn_many(
         &self,
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {

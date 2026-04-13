@@ -61,8 +61,8 @@ pub struct RosterEntry {
     pub meerkat_id: MeerkatId,
     /// Profile name this meerkat was spawned from.
     pub profile: ProfileName,
-    /// Backend-neutral identity for this meerkat.
-    pub member_ref: MemberRef,
+    /// Backend-neutral identity for this meerkat (internal bridge handle).
+    pub(crate) member_ref: MemberRef,
     /// Runtime mode for this member.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
@@ -110,7 +110,7 @@ pub struct RosterAddEntry {
     pub meerkat_id: MeerkatId,
     pub profile: ProfileName,
     pub runtime_mode: MobRuntimeMode,
-    pub member_ref: MemberRef,
+    pub(crate) member_ref: MemberRef,
     pub peer_id: Option<String>,
     pub labels: BTreeMap<String, String>,
     /// Effective profile override from `SpawnTooling::Profile` resolution.
@@ -344,7 +344,7 @@ impl Roster {
     }
 
     /// Update the member reference for an existing meerkat.
-    pub fn set_member_ref(&mut self, meerkat_id: &MeerkatId, member_ref: MemberRef) -> bool {
+    pub(crate) fn set_member_ref(&mut self, meerkat_id: &MeerkatId, member_ref: MemberRef) -> bool {
         if let Some(entry) = self.entries.get_mut(meerkat_id) {
             entry.member_ref = member_ref;
             return true;

@@ -271,7 +271,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                 {
                     Ok(receipt) => Ok(immediate_completed_dispatch(
                         occurrence,
-                        Some(receipt.bridge_session_id().to_string()),
+                        Some(receipt.identity.to_string()),
                     )),
                     Err(error) => Ok(immediate_delivery_failure(
                         occurrence,

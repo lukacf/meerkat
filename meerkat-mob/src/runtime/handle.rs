@@ -212,16 +212,18 @@ pub enum MobMemberStatus {
 pub struct MemberRespawnReceipt {
     /// The member identity that was respawned.
     pub identity: AgentIdentity,
-    /// Compatibility alias for the retired member's old bridge session ID.
-    pub old_session_id: Option<SessionId>,
-    /// Canonical retired member old bridge session ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub old_bridge_session_id: Option<SessionId>,
-    /// Compatibility alias for the replacement member's new bridge session ID.
-    pub new_session_id: Option<SessionId>,
-    /// Canonical replacement member new bridge session ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_bridge_session_id: Option<SessionId>,
+    /// Bridge-internal old session ID — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) old_session_id: Option<SessionId>,
+    /// Bridge-internal old session ID — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) old_bridge_session_id: Option<SessionId>,
+    /// Bridge-internal new session ID — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) new_session_id: Option<SessionId>,
+    /// Bridge-internal new session ID — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) new_bridge_session_id: Option<SessionId>,
 }
 
 impl MemberRespawnReceipt {
@@ -341,16 +343,18 @@ pub enum MobRespawnError {
 pub struct MemberDeliveryReceipt {
     /// The member identity.
     pub identity: AgentIdentity,
-    /// Compatibility alias for the bridge session the message was delivered to.
-    pub session_id: SessionId,
-    /// Canonical bridge session ID the message was delivered to.
-    pub bridge_session_id: SessionId,
+    /// Bridge-internal session binding — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) session_id: SessionId,
+    /// Bridge-internal session binding — not part of the public identity contract.
+    #[serde(skip)]
+    pub(crate) bridge_session_id: SessionId,
     /// How the message was handled.
     pub handling_mode: HandlingMode,
 }
 
 impl MemberDeliveryReceipt {
-    pub fn bridge_session_id(&self) -> &SessionId {
+    pub(crate) fn bridge_session_id(&self) -> &SessionId {
         &self.bridge_session_id
     }
 }
@@ -2962,7 +2966,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn member_projection_types_serialize_additive_bridge_session_fields() {
+    fn member_projection_types_omit_bridge_session_fields_in_serialized_output() {
         let sid = SessionId::new();
 
         let snapshot = MobMemberSnapshot {
@@ -2981,33 +2985,12 @@ mod tests {
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
             serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
-        assert_eq!(snapshot_value["current_session_id"], sid.to_string());
-        assert_eq!(snapshot_value["current_bridge_session_id"], sid.to_string());
-
-        let entry = MobMemberListEntry {
-            agent_identity: AgentIdentity::from("worker"),
-            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("worker")),
-            fence_token: FenceToken::new(0),
-            role: ProfileName::from("default"),
-            meerkat_id: MeerkatId::from("worker"),
-            member_ref: MemberRef::from_bridge_session_id(sid.clone()),
-            runtime_mode: MobRuntimeMode::AutonomousHost,
-            peer_id: None,
-            state: crate::roster::MemberState::Active,
-            wired_to: BTreeSet::new(),
-            external_peer_specs: BTreeMap::new(),
-            labels: BTreeMap::new(),
-            status: MobMemberStatus::Active,
-            error: None,
-            is_final: false,
-            current_session_id: None,
-            current_bridge_session_id: None,
-            kickoff: None,
-        }
-        .with_current_bridge_session_id(Some(sid.clone()));
-        let entry_value = serde_json::to_value(&entry).expect("entry should serialize to json");
-        assert_eq!(entry_value["current_session_id"], sid.to_string());
-        assert_eq!(entry_value["current_bridge_session_id"], sid.to_string());
+        // 0.6 clean break: session fields are #[serde(skip)] and must not appear
+        assert!(snapshot_value.get("current_session_id").is_none());
+        assert!(snapshot_value.get("current_bridge_session_id").is_none());
+        // Identity-native fields must be present
+        assert!(!snapshot_value["agent_runtime_id"].is_null());
+        assert!(!snapshot_value["fence_token"].is_null());
     }
 
     #[test]
@@ -3035,7 +3018,7 @@ mod tests {
     }
 
     #[test]
-    fn member_receipt_types_serialize_additive_bridge_session_fields() {
+    fn member_receipt_types_omit_bridge_session_fields_in_serialized_output() {
         let old_sid = SessionId::new();
         let new_sid = SessionId::new();
         let receipt = MemberRespawnReceipt::new(
@@ -3045,10 +3028,13 @@ mod tests {
         );
         let receipt_value =
             serde_json::to_value(&receipt).expect("respawn receipt should serialize to json");
-        assert_eq!(receipt_value["old_session_id"], old_sid.to_string());
-        assert_eq!(receipt_value["old_bridge_session_id"], old_sid.to_string());
-        assert_eq!(receipt_value["new_session_id"], new_sid.to_string());
-        assert_eq!(receipt_value["new_bridge_session_id"], new_sid.to_string());
+        // 0.6 clean break: session fields are #[serde(skip)]
+        assert!(receipt_value.get("old_session_id").is_none());
+        assert!(receipt_value.get("old_bridge_session_id").is_none());
+        assert!(receipt_value.get("new_session_id").is_none());
+        assert!(receipt_value.get("new_bridge_session_id").is_none());
+        // Identity field must be present
+        assert_eq!(receipt_value["identity"], "worker");
 
         let delivery = MemberDeliveryReceipt {
             identity: AgentIdentity::from("worker"),
@@ -3058,8 +3044,10 @@ mod tests {
         };
         let delivery_value =
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
-        assert_eq!(delivery_value["session_id"], new_sid.to_string());
-        assert_eq!(delivery_value["bridge_session_id"], new_sid.to_string());
+        // 0.6 clean break: session fields are #[serde(skip)]
+        assert!(delivery_value.get("session_id").is_none());
+        assert!(delivery_value.get("bridge_session_id").is_none());
+        assert_eq!(delivery_value["identity"], "worker");
 
         let session_ref = MemberSessionRef {
             identity: AgentIdentity::from("worker"),

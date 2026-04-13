@@ -559,9 +559,9 @@ pub async fn handle_member_send(
             id,
             MobMemberSendResult {
                 mob_id: mob_id.to_string(),
-                member_id: receipt.identity.to_string(),
-                session_id: receipt.bridge_session_id().clone(),
-                bridge_session_id: receipt.bridge_session_id().clone(),
+                agent_identity: receipt.identity.to_string(),
+                agent_runtime_id: String::new(), // TODO: populate from roster lookup
+                fence_token: 0,                  // TODO: populate from roster lookup
                 handling_mode: receipt.handling_mode.into(),
             },
         ),

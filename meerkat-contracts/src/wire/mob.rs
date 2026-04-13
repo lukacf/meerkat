@@ -502,11 +502,12 @@ pub struct MobMemberSendParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberSendResult {
     pub mob_id: String,
-    pub member_id: String,
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub session_id: SessionId,
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
-    pub bridge_session_id: SessionId,
+    /// Identity-native member identity (0.6).
+    pub agent_identity: String,
+    /// Identity-native runtime ID for this incarnation (0.6).
+    pub agent_runtime_id: String,
+    /// Fence token for the current incarnation (0.6).
+    pub fence_token: u64,
     pub handling_mode: WireHandlingMode,
 }
 

@@ -1390,10 +1390,10 @@ async fn mob_event_stream(
     let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         if let Some(member) = query.member {
             // Per-member agent event stream.
-            let meerkat_id = meerkat_mob::MeerkatId::from(member.as_str());
+            let identity = meerkat_mob::AgentIdentity::from(member.as_str());
             let mut event_stream = state
                 .mob_state
-                .subscribe_agent_events(&mob_id, &meerkat_id)
+                .subscribe_agent_events(&mob_id, &identity)
                 .await
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
@@ -1467,7 +1467,7 @@ async fn mob_spawn_helper(
     Json(req): Json<SpawnHelperRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let meerkat_id = meerkat_mob::MeerkatId::from(
+    let identity = meerkat_mob::AgentIdentity::from(
         req.meerkat_id
             .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
     );
@@ -1479,14 +1479,14 @@ async fn mob_spawn_helper(
     options.backend = req.backend;
     let result = state
         .mob_state
-        .mob_spawn_helper(&mob_id, meerkat_id, req.prompt, options)
+        .mob_spawn_helper(&mob_id, identity, req.prompt, options)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id,
-        "bridge_session_id": result.bridge_session_id,
+        "session_id": result.session_id(),
+        "bridge_session_id": result.bridge_session_id(),
     })))
 }
 
@@ -1528,7 +1528,7 @@ async fn mob_wait_kickoff(
     let member_ids = request.member_ids.map(|member_ids| {
         member_ids
             .into_iter()
-            .map(|member_id| meerkat_mob::MeerkatId::from(member_id.as_str()))
+            .map(|member_id| meerkat_mob::AgentIdentity::from(member_id.as_str()))
             .collect::<Vec<_>>()
     });
     let members = state
@@ -1548,8 +1548,8 @@ async fn mob_fork_helper(
     Json(req): Json<ForkHelperRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let source_member_id = meerkat_mob::MeerkatId::from(req.source_member_id.as_str());
-    let meerkat_id = meerkat_mob::MeerkatId::from(
+    let source_identity = meerkat_mob::AgentIdentity::from(req.source_member_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(
         req.meerkat_id
             .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
     );
@@ -1566,8 +1566,8 @@ async fn mob_fork_helper(
         .mob_state
         .mob_fork_helper(
             &mob_id,
-            &source_member_id,
-            meerkat_id,
+            &source_identity,
+            identity,
             req.prompt,
             fork_context,
             options,
@@ -1577,8 +1577,8 @@ async fn mob_fork_helper(
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id,
-        "bridge_session_id": result.bridge_session_id,
+        "session_id": result.session_id(),
+        "bridge_session_id": result.bridge_session_id(),
     })))
 }
 
@@ -1589,10 +1589,10 @@ async fn mob_member_status(
     Path((id, meerkat_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let meerkat_id = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
     let snapshot = state
         .mob_state
-        .mob_member_status(&mob_id, &meerkat_id)
+        .mob_member_status(&mob_id, &identity)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok(Json(json!(snapshot)))
@@ -1605,10 +1605,10 @@ async fn mob_force_cancel(
     Path((id, meerkat_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let meerkat_id = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
     state
         .mob_state
-        .mob_force_cancel(&mob_id, meerkat_id)
+        .mob_force_cancel(&mob_id, identity)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok(Json(json!({"cancelled": true})))
@@ -1622,7 +1622,7 @@ async fn mob_member_respawn(
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let meerkat_id_val = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
     let initial_message = body
         .and_then(|Json(v)| v.get("initial_message").cloned())
         .map(serde_json::from_value::<ContentInput>)
@@ -1630,7 +1630,7 @@ async fn mob_member_respawn(
         .map_err(|e| ApiError::BadRequest(format!("invalid initial_message: {e}")))?;
     match state
         .mob_state
-        .mob_respawn(&mob_id, meerkat_id_val, initial_message)
+        .mob_respawn(&mob_id, identity, initial_message)
         .await
     {
         Ok(receipt) => Ok(Json(json!({
@@ -5396,7 +5396,7 @@ mod tests {
             .as_array()
             .expect("members should be an array");
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0]["meerkat_id"], "lead-filter");
+        assert_eq!(members[0]["agent_identity"], "lead-filter");
         assert_eq!(members[0]["status"], "unknown");
     }
 

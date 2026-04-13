@@ -93,7 +93,7 @@ async fn run_event_router(
         for entry in handle.list_members().await {
             if tracked_ids.insert(entry.meerkat_id.clone())
                 && let Some(stream) =
-                    subscribe_member(&handle, entry.meerkat_id.clone(), entry.profile.clone()).await
+                    subscribe_member(&handle, entry.meerkat_id.clone(), entry.role.clone()).await
             {
                 merged.push(stream);
             }
@@ -149,9 +149,32 @@ async fn run_event_router(
                                 merged.push(stream);
                             }
                         }
+                        crate::event::MobEventKind::MemberSpawned {
+                            ref agent_identity,
+                            ref role,
+                            ..
+                        } => {
+                            let meerkat_id =
+                                crate::ids::MeerkatId::from(agent_identity.as_str());
+                            if tracked_ids.insert(meerkat_id.clone())
+                                && let Some(stream) =
+                                    subscribe_member(&handle, meerkat_id, role.clone())
+                                        .await
+                            {
+                                merged.push(stream);
+                            }
+                        }
                         crate::event::MobEventKind::MeerkatRetired {
                             meerkat_id, ..
                         } => {
+                            tracked_ids.remove(&meerkat_id);
+                        }
+                        crate::event::MobEventKind::MemberRetired {
+                            ref agent_identity,
+                            ..
+                        } => {
+                            let meerkat_id =
+                                crate::ids::MeerkatId::from(agent_identity.as_str());
                             tracked_ids.remove(&meerkat_id);
                         }
                         _ => {}

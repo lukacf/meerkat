@@ -39,8 +39,9 @@ use meerkat_core::types::{
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
-    MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
+    AgentIdentity, FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError,
+    MobHandle, MobId, MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId,
+    SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -64,7 +65,7 @@ type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Sen
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KickoffMemberSnapshot {
-    pub meerkat_id: MeerkatId,
+    pub agent_identity: AgentIdentity,
     #[serde(flatten)]
     pub snapshot: meerkat_mob::MobMemberSnapshot,
 }
@@ -526,11 +527,11 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         profile: ProfileName,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         runtime_mode: Option<MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<meerkat_mob::MemberRef, MobError> {
-        let mut spec = SpawnMemberSpec::new(profile, meerkat_id);
+        let mut spec = SpawnMemberSpec::new(profile, identity);
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         self.mob_spawn_spec(mob_id, spec).await
@@ -553,11 +554,12 @@ impl MobMcpState {
         Ok(self.handle_for(mob_id).await?.spawn_many(specs).await)
     }
 
-    pub async fn mob_retire(&self, mob_id: &MobId, meerkat_id: MeerkatId) -> Result<(), MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .retire(meerkat_id.clone())
-            .await
+    pub async fn mob_retire(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id).await?.retire(identity).await
     }
 
     pub async fn retire_member_by_bridge_session_id(
@@ -574,15 +576,14 @@ impl MobMcpState {
             let members = self.handle_for(&mob_id).await?.list_all_members().await;
             if let Some(member) = members.into_iter().find(|member| {
                 member
-                    .member_ref
                     .bridge_session_id()
                     .is_some_and(|candidate| candidate == bridge_session_id)
             }) {
-                resolved = Some((mob_id, member.meerkat_id));
+                resolved = Some((mob_id, member.agent_identity.clone()));
                 break;
             }
         }
-        let Some((mob_id, meerkat_id)) = resolved else {
+        let Some((mob_id, identity)) = resolved else {
             if self.owns_persisted_bridge_session(bridge_session_id).await {
                 return self
                     .session_service()
@@ -598,7 +599,7 @@ impl MobMcpState {
                 "bridge session not found in any live mob authority: {bridge_session_id}"
             )));
         };
-        self.mob_retire(&mob_id, meerkat_id).await
+        self.mob_retire(&mob_id, identity).await
     }
 
     pub async fn retire_member_by_session_id(
@@ -621,7 +622,6 @@ impl MobMcpState {
                 let members = handle.list_all_members().await;
                 if members.into_iter().any(|member| {
                     member
-                        .member_ref
                         .bridge_session_id()
                         .is_some_and(|candidate| candidate == bridge_session_id)
                 }) {
@@ -653,7 +653,6 @@ impl MobMcpState {
         match self.handle_for(&mob_id).await {
             Ok(handle) => handle.list_all_members().await.into_iter().any(|member| {
                 member
-                    .member_ref
                     .bridge_session_id()
                     .is_some_and(|candidate| candidate == bridge_session_id)
             }),
@@ -672,7 +671,7 @@ impl MobMcpState {
     pub async fn mob_wire(
         &self,
         mob_id: &MobId,
-        local: MeerkatId,
+        local: AgentIdentity,
         target: meerkat_mob::PeerTarget,
     ) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.wire(local, target).await
@@ -681,7 +680,7 @@ impl MobMcpState {
     pub async fn mob_unwire(
         &self,
         mob_id: &MobId,
-        local: MeerkatId,
+        local: AgentIdentity,
         target: meerkat_mob::PeerTarget,
     ) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.unwire(local, target).await
@@ -701,7 +700,7 @@ impl MobMcpState {
     pub async fn mob_append_system_context(
         &self,
         mob_id: &MobId,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
         req: AppendSystemContextRequest,
     ) -> Result<(SessionId, AppendSystemContextResult), SessionControlError> {
         let members: Vec<meerkat_mob::runtime::MobMemberListEntry> = self
@@ -712,10 +711,10 @@ impl MobMcpState {
             })?;
         let bridge_session_id = members
             .into_iter()
-            .find(|member| member.meerkat_id == *meerkat_id)
-            .and_then(|member| member.member_ref.bridge_session_id().cloned())
+            .find(|member| &member.agent_identity == identity)
+            .and_then(|member| member.bridge_session_id().cloned())
             .ok_or_else(|| SessionControlError::InvalidRequest {
-                message: format!("member has no session: {meerkat_id}"),
+                message: format!("member has no session: {identity}"),
             })?;
         let result = self
             .session_service()
@@ -727,14 +726,14 @@ impl MobMcpState {
     pub async fn mob_member_send(
         &self,
         mob_id: &MobId,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         content: ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<meerkat_mob::MemberDeliveryReceipt, MobError> {
         self.handle_for(mob_id)
             .await?
-            .member(&meerkat_id)
+            .member(&identity)
             .await?
             .send_with_render_metadata(content, handling_mode, render_metadata)
             .await
@@ -799,39 +798,36 @@ impl MobMcpState {
     pub async fn mob_respawn(
         &self,
         mob_id: &MobId,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         initial_message: Option<meerkat_core::types::ContentInput>,
     ) -> Result<meerkat_mob::MemberRespawnReceipt, meerkat_mob::MobRespawnError> {
         let handle = self.handle_for(mob_id).await?;
-        handle.respawn(meerkat_id, initial_message).await
+        handle.respawn(identity, initial_message).await
     }
 
     pub async fn mob_force_cancel(
         &self,
         mob_id: &MobId,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
     ) -> Result<(), MobError> {
         self.handle_for(mob_id)
             .await?
-            .force_cancel_member(meerkat_id)
+            .force_cancel_member(identity)
             .await
     }
 
     pub async fn mob_member_status(
         &self,
         mob_id: &MobId,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
     ) -> Result<meerkat_mob::MobMemberSnapshot, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .member_status(meerkat_id)
-            .await
+        self.handle_for(mob_id).await?.member_status(identity).await
     }
 
     pub async fn mob_wait_kickoff(
         &self,
         mob_id: &MobId,
-        member_ids: Option<Vec<MeerkatId>>,
+        member_ids: Option<Vec<AgentIdentity>>,
         timeout_ms: Option<u64>,
     ) -> Result<Vec<KickoffMemberSnapshot>, MobError> {
         let handle = self.handle_for(mob_id).await?;
@@ -846,8 +842,8 @@ impl MobMcpState {
         };
         Ok(snapshots
             .into_iter()
-            .map(|(meerkat_id, snapshot)| KickoffMemberSnapshot {
-                meerkat_id,
+            .map(|(identity, snapshot)| KickoffMemberSnapshot {
+                agent_identity: identity,
                 snapshot,
             })
             .collect())
@@ -856,28 +852,28 @@ impl MobMcpState {
     pub async fn mob_spawn_helper(
         &self,
         mob_id: &MobId,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         prompt: String,
         options: meerkat_mob::HelperOptions,
     ) -> Result<meerkat_mob::HelperResult, MobError> {
         self.handle_for(mob_id)
             .await?
-            .spawn_helper(meerkat_id, prompt, options)
+            .spawn_helper(identity, prompt, options)
             .await
     }
 
     pub async fn mob_fork_helper(
         &self,
         mob_id: &MobId,
-        source_member_id: &MeerkatId,
-        meerkat_id: MeerkatId,
+        source_identity: &AgentIdentity,
+        identity: AgentIdentity,
         prompt: String,
         fork_context: meerkat_mob::ForkContext,
         options: meerkat_mob::HelperOptions,
     ) -> Result<meerkat_mob::HelperResult, MobError> {
         self.handle_for(mob_id)
             .await?
-            .fork_helper(source_member_id, meerkat_id, prompt, fork_context, options)
+            .fork_helper(source_identity, identity, prompt, fork_context, options)
             .await
     }
 
@@ -893,11 +889,11 @@ impl MobMcpState {
     pub async fn subscribe_agent_events(
         &self,
         mob_id: &MobId,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
     ) -> Result<meerkat_core::comms::EventStream, MobError> {
         self.handle_for(mob_id)
             .await?
-            .subscribe_agent_events(meerkat_id)
+            .subscribe_agent_events(identity)
             .await
     }
 
@@ -2011,15 +2007,15 @@ struct WireActionArgs {
 }
 
 impl WireActionArgs {
-    fn resolve(self) -> Result<(String, MeerkatId, meerkat_mob::PeerTarget, String), String> {
+    fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
         let action = self.action;
         match (self.local, self.target, self.a, self.b) {
             (Some(local), Some(target), None, None) => {
-                Ok((self.mob_id, MeerkatId::from(local), target, action))
+                Ok((self.mob_id, AgentIdentity::from(local), target, action))
             }
             (None, None, Some(a), Some(b)) => Ok((
                 self.mob_id,
-                MeerkatId::from(a),
+                AgentIdentity::from(a),
                 meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
                 action,
             )),
@@ -2309,7 +2305,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 self.state
-                    .mob_retire(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id))
+                    .mob_retire(
+                        &MobId::from(args.mob_id),
+                        AgentIdentity::from(args.meerkat_id),
+                    )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
@@ -2362,7 +2361,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .state
                     .mob_respawn(
                         &MobId::from(args.mob_id),
-                        MeerkatId::from(meerkat_id_str.as_str()),
+                        AgentIdentity::from(meerkat_id_str.as_str()),
                         args.initial_message,
                     )
                     .await
@@ -2393,7 +2392,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 self.state
-                    .mob_force_cancel(&MobId::from(args.mob_id), MeerkatId::from(args.meerkat_id))
+                    .mob_force_cancel(
+                        &MobId::from(args.mob_id),
+                        AgentIdentity::from(args.meerkat_id),
+                    )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
@@ -2404,7 +2406,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let snapshot = self
                     .state
-                    .mob_member_status(&MobId::from(args.mob_id), &MeerkatId::from(args.meerkat_id))
+                    .mob_member_status(
+                        &MobId::from(args.mob_id),
+                        &AgentIdentity::from(args.meerkat_id),
+                    )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!(snapshot))
@@ -2415,7 +2420,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let member_ids = args.member_ids.map(|ids| {
                     ids.into_iter()
-                        .map(|id| MeerkatId::from(id.as_str()))
+                        .map(|id| AgentIdentity::from(id.as_str()))
                         .collect::<Vec<_>>()
                 });
                 let members = self
@@ -3607,10 +3612,8 @@ mod tests {
         .await;
         let events = events["events"].as_array().cloned().unwrap_or_default();
         assert!(
-            events
-                .iter()
-                .any(|e| e["kind"]["type"] == "meerkat_spawned"),
-            "expected structural events to include meerkat_spawned"
+            events.iter().any(|e| e["kind"]["type"] == "member_spawned"),
+            "expected structural events to include member_spawned"
         );
         assert!(
             events.iter().any(|e| e["kind"]["type"] == "mob_completed"),
@@ -3883,11 +3886,11 @@ mod tests {
         let members = listed["members"].as_array().cloned().unwrap_or_default();
         let lead_mode = members
             .iter()
-            .find(|m| m["meerkat_id"] == "lead-default")
+            .find(|m| m["agent_identity"] == "lead-default")
             .and_then(|m| m["runtime_mode"].as_str());
         let worker_mode = members
             .iter()
-            .find(|m| m["meerkat_id"] == "worker-turn")
+            .find(|m| m["agent_identity"] == "worker-turn")
             .and_then(|m| m["runtime_mode"].as_str());
 
         assert_eq!(lead_mode, Some("autonomous_host"));
@@ -3928,7 +3931,7 @@ mod tests {
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|m| m["meerkat_id"].as_str().map(ToString::to_string))
+            .filter_map(|m| m["agent_identity"].as_str().map(ToString::to_string))
             .collect::<std::collections::BTreeSet<_>>();
         assert!(ids.contains("w-many-a"));
         assert!(ids.contains("w-many-b"));
@@ -3967,8 +3970,8 @@ mod tests {
         .await;
         let members = waited["members"].as_array().expect("members array");
         assert_eq!(members.len(), 2);
-        assert_eq!(members[0]["meerkat_id"], "lead-kickoff");
-        assert_eq!(members[1]["meerkat_id"], "worker-kickoff");
+        assert_eq!(members[0]["agent_identity"], "lead-kickoff");
+        assert_eq!(members[1]["agent_identity"], "worker-kickoff");
     }
 
     #[tokio::test]
@@ -4008,8 +4011,8 @@ mod tests {
         .await;
         let members = waited["members"].as_array().expect("members array");
         assert_eq!(members.len(), 2);
-        assert_eq!(members[0]["meerkat_id"], "kickoff-lead");
-        assert_eq!(members[1]["meerkat_id"], "kickoff-worker");
+        assert_eq!(members[0]["agent_identity"], "kickoff-lead");
+        assert_eq!(members[1]["agent_identity"], "kickoff-worker");
     }
 
     #[tokio::test]
@@ -4310,7 +4313,7 @@ mod tests {
             .mob_spawn(
                 &mob_id,
                 ProfileName::from("worker"),
-                MeerkatId::from("worker-1"),
+                AgentIdentity::from("worker-1"),
                 Some(MobRuntimeMode::TurnDriven),
                 None,
             )
@@ -4322,7 +4325,7 @@ mod tests {
                 .with_persistent_storage_root(Some(root.path().to_path_buf())),
         );
         let status = restored
-            .mob_member_status(&mob_id, &MeerkatId::from("worker-1"))
+            .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
             .await
             .expect("restore member status");
         assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);

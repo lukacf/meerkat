@@ -70,7 +70,7 @@ use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
-use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
+use meerkat_mob::{AgentIdentity, FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
 
 // ═══════════════════════════════════════════════════════════
@@ -574,8 +574,8 @@ fn helper_result_payload(result: &meerkat_mob::HelperResult) -> serde_json::Valu
     serde_json::json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id,
-        "bridge_session_id": result.bridge_session_id,
+        "session_id": result.session_id(),
+        "bridge_session_id": result.bridge_session_id(),
     })
 }
 
@@ -643,7 +643,7 @@ async fn resolve_mob_member_bridge_session_id(
     let members = mob_state.mob_list_members(mob_id).await.map_err(err_mob)?;
     let entry = members
         .iter()
-        .find(|m| m.meerkat_id == *meerkat_id)
+        .find(|m| m.meerkat_id() == meerkat_id)
         .ok_or_else(|| {
             err_js(
                 "member_not_found",
@@ -652,7 +652,6 @@ async fn resolve_mob_member_bridge_session_id(
         })?;
 
     entry
-        .member_ref
         .bridge_session_id()
         .ok_or_else(|| {
             err_js(
@@ -1852,8 +1851,8 @@ struct SpawnSpecInput {
 pub async fn mob_retire(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
-    mob_state.mob_retire(&id, mid).await.map_err(err_mob)
+    let identity = AgentIdentity::from(meerkat_id);
+    mob_state.mob_retire(&id, identity).await.map_err(err_mob)
 }
 
 /// Wire bidirectional trust between two meerkats.
@@ -1864,7 +1863,7 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     mob_state
         .mob_wire(
             &id,
-            MeerkatId::from(a),
+            AgentIdentity::from(a),
             meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
         )
         .await
@@ -1885,7 +1884,7 @@ pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Resul
     let target: meerkat_mob::PeerTarget =
         serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
     mob_state
-        .mob_wire(&id, MeerkatId::from(member), target)
+        .mob_wire(&id, AgentIdentity::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -1898,7 +1897,7 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     mob_state
         .mob_unwire(
             &id,
-            MeerkatId::from(a),
+            AgentIdentity::from(a),
             meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
         )
         .await
@@ -1923,7 +1922,7 @@ pub async fn mob_unwire_peer(mob_id: &str, member: &str, peer_json: &str) -> Res
     let target: meerkat_mob::PeerTarget =
         serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
     mob_state
-        .mob_unwire(&id, MeerkatId::from(member), target)
+        .mob_unwire(&id, AgentIdentity::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -2001,7 +2000,7 @@ pub async fn wire_cross_mob(
         .map_err(err_mob)?;
     let entry_a = members_a
         .iter()
-        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_a))
+        .find(|m| *m.meerkat_id() == MeerkatId::from(meerkat_a))
         .ok_or_else(|| err_js("not_found", &format!("{meerkat_a} not in {mob_a}")))?;
 
     let members_b = mob_state
@@ -2010,15 +2009,13 @@ pub async fn wire_cross_mob(
         .map_err(err_mob)?;
     let entry_b = members_b
         .iter()
-        .find(|m| m.meerkat_id == MeerkatId::from(meerkat_b))
+        .find(|m| *m.meerkat_id() == MeerkatId::from(meerkat_b))
         .ok_or_else(|| err_js("not_found", &format!("{meerkat_b} not in {mob_b}")))?;
 
     let sid_a = entry_a
-        .member_ref
         .bridge_session_id()
         .ok_or_else(|| err_js("no_session", meerkat_a))?;
     let sid_b = entry_b
-        .member_ref
         .bridge_session_id()
         .ok_or_else(|| err_js("no_session", meerkat_b))?;
 
@@ -2048,8 +2045,8 @@ pub async fn wire_cross_mob(
         .ok_or_else(|| err_js("no_key", meerkat_b))?;
 
     // Build peer specs with full mob/profile/meerkat addressing
-    let name_a = format!("{mob_a}/{}/{meerkat_a}", entry_a.profile);
-    let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.profile);
+    let name_a = format!("{mob_a}/{}/{meerkat_a}", entry_a.role);
+    let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.role);
 
     let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
         &name_b,
@@ -2124,7 +2121,7 @@ pub async fn mob_member_send(
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
+    let mid = AgentIdentity::from(meerkat_id);
     let receipt = mob_state
         .mob_member_send(
             &id,
@@ -2143,7 +2140,7 @@ pub async fn mob_member_send(
 pub async fn mob_member_status(mob_id: &str, meerkat_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
+    let mid = AgentIdentity::from(meerkat_id);
     let snapshot = mob_state
         .mob_member_status(&id, &mid)
         .await
@@ -2163,7 +2160,7 @@ pub async fn mob_respawn(
 ) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
+    let mid = AgentIdentity::from(meerkat_id);
     let initial_message = initial_message.map(|message| {
         serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
             .unwrap_or_else(|_| message.into())
@@ -2196,7 +2193,7 @@ pub async fn mob_respawn(
 pub async fn mob_force_cancel(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
+    let mid = AgentIdentity::from(meerkat_id);
     mob_state.mob_force_cancel(&id, mid).await.map_err(err_mob)
 }
 
@@ -2207,7 +2204,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let meerkat_id = MeerkatId::from(
+    let identity = AgentIdentity::from(
         request
             .meerkat_id
             .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
@@ -2219,7 +2216,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
     let result = mob_state
-        .mob_spawn_helper(&id, meerkat_id, request.prompt, options)
+        .mob_spawn_helper(&id, identity, request.prompt, options)
         .await
         .map_err(err_mob)?;
     let json = serde_json::to_string(&helper_result_payload(&result))
@@ -2234,8 +2231,8 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let source_member_id = MeerkatId::from(request.source_member_id.as_str());
-    let meerkat_id = MeerkatId::from(
+    let source_member_id = AgentIdentity::from(request.source_member_id.as_str());
+    let identity = AgentIdentity::from(
         request
             .meerkat_id
             .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
@@ -2253,7 +2250,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
         .mob_fork_helper(
             &id,
             &source_member_id,
-            meerkat_id,
+            identity,
             request.prompt,
             fork_context,
             options,
@@ -2811,7 +2808,7 @@ mod tests {
         let result = mob_state
             .mob_spawn_helper(
                 &mob_id,
-                meerkat_mob::MeerkatId::from("helper-1"),
+                meerkat_mob::AgentIdentity::from("helper-1"),
                 "say hi".to_string(),
                 options,
             )

@@ -43,7 +43,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-runtime/src/session_adapter.rs` — runtime-owned peer ingress reconciliation (update_peer_ingress_context)
+- `meerkat-runtime/src/meerkat_machine.rs` — runtime-owned peer ingress reconciliation (update_peer_ingress_context)
 - `meerkat-runtime/src/comms_drain.rs` — comms inbox drain feeding typed inputs into the runtime adapter
 - `meerkat-core/src/agent/comms_impl.rs` — terminal peer response continuation precursor
 - `meerkat-core/src/agent/runner.rs` — continuation acceptance precursor

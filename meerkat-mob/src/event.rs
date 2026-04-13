@@ -72,7 +72,7 @@ pub struct NewMobEvent {
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MemberRef {
+pub enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.
@@ -268,6 +268,10 @@ pub enum MobEventKind {
         /// Application-defined labels for this member.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         labels: BTreeMap<String, String>,
+        /// Bridge-internal member reference needed for event replay.
+        /// Not part of the public identity-native contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bridge_member_ref: Option<MemberRef>,
     },
     /// A member was retired.
     ///
@@ -349,8 +353,8 @@ pub enum MobEventKind {
         task_id: TaskId,
         /// New status.
         status: super::tasks::TaskStatus,
-        /// New owner (if assigned).
-        owner: Option<MeerkatId>,
+        /// New owner identity (if assigned).
+        owner: Option<AgentIdentity>,
     },
     /// Flow run started.
     FlowStarted {
@@ -624,7 +628,7 @@ mod tests {
         roundtrip(&MobEventKind::TaskUpdated {
             task_id: TaskId::from("task-001"),
             status: TaskStatus::InProgress,
-            owner: Some(MeerkatId::from("agent-1")),
+            owner: Some(AgentIdentity::from("agent-1")),
         });
     }
 
@@ -791,6 +795,7 @@ mod tests {
             role: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
+            bridge_member_ref: None,
         });
     }
 
@@ -807,6 +812,7 @@ mod tests {
             role: ProfileName::from("coder"),
             runtime_mode: MobRuntimeMode::TurnDriven,
             labels,
+            bridge_member_ref: None,
         });
     }
 

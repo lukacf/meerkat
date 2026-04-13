@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
+    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobStorage, SpawnMemberSpec,
     validate_definition,
 };
 
@@ -231,27 +231,22 @@ content = "Implement Rust services, APIs, and data models."
 
     // Spawn an orchestrator (lead profile) and a worker.
     println!("\nSpawning agents...");
-    let lead_ref = handle
-        .spawn(
-            ProfileName::from("lead"),
-            MeerkatId::from("lead-1"),
-            Some("You are the coding swarm orchestrator.".to_string().into()),
-        )
-        .await?;
+    let mut lead_spec = SpawnMemberSpec::new("lead", "lead-1");
+    lead_spec.initial_message = Some("You are the coding swarm orchestrator.".to_string().into());
+    let lead_ref = handle.spawn_spec(lead_spec).await?;
     println!("  Spawned lead-1: {lead_ref:?}");
 
-    let worker_ref = handle
-        .spawn(
-            ProfileName::from("worker"),
-            MeerkatId::from("worker-1"),
-            Some("You are a coding worker in the swarm.".to_string().into()),
-        )
-        .await?;
+    let mut worker_spec = SpawnMemberSpec::new("worker", "worker-1");
+    worker_spec.initial_message = Some("You are a coding worker in the swarm.".to_string().into());
+    let worker_ref = handle.spawn_spec(worker_spec).await?;
     println!("  Spawned worker-1: {worker_ref:?}");
 
     // Wire orchestrator to worker for peer communication.
     handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
+        .wire(
+            AgentIdentity::from("lead-1"),
+            AgentIdentity::from("worker-1"),
+        )
         .await?;
     println!("  Wired lead-1 <-> worker-1");
 
@@ -261,14 +256,14 @@ content = "Implement Rust services, APIs, and data models."
     for m in &members {
         println!(
             "  {} (profile: {}, wired_to: {:?})",
-            m.meerkat_id, m.profile, m.wired_to
+            m.agent_identity, m.role, m.wired_to
         );
     }
 
     // Send a task to the orchestrator (external turn -- lead is external_addressable).
     println!("\nSending task to orchestrator (live LLM call)...");
     handle
-        .member(&MeerkatId::from("lead-1"))
+        .member(&AgentIdentity::from("lead-1"))
         .await?
         .send(
             "Plan a small task: write a function that reverses a string in Rust. \

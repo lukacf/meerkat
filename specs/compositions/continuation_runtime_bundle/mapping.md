@@ -8,7 +8,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `continuation_runtime_bundle`
 
 ### Code Anchors
-- `keep_alive_runtime_adapter`: `meerkat-runtime/src/session_adapter.rs` — runtime-owned peer ingress reconciliation (update_peer_ingress_context)
+- `keep_alive_runtime_adapter`: `meerkat-runtime/src/meerkat_machine.rs` — runtime-owned peer ingress reconciliation (update_peer_ingress_context)
 - `runtime_comms_drain`: `meerkat-runtime/src/comms_drain.rs` — comms inbox drain feeding typed inputs into the runtime adapter
 - `agent_comms_impl`: `meerkat-core/src/agent/comms_impl.rs` — terminal peer response continuation precursor
 - `agent_runner`: `meerkat-core/src/agent/runner.rs` — continuation acceptance precursor

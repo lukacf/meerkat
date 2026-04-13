@@ -155,6 +155,13 @@ string_newtype!(
     AgentIdentity
 );
 
+/// Bridge conversion from legacy MeerkatId to AgentIdentity.
+impl From<MeerkatId> for AgentIdentity {
+    fn from(id: MeerkatId) -> Self {
+        Self::from(id.as_str())
+    }
+}
+
 /// Monotonically increasing generation counter for a mob member.
 ///
 /// Starts at 0 on first spawn, advances on each reset. The generation is

@@ -200,10 +200,12 @@ impl Roster {
                 role,
                 runtime_mode,
                 labels,
+                bridge_member_ref,
             } => {
                 let meerkat_id = MeerkatId::from(agent_identity.as_str());
-                let member_ref =
-                    MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()));
+                let member_ref = bridge_member_ref.clone().unwrap_or_else(|| {
+                    MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()))
+                });
                 self.add(RosterAddEntry {
                     agent_identity: agent_identity.clone(),
                     generation: *generation,
@@ -641,6 +643,16 @@ impl RosterEntry {
 
     pub fn session_id(&self) -> Option<&SessionId> {
         self.bridge_session_id()
+    }
+
+    /// Bridge-internal peer ID for comms wiring.
+    pub fn peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
+    }
+
+    /// Bridge-internal meerkat ID.
+    pub fn meerkat_id(&self) -> &MeerkatId {
+        &self.meerkat_id
     }
 }
 
@@ -1545,6 +1557,7 @@ mod tests {
                 role: ProfileName::from("research"),
                 runtime_mode: MobRuntimeMode::AutonomousHost,
                 labels: BTreeMap::new(),
+                bridge_member_ref: None,
             },
         )];
         let roster = Roster::project(&events);
@@ -1570,6 +1583,7 @@ mod tests {
                     role: ProfileName::from("worker"),
                     runtime_mode: MobRuntimeMode::AutonomousHost,
                     labels: BTreeMap::new(),
+                    bridge_member_ref: None,
                 },
             ),
             make_event(

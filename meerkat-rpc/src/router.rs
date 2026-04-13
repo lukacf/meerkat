@@ -1729,9 +1729,9 @@ impl MethodRouter {
 
         if let Some(member_id_str) = params.member_id {
             // Per-member stream: subscribe to a specific member's agent events.
-            let meerkat_id = meerkat_mob::MeerkatId::from(member_id_str.as_str());
+            let identity = meerkat_mob::AgentIdentity::from(member_id_str.as_str());
             let stream: meerkat_core::comms::EventStream =
-                match handle.subscribe_agent_events(&meerkat_id).await {
+                match handle.subscribe_agent_events(&identity).await {
                     Ok(s) => s,
                     Err(e) => {
                         return RpcResponse::error(
@@ -3857,7 +3857,7 @@ mod tests {
         let members_value = result_value(&members_resp);
         let members = members_value["members"].as_array().expect("members array");
         assert_eq!(members.len(), 1, "retiring member should remain observable");
-        assert_eq!(members[0]["meerkat_id"], "lead-1");
+        assert_eq!(members[0]["agent_identity"], "lead-1");
         assert_eq!(members[0]["state"], "Retiring");
 
         let send_resp = router

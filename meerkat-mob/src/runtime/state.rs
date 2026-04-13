@@ -171,7 +171,7 @@ pub(super) enum MobCommand {
     TaskUpdate {
         task_id: TaskId,
         status: TaskStatus,
-        owner: Option<MeerkatId>,
+        owner: Option<AgentIdentity>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     TaskList {

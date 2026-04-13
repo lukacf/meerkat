@@ -31,7 +31,7 @@ use meerkat_core::{ContentInput, Session, SessionId};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
 #[cfg(feature = "mob")]
 use meerkat_mob::{
-    FlowId, ForkContext, HelperOptions, MeerkatId, MobBackendKind, MobId, MobRunStatus, RunId,
+    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobId, MobRunStatus, RunId,
 };
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpState;
@@ -332,8 +332,8 @@ impl McpScheduleTargetAdapter {
 
         match binding {
             MobTargetBinding::Member { member_id, .. } => {
-                let meerkat_id = MeerkatId::from(member_id.as_str());
-                Ok(if handle.get_member(&meerkat_id).await.is_some() {
+                let identity = AgentIdentity::from(member_id.as_str());
+                Ok(if handle.get_member(&identity).await.is_some() {
                     TargetProbeOutcome::Ready
                 } else {
                     TargetProbeOutcome::Missing {
@@ -354,8 +354,8 @@ impl McpScheduleTargetAdapter {
                 )
             }
             MobTargetBinding::SpawnHelper { member_id, .. } => {
-                let meerkat_id = MeerkatId::from(member_id.as_str());
-                Ok(if handle.get_member(&meerkat_id).await.is_some() {
+                let identity = AgentIdentity::from(member_id.as_str());
+                Ok(if handle.get_member(&identity).await.is_some() {
                     TargetProbeOutcome::Busy {
                         detail: Some(format!("mob member already exists: {member_id}")),
                     }
@@ -368,13 +368,13 @@ impl McpScheduleTargetAdapter {
                 member_id,
                 ..
             } => {
-                let source = MeerkatId::from(source_member_id.as_str());
+                let source = AgentIdentity::from(source_member_id.as_str());
                 if handle.get_member(&source).await.is_none() {
                     return Ok(TargetProbeOutcome::Missing {
                         detail: Some(format!("mob source member not found: {source_member_id}")),
                     });
                 }
-                let target = MeerkatId::from(member_id.as_str());
+                let target = AgentIdentity::from(member_id.as_str());
                 Ok(if handle.get_member(&target).await.is_some() {
                     TargetProbeOutcome::Busy {
                         detail: Some(format!("mob member already exists: {member_id}")),
@@ -481,7 +481,7 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                 } => match mob_state
                     .mob_member_send(
                         &mob_id,
-                        MeerkatId::from(member_id.as_str()),
+                        AgentIdentity::from(member_id.as_str()),
                         content.clone(),
                         HandlingMode::Queue,
                         render_metadata.clone(),
@@ -533,7 +533,7 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                     options,
                     ..
                 } => {
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
+                    let identity = AgentIdentity::from(member_id.as_str());
                     let helper_options = helper_options_from_spec(options)?;
                     let prompt = prompt.clone();
                     Ok(async_completion_dispatch(
@@ -541,7 +541,7 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                         Some(member_id.clone()),
                         Box::pin(async move {
                             match mob_state
-                                .mob_spawn_helper(&mob_id, meerkat_id, prompt, helper_options)
+                                .mob_spawn_helper(&mob_id, identity, prompt, helper_options)
                                 .await
                             {
                                 Ok(_) => Ok(DeliveryTerminal::completed(None)),
@@ -558,8 +558,8 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                     options,
                     ..
                 } => {
-                    let source_member_id = MeerkatId::from(source_member_id.as_str());
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
+                    let source_identity = AgentIdentity::from(source_member_id.as_str());
+                    let meerkat_id = AgentIdentity::from(member_id.as_str());
                     let helper_options = helper_options_from_spec(options)?;
                     let fork_context = fork_context_from_spec(fork_context);
                     let prompt = prompt.clone();
@@ -570,7 +570,7 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                             match mob_state
                                 .mob_fork_helper(
                                     &mob_id,
-                                    &source_member_id,
+                                    &source_identity,
                                     meerkat_id,
                                     prompt,
                                     fork_context,

@@ -1,3 +1,4 @@
+use crate::ids::{AgentRuntimeId, FenceToken};
 use crate::roster::{MemberState, MobMemberKickoffSnapshot};
 use crate::runtime::handle::{
     HelperResult, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
@@ -37,6 +38,8 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) error: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
+    pub(super) agent_runtime_id: AgentRuntimeId,
+    pub(super) fence_token: FenceToken,
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
@@ -54,6 +57,8 @@ impl CanonicalMemberSnapshotMaterial {
         let is_final = MobMemberLifecycleAuthority::is_terminal(self);
         MobMemberSnapshot {
             status,
+            agent_runtime_id: self.agent_runtime_id.clone(),
+            fence_token: self.fence_token,
             output_preview: self.output_preview.clone(),
             error: self.error.clone(),
             tokens_used: self.tokens_used,
@@ -84,6 +89,8 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) restore_failure: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
+    pub(super) agent_runtime_id: AgentRuntimeId,
+    pub(super) fence_token: FenceToken,
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
@@ -105,6 +112,8 @@ impl MobMemberLifecycleAuthority {
                 error: Some(reason),
                 output_preview: None,
                 tokens_used: 0,
+                agent_runtime_id: input.agent_runtime_id,
+                fence_token: input.fence_token,
                 current_bridge_session_id: input.current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff: input.kickoff,
@@ -132,6 +141,8 @@ impl MobMemberLifecycleAuthority {
             error: None,
             output_preview: input.output_preview,
             tokens_used: input.tokens_used,
+            agent_runtime_id: input.agent_runtime_id,
+            fence_token: input.fence_token,
             current_bridge_session_id: input.current_bridge_session_id,
             peer_connectivity: input.peer_connectivity,
             kickoff: input.kickoff,
@@ -169,6 +180,7 @@ impl MobMemberLifecycleAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::AgentIdentity;
 
     #[test]
     fn restore_failure_breaks_present_member() {
@@ -179,6 +191,8 @@ mod tests {
             restore_failure: Some("restore mismatch".into()),
             output_preview: Some("ignored".into()),
             tokens_used: 12,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            fence_token: FenceToken::new(0),
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
@@ -196,6 +210,8 @@ mod tests {
             restore_failure: None,
             output_preview: None,
             tokens_used: 0,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            fence_token: FenceToken::new(0),
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
@@ -213,6 +229,8 @@ mod tests {
             restore_failure: None,
             output_preview: None,
             tokens_used: 0,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            fence_token: FenceToken::new(0),
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,

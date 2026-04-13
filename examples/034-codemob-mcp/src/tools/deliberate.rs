@@ -10,7 +10,7 @@ use std::time::Duration;
 use meerkat::surface::{RequestContext, request_action};
 
 use meerkat_mob::definition::FlowSpec;
-use meerkat_mob::ids::{FlowId, MeerkatId, MobId};
+use meerkat_mob::ids::{AgentIdentity, FlowId, MobId};
 use meerkat_mob::{MobDefinition, MobRun, MobRunStatus, SpawnMemberSpec, StepRunStatus};
 
 use crate::state::ForceState;
@@ -532,7 +532,7 @@ async fn run_comms(
         .mob_state
         .mob_member_send(
             mob_id,
-            MeerkatId::from(orchestrator),
+            AgentIdentity::from(orchestrator),
             task.to_string().into(),
             meerkat_core::types::HandlingMode::Queue,
             None,

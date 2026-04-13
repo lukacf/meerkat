@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
+    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobStorage, SpawnMemberSpec,
     validate_definition,
 };
 
@@ -276,13 +276,9 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
 
     // Spawn the coordinator.
     println!("\nSpawning coordinator...");
-    let coord_ref = handle
-        .spawn(
-            ProfileName::from("coordinator"),
-            MeerkatId::from("coordinator-1"),
-            Some("You are the CI/CD pipeline coordinator.".to_string().into()),
-        )
-        .await?;
+    let mut coord_spec = SpawnMemberSpec::new("coordinator", "coordinator-1");
+    coord_spec.initial_message = Some("You are the CI/CD pipeline coordinator.".to_string().into());
+    let coord_ref = handle.spawn_spec(coord_spec).await?;
     println!("  Spawned coordinator-1: {coord_ref:?}");
 
     // Spawn pipeline stage workers sequentially.
@@ -297,28 +293,30 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     ];
 
     for (profile, id, msg) in &stages {
-        let member_ref = handle
-            .spawn(
-                ProfileName::from(*profile),
-                MeerkatId::from(*id),
-                Some(msg.to_string().into()),
-            )
-            .await?;
+        let mut spec = SpawnMemberSpec::new(*profile, *id);
+        spec.initial_message = Some(msg.to_string().into());
+        let member_ref = handle.spawn_spec(spec).await?;
         println!("  Spawned {id} ({profile}): {member_ref:?}");
     }
 
     // Wire coordinator to all stages, and chain stages sequentially.
     for (_, id, _) in &stages {
         handle
-            .wire(MeerkatId::from("coordinator-1"), MeerkatId::from(*id))
+            .wire(
+                AgentIdentity::from("coordinator-1"),
+                AgentIdentity::from(*id),
+            )
             .await?;
     }
     // Chain: lint -> test -> deploy
     handle
-        .wire(MeerkatId::from("lint-1"), MeerkatId::from("test-1"))
+        .wire(AgentIdentity::from("lint-1"), AgentIdentity::from("test-1"))
         .await?;
     handle
-        .wire(MeerkatId::from("test-1"), MeerkatId::from("deploy-1"))
+        .wire(
+            AgentIdentity::from("test-1"),
+            AgentIdentity::from("deploy-1"),
+        )
         .await?;
     println!("  Wired pipeline topology");
 
@@ -328,7 +326,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     for m in &members {
         println!(
             "  {} (profile: {}, wired_to: {:?})",
-            m.meerkat_id, m.profile, m.wired_to
+            m.agent_identity, m.role, m.wired_to
         );
     }
 
@@ -337,7 +335,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     println!("Sending lint request (live LLM call)...");
     handle
         .internal_turn(
-            MeerkatId::from("lint-1"),
+            AgentIdentity::from("lint-1"),
             "Analyze this Rust function for style issues. Report PASS or FAIL with a one-line reason. \
              Do NOT use any tools -- respond in plain text only.\n\n\
              ```rust\n\
@@ -362,7 +360,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     println!("Sending test request (live LLM call)...");
     handle
         .internal_turn(
-            MeerkatId::from("test-1"),
+            AgentIdentity::from("test-1"),
             "The lint stage passed. Now evaluate the test coverage for this function. \
              Report PASS or FAIL with a one-line summary. \
              Do NOT use any tools -- respond in plain text only.\n\n\

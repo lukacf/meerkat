@@ -113,9 +113,8 @@ pub(crate) use handle::RestoreFailureDiagnostic;
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MemberSessionRef, MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot,
-    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget,
-    SpawnMemberSpec,
+    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
 };
 pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;

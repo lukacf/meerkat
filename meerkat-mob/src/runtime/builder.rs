@@ -1027,6 +1027,7 @@ impl MobBuilder {
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
             autonomous_initial_turns: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             next_spawn_ticket: 0,
+            next_fence_token: std::sync::atomic::AtomicU64::new(1),
             pending_spawns: PendingSpawnLineage::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),

@@ -535,7 +535,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_retire(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -551,7 +551,7 @@ pub async fn handle_public_tools_call(
             match state
                 .mob_respawn(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
                     initial_message,
                 )
                 .await
@@ -580,7 +580,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_wire(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.member.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.member.as_str()),
                     peer_target_from_wire(input.peer),
                 )
                 .await
@@ -593,7 +593,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_unwire(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.member.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.member.as_str()),
                     peer_target_from_wire(input.peer),
                 )
                 .await
@@ -607,7 +607,7 @@ pub async fn handle_public_tools_call(
             let receipt = state
                 .mob_member_send(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
                     content,
                     input.handling_mode.into(),
                     input.render_metadata.map(Into::into),
@@ -616,7 +616,7 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             let mut payload = json!({
                 "mob_id": mob_id,
-                "member_id": receipt.member_id,
+                "member_id": receipt.identity,
                 "handling_mode": input.handling_mode,
             });
             insert_bridge_session_aliases(&mut payload, Some(receipt.bridge_session_id()));
@@ -625,7 +625,7 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_append_system_context" => {
             let input: MeerkatMobAppendSystemContextInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            let meerkat_id = meerkat_mob::MeerkatId::from(input.meerkat_id.as_str());
+            let meerkat_id = meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str());
             let (bridge_session_id, result) = state
                 .mob_append_system_context(
                     &mob_id,
@@ -703,7 +703,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_force_cancel(
                     &mob_id,
-                    meerkat_mob::MeerkatId::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -715,7 +715,7 @@ pub async fn handle_public_tools_call(
             let snapshot = state
                 .mob_member_status(
                     &mob_id,
-                    &meerkat_mob::MeerkatId::from(input.meerkat_id.as_str()),
+                    &meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -726,7 +726,7 @@ pub async fn handle_public_tools_call(
             let mob_id = parse_mob_id(&input.mob_id)?;
             let member_ids = input.member_ids.map(|ids| {
                 ids.into_iter()
-                    .map(|member_id| meerkat_mob::MeerkatId::from(member_id.as_str()))
+                    .map(|member_id| meerkat_mob::AgentIdentity::from(member_id.as_str()))
                     .collect::<Vec<_>>()
             });
             let members = state

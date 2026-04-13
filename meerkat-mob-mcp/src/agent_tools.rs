@@ -16,8 +16,8 @@ use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
 use meerkat_mob::{
-    MeerkatId, MemberRef, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode,
-    ProfileName, SpawnMemberSpec,
+    AgentIdentity, MeerkatId, MemberRef, MobBackendKind, MobDefinition, MobError, MobId,
+    MobRuntimeMode, ProfileName, SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -469,7 +469,7 @@ impl AgentMobToolSurface {
     async fn wire_delegate_helper_to_creator(
         &self,
         mob_id: &MobId,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
     ) -> bool {
         let Some(name) = self.comms_name.as_ref() else {
             return false;
@@ -493,7 +493,7 @@ impl AgentMobToolSurface {
             .state
             .mob_wire(
                 mob_id,
-                meerkat_id.clone(),
+                identity.clone(),
                 meerkat_mob::PeerTarget::External(parent_spec),
             )
             .await
@@ -506,19 +506,20 @@ impl AgentMobToolSurface {
             return false;
         };
         let roster = handle.roster().await;
-        let Some(entry) = roster.get(meerkat_id) else {
+        let meerkat_id = MeerkatId::from(identity.as_str());
+        let Some(entry) = roster.get(&meerkat_id) else {
             return false;
         };
-        let Some(helper_peer_id) = entry.peer_id.as_ref() else {
+        let Some(helper_peer_id) = entry.peer_id() else {
             return false;
         };
-        let helper_comms_name = format!("{}/{}/{}", mob_id, entry.profile, meerkat_id);
+        let helper_comms_name = format!("{}/{}/{}", mob_id, entry.role, identity);
         if helper_comms_name == *name {
             return false;
         }
         let Ok(helper_spec) = meerkat_core::comms::TrustedPeerSpec::new(
             &helper_comms_name,
-            helper_peer_id.as_str(),
+            helper_peer_id,
             format!("inproc://{helper_comms_name}"),
         ) else {
             return false;
@@ -530,10 +531,10 @@ impl AgentMobToolSurface {
 
         let peer_description = handle
             .definition()
-            .resolve_inline_profile(&entry.profile)
+            .resolve_inline_profile(&entry.role)
             .map(|profile| profile.peer_description.as_str())
             .unwrap_or("delegate helper");
-        let Some(helper_bridge_session_id) = entry.member_ref.bridge_session_id() else {
+        let Some(helper_bridge_session_id) = entry.bridge_session_id() else {
             return false;
         };
         let helper_runtime = meerkat_core::service::SessionServiceCommsExt::comms_runtime(
@@ -548,8 +549,8 @@ impl AgentMobToolSurface {
         let notify_parent = Self::notify_peer_added(
             &helper_runtime,
             name,
-            meerkat_id.as_str(),
-            entry.profile.as_str(),
+            identity.as_str(),
+            entry.role.as_str(),
             peer_description,
         )
         .await;
@@ -597,12 +598,12 @@ impl AgentMobToolSurface {
         }
 
         // Build spawn spec
-        let meerkat_id = MeerkatId::from(
+        let identity = AgentIdentity::from(
             args.member_id
                 .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
         );
         // Implicit mob always uses the "delegate" profile.
-        let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), meerkat_id.clone());
+        let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
         spec.runtime_mode = Some(MobRuntimeMode::AutonomousHost);
         // Don't use auto_wire_parent — it requires an orchestrator member in the roster.
@@ -634,12 +635,12 @@ impl AgentMobToolSurface {
         // 1. Wire helper → parent: helper trusts parent as external peer
         // 2. Wire parent → helper: parent trusts helper so it can receive messages
         let wired = self
-            .wire_delegate_helper_to_creator(&mob_id, &meerkat_id)
+            .wire_delegate_helper_to_creator(&mob_id, &identity)
             .await;
 
         let mut result = Self::member_ref_result_payload(&member_ref);
         result["mob_id"] = json!(mob_id);
-        result["meerkat_id"] = json!(meerkat_id);
+        result["meerkat_id"] = json!(identity);
         result["wired"] = json!(wired);
 
         if first_delegate {
@@ -783,7 +784,7 @@ impl AgentMobToolSurface {
             .map_err(|e| Self::map_mob_error(call, e))?;
 
         self.state
-            .mob_retire(&mob_id, MeerkatId::from(args.member_id))
+            .mob_retire(&mob_id, AgentIdentity::from(args.member_id))
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -806,7 +807,7 @@ impl AgentMobToolSurface {
 
         let snapshot = self
             .state
-            .mob_member_status(&mob_id, &MeerkatId::from(args.member_id))
+            .mob_member_status(&mob_id, &AgentIdentity::from(args.member_id))
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -863,7 +864,7 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
-        let local = meerkat_mob::MeerkatId::from(args.member_id.as_str());
+        let local = AgentIdentity::from(args.member_id.as_str());
         let target = peer_target_from_args(args.peer);
         self.state
             .mob_wire(&mob_id, local, target)
@@ -880,7 +881,7 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
-        let local = meerkat_mob::MeerkatId::from(args.member_id.as_str());
+        let local = AgentIdentity::from(args.member_id.as_str());
         let target = peer_target_from_args(args.peer);
         self.state
             .mob_unwire(&mob_id, local, target)
@@ -2935,7 +2936,7 @@ mod tests {
             .ensure_implicit_mob()
             .await
             .expect("create implicit mob");
-        let helper_id = MeerkatId::from("helper-1");
+        let helper_id = AgentIdentity::from("helper-1");
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), helper_id.clone());
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
         let member_ref = state

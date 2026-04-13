@@ -13,7 +13,7 @@ use mdm_tux::{
     load_or_generate_keypair, read_envelope, verify_envelope, write_envelope,
 };
 use meerkat_mob::{
-    MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Profile, ProfileBinding,
+    AgentIdentity, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Profile, ProfileBinding,
     ProfileName, RuntimeBinding, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, SessionCleanupPolicy, WiringRules};
@@ -531,7 +531,7 @@ async fn handle_connection(
                         if let Some(mob_id) = &hive_mob_id {
                             let mut spec = SpawnMemberSpec::new(
                                 ProfileName::from("target"),
-                                MeerkatId::from(name.clone()),
+                                AgentIdentity::from(name.clone()),
                             );
                             spec.binding = Some(RuntimeBinding::External {
                                 peer_id: pubkey.clone(),
@@ -797,8 +797,8 @@ async fn handle_connection(
         if let (SessionKind::Target(_), Some(mob_id), Some(name)) =
             (&kind, &hive_mob_id, target_name_for_retire)
         {
-            let member_id = MeerkatId::from(name.clone());
-            match hive_mob_state.mob_retire(mob_id, member_id).await {
+            let member_identity = AgentIdentity::from(name.clone());
+            match hive_mob_state.mob_retire(mob_id, member_identity).await {
                 Ok(()) => eprintln!("[kennel] retired {name} from hive mob"),
                 Err(e) => eprintln!("[kennel] failed to retire {name} from hive mob: {e}"),
             }

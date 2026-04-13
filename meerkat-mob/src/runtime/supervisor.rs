@@ -65,7 +65,7 @@ impl Supervisor {
             .list_runnable_members()
             .await
             .into_iter()
-            .find(|entry| entry.profile == supervisor_role)
+            .find(|entry| entry.role == supervisor_role)
             .ok_or_else(|| {
                 MobError::SupervisorEscalation(format!(
                     "no active supervisor member for role '{supervisor_role}'"

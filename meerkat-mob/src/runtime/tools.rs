@@ -452,7 +452,7 @@ impl MobOperatorToolDispatcher {
         let current_bridge_session_id = entry.current_bridge_session_id().cloned();
         json!({
             "meerkat_id": entry.meerkat_id,
-            "profile": entry.profile,
+            "profile": entry.role,
             "runtime_mode": entry.runtime_mode,
             "member_ref": entry.member_ref,
             "peer_id": entry.peer_id,
@@ -892,7 +892,11 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .task_update(args.task_id, args.status, args.owner.map(MeerkatId::from))
+                    .task_update(
+                        args.task_id,
+                        args.status,
+                        args.owner.map(AgentIdentity::from),
+                    )
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;

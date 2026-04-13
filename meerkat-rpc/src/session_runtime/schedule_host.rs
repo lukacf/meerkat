@@ -27,7 +27,7 @@ use meerkat_core::types::HandlingMode;
 use meerkat_core::{ContentInput, SessionId};
 #[cfg(feature = "mob")]
 use meerkat_mob::{
-    FlowId, ForkContext, HelperOptions, MeerkatId, MobBackendKind, MobId, MobRunStatus, RunId,
+    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobId, MobRunStatus, RunId,
 };
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpState;
@@ -172,8 +172,8 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
 
             return match binding {
                 MobTargetBinding::Member { member_id, .. } => {
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
-                    Ok(if handle.get_member(&meerkat_id).await.is_some() {
+                    let identity = AgentIdentity::from(member_id.as_str());
+                    Ok(if handle.get_member(&identity).await.is_some() {
                         TargetProbeOutcome::Ready
                     } else {
                         TargetProbeOutcome::Missing {
@@ -194,8 +194,8 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                     )
                 }
                 MobTargetBinding::SpawnHelper { member_id, .. } => {
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
-                    Ok(if handle.get_member(&meerkat_id).await.is_some() {
+                    let identity = AgentIdentity::from(member_id.as_str());
+                    Ok(if handle.get_member(&identity).await.is_some() {
                         TargetProbeOutcome::Busy {
                             detail: Some(format!("mob member already exists: {member_id}")),
                         }
@@ -208,7 +208,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                     member_id,
                     ..
                 } => {
-                    let source = MeerkatId::from(source_member_id.as_str());
+                    let source = AgentIdentity::from(source_member_id.as_str());
                     if handle.get_member(&source).await.is_none() {
                         return Ok(TargetProbeOutcome::Missing {
                             detail: Some(format!(
@@ -216,7 +216,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                             )),
                         });
                     }
-                    let target = MeerkatId::from(member_id.as_str());
+                    let target = AgentIdentity::from(member_id.as_str());
                     Ok(if handle.get_member(&target).await.is_some() {
                         TargetProbeOutcome::Busy {
                             detail: Some(format!("mob member already exists: {member_id}")),
@@ -262,7 +262,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                 } => match mob_state
                     .mob_member_send(
                         &mob_id,
-                        MeerkatId::from(member_id.as_str()),
+                        AgentIdentity::from(member_id.as_str()),
                         content.clone(),
                         HandlingMode::Queue,
                         render_metadata.clone(),
@@ -271,7 +271,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                 {
                     Ok(receipt) => Ok(immediate_completed_dispatch(
                         occurrence,
-                        Some(receipt.session_id.to_string()),
+                        Some(receipt.bridge_session_id().to_string()),
                     )),
                     Err(error) => Ok(immediate_delivery_failure(
                         occurrence,
@@ -314,7 +314,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                     options,
                     ..
                 } => {
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
+                    let meerkat_id = AgentIdentity::from(member_id.as_str());
                     let helper_options = helper_options_from_spec(options)?;
                     let prompt = prompt.clone();
                     Ok(async_completion_dispatch(
@@ -339,8 +339,8 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                     options,
                     ..
                 } => {
-                    let source_member_id = MeerkatId::from(source_member_id.as_str());
-                    let meerkat_id = MeerkatId::from(member_id.as_str());
+                    let source_identity = AgentIdentity::from(source_member_id.as_str());
+                    let meerkat_id = AgentIdentity::from(member_id.as_str());
                     let helper_options = helper_options_from_spec(options)?;
                     let fork_context = fork_context_from_spec(fork_context);
                     let prompt = prompt.clone();
@@ -351,7 +351,7 @@ impl SurfaceScheduleMobHost for RpcScheduleTargetAdapter {
                             match mob_state
                                 .mob_fork_helper(
                                     &mob_id,
-                                    &source_member_id,
+                                    &source_identity,
                                     meerkat_id,
                                     prompt,
                                     fork_context,

@@ -60,7 +60,7 @@ pub mod validate;
 pub use backend::{MobBackendKind, RuntimeBinding};
 pub use definition::MobDefinition;
 pub use error::MobError;
-pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};
+pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin,
@@ -80,10 +80,9 @@ pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MemberSessionRef, MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle,
-    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy,
-    SpawnSpec,
+    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobMemberSnapshot,
+    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobState,
+    MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy, SpawnSpec,
 };
 pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;

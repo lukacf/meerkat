@@ -6,7 +6,7 @@
 use crate::MobError;
 use crate::event::NewMobEvent;
 use crate::event::{MobEvent, MobEventKind};
-use crate::ids::{MeerkatId, MobId, TaskId};
+use crate::ids::{AgentIdentity, MobId, TaskId};
 use crate::store::MobEventStore;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -50,8 +50,8 @@ pub struct MobTask {
     pub description: String,
     /// Current status.
     pub status: TaskStatus,
-    /// Assigned owner (meerkat ID), if any.
-    pub owner: Option<MeerkatId>,
+    /// Assigned owner identity, if any.
+    pub owner: Option<AgentIdentity>,
     /// Task IDs that block this task.
     pub blocked_by: Vec<TaskId>,
     /// When the task was created.
@@ -121,7 +121,7 @@ impl MobTaskBoardService {
         &self,
         task_id: TaskId,
         status: TaskStatus,
-        owner: Option<MeerkatId>,
+        owner: Option<AgentIdentity>,
     ) -> Result<(), MobError> {
         // We treat `owner` as an *optional* claim/mutation field.
         //
@@ -271,7 +271,7 @@ impl TaskBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::MobId;
+    use crate::ids::{MeerkatId, MobId};
     use crate::store::InMemoryMobEventStore;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -306,7 +306,7 @@ mod tests {
             subject: "Build widget".to_string(),
             description: "A detailed description".to_string(),
             status: TaskStatus::InProgress,
-            owner: Some(MeerkatId::from("agent-1")),
+            owner: Some(AgentIdentity::from("agent-1")),
             blocked_by: vec![TaskId::from("task-000")],
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -315,7 +315,7 @@ mod tests {
         let parsed: MobTask = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, task.id);
         assert_eq!(parsed.status, TaskStatus::InProgress);
-        assert_eq!(parsed.owner, Some(MeerkatId::from("agent-1")));
+        assert_eq!(parsed.owner, Some(AgentIdentity::from("agent-1")));
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
                 MobEventKind::TaskUpdated {
                     task_id: TaskId::from("t1"),
                     status: TaskStatus::InProgress,
-                    owner: Some(MeerkatId::from("agent-1")),
+                    owner: Some(AgentIdentity::from("agent-1")),
                 },
             ),
             make_event(
@@ -370,7 +370,7 @@ mod tests {
                 MobEventKind::TaskUpdated {
                     task_id: TaskId::from("t1"),
                     status: TaskStatus::Completed,
-                    owner: Some(MeerkatId::from("agent-1")),
+                    owner: Some(AgentIdentity::from("agent-1")),
                 },
             ),
         ];
@@ -378,7 +378,7 @@ mod tests {
         let task_id = TaskId::from("t1");
         let task = board.get(&task_id).unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
-        assert_eq!(task.owner, Some(MeerkatId::from("agent-1")));
+        assert_eq!(task.owner, Some(AgentIdentity::from("agent-1")));
         assert_eq!(task.blocked_by, vec![TaskId::from("t0")]);
     }
 
@@ -496,7 +496,7 @@ mod tests {
             .update_task(
                 blocked.clone(),
                 TaskStatus::InProgress,
-                Some(MeerkatId::from("worker-1")),
+                Some(AgentIdentity::from("worker-1")),
             )
             .await
             .expect_err("blocked task claim should be rejected");
@@ -513,7 +513,7 @@ mod tests {
             .update_task(
                 blocked.clone(),
                 TaskStatus::InProgress,
-                Some(MeerkatId::from("worker-1")),
+                Some(AgentIdentity::from("worker-1")),
             )
             .await
             .expect("claim unblocked task");
@@ -521,7 +521,7 @@ mod tests {
         let board = board.read().await;
         assert_eq!(
             board.get(&blocked).expect("blocked task snapshot").owner,
-            Some(MeerkatId::from("worker-1"))
+            Some(AgentIdentity::from("worker-1"))
         );
     }
 

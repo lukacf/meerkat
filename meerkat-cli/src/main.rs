@@ -6060,7 +6060,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             profile,
             json,
         } => {
-            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+            let mid = meerkat_mob::AgentIdentity::from(meerkat_id.unwrap_or_else(|| {
                 format!(
                     "helper-{}",
                     std::time::SystemTime::now()
@@ -6090,7 +6090,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     serde_json::to_string_pretty(&serde_json::json!({
                         "output": result.output,
                         "tokens_used": result.tokens_used,
-                        "session_id": result.session_id,
+                        "session_id": result.session_id(),
                     }))?
                 );
             } else if let Some(output) = &result.output {
@@ -6108,7 +6108,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             last_messages,
             json,
         } => {
-            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+            let mid = meerkat_mob::AgentIdentity::from(meerkat_id.unwrap_or_else(|| {
                 format!(
                     "fork-{}",
                     std::time::SystemTime::now()
@@ -6117,7 +6117,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                         .unwrap_or(0)
                 )
             }));
-            let source_id = meerkat_mob::MeerkatId::from(source_member);
+            let source_id = meerkat_mob::AgentIdentity::from(source_member);
             let ctx = match fork_context.as_str() {
                 "last-messages" => {
                     let count = last_messages.unwrap_or(10);
@@ -6148,7 +6148,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     serde_json::to_string_pretty(&serde_json::json!({
                         "output": result.output,
                         "tokens_used": result.tokens_used,
-                        "session_id": result.session_id,
+                        "session_id": result.session_id(),
                     }))?
                 );
             } else if let Some(output) = &result.output {
@@ -6164,7 +6164,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let snapshot = state
                 .mob_member_status(
                     &meerkat_mob::MobId::from(mob_id),
-                    &meerkat_mob::MeerkatId::from(meerkat_id),
+                    &meerkat_mob::AgentIdentity::from(meerkat_id),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -6196,7 +6196,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             state
                 .mob_force_cancel(
                     &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    meerkat_mob::AgentIdentity::from(meerkat_id),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -6213,7 +6213,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let receipt = state
                 .mob_respawn(
                     &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    meerkat_mob::AgentIdentity::from(meerkat_id),
                     initial_message.map(meerkat_core::ContentInput::from),
                 )
                 .await
@@ -6238,7 +6238,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let member_ids = (!member_ids.is_empty()).then(|| {
                 member_ids
                     .into_iter()
-                    .map(|id| meerkat_mob::MeerkatId::from(id.as_str()))
+                    .map(|id| meerkat_mob::AgentIdentity::from(id.as_str()))
                     .collect::<Vec<_>>()
             });
             let members = state
@@ -6261,7 +6261,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 for member in members {
                     println!(
                         "{}\tstatus={:?}\tis_final={}",
-                        member.meerkat_id, member.snapshot.status, member.snapshot.is_final
+                        member.agent_identity, member.snapshot.status, member.snapshot.is_final
                     );
                 }
             }
@@ -6846,7 +6846,7 @@ async fn execute_mob_deploy_internal(
             let roster = handle.roster().await;
             if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
                 handle
-                    .member(&entry.meerkat_id)
+                    .member(&entry.agent_identity)
                     .await
                     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
                     .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
@@ -7143,7 +7143,7 @@ where
         let roster = handle.roster().await;
         if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
             handle
-                .member(&entry.meerkat_id)
+                .member(&entry.agent_identity)
                 .await
                 .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
                 .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
@@ -10243,7 +10243,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let members = listed["members"].as_array().cloned().unwrap_or_default();
         let lead_mode = members
             .iter()
-            .find(|m| m["meerkat_id"] == "lead-turn")
+            .find(|m| m["agent_identity"] == "lead-turn")
             .and_then(|m| m["runtime_mode"].as_str());
 
         assert_eq!(lead_mode, Some("turn_driven"));

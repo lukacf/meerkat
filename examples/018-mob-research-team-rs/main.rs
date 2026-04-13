@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobEventKind, MobStorage, ProfileName,
+    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobStorage, SpawnMemberSpec,
     validate_definition,
 };
 
@@ -234,54 +234,48 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     // Spawn the lead analyst and two researchers.
     println!("\nSpawning team...");
 
-    let lead_ref = handle
-        .spawn(
-            ProfileName::from("lead-analyst"),
-            MeerkatId::from("lead-1"),
-            Some(
-                "You are the lead analyst coordinating this research team."
-                    .to_string()
-                    .into(),
-            ),
-        )
-        .await?;
+    let mut lead_spec = SpawnMemberSpec::new("lead-analyst", "lead-1");
+    lead_spec.initial_message = Some(
+        "You are the lead analyst coordinating this research team."
+            .to_string()
+            .into(),
+    );
+    let lead_ref = handle.spawn_spec(lead_spec).await?;
     println!("  Spawned lead-1 (lead-analyst): {lead_ref:?}");
 
-    let market_ref = handle
-        .spawn(
-            ProfileName::from("market-researcher"),
-            MeerkatId::from("market-1"),
-            Some(
-                "You are a market researcher on this team."
-                    .to_string()
-                    .into(),
-            ),
-        )
-        .await?;
+    let mut market_spec = SpawnMemberSpec::new("market-researcher", "market-1");
+    market_spec.initial_message = Some(
+        "You are a market researcher on this team."
+            .to_string()
+            .into(),
+    );
+    let market_ref = handle.spawn_spec(market_spec).await?;
     println!("  Spawned market-1 (market-researcher): {market_ref:?}");
 
-    let tech_ref = handle
-        .spawn(
-            ProfileName::from("tech-researcher"),
-            MeerkatId::from("tech-1"),
-            Some(
-                "You are a technology researcher on this team."
-                    .to_string()
-                    .into(),
-            ),
-        )
-        .await?;
+    let mut tech_spec = SpawnMemberSpec::new("tech-researcher", "tech-1");
+    tech_spec.initial_message = Some(
+        "You are a technology researcher on this team."
+            .to_string()
+            .into(),
+    );
+    let tech_ref = handle.spawn_spec(tech_spec).await?;
     println!("  Spawned tech-1 (tech-researcher): {tech_ref:?}");
 
     // Wire the team: lead <-> market, lead <-> tech, market <-> tech.
     handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("market-1"))
+        .wire(
+            AgentIdentity::from("lead-1"),
+            AgentIdentity::from("market-1"),
+        )
         .await?;
     handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("tech-1"))
+        .wire(AgentIdentity::from("lead-1"), AgentIdentity::from("tech-1"))
         .await?;
     handle
-        .wire(MeerkatId::from("market-1"), MeerkatId::from("tech-1"))
+        .wire(
+            AgentIdentity::from("market-1"),
+            AgentIdentity::from("tech-1"),
+        )
         .await?;
     println!("  Wired all team members");
 
@@ -291,7 +285,7 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     for m in &members {
         println!(
             "  {} (profile: {}, wired_to: {:?})",
-            m.meerkat_id, m.profile, m.wired_to
+            m.agent_identity, m.role, m.wired_to
         );
     }
 
@@ -309,7 +303,7 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     // Send a research question to the lead analyst (live LLM call).
     println!("\nSending research question to lead analyst (live LLM call)...");
     handle
-        .member(&MeerkatId::from("lead-1"))
+        .member(&AgentIdentity::from("lead-1"))
         .await?
         .send(
             "Briefly outline 3 key research questions about the market for AI code assistants. \

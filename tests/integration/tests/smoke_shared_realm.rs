@@ -1712,7 +1712,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"mob/spawn_many","params":{{"mob_id":"{mob_id}","specs":[{{"profile":"lead","meerkat_id":"lead-1","runtime_mode":"turn_driven"}},{{"profile":"worker","meerkat_id":"worker-1","runtime_mode":"turn_driven"}},{{"profile":"reviewer","meerkat_id":"reviewer-1","runtime_mode":"turn_driven"}}]}}}}"#
+            r#"{{"jsonrpc":"2.0","id":3,"method":"mob/spawn_many","params":{{"mob_id":"{mob_id}","specs":[{{"profile":"lead","agent_identity":"lead-1","runtime_mode":"turn_driven"}},{{"profile":"worker","agent_identity":"worker-1","runtime_mode":"turn_driven"}},{{"profile":"reviewer","agent_identity":"reviewer-1","runtime_mode":"turn_driven"}}]}}}}"#
         ),
     )
     .await?;
@@ -2028,7 +2028,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             json!({
                 "mob_id": mob_id,
                 "profile": "parent",
-                "meerkat_id": "parent"
+                "agent_identity": "parent"
             }),
             30,
         )
@@ -2066,7 +2066,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             json!({
                 "mob_id": mob_id,
                 "profile": "helper-a",
-                "meerkat_id": "helper-a",
+                "agent_identity": "helper-a",
                 "runtime_mode": "autonomous_host",
                 "initial_message": helper_a_prompt,
             }),
@@ -2090,7 +2090,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             json!({
                 "mob_id": mob_id,
                 "profile": "helper-b",
-                "meerkat_id": "helper-b",
+                "agent_identity": "helper-b",
                 "runtime_mode": "turn_driven",
                 "initial_turn": "deferred",
             }),
@@ -2176,7 +2176,10 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
         )
         .await?;
     let helper_a_snapshot = helper_a_started["members"][0].clone();
-    assert_eq!(helper_a_snapshot["meerkat_id"].as_str(), Some("helper-a"));
+    assert_eq!(
+        helper_a_snapshot["agent_identity"].as_str(),
+        Some("helper-a")
+    );
     assert_eq!(helper_a_snapshot["status"].as_str(), Some("active"));
     if let Some(phase) = helper_a_snapshot["kickoff"]["phase"].as_str() {
         assert_eq!(phase, "started");
@@ -2372,7 +2375,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
             json!({
                 "mob_id": mob_id,
                 "profile": "worker",
-                "meerkat_id": "worker-1",
+                "agent_identity": "worker-1",
                 "runtime_mode": "turn_driven",
                 "initial_turn": "deferred"
             }),

@@ -30,6 +30,15 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl TaskStatus {
+    /// Whether this status is terminal (Completed or Cancelled).
+    ///
+    /// Maps to the TLA+ `TerminalTaskBindingInvariant` classification.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled)
+    }
+}
+
 /// A task on the shared task board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobTask {
@@ -514,5 +523,13 @@ mod tests {
             board.get(&blocked).expect("blocked task snapshot").owner,
             Some(MeerkatId::from("worker-1"))
         );
+    }
+
+    #[test]
+    fn task_status_terminal_classification() {
+        assert!(!TaskStatus::Open.is_terminal());
+        assert!(!TaskStatus::InProgress.is_terminal());
+        assert!(TaskStatus::Completed.is_terminal());
+        assert!(TaskStatus::Cancelled.is_terminal());
     }
 }

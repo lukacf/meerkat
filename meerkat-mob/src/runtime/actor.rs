@@ -4555,6 +4555,15 @@ impl MobActor {
         status: TaskStatus,
         owner: Option<MeerkatId>,
     ) -> Result<(), MobError> {
+        // TLA+ TaskBindingInvariant: owner must be a known identity (roster member).
+        if let Some(ref owner_id) = owner {
+            let roster = self.roster.read().await;
+            if roster.get(owner_id).is_none() {
+                return Err(MobError::Internal(format!(
+                    "TaskBindingInvariant violated: task owner '{owner_id}' is not in the roster",
+                )));
+            }
+        }
         self.task_board_service
             .update_task(task_id, status, owner)
             .await

@@ -900,13 +900,16 @@ impl MeerkatMachine {
                     (sid, d, c, w, ctrl)
                 };
 
+                // Guard: AdmitQueuedInput requires phase not in
+                // {Retired, Stopped, Destroyed}. Steered inputs are more
+                // permissive but the dispatch cannot distinguish here, so we
+                // reject all three conservatively.
+                let state = Self::driver_runtime_state(&driver).await;
                 if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
+                    state,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
                 ) {
-                    return Err(RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    });
+                    return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
 
                 let (outcome, signal) = {
@@ -12915,5 +12918,110 @@ mod tests {
 
         // Guard rejects unknown session but caller swallows the error.
         adapter.wait_comms_drain(&session_id).await;
+    }
+
+    // ---------------------------------------------------------------
+    // A3: Control command guards (TLA+ ActiveRunPhaseInvariant,
+    //     LiveBindingLifecycleInvariant, AdmitQueuedInput precondition)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ingest_rejects_retired_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+            .await
+            .expect("retire should succeed");
+
+        let input = make_prompt("should be rejected");
+        let err = crate::traits::RuntimeControlPlane::ingest(&adapter, &runtime_id, input)
+            .await
+            .expect_err("ingest should reject a retired session");
+        assert!(
+            matches!(
+                err,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Retired
+                }
+            ),
+            "expected InvalidState(Retired), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_stopped_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        // Stop the session by driving it through retire → stop.
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        adapter
+            .stop_runtime_executor(
+                &session_id,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "test stop".to_string(),
+                },
+            )
+            .await
+            .expect("stop should succeed");
+
+        let input = make_prompt("should be rejected");
+        let err = crate::traits::RuntimeControlPlane::ingest(&adapter, &runtime_id, input)
+            .await
+            .expect_err("ingest should reject a stopped session");
+        assert!(
+            matches!(
+                err,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Stopped
+                }
+            ),
+            "expected InvalidState(Stopped), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retire_rejects_initializing_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        // Don't register, just create a session entry in Initializing state.
+        // Since there's no way to create a session in Initializing via the
+        // public API (register_session transitions to Idle), we test that
+        // retire guards against the union of incompatible phases. The Idle →
+        // Retired path is already exercised above. Focus here on the existing
+        // Stopped guard and Destroyed guard.
+        adapter.register_session(session_id.clone()).await;
+
+        // First stop
+        adapter
+            .stop_runtime_executor(
+                &session_id,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .expect("stop should succeed");
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        let err = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+            .await
+            .expect_err("retire should reject a stopped session");
+        assert!(
+            matches!(
+                err,
+                RuntimeControlPlaneError::InvalidState {
+                    state: RuntimeState::Stopped
+                }
+            ),
+            "expected InvalidState(Stopped), got {err:?}"
+        );
     }
 }

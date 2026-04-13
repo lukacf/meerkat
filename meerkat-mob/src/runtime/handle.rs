@@ -384,6 +384,12 @@ impl From<MeerkatId> for PeerTarget {
     }
 }
 
+impl From<AgentIdentity> for PeerTarget {
+    fn from(value: AgentIdentity) -> Self {
+        Self::Local(MeerkatId::from(value.as_str()))
+    }
+}
+
 struct MobMemberTerminalClassifier;
 
 impl MobMemberTerminalClassifier {
@@ -1451,12 +1457,11 @@ impl MobHandle {
         }
     }
 
-    /// Get a specific member entry.
-    pub async fn get_member(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
+    /// Get a specific member entry by identity.
+    pub async fn get_member(&self, identity: &AgentIdentity) -> Option<RosterEntry> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
         match self
-            .execute_machine_command(MobMachineCommand::GetMember {
-                meerkat_id: meerkat_id.clone(),
-            })
+            .execute_machine_command(MobMachineCommand::GetMember { meerkat_id })
             .await
         {
             Ok(MobMachineCommandResult::GetMember(entry)) => entry,
@@ -1465,13 +1470,23 @@ impl MobHandle {
         }
     }
 
+    /// Get a specific member entry by legacy MeerkatId (bridge helper).
+    pub(crate) async fn get_member_by_meerkat_id(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Option<RosterEntry> {
+        self.get_member(&AgentIdentity::from(meerkat_id.as_str()))
+            .await
+    }
+
     /// Acquire a capability-bearing handle for a specific active member.
-    pub async fn member(&self, meerkat_id: &MeerkatId) -> Result<MemberHandle, MobError> {
-        if let Some(diag) = self.restore_failure_for(meerkat_id).await {
-            return Err(Self::restore_failure_error(meerkat_id, diag));
+    pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
+        if let Some(diag) = self.restore_failure_for(&meerkat_id).await {
+            return Err(Self::restore_failure_error(&meerkat_id, diag));
         }
         let entry = self
-            .get_member(meerkat_id)
+            .get_member(identity)
             .await
             .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
         if entry.state != crate::roster::MemberState::Active {
@@ -1479,7 +1494,7 @@ impl MobHandle {
         }
         Ok(MemberHandle {
             mob: self.clone(),
-            meerkat_id: meerkat_id.clone(),
+            meerkat_id,
         })
     }
 
@@ -1520,11 +1535,11 @@ impl MobHandle {
     /// roster or has no session ID.
     pub async fn subscribe_agent_events(
         &self,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAgentEvents {
-                meerkat_id: meerkat_id.clone(),
+                meerkat_id: MeerkatId::from(identity.as_str()),
             })
             .await?
         {
@@ -1538,12 +1553,15 @@ impl MobHandle {
     /// Returns one stream per active member that has a session ID. Members
     /// spawned after this call are not included — use [`subscribe_mob_events`]
     /// for a continuously updated view.
-    pub async fn subscribe_all_agent_events(&self) -> Vec<(MeerkatId, EventStream)> {
+    pub async fn subscribe_all_agent_events(&self) -> Vec<(AgentIdentity, EventStream)> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAllAgentEvents)
             .await
         {
-            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => streams,
+            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => streams
+                .into_iter()
+                .map(|(mid, stream)| (AgentIdentity::from(mid.as_str()), stream))
+                .collect(),
             Ok(_) => unreachable!("subscribe_all_agent_events returned wrong result"),
             Err(_) => Vec::new(),
         }
@@ -1791,7 +1809,8 @@ impl MobHandle {
     }
 
     /// Retire a member, archiving its session and removing trust.
-    pub async fn retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    pub async fn retire(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
         match self
             .execute_machine_command(MobMachineCommand::Retire { meerkat_id })
             .await?
@@ -1808,9 +1827,10 @@ impl MobHandle {
     /// structured error on failure. No rollback is attempted after retire.
     pub async fn respawn(
         &self,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
         let old_session_id_before = self
             .canonical_member_list_material(&meerkat_id)
             .await
@@ -1871,13 +1891,13 @@ impl MobHandle {
     }
 
     /// Wire a local member to either another local member or an external peer.
-    pub async fn wire<T>(&self, local: MeerkatId, target: T) -> Result<(), MobError>
+    pub async fn wire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
         T: Into<PeerTarget>,
     {
         match self
             .execute_machine_command(MobMachineCommand::Wire {
-                local,
+                local: MeerkatId::from(local.as_str()),
                 target: target.into(),
             })
             .await?
@@ -1888,13 +1908,13 @@ impl MobHandle {
     }
 
     /// Unwire a local member from either another local member or an external peer.
-    pub async fn unwire<T>(&self, local: MeerkatId, target: T) -> Result<(), MobError>
+    pub async fn unwire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
         T: Into<PeerTarget>,
     {
         match self
             .execute_machine_command(MobMachineCommand::Unwire {
-                local,
+                local: MeerkatId::from(local.as_str()),
                 target: target.into(),
             })
             .await?
@@ -1910,9 +1930,10 @@ impl MobHandle {
     /// the target 0.5 API shape.
     pub async fn internal_turn(
         &self,
-        meerkat_id: MeerkatId,
+        identity: AgentIdentity,
         message: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
         let session_id = self
             .internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
@@ -2165,9 +2186,11 @@ impl MobHandle {
     ///
     /// Unlike [`retire`](Self::retire), this does not archive the session or
     /// remove the member from the roster — it only cancels the current turn.
-    pub async fn force_cancel_member(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    pub async fn force_cancel_member(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
-            .execute_machine_command(MobMachineCommand::ForceCancel { meerkat_id })
+            .execute_machine_command(MobMachineCommand::ForceCancel {
+                meerkat_id: MeerkatId::from(identity.as_str()),
+            })
             .await?
         {
             MobMachineCommandResult::Unit => Ok(()),
@@ -2277,11 +2300,11 @@ impl MobHandle {
     /// resolves live peer connectivity when a comms runtime is available.
     pub async fn member_status(
         &self,
-        meerkat_id: &MeerkatId,
+        identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::MemberStatus {
-                meerkat_id: meerkat_id.clone(),
+                meerkat_id: MeerkatId::from(identity.as_str()),
             })
             .await?
         {
@@ -2298,15 +2321,26 @@ impl MobHandle {
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
-    ) -> Result<Vec<(MeerkatId, MobMemberSnapshot)>, MobError> {
+    ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
         let target_ids = self
             .list_all_members()
             .await
             .into_iter()
             .map(|entry| entry.meerkat_id)
             .collect::<Vec<_>>();
-        self.wait_for_members_kickoff_complete(&target_ids, timeout)
-            .await
+        let identities: Vec<AgentIdentity> = target_ids
+            .iter()
+            .map(|id| AgentIdentity::from(id.as_str()))
+            .collect();
+        let waiters = self.snapshot_kickoff_waiters(target_ids.clone()).await?;
+        self.wait_for_kickoff_receivers(&target_ids, waiters, timeout)
+            .await?;
+
+        let mut snapshots = Vec::with_capacity(identities.len());
+        for identity in identities {
+            snapshots.push((identity.clone(), self.member_status(&identity).await?));
+        }
+        Ok(snapshots)
     }
 
     /// Wait until the given autonomous members have been admitted to the runtime.
@@ -2314,17 +2348,20 @@ impl MobHandle {
     /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for details.
     pub async fn wait_for_members_kickoff_complete(
         &self,
-        ids: &[MeerkatId],
+        ids: &[AgentIdentity],
         timeout: Option<Duration>,
-    ) -> Result<Vec<(MeerkatId, MobMemberSnapshot)>, MobError> {
-        let target_ids = ids.to_vec();
-        let waiters = self.snapshot_kickoff_waiters(target_ids.clone()).await?;
-        self.wait_for_kickoff_receivers(&target_ids, waiters, timeout)
+    ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
+        let target_meerkat_ids: Vec<MeerkatId> =
+            ids.iter().map(|id| MeerkatId::from(id.as_str())).collect();
+        let waiters = self
+            .snapshot_kickoff_waiters(target_meerkat_ids.clone())
+            .await?;
+        self.wait_for_kickoff_receivers(&target_meerkat_ids, waiters, timeout)
             .await?;
 
-        let mut snapshots = Vec::with_capacity(target_ids.len());
-        for id in target_ids {
-            snapshots.push((id.clone(), self.member_status(&id).await?));
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for identity in ids {
+            snapshots.push((identity.clone(), self.member_status(identity).await?));
         }
         Ok(snapshots)
     }
@@ -2332,19 +2369,24 @@ impl MobHandle {
     /// Wait for a specific member to reach a terminal state, then return its snapshot.
     ///
     /// Polls canonical member classification until terminal.
-    pub async fn wait_one(&self, meerkat_id: &MeerkatId) -> Result<MobMemberSnapshot, MobError> {
-        let material = self.wait_one_material(meerkat_id).await?;
+    pub async fn wait_one(&self, identity: &AgentIdentity) -> Result<MobMemberSnapshot, MobError> {
+        let meerkat_id = MeerkatId::from(identity.as_str());
+        let material = self.wait_one_material(&meerkat_id).await?;
         Ok(material.to_snapshot())
     }
 
     /// Wait for all specified members to reach terminal states.
     pub async fn wait_all(
         &self,
-        meerkat_ids: &[MeerkatId],
+        identities: &[AgentIdentity],
     ) -> Result<Vec<MobMemberSnapshot>, MobError> {
+        let meerkat_ids: Vec<MeerkatId> = identities
+            .iter()
+            .map(|id| MeerkatId::from(id.as_str()))
+            .collect();
         let futs = meerkat_ids
             .iter()
-            .map(|id| self.wait_one_material(id))
+            .map(|mid| self.wait_one_material(mid))
             .collect::<Vec<_>>();
         let results = futures::future::join_all(futs).await;
         results
@@ -2354,14 +2396,14 @@ impl MobHandle {
     }
 
     /// Collect snapshots for all members that have reached terminal states.
-    pub async fn collect_completed(&self) -> Vec<(MeerkatId, MobMemberSnapshot)> {
+    pub async fn collect_completed(&self) -> Vec<(AgentIdentity, MobMemberSnapshot)> {
         let entries = self.list_all_members().await;
         let mut completed = Vec::new();
         for entry in entries {
-            if let Ok(snapshot) = self.member_status(&entry.meerkat_id).await
+            if let Ok(snapshot) = self.member_status(&entry.agent_identity).await
                 && snapshot.is_final
             {
-                completed.push((entry.meerkat_id, snapshot));
+                completed.push((entry.agent_identity, snapshot));
             }
         }
         completed
@@ -2398,7 +2440,7 @@ impl MobHandle {
 
         self.spawn_spec(spec).await?;
         let helper_material = self.canonical_member_list_material(&meerkat_id).await;
-        let _ = self.retire(meerkat_id.clone()).await;
+        let _ = self.retire(AgentIdentity::from(meerkat_id.as_str())).await;
 
         Ok(helper_material.to_helper_result())
     }
@@ -2439,15 +2481,20 @@ impl MobHandle {
 
         self.spawn_spec(spec).await?;
         let helper_material = self.canonical_member_list_material(&meerkat_id).await;
-        let _ = self.retire(meerkat_id.clone()).await;
+        let _ = self.retire(AgentIdentity::from(meerkat_id.as_str())).await;
 
         Ok(helper_material.to_helper_result())
     }
 }
 
 impl MemberHandle {
-    /// Target member id for this capability.
-    pub fn meerkat_id(&self) -> &MeerkatId {
+    /// Target member identity.
+    pub fn identity(&self) -> AgentIdentity {
+        AgentIdentity::from(self.meerkat_id.as_str())
+    }
+
+    /// Target member id for this capability (bridge).
+    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
         &self.meerkat_id
     }
 
@@ -2527,12 +2574,12 @@ impl MemberHandle {
 
     /// Get a point-in-time execution snapshot for this member.
     pub async fn status(&self) -> Result<MobMemberSnapshot, MobError> {
-        self.mob.member_status(&self.meerkat_id).await
+        self.mob.member_status(&self.identity()).await
     }
 
     /// Subscribe to this member's agent events.
     pub async fn events(&self) -> Result<EventStream, MobError> {
-        self.mob.subscribe_agent_events(&self.meerkat_id).await
+        self.mob.subscribe_agent_events(&self.identity()).await
     }
 }
 

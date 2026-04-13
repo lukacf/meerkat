@@ -1,7 +1,7 @@
 use super::events::MobEventEmitter;
 use super::handle::MobHandle;
 use crate::error::MobError;
-use crate::ids::{RunId, StepId};
+use crate::ids::{AgentIdentity, RunId, StepId};
 use crate::run::FlowRunConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -77,7 +77,7 @@ impl Supervisor {
         tokio::time::timeout(
             escalation_turn_timeout,
             self.handle.internal_turn(
-                escalation_target.meerkat_id.clone(),
+                AgentIdentity::from(escalation_target.meerkat_id.as_str()),
                 format!("Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"),
             ),
         )
@@ -93,7 +93,7 @@ impl Supervisor {
             .supervisor_escalation(
                 run_id.clone(),
                 step_id.clone(),
-                escalation_target.meerkat_id,
+                escalation_target.meerkat_id.clone(),
             )
             .await?;
 
@@ -101,18 +101,18 @@ impl Supervisor {
     }
 
     pub async fn force_reset(&self) -> Result<(), MobError> {
-        let ids = self
+        let identities: Vec<AgentIdentity> = self
             .handle
             .list_members()
             .await
             .into_iter()
-            .map(|entry| entry.meerkat_id)
-            .collect::<Vec<_>>();
+            .map(|entry| AgentIdentity::from(entry.meerkat_id.as_str()))
+            .collect();
 
         let mut failures = Vec::new();
-        for id in ids {
-            if let Err(error) = self.handle.retire(id.clone()).await {
-                failures.push(format!("{id}: {error}"));
+        for identity in identities {
+            if let Err(error) = self.handle.retire(identity.clone()).await {
+                failures.push(format!("{identity}: {error}"));
             }
         }
 

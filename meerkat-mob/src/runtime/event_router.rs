@@ -11,7 +11,7 @@
 //! Streams for retired members end naturally when sessions are archived.
 
 use crate::event::AttributedEvent;
-use crate::ids::{MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -181,7 +181,8 @@ async fn subscribe_member(
     meerkat_id: MeerkatId,
     profile: ProfileName,
 ) -> Option<TaggedStream> {
-    let stream = handle.subscribe_agent_events(&meerkat_id).await.ok()?;
+    let identity = AgentIdentity::from(meerkat_id.as_str());
+    let stream = handle.subscribe_agent_events(&identity).await.ok()?;
     let mid = meerkat_id;
     let prof = profile;
     Some(stream.map(

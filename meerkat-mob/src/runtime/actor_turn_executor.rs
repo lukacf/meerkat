@@ -290,7 +290,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
             .handle
-            .get_member(target)
+            .get_member_by_meerkat_id(target)
             .await
             .ok_or_else(|| MobError::MeerkatNotFound(target.clone()))?;
 

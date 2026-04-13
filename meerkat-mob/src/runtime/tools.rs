@@ -787,7 +787,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .retire(MeerkatId::from(args.meerkat_id))
+                    .retire(AgentIdentity::from(args.meerkat_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
@@ -798,7 +798,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .wire(MeerkatId::from(args.a), MeerkatId::from(args.b))
+                    .wire(AgentIdentity::from(args.a), MeerkatId::from(args.b))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
@@ -809,7 +809,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .unwire(MeerkatId::from(args.a), MeerkatId::from(args.b))
+                    .unwire(AgentIdentity::from(args.a), MeerkatId::from(args.b))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
@@ -914,7 +914,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .force_cancel_member(MeerkatId::from(args.meerkat_id))
+                    .force_cancel_member(AgentIdentity::from(args.meerkat_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
@@ -926,7 +926,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 let snapshot = self
                     .handle
-                    .member_status(&MeerkatId::from(args.meerkat_id))
+                    .member_status(&AgentIdentity::from(args.meerkat_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!(snapshot))

@@ -255,21 +255,21 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/{id}/members/{meerkat_id}/status",
+            "/mob/{id}/members/{agent_identity}/status",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get live status for a mob member",
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/{id}/members/{meerkat_id}/cancel",
+            "/mob/{id}/members/{agent_identity}/cancel",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Force-cancel a mob member",
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/{id}/members/{meerkat_id}/respawn",
+            "/mob/{id}/members/{agent_identity}/respawn",
             vec![RestOperationDescriptor::new(
                 "post",
                 "Respawn a mob member with topology restore",
@@ -300,9 +300,9 @@ mod tests {
             "/config",
             "/schedules",
             "/schedules/{id}/occurrences",
-            "/mob/{id}/members/{meerkat_id}/status",
-            "/mob/{id}/members/{meerkat_id}/cancel",
-            "/mob/{id}/members/{meerkat_id}/respawn",
+            "/mob/{id}/members/{agent_identity}/status",
+            "/mob/{id}/members/{agent_identity}/cancel",
+            "/mob/{id}/members/{agent_identity}/respawn",
         ] {
             assert!(paths.iter().any(|path| path == &expected));
         }

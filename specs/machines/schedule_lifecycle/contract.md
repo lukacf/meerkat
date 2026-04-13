@@ -88,11 +88,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/authority.rs` — schedule lifecycle authority that owns revision, pause/resume, and delete semantics
-- `meerkat-schedule/src/service.rs` — schedule service precursor for revision supersession and rolling planning
-- `meerkat-machine-schema/src/catalog/schedule_lifecycle.rs` — formal ScheduleLifecycleMachine schema
+- `meerkat-schedule/src/authority.rs` — schedule lifecycle authority and revision ownership
 
 ### Scenarios
-- `schedule-revision-supersede` — revision-affecting updates bump revision and explicitly supersede pending future occurrences
-- `schedule-pause-resume` — pause freezes claiming and resume re-enables planning without bumping revision
-- `schedule-delete` — delete terminalizes the schedule while preserving occurrence history
+- `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision

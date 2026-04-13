@@ -8,6 +8,7 @@ import type {
   MobFlowStatus,
   MobLifecycleAction,
   MobMember,
+  MobSpawnResult,
   MobSpawnManyResultEntry,
   MobStatus,
   SpawnSpec,
@@ -38,18 +39,19 @@ export interface MemberSendOptions {
 }
 
 export interface MemberDeliveryReceipt {
-  memberId: string;
-  sessionId: string;
-  bridgeSessionId?: string;
+  agentIdentity: string;
+  agentRuntimeId: string;
+  fenceToken: number;
+  generation?: number;
   handlingMode: MobHandlingMode;
 }
 
 export interface MemberRespawnReceipt {
-  memberId: string;
-  oldSessionId?: string;
-  oldBridgeSessionId?: string;
-  newSessionId?: string;
-  newBridgeSessionId?: string;
+  agentIdentity: string;
+  agentRuntimeId: string;
+  previousFenceToken: number;
+  fenceToken: number;
+  generation?: number;
 }
 
 export interface MobRespawnResult {
@@ -60,12 +62,13 @@ export interface MobRespawnResult {
 
 export interface MobMemberSnapshot {
   status: string;
+  agentRuntimeId: string;
+  fenceToken: number;
+  generation?: number;
   outputPreview?: string;
   error?: string;
   tokensUsed: number;
   isFinal: boolean;
-  currentSessionId?: string;
-  currentBridgeSessionId?: string;
   peerConnectivity?: {
     reachablePeerCount: number;
     unknownPeerCount: number;
@@ -82,7 +85,7 @@ export interface MobKickoffWaitOptions {
 }
 
 export interface MobKickoffMemberSnapshot extends MobMemberSnapshot {
-  meerkatId: string;
+  agentIdentity: string;
 }
 
 export interface ExternalPeerTarget {
@@ -98,31 +101,33 @@ export type MobPeerTarget = string | ExternalPeerTarget;
 export interface MobHelperResult {
   output?: string;
   tokensUsed: number;
-  sessionId?: string;
-  bridgeSessionId?: string;
+  agentIdentity: string;
+  agentRuntimeId: string;
+  fenceToken: number;
+  generation?: number;
 }
 
 export class Member {
   private readonly client: MeerkatClient;
   readonly mobId: string;
-  readonly meerkatId: string;
+  readonly agentIdentity: string;
 
   /** @internal */
-  constructor(client: MeerkatClient, mobId: string, meerkatId: string) {
+  constructor(client: MeerkatClient, mobId: string, agentIdentity: string) {
     this.client = client;
     this.mobId = mobId;
-    this.meerkatId = meerkatId;
+    this.agentIdentity = agentIdentity;
   }
 
   async send(
     content: string | ContentBlock[],
     options?: MemberSendOptions,
   ): Promise<MemberDeliveryReceipt> {
-    return this.client.sendMobMemberContent(this.mobId, this.meerkatId, content, options);
+    return this.client.sendMobMemberContent(this.mobId, this.agentIdentity, content, options);
   }
 
   async events(): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, this.meerkatId);
+    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity);
   }
 }
 
@@ -144,7 +149,7 @@ export class Mob {
     await this.client.mobLifecycle(this.mobId, action);
   }
 
-  async spawn(spec: SpawnSpec): Promise<Record<string, unknown>> {
+  async spawn(spec: SpawnSpec): Promise<MobSpawnResult> {
     return this.client.spawnMobMember(this.mobId, spec);
   }
 
@@ -152,23 +157,23 @@ export class Mob {
     return this.client.spawnMobMembers(this.mobId, specs);
   }
 
-  async retire(meerkatId: string): Promise<void> {
-    await this.client.retireMobMember(this.mobId, meerkatId);
+  async retire(agentIdentity: string): Promise<void> {
+    await this.client.retireMobMember(this.mobId, agentIdentity);
   }
 
   async respawn(
-    meerkatId: string,
+    agentIdentity: string,
     initialMessage?: string | ContentBlock[],
   ): Promise<MobRespawnResult> {
-    return this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
+    return this.client.respawnMobMember(this.mobId, agentIdentity, initialMessage);
   }
 
-  async forceCancel(meerkatId: string): Promise<void> {
-    await this.client.forceCancelMobMember(this.mobId, meerkatId);
+  async forceCancel(agentIdentity: string): Promise<void> {
+    await this.client.forceCancelMobMember(this.mobId, agentIdentity);
   }
 
-  async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
-    return this.client.mobMemberStatus(this.mobId, meerkatId);
+  async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {
+    return this.client.mobMemberStatus(this.mobId, agentIdentity);
   }
 
   async waitForKickoffComplete(
@@ -179,7 +184,7 @@ export class Mob {
 
   async spawnHelper(
     prompt: string,
-    options?: { meerkatId?: string; roleName?: string; profileName?: string },
+    options?: { agentIdentity?: string; roleName?: string; profileName?: string },
   ): Promise<MobHelperResult> {
     return this.client.spawnMobHelper(this.mobId, prompt, options);
   }
@@ -188,7 +193,7 @@ export class Mob {
     sourceMemberId: string,
     prompt: string,
     options?: {
-      meerkatId?: string;
+      agentIdentity?: string;
       roleName?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;
@@ -209,16 +214,16 @@ export class Mob {
     return this.client.listMobMembers(this.mobId);
   }
 
-  member(meerkatId: string): Member {
-    return new Member(this.client, this.mobId, meerkatId);
+  member(agentIdentity: string): Member {
+    return new Member(this.client, this.mobId, agentIdentity);
   }
 
   async appendSystemContext(
-    meerkatId: string,
+    agentIdentity: string,
     text: string,
     options?: { source?: string; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
-    return this.client.appendMobSystemContext(this.mobId, meerkatId, text, options);
+    return this.client.appendMobSystemContext(this.mobId, agentIdentity, text, options);
   }
 
   async listFlows(): Promise<string[]> {
@@ -237,8 +242,8 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
-  async subscribeMemberEvents(meerkatId: string): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, meerkatId);
+  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {

@@ -16,7 +16,7 @@ use meerkat_core::types::SessionId;
 
 use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 
-use crate::comms_bridge::peer_input_candidate_to_runtime_input;
+use crate::comms_bridge::classified_interaction_to_runtime_input;
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::meerkat_machine::MeerkatMachine;
@@ -93,7 +93,8 @@ pub fn spawn_comms_drain(
                         // Lifecycle events must be injected as session context
                         // so the LLM knows when peers connect/disconnect.
                         // comms_drain is the sole keep-alive inbox consumer.
-                        let input = peer_input_candidate_to_runtime_input(&candidate, &runtime_id);
+                        let input =
+                            classified_interaction_to_runtime_input(&candidate, &runtime_id);
                         if let Err(err) = adapter.accept_input(&session_id, input).await {
                             tracing::warn!(
                                 error = %err,
@@ -124,7 +125,7 @@ pub fn spawn_comms_drain(
                             let interaction_id = candidate.interaction.id;
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let content_input =
-                                peer_input_candidate_to_runtime_input(&candidate, &runtime_id);
+                                classified_interaction_to_runtime_input(&candidate, &runtime_id);
                             let result = adapter
                                 .accept_input_with_completion(&session_id, content_input)
                                 .await;
@@ -152,7 +153,7 @@ pub fn spawn_comms_drain(
                         } else {
                             // Progress response — route as peer input for checkpoint-style handling.
                             let input =
-                                peer_input_candidate_to_runtime_input(&candidate, &runtime_id);
+                                classified_interaction_to_runtime_input(&candidate, &runtime_id);
                             if let Err(err) = adapter.accept_input(&session_id, input).await {
                                 tracing::warn!(
                                     error = %err,
@@ -170,7 +171,8 @@ pub fn spawn_comms_drain(
                         // Route through the adapter as a peer input.
                         let interaction_id = candidate.interaction.id;
                         let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
-                        let input = peer_input_candidate_to_runtime_input(&candidate, &runtime_id);
+                        let input =
+                            classified_interaction_to_runtime_input(&candidate, &runtime_id);
                         let result = adapter
                             .accept_input_with_completion(&session_id, input)
                             .await;

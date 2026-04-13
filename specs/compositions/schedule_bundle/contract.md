@@ -7,7 +7,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `occurrence`: `OccurrenceLifecycleMachine` @ actor `occurrence_authority`
 
 ## Routes
-- `revision_supersede_enters_occurrence_authority`: `schedule`.`SupersedePendingOccurrences` -> `occurrence`.`SupersedeByRevision` [Immediate]
+- `revision_supersede_enters_occurrence_authority`: `schedule`.`SupersedePendingOccurrences` -> `occurrence`.`Supersede` [Immediate]
 
 ## Target Selectors
 - `(none)`

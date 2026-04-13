@@ -463,8 +463,13 @@ pub enum StreamScopeFrame {
     /// Mob member scope for flow dispatch turns.
     MobMember {
         flow_run_id: String,
-        member_ref: String,
-        session_id: String,
+        agent_identity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_runtime_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fence_token: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
 }
 
@@ -514,7 +519,7 @@ impl ScopedAgentEvent {
     ///
     /// Formats:
     /// - `primary`
-    /// - `mob:<member_ref>`
+    /// - `mob:<agent_identity>`
     pub fn scope_id_from_path(path: &[StreamScopeFrame]) -> String {
         if path.is_empty() {
             return "primary".to_string();
@@ -523,8 +528,8 @@ impl ScopedAgentEvent {
         for frame in path {
             match frame {
                 StreamScopeFrame::Primary { .. } => segments.push("primary".to_string()),
-                StreamScopeFrame::MobMember { member_ref, .. } => {
-                    segments.push(format!("mob:{member_ref}"));
+                StreamScopeFrame::MobMember { agent_identity, .. } => {
+                    segments.push(format!("mob:{agent_identity}"));
                 }
             }
         }
@@ -1006,8 +1011,10 @@ mod tests {
         let event = ScopedAgentEvent::new(
             vec![StreamScopeFrame::MobMember {
                 flow_run_id: "run_123".to_string(),
-                member_ref: "writer".to_string(),
-                session_id: "sid_1".to_string(),
+                agent_identity: "writer".to_string(),
+                agent_runtime_id: Some("writer:0".to_string()),
+                fence_token: Some(1),
+                generation: Some(0),
             }],
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
@@ -1034,8 +1041,10 @@ mod tests {
 
         let mob = vec![StreamScopeFrame::MobMember {
             flow_run_id: "run_1".to_string(),
-            member_ref: "planner".to_string(),
-            session_id: "sid_m".to_string(),
+            agent_identity: "planner".to_string(),
+            agent_runtime_id: Some("planner:2".to_string()),
+            fence_token: Some(3),
+            generation: Some(2),
         }];
         assert_eq!(ScopedAgentEvent::scope_id_from_path(&mob), "mob:planner");
     }

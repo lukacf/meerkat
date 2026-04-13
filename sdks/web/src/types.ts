@@ -139,27 +139,26 @@ export interface SessionState {
 /** Result of appending runtime system context to a mob member session. */
 export interface MobAppendSystemContextResult {
   mob_id: string;
-  meerkat_id: string;
-  session_id: string;
-  bridge_session_id?: string;
+  agent_identity: string;
   status: 'staged' | 'duplicate';
 }
 
 /** Delivery receipt for a direct mob member turn. */
 export interface MemberDeliveryReceipt {
-  member_id: string;
-  session_id: string;
-  bridge_session_id?: string;
+  agent_identity: string;
+  agent_runtime_id: string;
+  fence_token: number;
+  generation?: number;
   handling_mode: HandlingMode;
 }
 
 /** Respawn receipt for a mob member. */
 export interface MemberRespawnReceipt {
-  member_id: string;
-  old_session_id?: string | null;
-  old_bridge_session_id?: string | null;
-  new_session_id?: string | null;
-  new_bridge_session_id?: string | null;
+  agent_identity: string;
+  agent_runtime_id: string;
+  previous_fence_token: number;
+  fence_token: number;
+  generation?: number;
 }
 
 /** Result envelope for a member respawn operation. */
@@ -322,33 +321,31 @@ export interface RoleWiringRule {
 /** Spawn specification for a single agent within a mob. */
 export interface SpawnSpec {
   profile: string;
-  meerkat_id: string;
+  agent_identity: string;
   runtime_mode?: 'turn_driven' | 'autonomous_host';
   initial_message?: string | ContentBlock[];
   labels?: Record<string, string>;
-}
-
-/** Result of a spawn operation. */
-export interface MobMemberRef {
-  kind?: string;
-  session_id?: string;
-  bridge_session_id?: string;
-  peer_id?: string;
-  address?: string;
+  context?: Record<string, unknown>;
+  generation?: number;
+  additional_instructions?: string[];
 }
 
 /** Result of a spawn operation. */
 export interface SpawnResult {
-  status: 'ok' | 'error';
-  member_ref?: MobMemberRef | null;
-  error?: string;
+  mob_id: string;
+  agent_identity: string;
+  agent_runtime_id: string;
+  fence_token: number;
+  generation?: number;
 }
 
 /** A mob member entry from listMembers. */
 export interface MobMember {
-  meerkat_id: string;
+  agent_identity: string;
+  agent_runtime_id: string;
+  fence_token: number;
+  generation?: number;
   profile: string;
-  member_ref: MobMemberRef;
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
@@ -358,8 +355,7 @@ export interface MobMember {
   status?: string;
   error?: string;
   is_final?: boolean;
-  current_session_id?: string;
-  current_bridge_session_id?: string;
+  kickoff?: Record<string, unknown>;
 }
 
 export interface ExternalPeerTarget {
@@ -394,12 +390,14 @@ export interface MobPeerConnectivitySnapshot {
 /** Point-in-time execution snapshot for a mob member. */
 export interface MobMemberSnapshot {
   status: string;
+  agent_runtime_id: string;
+  fence_token: number;
+  generation?: number;
   output_preview?: string;
   error?: string;
   tokens_used: number;
   is_final: boolean;
-  current_session_id?: string;
-  current_bridge_session_id?: string;
+  kickoff?: Record<string, unknown>;
   peer_connectivity?: MobPeerConnectivitySnapshot;
 }
 
@@ -407,8 +405,10 @@ export interface MobMemberSnapshot {
 export interface MobHelperResult {
   output?: string;
   tokens_used: number;
-  session_id?: string;
-  bridge_session_id?: string;
+  agent_identity: string;
+  agent_runtime_id: string;
+  fence_token: number;
+  generation?: number;
 }
 
 /** Mob lifecycle actions. */
@@ -418,8 +418,9 @@ export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'des
 
 /** Envelope wrapping an agent event with metadata. */
 export interface EventEnvelope {
-  session_id?: string;
-  meerkat_id?: string;
+  agent_identity?: string;
+  agent_runtime_id?: string;
+  fence_token?: number;
   cursor?: string | number;
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
@@ -439,7 +440,8 @@ export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
   source: string;
-  profile: string;
+  source_fence_token?: number;
+  role: string;
   envelope: EventEnvelope;
 }
 

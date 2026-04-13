@@ -75,8 +75,9 @@ impl CanonicalMemberSnapshotMaterial {
         HelperResult {
             output: self.output_preview.clone(),
             tokens_used: self.tokens_used,
-            session_id: self.current_bridge_session_id.clone(),
-            bridge_session_id: self.current_bridge_session_id.clone(),
+            agent_identity: self.agent_runtime_id.identity.clone(),
+            agent_runtime_id: self.agent_runtime_id.clone(),
+            fence_token: self.fence_token,
         }
     }
 }

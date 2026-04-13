@@ -294,23 +294,19 @@ test(
       const spawned = await mob.spawn([
         {
           profile: "lead",
-          meerkat_id: "lead-1",
+          agent_identity: "lead-1",
           runtime_mode: "autonomous_host",
           initial_message: "Acknowledge the lead role in one sentence.",
         },
         {
           profile: "reviewer",
-          meerkat_id: "reviewer-1",
+          agent_identity: "reviewer-1",
           runtime_mode: "turn_driven",
           initial_message: "Acknowledge the reviewer role in one sentence.",
         },
       ]);
       assert.equal(spawned.length, 2);
-      assert.ok(spawned.every((entry) => entry.status === "ok"));
-
-      const reviewerBridgeSessionId = spawned[1].member_ref?.bridge_session_id;
-      assert.ok(reviewerBridgeSessionId);
-      assert.equal(spawned[1].member_ref?.session_id, reviewerBridgeSessionId);
+      assert.ok(spawned.every((entry) => entry.agent_runtime_id));
 
       await mob.wire("lead-1", "reviewer-1");
       const appended = await mob.appendSystemContext("reviewer-1", {
@@ -337,13 +333,11 @@ test(
       }
 
       const members = await mob.listMembers();
-      const reviewer = members.find((member) => member.meerkat_id === "reviewer-1");
+      const reviewer = members.find((member) => member.agent_identity === "reviewer-1");
       assert.ok(reviewer);
-      assert.equal(reviewer.member_ref.bridge_session_id, reviewerBridgeSessionId);
-      assert.equal(reviewer.member_ref.session_id, reviewerBridgeSessionId);
+      assert.ok(reviewer.agent_runtime_id);
       const reviewerSnapshot = await mob.memberStatus("reviewer-1");
-      assert.equal(reviewerSnapshot.current_bridge_session_id, reviewerBridgeSessionId);
-      assert.equal(reviewerSnapshot.current_session_id, reviewerBridgeSessionId);
+      assert.ok(reviewerSnapshot.agent_runtime_id);
 
       const ledger = await mob.events("", 200);
       assert.ok(Array.isArray(ledger));
@@ -352,11 +346,11 @@ test(
       const brokenSpawn = await mob.spawn([
         {
           profile: "broken",
-          meerkat_id: "broken-1",
+          agent_identity: "broken-1",
           runtime_mode: "turn_driven",
         },
       ]);
-      assert.equal(brokenSpawn[0]?.status, "ok");
+      assert.ok(brokenSpawn[0]?.agent_runtime_id);
       await assert.rejects(
         () => mob.member("broken-1").send(
           "This turn must fail because the member model is invalid.",
@@ -407,30 +401,25 @@ test(
       const spawned = await mob.spawn([
         {
           profile: "lead",
-          meerkat_id: "lead-1",
+          agent_identity: "lead-1",
           runtime_mode: "autonomous_host",
           initial_message: "Acknowledge the lead role in one sentence.",
         },
         {
           profile: "analyst",
-          meerkat_id: "analyst-1",
+          agent_identity: "analyst-1",
           runtime_mode: "turn_driven",
           initial_message: "Acknowledge the analyst role in one sentence.",
         },
         {
           profile: "reviewer",
-          meerkat_id: "reviewer-1",
+          agent_identity: "reviewer-1",
           runtime_mode: "turn_driven",
           initial_message: "Acknowledge the reviewer role in one sentence.",
         },
       ]);
       assert.equal(spawned.length, 3);
-      assert.ok(spawned.every((entry) => entry.status === "ok"));
-
-      const reviewerSessionId = spawned[2].member_ref?.session_id;
-      const reviewerBridgeSessionId = spawned[2].member_ref?.bridge_session_id;
-      assert.ok(reviewerSessionId);
-      assert.equal(reviewerBridgeSessionId, reviewerSessionId);
+      assert.ok(spawned.every((entry) => entry.agent_runtime_id));
 
       const allSubscription = await mob.subscribeEvents();
       try {
@@ -444,8 +433,8 @@ test(
           "mob-wide swarm events",
           allSubscription,
           (events) =>
-            events.some((item) => item?.meerkat_id === "analyst-1")
-            && events.some((item) => item?.meerkat_id === "reviewer-1"),
+            events.some((item) => item?.agent_identity === "analyst-1")
+            && events.some((item) => item?.agent_identity === "reviewer-1"),
           { timeoutMs: 120000, intervalMs: 200 },
         );
         assert.ok(items.length > 0);
@@ -457,10 +446,10 @@ test(
       const withoutReviewer = await waitFor(
         "reviewer retirement",
         () => mob.listMembers(),
-        (members) => !members.some((member) => member.meerkat_id === "reviewer-1"),
+        (members) => !members.some((member) => member.agent_identity === "reviewer-1"),
         { timeoutMs: 30000, intervalMs: 150 },
       );
-      assert.ok(!withoutReviewer.some((member) => member.meerkat_id === "reviewer-1"));
+      assert.ok(!withoutReviewer.some((member) => member.agent_identity === "reviewer-1"));
 
       await mob.respawn("reviewer-1", "Return online and say REVIEWER_RESPAWN_48.");
       const withRespawnedReviewer = await waitFor(
@@ -469,23 +458,14 @@ test(
         (members) =>
           members.some(
             (member) =>
-              member.meerkat_id === "reviewer-1"
-              && member.member_ref?.session_id
-              && member.member_ref?.bridge_session_id
-              && member.member_ref.session_id !== reviewerSessionId,
+              member.agent_identity === "reviewer-1"
+              && member.agent_runtime_id
+              && member.agent_runtime_id !== spawned[2].agent_runtime_id,
         ),
         { timeoutMs: 60000, intervalMs: 200 },
       );
       assert.ok(
-        withRespawnedReviewer.some((member) => member.meerkat_id === "reviewer-1"),
-      );
-      assert.ok(
-        withRespawnedReviewer.some(
-          (member) =>
-            member.meerkat_id === "reviewer-1"
-            && member.member_ref?.bridge_session_id
-            && member.member_ref.bridge_session_id !== reviewerBridgeSessionId,
-        ),
+        withRespawnedReviewer.some((member) => member.agent_identity === "reviewer-1"),
       );
 
       await mob.lifecycle("stop");

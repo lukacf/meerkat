@@ -289,22 +289,20 @@ if include_scenario(40):
 
             lead = await mob.spawn(
                 profile="lead",
-                meerkat_id="lead-1",
+                agent_identity="lead-1",
                 initial_message="Acknowledge the lead role in one sentence.",
                 runtime_mode="autonomous_host",
             )
             reviewer = await mob.spawn(
                 profile="reviewer",
-                meerkat_id="reviewer-1",
+                agent_identity="reviewer-1",
                 initial_message="Acknowledge the reviewer role in one sentence.",
                 runtime_mode="turn_driven",
             )
-            assert lead["session_id"]
-            assert lead["bridge_session_id"] == lead["session_id"]
-            assert reviewer["session_id"]
-            assert reviewer["bridge_session_id"] == reviewer["session_id"]
-
-            reviewer_session_id = reviewer["bridge_session_id"]
+            assert lead["agent_identity"] == "lead-1"
+            assert reviewer["agent_identity"] == "reviewer-1"
+            reviewer_runtime_id = reviewer["agent_runtime_id"]
+            reviewer_fence_token = reviewer["fence_token"]
             await mob.wire("lead-1", "reviewer-1")
 
             append = await mob.append_system_context(
@@ -314,113 +312,99 @@ if include_scenario(40):
                 idempotency_key="py-swarm-40",
             )
             assert append["status"] in {"staged", "duplicate"}
-            assert append["bridge_session_id"] == reviewer_session_id
+            assert append["agent_identity"] == "reviewer-1"
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:
                 reviewer_receipt = await mob.member("reviewer-1").send(
                     "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
                 )
-                assert reviewer_receipt["session_id"] == reviewer_session_id
-                assert reviewer_receipt["bridge_session_id"] == reviewer_session_id
-                assert reviewer_receipt["member_id"] == "reviewer-1"
+                assert reviewer_receipt["agent_identity"] == "reviewer-1"
+                assert reviewer_receipt["agent_runtime_id"] == reviewer_runtime_id
+                assert reviewer_receipt["fence_token"] == reviewer_fence_token
                 observed = await next_subscription_event(subscription)
                 assert observed is not None
 
             reviewer_state = await wait_for(
                 "reviewer turn to finish",
-                lambda: client.read_session(reviewer_session_id),
+                lambda: mob.member_status("reviewer-1"),
                 lambda state: "reviewer_ready_40"
-                in (state.last_assistant_text or "").lower(),
+                in (state.get("output_preview") or "").lower(),
                 timeout_secs=120.0,
             )
-            reviewer_text = (reviewer_state.last_assistant_text or "").lower()
+            reviewer_text = (reviewer_state.get("output_preview") or "").lower()
             assert "reviewer_ready_40" in reviewer_text
             assert "py-swarm-40" in reviewer_text
 
-            await wait_for(
-                "reviewer runtime to become idle/attached",
-                lambda: client.runtime_state(reviewer_session_id),
-                lambda payload: payload.state in ("idle", "attached"),
-                timeout_secs=120.0,
-            )
-
             members = await mob.members()
             assert {"lead-1", "reviewer-1"}.issubset(
-                {entry["meerkat_id"] for entry in members}
+                {entry["agent_identity"] for entry in members}
             )
 
-            broken_session_id = None
             try:
                 broken = await mob.spawn(
                     profile="broken",
-                    meerkat_id="broken-1",
+                    agent_identity="broken-1",
                     runtime_mode="turn_driven",
                 )
             except MeerkatError as err:
                 assert "definitely-invalid-live-smoke-model" in str(err)
             else:
-                broken_session_id = broken["session_id"]
-                assert broken_session_id
+                assert broken["agent_identity"] == "broken-1"
                 with pytest.raises(MeerkatError):
                     await mob.member("broken-1").send(
                         "This turn must fail because the member model is invalid.",
                     )
-                broken_state = await client.read_session(broken_session_id)
-                assert not (broken_state.last_assistant_text or "").strip()
+                broken_state = await mob.member_status("broken-1")
+                assert not (broken_state.get("output_preview") or "").strip()
 
-            await mob.respawn(
+            respawn_result = await mob.respawn(
                 "reviewer-1",
                 "Come back online and say REVIEWER_RESPAWN_40.",
             )
+            respawned_runtime_id = respawn_result["receipt"]["agent_runtime_id"]
+            respawned_fence_token = respawn_result["receipt"]["fence_token"]
             respawned_members = await wait_for(
                 "reviewer active after respawn",
                 mob.members,
                 lambda entries: any(
-                    entry["meerkat_id"] == "reviewer-1"
+                    entry["agent_identity"] == "reviewer-1"
+                    and entry["agent_runtime_id"] == respawned_runtime_id
                     and entry.get("state") == "Active"
                     for entry in entries
                 ),
                 timeout_secs=60.0,
             )
-            respawned_session_id = next(
-                entry.get("member_ref", {}).get("bridge_session_id")
-                or entry.get("member_ref", {}).get("session_id")
+            assert any(
+                entry["agent_identity"] == "reviewer-1"
+                and entry["agent_runtime_id"] == respawned_runtime_id
                 for entry in respawned_members
-                if entry["meerkat_id"] == "reviewer-1"
-            )
-            assert respawned_session_id
-            await wait_for(
-                "reviewer runtime idle/attached after respawn",
-                lambda: client.runtime_state(respawned_session_id),
-                lambda payload: payload.state in ("idle", "attached"),
-                timeout_secs=120.0,
             )
             respawn_receipt = await mob.member("reviewer-1").send(
                 "Reply with REVIEWER_RESPAWN_40.",
             )
-            assert respawn_receipt["session_id"] == respawned_session_id
-            assert respawn_receipt["bridge_session_id"] == respawned_session_id
-            assert respawn_receipt["member_id"] == "reviewer-1"
+            assert respawn_receipt["agent_identity"] == "reviewer-1"
+            assert respawn_receipt["agent_runtime_id"] == respawned_runtime_id
+            assert respawn_receipt["fence_token"] == respawned_fence_token
             respawned_state = await wait_for(
                 "reviewer reply after respawn",
-                lambda: client.read_session(respawned_session_id),
+                lambda: mob.member_status("reviewer-1"),
                 lambda state: "reviewer_respawn_40"
-                in (state.last_assistant_text or "").lower(),
+                in (state.get("output_preview") or "").lower(),
                 timeout_secs=120.0,
             )
             assert "reviewer_respawn_40" in (
-                respawned_state.last_assistant_text or ""
+                respawned_state.get("output_preview") or ""
             ).lower()
 
             await mob.retire("reviewer-1")
             members_after_retire = await wait_for(
                 "reviewer retirement",
                 mob.members,
-                lambda entries: all(entry["meerkat_id"] != "reviewer-1" for entry in entries),
+                lambda entries: all(entry["agent_identity"] != "reviewer-1" for entry in entries),
                 timeout_secs=60.0,
             )
             assert all(
-                entry["meerkat_id"] != "reviewer-1" for entry in members_after_retire
+                entry["agent_identity"] != "reviewer-1" for entry in members_after_retire
             )
 
             with pytest.raises(MeerkatError) as exc_info:

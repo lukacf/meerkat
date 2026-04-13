@@ -16,8 +16,8 @@ use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
 use meerkat_mob::{
-    AgentIdentity, MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode,
-    ProfileName, SpawnMemberSpec, SpawnResult,
+    AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
+    SpawnMemberSpec, SpawnResult, ids::MeerkatId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -639,7 +639,7 @@ impl AgentMobToolSurface {
 
         let mut result = Self::spawn_result_payload(&spawn_result);
         result["mob_id"] = json!(mob_id);
-        result["meerkat_id"] = json!(identity);
+        result["agent_identity"] = json!(identity);
         result["wired"] = json!(wired);
 
         if first_delegate {
@@ -1706,9 +1706,7 @@ struct ExternalPeerArg {
 
 fn peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
     match peer {
-        WirePeerArg::Local { local } => {
-            meerkat_mob::PeerTarget::Local(meerkat_mob::MeerkatId::from(local.as_str()))
-        }
+        WirePeerArg::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
         WirePeerArg::External { external } => {
             meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
                 name: external.name,

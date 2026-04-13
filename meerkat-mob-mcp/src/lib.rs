@@ -19,7 +19,7 @@ mod tokio {
 use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
-use meerkat_contracts::MobDefinitionInput;
+use meerkat_contracts::{MobDefinitionInput, MobPeerTarget};
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -39,9 +39,8 @@ use meerkat_core::types::{
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
-    AgentIdentity, FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError,
-    MobHandle, MobId, MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId,
-    SpawnMemberSpec,
+    AgentIdentity, FlowId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
+    MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -1800,9 +1799,9 @@ impl MobMcpDispatcher {
             // ── Member-level (meerkat_*) ───────────────────────────────
             tool(
                 "meerkat_spawn",
-                &format!("Spawn one or more meerkats. Required: mob_id, specs[].profile, specs[].meerkat_id. \
+                &format!("Spawn one or more mob members. Required: mob_id, specs[].profile, specs[].agent_identity. \
                      Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
-                     initial_message, resume_bridge_session_id, resume_session_id, labels (key-value map), context (opaque JSON). {COMMON}"),
+                     initial_message, labels (key-value map), context (opaque JSON). {COMMON}"),
                 json!({
                     "type":"object",
                     "properties":{
@@ -1813,16 +1812,14 @@ impl MobMcpDispatcher {
                                 "type":"object",
                                 "properties":{
                                     "profile":{"type":"string"},
-                                    "meerkat_id":{"type":"string"},
+                                    "agent_identity":{"type":"string"},
                                     "initial_message": content_input_schema(),
                                     "backend":{"type":"string","enum":["session","external"]},
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
-                                    "resume_bridge_session_id":{"type":"string"},
-                                    "resume_session_id":{"type":"string"},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
                                     "context":{"type":"object"}
                                 },
-                                "required":["profile","meerkat_id"]
+                                "required":["profile","agent_identity"]
                             }
                         }
                     },
@@ -1831,8 +1828,8 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "meerkat_retire",
-                &format!("Retire a spawned meerkat by ID. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+                &format!("Retire a spawned mob member by identity. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
                 "meerkat_list",
@@ -1841,28 +1838,60 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "meerkat_wire",
-                &format!("Wire or unwire bidirectional trust between two meerkats. \
+                &format!("Wire or unwire bidirectional trust between a local member and a peer target. \
                      action: wire | unwire. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"},"action":{"type":"string","enum":["wire","unwire"]}},"required":["mob_id","a","b","action"]}),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "agent_identity":{"type":"string"},
+                        "peer":{
+                            "oneOf":[
+                                {
+                                    "type":"object",
+                                    "properties":{"local":{"type":"string"}},
+                                    "required":["local"]
+                                },
+                                {
+                                    "type":"object",
+                                    "properties":{
+                                        "external":{
+                                            "type":"object",
+                                            "properties":{
+                                                "name":{"type":"string"},
+                                                "peer_id":{"type":"string"},
+                                                "address":{"type":"string"}
+                                            },
+                                            "required":["name","peer_id","address"]
+                                        }
+                                    },
+                                    "required":["external"]
+                                }
+                            ]
+                        },
+                        "action":{"type":"string","enum":["wire","unwire"]}
+                    },
+                    "required":["mob_id","agent_identity","peer","action"]
+                }),
             ),
             tool(
                 "mob_respawn",
-                &format!("Retire and re-spawn a meerkat with the same profile. \
-                     Required: mob_id, meerkat_id. Optional: initial_message. \
-                     Returns a receipt with old/new session IDs. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","meerkat_id"]}),
+                &format!("Retire and re-spawn a member with the same profile. \
+                     Required: mob_id, agent_identity. Optional: initial_message. \
+                     Returns an identity-native respawn receipt. {COMMON}"),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","agent_identity"]}),
             ),
             tool(
                 "meerkat_force_cancel",
-                &format!("Force-cancel a meerkat's in-flight turn. Unlike retire, this \
+                &format!("Force-cancel a member's in-flight turn. Unlike retire, this \
                      interrupts immediately without graceful shutdown. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
                 "meerkat_status",
-                &format!("Get execution status snapshot for a meerkat. Returns status, \
+                &format!("Get execution status snapshot for a member. Returns status, \
                      output_preview, tokens_used, and is_final. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
                 "mob_wait_kickoff",
@@ -1960,7 +1989,7 @@ struct MobIdArgs {
 #[derive(Deserialize)]
 struct MobSpawnMeerkatArgs {
     profile: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
     #[serde(default)]
@@ -1969,10 +1998,6 @@ struct MobSpawnMeerkatArgs {
     binding: Option<meerkat_mob::RuntimeBinding>,
     #[serde(default)]
     runtime_mode: Option<MobRuntimeMode>,
-    #[serde(default)]
-    resume_bridge_session_id: Option<String>,
-    #[serde(default)]
-    resume_session_id: Option<String>,
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -1988,43 +2013,33 @@ struct SpawnManyMeerkatsArgs {
 #[derive(Deserialize)]
 struct RetireArgs {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
 }
 #[derive(Deserialize)]
 struct WireActionArgs {
     mob_id: String,
-    #[serde(default)]
-    local: Option<String>,
-    #[serde(default)]
-    target: Option<meerkat_mob::PeerTarget>,
-    #[serde(default)]
-    a: Option<String>,
-    #[serde(default)]
-    b: Option<String>,
+    agent_identity: String,
+    peer: MobPeerTarget,
     action: String,
 }
 
 impl WireActionArgs {
     fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
-        let action = self.action;
-        match (self.local, self.target, self.a, self.b) {
-            (Some(local), Some(target), None, None) => {
-                Ok((self.mob_id, AgentIdentity::from(local), target, action))
-            }
-            (None, None, Some(a), Some(b)) => Ok((
-                self.mob_id,
-                AgentIdentity::from(a),
-                meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
-                action,
-            )),
-            (Some(_) | None, Some(_), Some(_), Some(_))
-            | (Some(_), Some(_), Some(_), None)
-            | (Some(_), Some(_), None, Some(_))
-            | (Some(_), None, Some(_), Some(_)) => {
-                Err("provide either {local, target} or legacy {a, b}, but not both".to_string())
-            }
-            _ => Err("wire action requires either {local, target} or legacy {a, b}".to_string()),
-        }
+        Ok((
+            self.mob_id,
+            AgentIdentity::from(self.agent_identity),
+            match self.peer {
+                MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
+                MobPeerTarget::External(spec) => {
+                    meerkat_mob::PeerTarget::External(TrustedPeerSpec {
+                        name: spec.name,
+                        peer_id: spec.peer_id,
+                        address: spec.address,
+                    })
+                }
+            },
+            self.action,
+        ))
     }
 }
 #[derive(Deserialize)]
@@ -2050,19 +2065,19 @@ struct EventsArgs {
 #[derive(Deserialize)]
 struct RespawnArgs {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
 }
 #[derive(Deserialize)]
 struct ForceCancelArgs {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
 }
 #[derive(Deserialize)]
 struct MeerkatStatusArgs {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
 }
 #[derive(Deserialize)]
 struct WaitKickoffArgs {
@@ -2230,26 +2245,13 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        let mut s = SpawnMemberSpec::new(spec.profile, spec.meerkat_id);
+                        let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
                         s.initial_message = spec.initial_message;
                         s.runtime_mode = spec.runtime_mode;
                         s.backend = spec.backend;
                         s.binding = spec.binding;
                         s.context = spec.context;
                         s.labels = spec.labels;
-                        if let Some(sid_str) =
-                            spec.resume_bridge_session_id.or(spec.resume_session_id)
-                        {
-                            let sid = SessionId::parse(&sid_str).map_err(|e| {
-                                ToolError::invalid_arguments(
-                                    call.name,
-                                    format!(
-                                        "invalid resume_bridge_session_id/resume_session_id: {e}"
-                                    ),
-                                )
-                            })?;
-                            s = s.with_resume_bridge_session_id(sid);
-                        }
                         s.additional_instructions = spec.additional_instructions;
                         Ok(s)
                     })
@@ -2309,7 +2311,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 self.state
                     .mob_retire(
                         &MobId::from(args.mob_id),
-                        AgentIdentity::from(args.meerkat_id),
+                        AgentIdentity::from(args.agent_identity),
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -2358,12 +2360,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: RespawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let meerkat_id_str = args.meerkat_id;
                 match self
                     .state
                     .mob_respawn(
                         &MobId::from(args.mob_id),
-                        AgentIdentity::from(meerkat_id_str.as_str()),
+                        AgentIdentity::from(args.agent_identity.as_str()),
                         args.initial_message,
                     )
                     .await
@@ -2396,7 +2397,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 self.state
                     .mob_force_cancel(
                         &MobId::from(args.mob_id),
-                        AgentIdentity::from(args.meerkat_id),
+                        AgentIdentity::from(args.agent_identity),
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -2410,7 +2411,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .state
                     .mob_member_status(
                         &MobId::from(args.mob_id),
-                        &AgentIdentity::from(args.meerkat_id),
+                        &AgentIdentity::from(args.agent_identity),
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
@@ -3520,13 +3521,13 @@ mod tests {
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": a, "specs":[{"profile":"worker", "meerkat_id":"wa", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": a, "specs":[{"profile":"worker", "agent_identity":"wa", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": b, "specs":[{"profile":"worker", "meerkat_id":"wb", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": b, "specs":[{"profile":"worker", "agent_identity":"wb", "runtime_mode":"turn_driven"}]}),
         )
         .await;
 
@@ -3562,25 +3563,25 @@ mod tests {
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "agent_identity":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_wire",
-            json!({"mob_id": mob_id, "a":"w1", "b":"w2", "action":"wire"}),
+            json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"wire"}),
         )
         .await;
         let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
@@ -3591,13 +3592,13 @@ mod tests {
         call_tool(
             &d,
             "meerkat_wire",
-            json!({"mob_id": mob_id, "a":"w1", "b":"w2", "action":"unwire"}),
+            json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"unwire"}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_retire",
-            json!({"mob_id": mob_id, "meerkat_id":"w2"}),
+            json!({"mob_id": mob_id, "agent_identity":"w2"}),
         )
         .await;
         call_tool(
@@ -3644,25 +3645,25 @@ mod tests {
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "agent_identity":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2", "runtime_mode":"turn_driven"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_wire",
-            json!({"mob_id": mob_id, "a":"w1", "b":"w2", "action":"wire"}),
+            json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"wire"}),
         )
         .await;
         call_tool(
@@ -3713,7 +3714,7 @@ mod tests {
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1"}]}),
         )
         .await;
 
@@ -3849,7 +3850,7 @@ mod tests {
             "meerkat_spawn",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "worker", "meerkat_id": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
+                "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
             }),
         )
         .await;
@@ -3870,7 +3871,7 @@ mod tests {
             "meerkat_spawn",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "lead", "meerkat_id": "lead-default"}]
+                "specs": [{"profile": "lead", "agent_identity": "lead-default"}]
             }),
         )
         .await;
@@ -3879,7 +3880,7 @@ mod tests {
             "meerkat_spawn",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "worker", "meerkat_id": "worker-turn", "runtime_mode": "turn_driven"}]
+                "specs": [{"profile": "worker", "agent_identity": "worker-turn", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -3914,8 +3915,8 @@ mod tests {
             json!({
                 "mob_id": mob_id,
                 "specs": [
-                    {"profile":"worker","meerkat_id":"w-many-a"},
-                    {"profile":"worker","meerkat_id":"w-many-b"}
+                    {"profile":"worker","agent_identity":"w-many-a"},
+                    {"profile":"worker","agent_identity":"w-many-b"}
                 ]
             }),
         )
@@ -3953,8 +3954,8 @@ mod tests {
             json!({
                 "mob_id": mob_id,
                 "specs": [
-                    {"profile":"lead","meerkat_id":"lead-kickoff","runtime_mode":"turn_driven"},
-                    {"profile":"worker","meerkat_id":"worker-kickoff","runtime_mode":"turn_driven"}
+                    {"profile":"lead","agent_identity":"lead-kickoff","runtime_mode":"turn_driven"},
+                    {"profile":"worker","agent_identity":"worker-kickoff","runtime_mode":"turn_driven"}
                 ]
             }),
         )
@@ -3992,8 +3993,8 @@ mod tests {
             json!({
                 "mob_id": mob_id,
                 "specs": [
-                    {"profile":"lead","meerkat_id":"kickoff-lead","runtime_mode":"turn_driven"},
-                    {"profile":"worker","meerkat_id":"kickoff-worker","runtime_mode":"turn_driven"}
+                    {"profile":"lead","agent_identity":"kickoff-lead","runtime_mode":"turn_driven"},
+                    {"profile":"worker","agent_identity":"kickoff-worker","runtime_mode":"turn_driven"}
                 ]
             }),
         )

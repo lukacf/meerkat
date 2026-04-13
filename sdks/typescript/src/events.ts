@@ -71,8 +71,10 @@ export type StreamScopeFrame =
   | {
       readonly scope: "mob_member";
       readonly flow_run_id: string;
-      readonly member_ref: string;
-      readonly session_id: string;
+      readonly agent_identity: string;
+      readonly agent_runtime_id?: string;
+      readonly fence_token?: number;
+      readonly generation?: number;
     };
 
 export interface ScopedAgentEvent {
@@ -425,6 +427,35 @@ function parseUsage(raw: Record<string, unknown> | undefined): Usage {
  * forward-compatibility.
  */
 export function parseEvent(raw: Record<string, unknown>): StreamEvent {
+  const normalizeScopePath = (value: unknown): StreamScopeFrame[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return { scope: "primary", session_id: "" } as StreamScopeFrame;
+      }
+      const frame = entry as Record<string, unknown>;
+      if (frame.scope === "mob_member") {
+        return {
+          scope: "mob_member",
+          flow_run_id: String(frame.flow_run_id ?? ""),
+          agent_identity: String(frame.agent_identity ?? ""),
+          agent_runtime_id:
+            frame.agent_runtime_id != null ? String(frame.agent_runtime_id) : undefined,
+          fence_token:
+            typeof frame.fence_token === "number" ? frame.fence_token : undefined,
+          generation:
+            typeof frame.generation === "number" ? frame.generation : undefined,
+        } as StreamScopeFrame;
+      }
+      return {
+        scope: "primary",
+        session_id: String(frame.session_id ?? ""),
+      } as StreamScopeFrame;
+    });
+  };
+
   if (
     raw.event &&
     (typeof raw.scope_id === "string" || Array.isArray(raw.scope_path))
@@ -435,7 +466,7 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
     return {
       type: "scoped_agent_event",
       scopeId: String(raw.scope_id ?? ""),
-      scopePath: (raw.scope_path ?? []) as StreamScopeFrame[],
+      scopePath: normalizeScopePath(raw.scope_path),
       event: parseCoreEvent(innerRaw),
     };
   }

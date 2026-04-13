@@ -2227,25 +2227,43 @@
           {
             "description": "Mob member scope for flow dispatch turns.",
             "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "agent_runtime_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fence_token": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "flow_run_id": {
                 "type": "string"
               },
-              "member_ref": {
-                "type": "string"
+              "generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "scope": {
                 "const": "mob_member",
-                "type": "string"
-              },
-              "session_id": {
                 "type": "string"
               }
             },
             "required": [
               "scope",
               "flow_run_id",
-              "member_ref",
-              "session_id"
+              "agent_identity"
             ],
             "type": "object"
           }

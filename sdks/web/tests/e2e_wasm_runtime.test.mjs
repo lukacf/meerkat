@@ -384,11 +384,12 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       const spawned = await mob.spawn([
         {
           profile: "worker",
-          meerkat_id: "worker-1",
+          agent_identity: "worker-1",
           runtime_mode: "turn_driven",
         },
       ]);
-      assert.equal(spawned[0].status, "ok");
+      assert.equal(spawned[0].agent_identity, "worker-1");
+      assert.ok(spawned[0].agent_runtime_id);
 
       const subscription = await mob.member("worker-1").subscribe();
       await mob.member("worker-1").send("Trigger a long streamed response.");
@@ -446,16 +447,15 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_spawn() {
       return JSON.stringify([
         {
-          status: "ok",
-          member_ref: {
-            kind: "session",
-            session_id: "spawn-session-1",
-          },
+          mob_id: "mob-web-parity",
+          agent_identity: "worker-1",
+          agent_runtime_id: "worker-1:1",
+          fence_token: 1,
         },
       ]);
     },
-    async mob_retire(mobId, meerkatId) {
-      calls.push(["retire", mobId, meerkatId]);
+    async mob_retire(mobId, agentIdentity) {
+      calls.push(["retire", mobId, agentIdentity]);
     },
     async mob_wire(mobId, member, peer) {
       calls.push(["wire", mobId, member, peer]);
@@ -472,65 +472,60 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_list_members() {
       return JSON.stringify([
         {
-          meerkat_id: "worker-1",
+          agent_identity: "worker-1",
+          agent_runtime_id: "worker-1:1",
+          fence_token: 1,
           profile: "worker",
-          member_ref: {
-            kind: "session",
-            session_id: "listed-session-1",
-          },
-          current_session_id: "listed-current-session-1",
         },
       ]);
     },
-    async mob_append_system_context(_mobId, meerkatId) {
+    async mob_append_system_context(_mobId, agentIdentity) {
       return JSON.stringify({
         mob_id: "mob-web-parity",
-        meerkat_id: meerkatId,
-        session_id: "sess-ctx",
-        bridge_session_id: "bridge-ctx",
+        agent_identity: agentIdentity,
         status: "staged",
       });
     },
-    async mob_member_send(_mobId, meerkatId, requestJson) {
-      calls.push(["member_send", meerkatId, JSON.parse(requestJson)]);
+    async mob_member_send(_mobId, agentIdentity, requestJson) {
+      calls.push(["member_send", agentIdentity, JSON.parse(requestJson)]);
       return JSON.stringify({
-        member_id: meerkatId,
-        session_id: "sess-send",
-        bridge_session_id: "bridge-send",
+        agent_identity: agentIdentity,
+        agent_runtime_id: `${agentIdentity}:1`,
+        fence_token: 1,
         handling_mode: "queue",
       });
     },
-    async mob_member_status(_mobId, meerkatId) {
+    async mob_member_status(_mobId, agentIdentity) {
       return JSON.stringify({
         status: "running",
+        agent_runtime_id: `${agentIdentity}:1`,
+        fence_token: 1,
         tokens_used: 7,
         is_final: false,
-        current_session_id: `${meerkatId}-session`,
-        current_bridge_session_id: `${meerkatId}-bridge-session`,
       });
     },
-    async mob_respawn(_mobId, meerkatId) {
+    async mob_respawn(_mobId, agentIdentity) {
       return JSON.stringify({
         status: "completed",
         receipt: {
-          member_id: meerkatId,
-          old_session_id: "sess-old",
-          old_bridge_session_id: "bridge-old",
-          new_session_id: "sess-new",
-          new_bridge_session_id: "bridge-new",
+          agent_identity: agentIdentity,
+          agent_runtime_id: `${agentIdentity}:2`,
+          previous_fence_token: 1,
+          fence_token: 2,
         },
       });
     },
-    async mob_force_cancel(mobId, meerkatId) {
-      calls.push(["force_cancel", mobId, meerkatId]);
+    async mob_force_cancel(mobId, agentIdentity) {
+      calls.push(["force_cancel", mobId, agentIdentity]);
     },
     async mob_spawn_helper(mobId, requestJson) {
       calls.push(["spawn_helper", mobId, JSON.parse(requestJson)]);
       return JSON.stringify({
         output: "helper complete",
         tokens_used: 11,
-        session_id: "sess-helper",
-        bridge_session_id: "bridge-helper",
+        agent_identity: "helper-1",
+        agent_runtime_id: "helper-1:1",
+        fence_token: 1,
       });
     },
     async mob_fork_helper(mobId, requestJson) {
@@ -538,8 +533,9 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({
         output: "fork complete",
         tokens_used: 13,
-        session_id: "sess-fork",
-        bridge_session_id: "bridge-fork",
+        agent_identity: "fork-1",
+        agent_runtime_id: "fork-1:1",
+        fence_token: 1,
       });
     },
     async mob_run_flow() {
@@ -582,56 +578,58 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     const spawned = await mob.spawn([
       {
         profile: "worker",
-        meerkat_id: "worker-1",
+        agent_identity: "worker-1",
       },
     ]);
-    assert.equal(spawned[0].member_ref.session_id, "spawn-session-1");
-    assert.equal(spawned[0].member_ref.bridge_session_id, "spawn-session-1");
+    assert.equal(spawned[0].agent_identity, "worker-1");
+    assert.equal(spawned[0].agent_runtime_id, "worker-1:1");
+    assert.equal(spawned[0].fence_token, 1);
 
     const listed = await mob.listMembers();
-    assert.equal(listed[0].member_ref.session_id, "listed-session-1");
-    assert.equal(listed[0].member_ref.bridge_session_id, "listed-session-1");
-    assert.equal(listed[0].current_session_id, "listed-current-session-1");
-    assert.equal(listed[0].current_bridge_session_id, "listed-current-session-1");
+    assert.equal(listed[0].agent_identity, "worker-1");
+    assert.equal(listed[0].agent_runtime_id, "worker-1:1");
+    assert.equal(listed[0].fence_token, 1);
 
     const receipt = await mob.member("worker-1").send("hello");
-    assert.equal(receipt.session_id, "sess-send");
-    assert.equal(receipt.bridge_session_id, "bridge-send");
+    assert.equal(receipt.agent_identity, "worker-1");
+    assert.equal(receipt.agent_runtime_id, "worker-1:1");
+    assert.equal(receipt.fence_token, 1);
 
     const snapshot = await mob.memberStatus("worker-1");
-    assert.equal(snapshot.current_session_id, "worker-1-session");
-    assert.equal(snapshot.current_bridge_session_id, "worker-1-bridge-session");
+    assert.equal(snapshot.agent_runtime_id, "worker-1:1");
+    assert.equal(snapshot.fence_token, 1);
 
     const appended = await mob.appendSystemContext("worker-1", {
       text: "Remember [BRIDGE-CTX].",
       source: "web-parity",
       idempotencyKey: "bridge-ctx",
     });
-    assert.equal(appended.session_id, "sess-ctx");
-    assert.equal(appended.bridge_session_id, "bridge-ctx");
+    assert.equal(appended.agent_identity, "worker-1");
 
     const respawn = await mob.respawn("worker-1");
-    assert.equal(respawn.receipt.old_session_id, "sess-old");
-    assert.equal(respawn.receipt.old_bridge_session_id, "bridge-old");
-    assert.equal(respawn.receipt.new_session_id, "sess-new");
-    assert.equal(respawn.receipt.new_bridge_session_id, "bridge-new");
+    assert.equal(respawn.receipt.agent_identity, "worker-1");
+    assert.equal(respawn.receipt.agent_runtime_id, "worker-1:2");
+    assert.equal(respawn.receipt.previous_fence_token, 1);
+    assert.equal(respawn.receipt.fence_token, 2);
 
     await mob.forceCancel("worker-1");
 
     const helper = await mob.spawnHelper("Summarize the thread.", {
-      meerkatId: "helper-1",
+      agentIdentity: "helper-1",
       profileName: "worker",
     });
-    assert.equal(helper.session_id, "sess-helper");
-    assert.equal(helper.bridge_session_id, "bridge-helper");
+    assert.equal(helper.agent_identity, "helper-1");
+    assert.equal(helper.agent_runtime_id, "helper-1:1");
+    assert.equal(helper.fence_token, 1);
 
     const fork = await mob.forkHelper("worker-1", "Review the draft.", {
-      meerkatId: "fork-1",
+      agentIdentity: "fork-1",
       profileName: "worker",
       forkContext: { mode: "full_history" },
     });
-    assert.equal(fork.session_id, "sess-fork");
-    assert.equal(fork.bridge_session_id, "bridge-fork");
+    assert.equal(fork.agent_identity, "fork-1");
+    assert.equal(fork.agent_runtime_id, "fork-1:1");
+    assert.equal(fork.fence_token, 1);
 
     assert.deepEqual(
       calls.filter(([name]) =>
@@ -649,7 +647,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
           "mob-web-parity",
           {
             prompt: "Summarize the thread.",
-            meerkat_id: "helper-1",
+            agent_identity: "helper-1",
             profile_name: "worker",
           },
         ],
@@ -659,7 +657,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
           {
             source_member_id: "worker-1",
             prompt: "Review the draft.",
-            meerkat_id: "fork-1",
+            agent_identity: "fork-1",
             profile_name: "worker",
             fork_context: { mode: "full_history" },
           },

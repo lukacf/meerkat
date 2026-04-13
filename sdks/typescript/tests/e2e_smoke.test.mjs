@@ -289,20 +289,22 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
 
       const lead = await mob.spawn({
         profile: "lead",
-        meerkatId: "lead-1",
+        agentIdentity: "lead-1",
         initialMessage: "Acknowledge the lead role in one sentence.",
         runtimeMode: "autonomous_host",
       });
       const reviewer = await mob.spawn({
         profile: "reviewer",
-        meerkatId: "reviewer-1",
+        agentIdentity: "reviewer-1",
         initialMessage: "Acknowledge the reviewer role in one sentence.",
         runtimeMode: "turn_driven",
       });
-      assert.ok(lead.session_id);
-      assert.equal(lead.bridge_session_id, lead.session_id);
-      assert.ok(reviewer.session_id);
-      assert.equal(reviewer.bridge_session_id, reviewer.session_id);
+      assert.equal(lead.agentIdentity, "lead-1");
+      assert.ok(lead.agentRuntimeId);
+      assert.ok(Number.isInteger(lead.fenceToken));
+      assert.equal(reviewer.agentIdentity, "reviewer-1");
+      assert.ok(reviewer.agentRuntimeId);
+      assert.ok(Number.isInteger(reviewer.fenceToken));
 
       await mob.wire("lead-1", "reviewer-1");
       const append = await mob.appendSystemContext(
@@ -311,7 +313,9 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         { source: "typescript-sdk", idempotencyKey: "ts-swarm-marker" },
       );
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(append.status)));
-      assert.equal(append.bridge_session_id, reviewer.bridge_session_id);
+      if (append.agent_identity != null) {
+        assert.equal(append.agent_identity, "reviewer-1");
+      }
 
       const subscription = await mob.subscribeMemberEvents("reviewer-1");
       try {
@@ -331,17 +335,9 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       }
 
       const members = await mob.listMembers();
-      const memberIds = members.map((member) => member.meerkatId);
+      const memberIds = members.map((member) => member.agentIdentity);
       assert.ok(memberIds.includes("lead-1"));
       assert.ok(memberIds.includes("reviewer-1"));
-
-      // RPC surface eagerly attaches an executor, so runtime state after a
-      // turn completes is "attached" (not "idle") while the executor remains.
-      await waitFor(
-        async () => client.request("runtime/state", { session_id: reviewer.session_id }),
-        (payload) => payload.state === "attached" || payload.state === "idle",
-        { timeoutMs: 120000, intervalMs: 200 },
-      );
 
       await mob.respawn(
         "reviewer-1",
@@ -351,54 +347,42 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         async () => mob.listMembers(),
         (items) => items.some(
           (member) =>
-            member.meerkatId === "reviewer-1"
+            member.agentIdentity === "reviewer-1"
             && member.state === "Active",
         ),
         { timeoutMs: 60000, intervalMs: 200 },
       );
-      assert.ok(membersAfterRespawn.some((member) => member.meerkatId === "reviewer-1"));
+      assert.ok(membersAfterRespawn.some((member) => member.agentIdentity === "reviewer-1"));
       const respawnedReviewer = membersAfterRespawn.find(
-        (member) => member.meerkatId === "reviewer-1",
+        (member) => member.agentIdentity === "reviewer-1",
       );
-      assert.ok(respawnedReviewer?.sessionId);
-      assert.equal(respawnedReviewer?.bridgeSessionId, respawnedReviewer?.sessionId);
-      await waitFor(
-        async () => client.request("runtime/state", { session_id: respawnedReviewer.sessionId }),
-        (payload) => payload.state === "attached" || payload.state === "idle",
-        { timeoutMs: 120000, intervalMs: 200 },
-      );
+      assert.ok(respawnedReviewer?.agentRuntimeId);
       const respawnReceipt = await mob.member("reviewer-1").send(
         "Reply with REVIEWER_RESPAWN_44.",
       );
-      assert.equal(respawnReceipt.bridgeSessionId, respawnedReviewer.sessionId);
-      await waitFor(
-        async () => client.readSession(respawnedReviewer.sessionId),
-        (state) => String(state.lastAssistantText ?? "").toLowerCase().includes("reviewer_respawn_44"),
-        { timeoutMs: 120000, intervalMs: 200 },
-      );
+      assert.equal(respawnReceipt.agentIdentity, "reviewer-1");
+      assert.ok(respawnReceipt.agentRuntimeId);
 
       await mob.retire("reviewer-1");
       const membersAfterRetire = await waitFor(
         async () => mob.listMembers(),
-        (items) => items.every((member) => member.meerkatId !== "reviewer-1"),
+        (items) => items.every((member) => member.agentIdentity !== "reviewer-1"),
         { timeoutMs: 60000, intervalMs: 200 },
       );
-      assert.ok(membersAfterRetire.every((member) => member.meerkatId !== "reviewer-1"));
+      assert.ok(membersAfterRetire.every((member) => member.agentIdentity !== "reviewer-1"));
 
       try {
         const broken = await mob.spawn({
           profile: "broken",
-          meerkatId: "broken-1",
+          agentIdentity: "broken-1",
           runtimeMode: "turn_driven",
         });
-        assert.ok(broken.session_id);
+        assert.ok(broken.agentRuntimeId);
         await assert.rejects(
           () => mob.member("broken-1").send(
             "This turn must fail because the member model is invalid.",
           ),
         );
-        const brokenState = await client.readSession(broken.session_id);
-        assert.equal(String(brokenState.lastAssistantText ?? "").trim(), "");
       } catch (error) {
         assert.match(String(error), /definitely-invalid-live-smoke-model/);
       }

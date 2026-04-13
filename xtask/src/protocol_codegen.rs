@@ -56,8 +56,8 @@ pub fn run_protocol_codegen() -> Result<()> {
         }
     }
 
-    // Generate terminal surface mapping for TurnExecutionMachine
-    let turn_machine = machine_by_name.get("TurnExecutionMachine");
+    // Generate terminal surface mapping for MeerkatMachine turn outcomes.
+    let turn_machine = machine_by_name.get("MeerkatMachine");
     if let Some(machine) = turn_machine {
         let code = generate_terminal_surface_mapping(machine)?;
         let code = rustfmt_source(&code)?;
@@ -790,7 +790,7 @@ fn is_known_copy_named_type(name: &str) -> bool {
     matches!(name, "TurnNumber" | "SurfaceDeltaOperation")
 }
 
-/// Generate a standalone terminal surface mapping module for TurnExecutionMachine.
+/// Generate a standalone terminal surface mapping module for MeerkatMachine.
 fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
     let mut out = String::new();
 

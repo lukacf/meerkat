@@ -69,7 +69,7 @@ fn catches_dead_authority_dead_code() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/mob_lifecycle_authority.rs",
+        "meerkat-mob/src/runtime/actor.rs",
         r"
 #[allow(dead_code)]
 enum FutureInput {
@@ -84,12 +84,12 @@ fn future_shell_hook() {}
     let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoDeadAuthorityWiring"
-            && finding.key.path == "meerkat-mob/src/runtime/mob_lifecycle_authority.rs"
+            && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
             && finding.key.symbol == "FutureInput"
     }));
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoDeadAuthorityWiring"
-            && finding.key.path == "meerkat-mob/src/runtime/mob_lifecycle_authority.rs"
+            && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
             && finding.key.symbol == "future_shell_hook"
     }));
 }

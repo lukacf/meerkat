@@ -90,7 +90,7 @@ export interface WasmModule {
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
-  mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
@@ -100,19 +100,19 @@ export interface WasmModule {
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
-    meerkatId: string,
+    agentIdentity: string,
     requestJson: string,
   ) => Promise<string>;
-  mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
-  mob_member_status: (mobId: string, meerkatId: string) => Promise<string>;
-  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
-  mob_force_cancel: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_member_send: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
+  mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
+  mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
   mob_subscribe_events: (mobId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;

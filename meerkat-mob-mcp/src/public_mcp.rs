@@ -37,7 +37,7 @@ struct MeerkatMobLifecycleInput {
 struct MeerkatMobSpawnInput {
     mob_id: String,
     profile: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<WireContentInput>,
     #[serde(default)]
@@ -46,10 +46,6 @@ struct MeerkatMobSpawnInput {
     backend: Option<WireMobBackendKind>,
     #[serde(default)]
     binding: Option<WireRuntimeBinding>,
-    #[serde(default)]
-    resume_bridge_session_id: Option<String>,
-    #[serde(default)]
-    resume_session_id: Option<String>,
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -69,7 +65,7 @@ struct MeerkatMobSpawnManyInput {
 #[serde(deny_unknown_fields)]
 struct MeerkatMobSpawnInputSpec {
     profile: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<WireContentInput>,
     #[serde(default)]
@@ -78,10 +74,6 @@ struct MeerkatMobSpawnInputSpec {
     backend: Option<WireMobBackendKind>,
     #[serde(default)]
     binding: Option<WireRuntimeBinding>,
-    #[serde(default)]
-    resume_bridge_session_id: Option<String>,
-    #[serde(default)]
-    resume_session_id: Option<String>,
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -94,14 +86,14 @@ struct MeerkatMobSpawnInputSpec {
 #[serde(deny_unknown_fields)]
 struct MeerkatMobMemberInput {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobRespawnInput {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<WireContentInput>,
 }
@@ -110,7 +102,7 @@ struct MeerkatMobRespawnInput {
 #[serde(deny_unknown_fields)]
 struct MeerkatMobAppendSystemContextInput {
     mob_id: String,
-    meerkat_id: String,
+    agent_identity: String,
     text: String,
     #[serde(default)]
     source: Option<String>,
@@ -457,13 +449,11 @@ pub async fn handle_public_tools_call(
             let mob_id = parse_mob_id(&input.mob_id)?;
             let spec = build_spawn_spec(
                 input.profile,
-                input.meerkat_id.clone(),
+                input.agent_identity.clone(),
                 input.initial_message,
                 input.runtime_mode,
                 input.backend,
                 input.binding,
-                input.resume_bridge_session_id,
-                input.resume_session_id,
                 input.labels,
                 input.context,
                 input.additional_instructions,
@@ -474,7 +464,6 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             let mut payload = spawn_result_payload(&spawn_result);
             payload["mob_id"] = json!(mob_id);
-            payload["meerkat_id"] = json!(input.meerkat_id);
             Ok(payload)
         }
         "meerkat_mob_spawn_many" => {
@@ -486,13 +475,11 @@ pub async fn handle_public_tools_call(
                 .map(|spec| {
                     build_spawn_spec(
                         spec.profile,
-                        spec.meerkat_id,
+                        spec.agent_identity,
                         spec.initial_message,
                         spec.runtime_mode,
                         spec.backend,
                         spec.binding,
-                        spec.resume_bridge_session_id,
-                        spec.resume_session_id,
                         spec.labels,
                         spec.context,
                         spec.additional_instructions,
@@ -523,7 +510,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_retire(
                     &mob_id,
-                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -539,7 +526,7 @@ pub async fn handle_public_tools_call(
             match state
                 .mob_respawn(
                     &mob_id,
-                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                     initial_message,
                 )
                 .await
@@ -595,7 +582,7 @@ pub async fn handle_public_tools_call(
             let receipt = state
                 .mob_member_send(
                     &mob_id,
-                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                     content,
                     input.handling_mode.into(),
                     input.render_metadata.map(Into::into),
@@ -604,18 +591,20 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
                 "mob_id": mob_id,
-                "member_id": receipt.identity,
+                "agent_identity": receipt.identity,
+                "agent_runtime_id": receipt.agent_runtime_id,
+                "fence_token": receipt.fence_token,
                 "handling_mode": input.handling_mode,
             }))
         }
         "meerkat_mob_append_system_context" => {
             let input: MeerkatMobAppendSystemContextInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            let meerkat_id = meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str());
+            let agent_identity = meerkat_mob::AgentIdentity::from(input.agent_identity.as_str());
             let (_bridge_session_id, result) = state
                 .mob_append_system_context(
                     &mob_id,
-                    &meerkat_id,
+                    &agent_identity,
                     meerkat_core::service::AppendSystemContextRequest {
                         text: input.text,
                         source: input.source,
@@ -626,7 +615,7 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
                 "mob_id": mob_id,
-                "meerkat_id": meerkat_id,
+                "agent_identity": agent_identity,
                 "status": result.status,
             }))
         }
@@ -687,7 +676,7 @@ pub async fn handle_public_tools_call(
             state
                 .mob_force_cancel(
                     &mob_id,
-                    meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
+                    meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -699,7 +688,7 @@ pub async fn handle_public_tools_call(
             let snapshot = state
                 .mob_member_status(
                     &mob_id,
-                    &meerkat_mob::AgentIdentity::from(input.meerkat_id.as_str()),
+                    &meerkat_mob::AgentIdentity::from(input.agent_identity.as_str()),
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
@@ -805,9 +794,7 @@ fn content_input_from_wire(
 
 fn peer_target_from_wire(peer: MobPeerTarget) -> meerkat_mob::PeerTarget {
     match peer {
-        MobPeerTarget::Local(member_id) => {
-            meerkat_mob::PeerTarget::Local(meerkat_mob::MeerkatId::from(member_id.as_str()))
-        }
+        MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
         MobPeerTarget::External(spec) => {
             meerkat_mob::PeerTarget::External(meerkat_core::comms::TrustedPeerSpec {
                 name: spec.name,
@@ -835,18 +822,16 @@ fn backend_kind_from_wire(kind: WireMobBackendKind) -> meerkat_mob::MobBackendKi
 #[allow(clippy::too_many_arguments)]
 fn build_spawn_spec(
     profile: String,
-    meerkat_id: String,
+    agent_identity: String,
     initial_message: Option<WireContentInput>,
     runtime_mode: Option<WireMobRuntimeMode>,
     backend: Option<WireMobBackendKind>,
     binding: Option<WireRuntimeBinding>,
-    resume_bridge_session_id: Option<String>,
-    resume_session_id: Option<String>,
     labels: Option<BTreeMap<String, String>>,
     context: Option<Value>,
     additional_instructions: Option<Vec<String>>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
-    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), meerkat_id.as_str());
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
     spec.runtime_mode = runtime_mode.map(runtime_mode_from_wire);
     // Resolve binding: explicit binding takes precedence over legacy backend tag.
@@ -879,12 +864,6 @@ fn build_spawn_spec(
     spec.labels = labels;
     spec.context = context;
     spec.additional_instructions = additional_instructions;
-    if let Some(session_id) = resume_bridge_session_id.or(resume_session_id) {
-        let parsed = meerkat_core::types::SessionId::parse(&session_id)
-            .map_err(|error| format!("invalid resume_bridge_session_id/resume_session_id: {error}"))
-            .map_err(McpToolError::invalid_params)?;
-        spec = spec.with_resume_bridge_session_id(parsed);
-    }
     Ok(spec)
 }
 
@@ -963,30 +942,5 @@ mod tests {
             .collect();
         assert!(names.contains(&"meerkat_mob_create".to_string()));
         assert!(!names.contains(&"mob_create".to_string()));
-    }
-
-    #[test]
-    fn build_spawn_spec_rejects_invalid_bridge_resume_aliases_with_bridge_native_message() {
-        let err = build_spawn_spec(
-            "worker".to_string(),
-            "worker-1".to_string(),
-            None,
-            None,
-            None,
-            None,
-            Some("not-a-session-id".to_string()),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect_err("invalid resume bridge session id should fail");
-
-        assert!(
-            err.message
-                .contains("invalid resume_bridge_session_id/resume_session_id"),
-            "unexpected error message: {}",
-            err.message
-        );
     }
 }

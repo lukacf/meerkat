@@ -207,7 +207,8 @@ export interface EventEnvelope<T = unknown> {
 
 export interface AttributedEvent {
   readonly source: string;
-  readonly profile: string;
+  readonly sourceFenceToken?: number;
+  readonly role: string;
   readonly envelope: EventEnvelope;
 }
 
@@ -256,29 +257,30 @@ export interface MobDefinition {
 
 export interface SpawnSpec {
   readonly profile: string;
-  readonly meerkatId: string;
+  readonly agentIdentity: string;
   readonly initialMessage?: string | ContentBlock[];
   readonly runtimeMode?: "turn_driven" | "autonomous_host";
   readonly backend?: "session" | "external";
   readonly labels?: Record<string, string>;
   readonly context?: Record<string, unknown>;
-  readonly resumeBridgeSessionId?: string;
-  readonly resumeSessionId?: string;
+  readonly generation?: number;
   readonly additionalInstructions?: string[];
 }
 
-export interface MobMemberRef {
-  readonly kind?: string;
-  readonly sessionId?: string;
-  readonly bridgeSessionId?: string;
-  readonly peerId?: string;
-  readonly address?: string;
+export interface MobSpawnResult {
+  readonly mobId: string;
+  readonly agentIdentity: string;
+  readonly agentRuntimeId: string;
+  readonly fenceToken: number;
+  readonly generation?: number;
 }
 
 export interface MobMember {
-  readonly meerkatId: string;
+  readonly agentIdentity: string;
+  readonly agentRuntimeId: string;
+  readonly fenceToken: number;
+  readonly generation?: number;
   readonly profile: string;
-  readonly memberRef?: MobMemberRef;
   readonly peerId?: string;
   readonly externalPeerSpecs?: Readonly<Record<string, Record<string, unknown>>>;
   readonly runtimeMode?: string;
@@ -288,10 +290,8 @@ export interface MobMember {
   readonly status?: string;
   readonly error?: string;
   readonly isFinal?: boolean;
-  readonly currentSessionId?: string;
-  readonly currentBridgeSessionId?: string;
-  readonly sessionId?: string;
-  readonly bridgeSessionId?: string;
+  readonly currentRuntimeId?: string;
+  readonly currentFenceToken?: number;
 }
 
 export interface MobSummary {
@@ -312,9 +312,10 @@ export interface MobFlowStatus {
 
 export interface MobSpawnManyResultEntry {
   readonly ok: boolean;
-  readonly memberRef?: MobMemberRef;
-  readonly sessionId?: string;
-  readonly bridgeSessionId?: string;
+  readonly agentIdentity?: string;
+  readonly agentRuntimeId?: string;
+  readonly fenceToken?: number;
+  readonly generation?: number;
   readonly error?: string;
 }
 

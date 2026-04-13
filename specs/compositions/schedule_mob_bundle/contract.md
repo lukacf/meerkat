@@ -20,7 +20,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Structural Requirements
-- `mob_delivery_protocol_covered` — mob delivery feedback closes occurrence obligations only through the explicit mob delivery protocol
+- `(none)`
 
 ## Behavioral Invariants
 - `(none)`

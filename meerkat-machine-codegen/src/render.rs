@@ -375,6 +375,11 @@ pub fn render_generated_kernel_mod(schemas: &[MachineSchema]) -> String {
         .iter()
         .map(|schema| machine_slug(&schema.machine))
         .collect();
+    for compatibility_slug in ["flow_frame", "flow_run", "loop_iteration"] {
+        if !module_slugs.iter().any(|slug| slug == compatibility_slug) {
+            module_slugs.push(compatibility_slug.to_string());
+        }
+    }
     module_slugs.sort();
     for slug in module_slugs {
         pushln!(&mut out, "pub mod {slug};");

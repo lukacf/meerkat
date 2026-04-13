@@ -36,16 +36,9 @@ impl AuditPolicy {
                 ),
             ],
             authority_modules: vec![
-                AuthorityModuleRule::new("meerkat-mob/src/runtime/mob_lifecycle_authority.rs"),
-                AuthorityModuleRule::new("meerkat-mob/src/runtime/mob_orchestrator_authority.rs"),
-                AuthorityModuleRule::new("meerkat-mob/src/runtime/flow_run_kernel.rs"),
-                AuthorityModuleRule::new("meerkat-mob/src/runtime/loop_iteration_authority.rs"),
-                AuthorityModuleRule::new("meerkat-runtime/src/runtime_ingress_authority.rs"),
-                AuthorityModuleRule::new("meerkat-runtime/src/ops_lifecycle_authority.rs"),
-                AuthorityModuleRule::new("meerkat-core/src/turn_execution_authority.rs"),
-                AuthorityModuleRule::new("meerkat-mcp/src/external_tool_surface_authority.rs"),
-                AuthorityModuleRule::new("meerkat-runtime/src/runtime_control_authority.rs"),
-                AuthorityModuleRule::new("meerkat-comms/src/peer_comms_authority.rs"),
+                AuthorityModuleRule::new("meerkat-runtime/src/meerkat_machine.rs"),
+                AuthorityModuleRule::new("meerkat-mob/src/runtime/actor.rs"),
+                AuthorityModuleRule::new("meerkat-schedule/src/authority.rs"),
             ],
             protected_fields: vec![
                 ProtectedFieldRule::new(
@@ -193,64 +186,23 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
 
 fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> String {
     match (producer, effect_variant, consumer) {
-        ("OpsLifecycleMachine", "ExposeOperationPeer", "PeerCommsMachine") => {
-            "TrustPeer".to_string()
+        ("MobMachine", "RequestRuntimeBinding", "MeerkatMachine") => "PrepareBindings".to_string(),
+        ("MobMachine", "SubmitMemberWork", "MeerkatMachine") => "SubmitMobWork".to_string(),
+        ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "RetireRuntime".to_string(),
+        ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "DestroyRuntime".to_string(),
+        ("MeerkatMachine", "RuntimeBound", "MobMachine") => "ObserveRuntimeReady".to_string(),
+        ("MeerkatMachine", "RuntimeRetired", "MobMachine") => "ObserveRuntimeRetired".to_string(),
+        ("MeerkatMachine", "RuntimeDestroyed", "MobMachine") => {
+            "ObserveRuntimeDestroyed".to_string()
         }
-        ("FlowRunMachine", "AdmitStepWork", "RuntimeControlMachine") => {
-            "SubmitIngressEffect".to_string()
-        }
-        ("FlowRunMachine", "EscalateSupervisor", "MobOrchestratorMachine") => {
-            "EscalateSupervisor".to_string()
-        }
-        ("FlowRunMachine", "FlowTerminalized", "MobOrchestratorMachine") => {
-            "MarkCompleted".to_string()
-        }
-        ("MobLifecycleMachine", "RequestCleanup", "MobOrchestratorMachine") => "Stop".to_string(),
-        ("MobOrchestratorMachine", "ActivateSupervisor", "MobLifecycleMachine") => {
-            "Start".to_string()
-        }
-        ("MobOrchestratorMachine", "DeactivateSupervisor", "MobLifecycleMachine") => {
-            "Stop".to_string()
-        }
-        ("MobOrchestratorMachine", "FlowActivated", "FlowRunMachine") => "StartRun".to_string(),
-        ("MobOrchestratorMachine", "FlowActivated", "MobLifecycleMachine") => {
-            "StartRun".to_string()
-        }
-        ("MobOrchestratorMachine", "FlowDeactivated", "MobLifecycleMachine") => {
-            "FinishRun".to_string()
-        }
-        ("MobOrchestratorMachine", "MemberForceCancelled", "RuntimeControlMachine") => {
-            "CancelRequested".to_string()
-        }
-        ("PeerCommsMachine", "SubmitPeerInputCandidate", "RuntimeControlMachine") => {
-            "SubmitIngressEffect".to_string()
-        }
-        ("RuntimeControlMachine", "SubmitAdmittedIngressEffect", "RuntimeIngressMachine") => {
-            "AdmitRecovered".to_string()
-        }
-        ("RuntimeControlMachine", "SubmitRunPrimitive", "TurnExecutionMachine") => {
-            "BeginTurn".to_string()
-        }
-        ("RuntimeIngressMachine", "ReadyForRun", "RuntimeControlMachine") => {
-            "BeginRunFromIngress".to_string()
-        }
-        ("TurnExecutionMachine", "BoundaryApplied", "RuntimeIngressMachine") => {
-            "BoundaryApplied".to_string()
-        }
-        ("TurnExecutionMachine", "RunCompleted", "RuntimeIngressMachine") => {
-            "RunCompleted".to_string()
-        }
-        ("TurnExecutionMachine", "RunCompleted", "RuntimeControlMachine") => {
-            "RunCompleted".to_string()
-        }
-        ("TurnExecutionMachine", "RunFailed", "RuntimeIngressMachine") => "RunFailed".to_string(),
-        ("TurnExecutionMachine", "RunFailed", "RuntimeControlMachine") => "RunFailed".to_string(),
-        ("TurnExecutionMachine", "RunCancelled", "RuntimeIngressMachine") => {
-            "RunCancelled".to_string()
-        }
-        ("TurnExecutionMachine", "RunCancelled", "RuntimeControlMachine") => {
-            "RunCancelled".to_string()
-        }
+        ("MeerkatMachine", "WorkCompleted", "MobMachine") => "ObserveWorkCompleted".to_string(),
+        ("MeerkatMachine", "WorkFailed", "MobMachine") => "ObserveWorkFailed".to_string(),
+        ("MeerkatMachine", "WorkCancelled", "MobMachine") => "ObserveWorkCancelled".to_string(),
+        (
+            "ScheduleLifecycleMachine",
+            "SupersedePendingOccurrences",
+            "OccurrenceLifecycleMachine",
+        ) => "SupersedeByRevision".to_string(),
         _ => format!("{producer}:{effect_variant}->{consumer}"),
     }
 }
@@ -405,7 +357,7 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                 .find(|m| m.instance_id == protocol.producer_instance)
                 .map(|m| m.machine_name.as_str());
             if let Some(machine_name) = producer_machine_name
-                && machine_name == "TurnExecutionMachine"
+                && machine_name == "MeerkatMachine"
             {
                 let has_terminals = machines
                     .iter()
@@ -426,39 +378,11 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
 
 fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
     match (producer, consumer) {
-        ("RuntimeControlMachine" | "TurnExecutionMachine", "RuntimeIngressMachine")
-        | ("RuntimeControlMachine", "TurnExecutionMachine")
-        | (
-            "RuntimeIngressMachine"
-            | "TurnExecutionMachine"
-            | "PeerCommsMachine"
-            | "OpsLifecycleMachine",
-            "RuntimeControlMachine",
-        ) => {
+        ("MobMachine", "MeerkatMachine") | ("MeerkatMachine", "MobMachine") => {
             vec![
-                "meerkat-runtime/src/runtime_loop.rs",
-                "meerkat-runtime/src/session_adapter.rs",
-            ]
-        }
-        ("OpsLifecycleMachine", "PeerCommsMachine") => {
-            vec![
-                "meerkat-machine-schema/src/catalog/compositions.rs",
-                "meerkat-runtime/src/ops_lifecycle.rs",
-            ]
-        }
-        ("FlowRunMachine" | "MobOrchestratorMachine", "RuntimeControlMachine")
-        | ("FlowRunMachine" | "MobLifecycleMachine", "MobOrchestratorMachine")
-        | ("MobOrchestratorMachine", "MobLifecycleMachine" | "FlowRunMachine") => {
-            vec![
+                "meerkat-runtime/src/meerkat_machine.rs",
                 "meerkat-mob/src/runtime/actor.rs",
-                "meerkat-mob/src/runtime/flow.rs",
-            ]
-        }
-        ("FlowFrameMachine", "FlowRunMachine" | "LoopIterationMachine")
-        | ("LoopIterationMachine", "FlowRunMachine" | "FlowFrameMachine") => {
-            vec![
-                "meerkat-mob/src/runtime/flow_frame_engine.rs",
-                "meerkat-mob/src/runtime/flow.rs",
+                "meerkat-mob/src/runtime/handle.rs",
             ]
         }
         ("ScheduleLifecycleMachine", "OccurrenceLifecycleMachine") => {

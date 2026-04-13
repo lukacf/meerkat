@@ -88,10 +88,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-session/src/ephemeral.rs` — session task shell executing admission authority effects and projections
-- `meerkat-session/src/session_turn_admission_authority.rs` — canonical session turn admission authority
+- `meerkat-core/src/turn_execution_authority.rs` — turn admission and gating authority
 
 ### Scenarios
-- `admit-begin-resolve-finalize` — a single turn claims the session slot, runs, resolves, and releases admission canonically
-- `abort-admitted-pre_run-failure` — pre-run failures after admission release the slot without leaving a busy session behind
-- `graceful-shutdown-drain` — shutdown drains running turns and blocks new admissions once shutting down
+- `turn_admission_accept_reject` — session turn admission accepts or rejects inputs according to machine-owned policy

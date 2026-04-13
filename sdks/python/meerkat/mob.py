@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
+
 from .streaming import EventSubscription
 
 RenderClass = Literal[
@@ -24,9 +25,10 @@ RenderMetadata = TypedDict(
 MemberDeliveryReceipt = TypedDict(
     "MemberDeliveryReceipt",
     {
-        "member_id": str,
-        "session_id": str,
-        "bridge_session_id": NotRequired[str],
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
         "handling_mode": Literal["queue", "steer"],
     },
 )
@@ -34,34 +36,22 @@ MemberDeliveryReceipt = TypedDict(
 MemberRespawnReceipt = TypedDict(
     "MemberRespawnReceipt",
     {
-        "member_id": str,
-        "old_session_id": NotRequired[str | None],
-        "old_bridge_session_id": NotRequired[str | None],
-        "new_session_id": NotRequired[str | None],
-        "new_bridge_session_id": NotRequired[str | None],
-    },
-)
-
-MobMemberRef = TypedDict(
-    "MobMemberRef",
-    {
-        "kind": NotRequired[str],
-        "session_id": NotRequired[str],
-        "bridge_session_id": NotRequired[str],
-        "peer_id": NotRequired[str],
-        "address": NotRequired[str],
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "previous_fence_token": int,
+        "fence_token": int,
+        "generation": NotRequired[int],
     },
 )
 
 MobSpawnResult = TypedDict(
     "MobSpawnResult",
     {
-        "status": NotRequired[str],
-        "meerkat_id": NotRequired[str],
-        "session_id": NotRequired[str],
-        "bridge_session_id": NotRequired[str],
-        "member_ref": NotRequired[MobMemberRef | None],
-        "error": NotRequired[str],
+        "mob_id": str,
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
     },
 )
 
@@ -95,28 +85,32 @@ MobMemberSnapshot = TypedDict(
     "MobMemberSnapshot",
     {
         "status": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
         "output_preview": NotRequired[str],
         "error": NotRequired[str],
         "tokens_used": int,
         "is_final": bool,
-        "current_session_id": NotRequired[str],
-        "current_bridge_session_id": NotRequired[str],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+        "kickoff": NotRequired[dict[str, Any]],
     },
 )
 
 MobKickoffMemberSnapshot = TypedDict(
     "MobKickoffMemberSnapshot",
     {
-        "meerkat_id": str,
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
         "status": str,
         "output_preview": NotRequired[str],
         "error": NotRequired[str],
         "tokens_used": int,
         "is_final": bool,
-        "current_session_id": NotRequired[str],
-        "current_bridge_session_id": NotRequired[str],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+        "kickoff": NotRequired[dict[str, Any]],
     },
 )
 
@@ -125,17 +119,21 @@ MobHelperResult = TypedDict(
     {
         "output": NotRequired[str],
         "tokens_used": int,
-        "session_id": NotRequired[str],
-        "bridge_session_id": NotRequired[str],
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
     },
 )
 
 MobMember = TypedDict(
     "MobMember",
     {
-        "meerkat_id": str,
+        "agent_identity": str,
+        "agent_runtime_id": str,
+        "fence_token": int,
+        "generation": NotRequired[int],
         "profile": str,
-        "member_ref": MobMemberRef,
         "peer_id": NotRequired[str],
         "external_peer_specs": NotRequired[dict[str, dict[str, Any]]],
         "runtime_mode": NotRequired[str],
@@ -145,8 +143,7 @@ MobMember = TypedDict(
         "status": NotRequired[str],
         "error": NotRequired[str],
         "is_final": NotRequired[bool],
-        "current_session_id": NotRequired[str],
-        "current_bridge_session_id": NotRequired[str],
+        "kickoff": NotRequired[dict[str, Any]],
     },
 )
 
@@ -154,12 +151,10 @@ MobSpawnSpec = TypedDict(
     "MobSpawnSpec",
     {
         "profile": str,
-        "meerkat_id": str,
+        "agent_identity": str,
         "initial_message": NotRequired[str | list[dict[str, Any]] | None],
         "runtime_mode": NotRequired[str | None],
         "backend": NotRequired[str | None],
-        "resume_bridge_session_id": NotRequired[str | None],
-        "resume_session_id": NotRequired[str | None],
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
         "additional_instructions": NotRequired[list[str] | None],
@@ -167,13 +162,12 @@ MobSpawnSpec = TypedDict(
 )
 
 
-
 class Member:
     """Capability-bearing mob member handle."""
 
-    def __init__(self, mob: "Mob", meerkat_id: str):
+    def __init__(self, mob: "Mob", agent_identity: str):
         self._mob = mob
-        self.meerkat_id = meerkat_id
+        self.agent_identity = agent_identity
 
     async def send(
         self,
@@ -184,19 +178,18 @@ class Member:
     ) -> MemberDeliveryReceipt:
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
-            self.meerkat_id,
+            self.agent_identity,
             content,
             handling_mode=handling_mode,
             render_metadata=render_metadata,
         )
 
     async def events(self) -> EventSubscription:
-        return await self._mob.subscribe_member_events(self.meerkat_id)
+        return await self._mob.subscribe_member_events(self.agent_identity)
 
 
 class Mob:
     """First-class mob handle backed by explicit RPC methods."""
-
 
     def __init__(self, client: Any, mob_id: str):
         self._client = client
@@ -212,12 +205,10 @@ class Mob:
         self,
         *,
         profile: str,
-        meerkat_id: str,
-        initial_message: str | list[dict] | None = None,
+        agent_identity: str,
+        initial_message: str | list[dict[str, Any]] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
-        resume_bridge_session_id: str | None = None,
-        resume_session_id: str | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
@@ -225,16 +216,15 @@ class Mob:
         return await self._client.spawn_mob_member(
             self.id,
             profile=profile,
-            meerkat_id=meerkat_id,
+            agent_identity=agent_identity,
             initial_message=initial_message,
             runtime_mode=runtime_mode,
             backend=backend,
-            resume_bridge_session_id=resume_bridge_session_id,
-            resume_session_id=resume_session_id,
             labels=labels,
             context=context,
             additional_instructions=additional_instructions,
         )
+
     async def spawn_many(
         self,
         specs: list[MobSpawnSpec],
@@ -253,21 +243,21 @@ class Mob:
             limit=limit,
         )
 
-    async def retire(self, meerkat_id: str) -> None:
-        await self._client.retire_mob_member(self.id, meerkat_id)
+    async def retire(self, agent_identity: str) -> None:
+        await self._client.retire_mob_member(self.id, agent_identity)
 
     async def respawn(
         self,
-        meerkat_id: str,
+        agent_identity: str,
         initial_message: str | list[dict[str, Any]] | None = None,
     ) -> MobRespawnResult:
-        return await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
+        return await self._client.respawn_mob_member(self.id, agent_identity, initial_message)
 
-    async def force_cancel(self, meerkat_id: str) -> None:
-        await self._client.force_cancel_mob_member(self.id, meerkat_id)
+    async def force_cancel(self, agent_identity: str) -> None:
+        await self._client.force_cancel_mob_member(self.id, agent_identity)
 
-    async def member_status(self, meerkat_id: str) -> MobMemberSnapshot:
-        return await self._client.mob_member_status(self.id, meerkat_id)
+    async def member_status(self, agent_identity: str) -> MobMemberSnapshot:
+        return await self._client.mob_member_status(self.id, agent_identity)
 
     async def wait_for_kickoff_complete(
         self,
@@ -285,14 +275,14 @@ class Mob:
         self,
         prompt: str,
         *,
-        meerkat_id: str | None = None,
+        agent_identity: str | None = None,
         role_name: str | None = None,
         profile_name: str | None = None,
     ) -> MobHelperResult:
         return await self._client.spawn_mob_helper(
             self.id,
             prompt,
-            meerkat_id=meerkat_id,
+            agent_identity=agent_identity,
             role_name=role_name,
             profile_name=profile_name,
         )
@@ -302,7 +292,7 @@ class Mob:
         source_member_id: str,
         prompt: str,
         *,
-        meerkat_id: str | None = None,
+        agent_identity: str | None = None,
         role_name: str | None = None,
         profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
@@ -311,7 +301,7 @@ class Mob:
             self.id,
             source_member_id,
             prompt,
-            meerkat_id=meerkat_id,
+            agent_identity=agent_identity,
             role_name=role_name,
             profile_name=profile_name,
             fork_context=fork_context,
@@ -326,12 +316,12 @@ class Mob:
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)
 
-    def member(self, meerkat_id: str) -> Member:
-        return Member(self, meerkat_id)
+    def member(self, agent_identity: str) -> Member:
+        return Member(self, agent_identity)
 
     async def append_system_context(
         self,
-        meerkat_id: str,
+        agent_identity: str,
         text: str,
         *,
         source: str | None = None,
@@ -339,7 +329,7 @@ class Mob:
     ) -> dict[str, Any]:
         return await self._client.append_mob_system_context(
             self.id,
-            meerkat_id,
+            agent_identity,
             text,
             source=source,
             idempotency_key=idempotency_key,
@@ -357,16 +347,16 @@ class Mob:
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
 
-    async def subscribe_member_events(self, meerkat_id: str) -> EventSubscription:
+    async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
         """Subscribe to events for a single mob member."""
-        return await self._client.subscribe_mob_member_events(self.id, meerkat_id)
+        return await self._client.subscribe_mob_member_events(self.id, agent_identity)
 
     async def subscribe_events(self) -> EventSubscription:
         """Subscribe to attributed mob-wide events."""
         return await self._client.subscribe_mob_events(self.id)
 
-    async def subscribe_member(self, meerkat_id: str) -> EventSubscription:
-        return await self.subscribe_member_events(meerkat_id)
+    async def subscribe_member(self, agent_identity: str) -> EventSubscription:
+        return await self.subscribe_member_events(agent_identity)
 
     async def subscribe_all(self) -> EventSubscription:
         return await self.subscribe_events()

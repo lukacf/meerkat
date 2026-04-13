@@ -1,6 +1,8 @@
 use crate::error::MobError;
 use crate::event::{MobEvent, MobEventKind, NewMobEvent};
-use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, AgentRuntimeId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId,
+};
 use crate::store::MobEventStore;
 use std::sync::Arc;
 
@@ -46,10 +48,11 @@ impl MobEventEmitter {
         step_id: StepId,
         meerkat_id: MeerkatId,
     ) -> Result<MobEvent, MobError> {
+        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
         self.append(MobEventKind::StepDispatched {
             run_id,
             step_id,
-            meerkat_id,
+            target,
         })
         .await
     }
@@ -60,10 +63,11 @@ impl MobEventEmitter {
         step_id: StepId,
         meerkat_id: MeerkatId,
     ) -> Result<MobEvent, MobError> {
+        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
         self.append(MobEventKind::StepTargetCompleted {
             run_id,
             step_id,
-            meerkat_id,
+            target,
         })
         .await
     }
@@ -75,10 +79,11 @@ impl MobEventEmitter {
         meerkat_id: MeerkatId,
         reason: String,
     ) -> Result<MobEvent, MobError> {
+        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
         self.append(MobEventKind::StepTargetFailed {
             run_id,
             step_id,
-            meerkat_id,
+            target,
             reason,
         })
         .await
@@ -139,7 +144,7 @@ impl MobEventEmitter {
         self.append(MobEventKind::SupervisorEscalation {
             run_id,
             step_id,
-            escalated_to,
+            escalated_to: AgentIdentity::from(escalated_to.as_str()),
         })
         .await
     }

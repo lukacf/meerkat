@@ -1,5 +1,9 @@
 # schedule_runtime_bundle Mapping Note
 
+This composition was audited during the two-kernel collapse and retained
+unchanged because it does not route through any absorbed Meerkat or Mob
+internal machine.
+
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage
 This section is generated from the Rust composition catalog. Do not edit it by hand.
@@ -23,9 +27,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `(none)`
 
 ### Invariants
-- `runtime_delivery_protocol_covered`
-  - anchors: `schedule_driver`, `runtime_delivery_precursor`, `schedule_runtime_bundle_schema`
-  - scenarios: `runtime-delivery-feedback`
+- `(none)`
 
 
 <!-- GENERATED_COVERAGE_END -->

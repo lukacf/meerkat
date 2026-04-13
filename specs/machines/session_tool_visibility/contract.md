@@ -61,12 +61,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-core/src/session.rs` — canonical durable session-owned tool visibility state
-- `meerkat-core/src/tool_scope.rs` — live session/control-plane visibility projection bridge
-- `meerkat-session/src/persistent.rs` — live-session-first durable mutation and rollback seam
-- `meerkat-tools/src/control_plane.rs` — search/load control-plane tools over exact catalogs
+- `meerkat-core/src/tool_scope.rs` — tool visibility projection layered on durable visibility state
 
 ### Scenarios
-- `stage-filter-and-promote` — persistent filter mutations stage first and only become active at the next calling-llm boundary
-- `deferred-load-and-promote` — requested deferred tool names accumulate in staged intent and become callable only after boundary promotion
-- `dormant-missing-intent-persists` — requested and filtered names remain durable intent even while temporarily absent from the current callable projection
+- `staged_visibility_apply` — tool visibility staged state applies and publishes committed revisions at a boundary

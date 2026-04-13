@@ -516,7 +516,7 @@ impl MobBuilder {
                 return Err(error.into());
             }
         }
-        // Recreate missing sessions referenced by MeerkatSpawned events.
+        // Recreate missing sessions referenced by MemberSpawned events.
         for entry in &roster_entries {
             let Some(bridge_session_id) = entry.bridge_session_id().cloned() else {
                 continue;

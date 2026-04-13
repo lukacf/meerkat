@@ -15,7 +15,7 @@ pub struct MachineSchema {
     pub transitions: Vec<TransitionSchema>,
     pub effect_dispositions: Vec<EffectDispositionRule>,
     /// Override the CI step_limit for individual machine TLC verification.
-    /// Machines with many state fields (e.g. FlowRunMachine v2 with scheduler queues)
+    /// Machines with many state fields (e.g. a rich MobMachine flow/work region)
     /// may need a lower limit to keep CI verification tractable. `None` uses the
     /// codegen default (6 for CI, 8 for deep).
     pub ci_step_limit: Option<u32>,
@@ -966,22 +966,29 @@ impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::{peer_comms_machine, peer_directory_reachability_machine};
+    use crate::catalog::{meerkat_machine, peer_directory_reachability_machine};
 
     #[test]
-    fn validates_peer_comms_style_machine() {
-        let schema = peer_comms_machine();
+    fn validates_meerkat_machine_schema() {
+        let schema = meerkat_machine();
 
-        assert_eq!(schema.machine, "PeerCommsMachine");
-        assert_eq!(schema.rust.crate_name, "meerkat-comms");
-        assert_eq!(schema.rust.module, "generated::peer_comms");
+        assert_eq!(schema.machine, "MeerkatMachine");
+        assert_eq!(schema.rust.crate_name, "meerkat-runtime");
+        assert_eq!(schema.rust.module, "generated::meerkat_machine");
+        assert_eq!(schema.state.phase.name, "MeerkatPhase");
         assert!(
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "EnqueueActionableMessage")
+                .any(|transition| transition.name == "PrepareBindings")
         );
-        assert!(schema.state.terminal_phases.is_empty());
+        assert!(
+            schema
+                .transitions
+                .iter()
+                .any(|transition| transition.name == "DestroyRuntime")
+        );
+        assert_eq!(schema.state.terminal_phases, vec!["Destroyed"]);
         assert_eq!(schema.validate(), Ok(()));
     }
 

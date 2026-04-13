@@ -1007,20 +1007,19 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
 }
 
 fn named_type_is_u64(name: &str) -> bool {
-    matches!(name, "BoundarySequence" | "TurnNumber")
+    matches!(
+        name,
+        "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use meerkat_machine_schema::{
-        canonical_machine_schemas, input_lifecycle_machine, runtime_control_machine,
-    };
+    use meerkat_machine_schema::{canonical_machine_schemas, meerkat_machine, mob_machine};
 
-    use super::{
-        GeneratedMachineKernel, KernelInput, KernelValue, TransitionOutcome, TransitionRefusal,
-    };
+    use super::{GeneratedMachineKernel, KernelInput, KernelValue, TransitionRefusal};
 
     #[allow(clippy::expect_used)]
     #[test]
@@ -1034,26 +1033,8 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
-    fn input_lifecycle_queue_accepted_transition_executes() {
-        let kernel = GeneratedMachineKernel::new(input_lifecycle_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let outcome = kernel
-            .transition(
-                &state,
-                &KernelInput {
-                    variant: "QueueAccepted".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("queue accepted transition");
-        assert_eq!(outcome.transition, "QueueAccepted");
-        assert_eq!(outcome.next_state.phase, "Queued");
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn runtime_control_rejects_unknown_input_variant() {
-        let kernel = GeneratedMachineKernel::new(runtime_control_machine());
+    fn meerkat_rejects_unknown_input_variant() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
         let state = kernel.initial_state().expect("initial state");
         let refusal = kernel
             .transition(
@@ -1072,846 +1053,118 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
-    fn input_payload_types_are_checked() {
-        let kernel = GeneratedMachineKernel::new(runtime_control_machine());
+    fn meerkat_prepare_bindings_rejects_bad_payload_types() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
         let state = kernel.initial_state().expect("initial state");
-        let refusal = kernel
+        let initialized = kernel
             .transition(
                 &state,
+                &KernelInput {
+                    variant: "Initialize".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+        let registered = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: "RegisterSession".into(),
+                    fields: BTreeMap::from([(
+                        "session_id".into(),
+                        KernelValue::String("session-1".into()),
+                    )]),
+                },
+            )
+            .expect("register session");
+        let refusal = kernel
+            .transition(
+                &registered.next_state,
+                &KernelInput {
+                    variant: "PrepareBindings".into(),
+                    fields: BTreeMap::from([
+                        ("agent_runtime_id".into(), KernelValue::U64(7)),
+                        ("fence_token".into(), KernelValue::U64(3)),
+                        ("generation".into(), KernelValue::U64(1)),
+                    ]),
+                },
+            )
+            .expect_err("invalid runtime id payload should fail");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::InvalidInputPayload { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn mob_spawn_and_submit_work_transitions_execute() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let running = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "Start".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start");
+        let spawned = kernel
+            .transition(
+                &running.next_state,
+                &KernelInput {
+                    variant: "SpawnMember".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "agent_identity".into(),
+                            KernelValue::String("agent.worker".into()),
+                        ),
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String("runtime.worker.1".into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
+                        ("generation".into(), KernelValue::U64(2)),
+                    ]),
+                },
+            )
+            .expect("spawn member");
+        assert_eq!(spawned.transition, "SpawnMember");
+        assert_eq!(spawned.next_state.phase, "Running");
+        assert!(
+            spawned
+                .effects
+                .iter()
+                .any(|effect| effect.variant == "RequestRuntimeBinding")
+        );
+        let submitted = kernel
+            .transition(
+                &spawned.next_state,
                 &KernelInput {
                     variant: "SubmitWork".into(),
                     fields: BTreeMap::from([
+                        (
+                            "agent_runtime_id".into(),
+                            KernelValue::String("runtime.worker.1".into()),
+                        ),
+                        ("fence_token".into(), KernelValue::U64(41)),
                         ("work_id".into(), KernelValue::String("work-1".into())),
-                        ("content_shape".into(), KernelValue::U64(99)),
-                        ("handling_mode".into(), KernelValue::String("Queue".into())),
-                        ("request_id".into(), KernelValue::None),
-                        ("reservation_key".into(), KernelValue::None),
                     ]),
                 },
             )
-            .expect_err("typed payload mismatch should fail");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::InvalidInputPayload { .. }
-        ));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_rejects_string_payloads_for_enum_fields() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let refusal = kernel
-            .transition(
-                &state,
-                &KernelInput {
-                    variant: "CreateRun".into(),
-                    fields: BTreeMap::from([
-                        (
-                            "step_ids".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "ordered_steps".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "step_has_conditions".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Bool(false),
-                            )])),
-                        ),
-                        (
-                            "step_dependencies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Seq(vec![]),
-                            )])),
-                        ),
-                        (
-                            "step_dependency_modes".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::NamedVariant {
-                                    enum_name: "DependencyMode".into(),
-                                    variant: "All".into(),
-                                },
-                            )])),
-                        ),
-                        (
-                            "step_branches".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::None,
-                            )])),
-                        ),
-                        (
-                            "step_collection_policies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::String("All".into()),
-                            )])),
-                        ),
-                        (
-                            "step_quorum_thresholds".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::U64(0),
-                            )])),
-                        ),
-                        ("escalation_threshold".into(), KernelValue::U64(0)),
-                        ("max_step_retries".into(), KernelValue::U64(0)),
-                        ("max_active_nodes".into(), KernelValue::U64(0)),
-                        ("max_active_frames".into(), KernelValue::U64(0)),
-                        ("max_frame_depth".into(), KernelValue::U64(0)),
-                    ]),
-                },
-            )
-            .expect_err("string enum payload should fail");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::InvalidInputPayload { .. }
-        ));
-    }
-
-    fn flow_named_variant(enum_name: &str, variant: &str) -> KernelValue {
-        KernelValue::NamedVariant {
-            enum_name: enum_name.into(),
-            variant: variant.into(),
-        }
-    }
-
-    fn flow_create_run_input(
-        step_ids: &[&str],
-        step_has_conditions: &[(&str, bool)],
-        step_dependencies: &[(&str, &[&str])],
-        step_dependency_modes: &[(&str, &str)],
-        step_branches: &[(&str, Option<&str>)],
-    ) -> KernelInput {
-        let ordered_steps = step_ids
-            .iter()
-            .map(|step_id| KernelValue::String((*step_id).into()))
-            .collect::<Vec<_>>();
-        let step_ids = ordered_steps.clone();
-        let step_has_conditions = step_has_conditions
-            .iter()
-            .map(|(step_id, has_conditions)| {
-                (
-                    KernelValue::String((*step_id).into()),
-                    KernelValue::Bool(*has_conditions),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let step_dependencies = step_dependencies
-            .iter()
-            .map(|(step_id, dependencies)| {
-                (
-                    KernelValue::String((*step_id).into()),
-                    KernelValue::Seq(
-                        dependencies
-                            .iter()
-                            .map(|dependency| KernelValue::String((*dependency).into()))
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let step_dependency_modes = step_dependency_modes
-            .iter()
-            .map(|(step_id, mode)| {
-                (
-                    KernelValue::String((*step_id).into()),
-                    flow_named_variant("DependencyMode", mode),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let step_branches = step_branches
-            .iter()
-            .map(|(step_id, branch)| {
-                (
-                    KernelValue::String((*step_id).into()),
-                    match branch {
-                        Some(branch_id) => KernelValue::String((*branch_id).into()),
-                        None => KernelValue::None,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let step_collection_policies = step_dependency_modes
-            .keys()
-            .map(|step_id| {
-                (
-                    step_id.clone(),
-                    flow_named_variant("CollectionPolicyKind", "All"),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let step_quorum_thresholds = step_dependency_modes
-            .keys()
-            .map(|step_id| (step_id.clone(), KernelValue::U64(0)))
-            .collect::<BTreeMap<_, _>>();
-
-        KernelInput {
-            variant: "CreateRun".into(),
-            fields: BTreeMap::from([
-                ("step_ids".into(), KernelValue::Seq(step_ids)),
-                ("ordered_steps".into(), KernelValue::Seq(ordered_steps)),
-                (
-                    "step_has_conditions".into(),
-                    KernelValue::Map(step_has_conditions),
-                ),
-                (
-                    "step_dependencies".into(),
-                    KernelValue::Map(step_dependencies),
-                ),
-                (
-                    "step_dependency_modes".into(),
-                    KernelValue::Map(step_dependency_modes),
-                ),
-                ("step_branches".into(), KernelValue::Map(step_branches)),
-                (
-                    "step_collection_policies".into(),
-                    KernelValue::Map(step_collection_policies),
-                ),
-                (
-                    "step_quorum_thresholds".into(),
-                    KernelValue::Map(step_quorum_thresholds),
-                ),
-                ("escalation_threshold".into(), KernelValue::U64(0)),
-                ("max_step_retries".into(), KernelValue::U64(0)),
-                ("max_active_nodes".into(), KernelValue::U64(0)),
-                ("max_active_frames".into(), KernelValue::U64(0)),
-                ("max_frame_depth".into(), KernelValue::U64(0)),
-            ]),
-        }
-    }
-
-    fn flow_step_input(variant: &str, step_id: &str) -> KernelInput {
-        KernelInput {
-            variant: variant.into(),
-            fields: BTreeMap::from([("step_id".into(), KernelValue::String(step_id.into()))]),
-        }
-    }
-
-    fn flow_has_effect(outcome: &TransitionOutcome, variant: &str) -> bool {
-        outcome
-            .effects
-            .iter()
-            .any(|effect| effect.variant == variant)
-    }
-
-    #[allow(clippy::expect_used, clippy::panic)]
-    fn flow_helper_bool(
-        kernel: &GeneratedMachineKernel,
-        state: &super::KernelState,
-        helper_name: &str,
-        step_id: &str,
-    ) -> bool {
-        match kernel
-            .evaluate_helper(
-                state,
-                helper_name,
-                &BTreeMap::from([("step_id".into(), KernelValue::String(step_id.into()))]),
-            )
-            .expect("helper evaluation should succeed")
-        {
-            KernelValue::Bool(value) => value,
-            other => panic!("expected bool helper result, got {other:?}"),
-        }
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_dispatch_requires_recorded_true_condition() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &flow_create_run_input(
-                    &["conditional"],
-                    &[("conditional", true)],
-                    &[("conditional", &[])],
-                    &[("conditional", "All")],
-                    &[("conditional", None)],
-                ),
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-
-        let refusal = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("DispatchStep", "conditional"),
-            )
-            .expect_err("dispatch should be refused before condition result");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::NoMatchingTransition { .. }
-        ));
-
-        let condition_passed = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("ConditionPassed", "conditional"),
-            )
-            .expect("record condition");
-        let dispatched = kernel
-            .transition(
-                &condition_passed.next_state,
-                &flow_step_input("DispatchStep", "conditional"),
-            )
-            .expect("dispatch after condition passed");
-        assert_eq!(dispatched.transition, "DispatchStep");
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_dispatch_requires_dependencies_to_be_ready() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &flow_create_run_input(
-                    &["dep", "gated"],
-                    &[("dep", false), ("gated", false)],
-                    &[("dep", &[]), ("gated", &["dep"])],
-                    &[("dep", "All"), ("gated", "All")],
-                    &[("dep", None), ("gated", None)],
-                ),
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-
-        let refusal = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("DispatchStep", "gated"),
-            )
-            .expect_err("dispatch should be refused before dependency completes");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::NoMatchingTransition { .. }
-        ));
-
-        let dep_dispatched = kernel
-            .transition(&running.next_state, &flow_step_input("DispatchStep", "dep"))
-            .expect("dispatch dependency");
-        let dep_completed = kernel
-            .transition(
-                &dep_dispatched.next_state,
-                &flow_step_input("CompleteStep", "dep"),
-            )
-            .expect("complete dependency");
-        let gated_dispatched = kernel
-            .transition(
-                &dep_completed.next_state,
-                &flow_step_input("DispatchStep", "gated"),
-            )
-            .expect("dispatch gated step after dependency");
-        assert_eq!(gated_dispatched.transition, "DispatchStep");
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_dispatch_blocks_losing_branch_after_winner_completes() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &flow_create_run_input(
-                    &["first", "second"],
-                    &[("first", false), ("second", false)],
-                    &[("first", &[]), ("second", &[])],
-                    &[("first", "All"), ("second", "All")],
-                    &[("first", Some("winner")), ("second", Some("winner"))],
-                ),
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-        let first_dispatched = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("DispatchStep", "first"),
-            )
-            .expect("dispatch first");
-        let first_completed = kernel
-            .transition(
-                &first_dispatched.next_state,
-                &flow_step_input("CompleteStep", "first"),
-            )
-            .expect("complete first");
-        let refusal = kernel
-            .transition(
-                &first_completed.next_state,
-                &flow_step_input("DispatchStep", "second"),
-            )
-            .expect_err("dispatch should be refused once branch winner completed");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::NoMatchingTransition { .. }
-        ));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_condition_rejection_skips_step_and_blocks_later_dispatch() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &flow_create_run_input(
-                    &["conditional"],
-                    &[("conditional", true)],
-                    &[("conditional", &[])],
-                    &[("conditional", "All")],
-                    &[("conditional", None)],
-                ),
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-        let rejected = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("ConditionRejected", "conditional"),
-            )
-            .expect("reject condition");
-        assert!(flow_has_effect(&rejected, "EmitStepNotice"));
-
-        let refusal = kernel
-            .transition(
-                &rejected.next_state,
-                &flow_step_input("DispatchStep", "conditional"),
-            )
-            .expect_err("skipped step should no longer dispatch");
-        assert!(matches!(
-            refusal,
-            TransitionRefusal::NoMatchingTransition { .. }
-        ));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_fail_step_emits_supervisor_escalation_at_threshold() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &KernelInput {
-                    variant: "CreateRun".into(),
-                    fields: BTreeMap::from([
-                        (
-                            "step_ids".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "ordered_steps".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "step_has_conditions".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Bool(false),
-                            )])),
-                        ),
-                        (
-                            "step_dependencies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Seq(vec![]),
-                            )])),
-                        ),
-                        (
-                            "step_dependency_modes".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                flow_named_variant("DependencyMode", "All"),
-                            )])),
-                        ),
-                        (
-                            "step_branches".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::None,
-                            )])),
-                        ),
-                        (
-                            "step_collection_policies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                flow_named_variant("CollectionPolicyKind", "All"),
-                            )])),
-                        ),
-                        (
-                            "step_quorum_thresholds".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::U64(0),
-                            )])),
-                        ),
-                        ("escalation_threshold".into(), KernelValue::U64(1)),
-                        ("max_step_retries".into(), KernelValue::U64(0)),
-                        ("max_active_nodes".into(), KernelValue::U64(0)),
-                        ("max_active_frames".into(), KernelValue::U64(0)),
-                        ("max_frame_depth".into(), KernelValue::U64(0)),
-                    ]),
-                },
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-        let dispatched = kernel
-            .transition(
-                &running.next_state,
-                &flow_step_input("DispatchStep", "step-a"),
-            )
-            .expect("dispatch step");
-        let failed = kernel
-            .transition(
-                &dispatched.next_state,
-                &flow_step_input("FailStep", "step-a"),
-            )
-            .expect("fail step");
-        assert!(flow_has_effect(&failed, "AppendFailureLedger"));
-        assert!(flow_has_effect(&failed, "EscalateSupervisor"));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_any_dependency_all_skipped_sets_skip_truth() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &flow_create_run_input(
-                    &["dep_a", "dep_b", "gated"],
-                    &[("dep_a", false), ("dep_b", false), ("gated", false)],
-                    &[
-                        ("dep_a", &[]),
-                        ("dep_b", &[]),
-                        ("gated", &["dep_a", "dep_b"]),
-                    ],
-                    &[("dep_a", "All"), ("dep_b", "All"), ("gated", "Any")],
-                    &[("dep_a", None), ("dep_b", None), ("gated", None)],
-                ),
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-        let dep_a_skipped = kernel
-            .transition(&running.next_state, &flow_step_input("SkipStep", "dep_a"))
-            .expect("skip dep_a");
-        let dep_b_skipped = kernel
-            .transition(
-                &dep_a_skipped.next_state,
-                &flow_step_input("SkipStep", "dep_b"),
-            )
-            .expect("skip dep_b");
-
-        assert!(flow_helper_bool(
-            &kernel,
-            &dep_b_skipped.next_state,
-            "StepDependencyShouldSkip",
-            "gated",
-        ));
-        assert!(!flow_helper_bool(
-            &kernel,
-            &dep_b_skipped.next_state,
-            "StepDependencyReady",
-            "gated",
-        ));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn flow_run_quorum_collection_truth_is_machine_derived() {
-        use meerkat_machine_schema::flow_run_machine;
-
-        let kernel = GeneratedMachineKernel::new(flow_run_machine());
-        let state = kernel.initial_state().expect("initial state");
-        let created = kernel
-            .transition(
-                &state,
-                &KernelInput {
-                    variant: "CreateRun".into(),
-                    fields: BTreeMap::from([
-                        (
-                            "step_ids".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "ordered_steps".into(),
-                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
-                        ),
-                        (
-                            "step_has_conditions".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Bool(false),
-                            )])),
-                        ),
-                        (
-                            "step_dependencies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::Seq(vec![]),
-                            )])),
-                        ),
-                        (
-                            "step_dependency_modes".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                flow_named_variant("DependencyMode", "All"),
-                            )])),
-                        ),
-                        (
-                            "step_branches".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::None,
-                            )])),
-                        ),
-                        (
-                            "step_collection_policies".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                flow_named_variant("CollectionPolicyKind", "Quorum"),
-                            )])),
-                        ),
-                        (
-                            "step_quorum_thresholds".into(),
-                            KernelValue::Map(BTreeMap::from([(
-                                KernelValue::String("step-a".into()),
-                                KernelValue::U64(2),
-                            )])),
-                        ),
-                        ("escalation_threshold".into(), KernelValue::U64(0)),
-                        ("max_step_retries".into(), KernelValue::U64(0)),
-                        ("max_active_nodes".into(), KernelValue::U64(0)),
-                        ("max_active_frames".into(), KernelValue::U64(0)),
-                        ("max_frame_depth".into(), KernelValue::U64(0)),
-                    ]),
-                },
-            )
-            .expect("create run");
-        let running = kernel
-            .transition(
-                &created.next_state,
-                &KernelInput {
-                    variant: "StartRun".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start run");
-        let registered = kernel
-            .transition(
-                &running.next_state,
-                &KernelInput {
-                    variant: "RegisterTargets".into(),
-                    fields: BTreeMap::from([
-                        ("step_id".into(), KernelValue::String("step-a".into())),
-                        ("target_count".into(), KernelValue::U64(3)),
-                    ]),
-                },
-            )
-            .expect("register targets");
-        let dispatched = kernel
-            .transition(
-                &registered.next_state,
-                &flow_step_input("DispatchStep", "step-a"),
-            )
-            .expect("dispatch step");
-        let first_success = kernel
-            .transition(
-                &dispatched.next_state,
-                &KernelInput {
-                    variant: "RecordTargetSuccess".into(),
-                    fields: BTreeMap::from([
-                        ("step_id".into(), KernelValue::String("step-a".into())),
-                        ("target_id".into(), KernelValue::String("worker-1".into())),
-                    ]),
-                },
-            )
-            .expect("record first success");
-        assert!(flow_helper_bool(
-            &kernel,
-            &first_success.next_state,
-            "CollectionFeasible",
-            "step-a",
-        ));
-        assert!(!flow_helper_bool(
-            &kernel,
-            &first_success.next_state,
-            "CollectionSatisfied",
-            "step-a",
-        ));
-        let second_success = kernel
-            .transition(
-                &first_success.next_state,
-                &KernelInput {
-                    variant: "RecordTargetSuccess".into(),
-                    fields: BTreeMap::from([
-                        ("step_id".into(), KernelValue::String("step-a".into())),
-                        ("target_id".into(), KernelValue::String("worker-2".into())),
-                    ]),
-                },
-            )
-            .expect("record second success");
-        assert!(flow_helper_bool(
-            &kernel,
-            &second_success.next_state,
-            "CollectionSatisfied",
-            "step-a",
-        ));
-    }
-
-    #[allow(clippy::expect_used)]
-    #[test]
-    fn named_numeric_aliases_accept_u64_payloads() {
-        use meerkat_machine_schema::{external_tool_surface_machine, input_lifecycle_machine};
-
-        let external_tool_kernel = GeneratedMachineKernel::new(external_tool_surface_machine());
-        let external_tool_state = external_tool_kernel.initial_state().expect("initial state");
-        let staged_add = external_tool_kernel
-            .transition(
-                &external_tool_state,
-                &KernelInput {
-                    variant: "StageAdd".into(),
-                    fields: BTreeMap::from([(
-                        "surface_id".into(),
-                        KernelValue::String("alpha".into()),
-                    )]),
-                },
-            )
-            .expect("stage add");
-        let applied = external_tool_kernel
-            .transition(
-                &staged_add.next_state,
-                &KernelInput {
-                    variant: "ApplyBoundary".into(),
-                    fields: BTreeMap::from([
-                        ("surface_id".into(), KernelValue::String("alpha".into())),
-                        ("applied_at_turn".into(), KernelValue::U64(7)),
-                    ]),
-                },
-            )
-            .expect("turn-number payload should be accepted");
-        assert_eq!(applied.transition, "ApplyBoundaryAdd");
-
-        let input_lifecycle_kernel = GeneratedMachineKernel::new(input_lifecycle_machine());
-        let input_lifecycle_state = input_lifecycle_kernel
-            .initial_state()
-            .expect("initial state");
-        let queued = input_lifecycle_kernel
-            .transition(
-                &input_lifecycle_state,
-                &KernelInput {
-                    variant: "QueueAccepted".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("queue accepted");
-        let staged = input_lifecycle_kernel
-            .transition(
-                &queued.next_state,
-                &KernelInput {
-                    variant: "StageForRun".into(),
-                    fields: BTreeMap::from([(
-                        "run_id".into(),
-                        KernelValue::String("run-1".into()),
-                    )]),
-                },
-            )
-            .expect("stage for run");
-        let applied = input_lifecycle_kernel
-            .transition(
-                &staged.next_state,
-                &KernelInput {
-                    variant: "MarkApplied".into(),
-                    fields: BTreeMap::from([(
-                        "run_id".into(),
-                        KernelValue::String("run-1".into()),
-                    )]),
-                },
-            )
-            .expect("mark applied");
-        let boundary_marked = input_lifecycle_kernel
-            .transition(
-                &applied.next_state,
-                &KernelInput {
-                    variant: "MarkAppliedPendingConsumption".into(),
-                    fields: BTreeMap::from([("boundary_sequence".into(), KernelValue::U64(1))]),
-                },
-            )
-            .expect("boundary-sequence payload should be accepted");
-        assert_eq!(boundary_marked.transition, "MarkAppliedPendingConsumption");
+            .expect("submit work");
+        assert_eq!(submitted.transition, "SubmitWork");
+        assert!(
+            submitted
+                .effects
+                .iter()
+                .any(|effect| effect.variant == "SubmitMemberWork")
+        );
+        assert_eq!(
+            submitted.next_state.fields.get("active_run_count"),
+            Some(&KernelValue::U64(1))
+        );
     }
 
     #[allow(clippy::expect_used)]
@@ -1919,19 +1172,13 @@ mod tests {
     fn kernel_value_map_roundtrips_through_json() {
         let value = KernelValue::Map(BTreeMap::from([
             (
-                KernelValue::String("step-a".into()),
-                KernelValue::NamedVariant {
-                    enum_name: "StepRunStatus".into(),
-                    variant: "Completed".into(),
-                },
+                KernelValue::String("members".into()),
+                KernelValue::Set(BTreeSet::from([
+                    KernelValue::String("agent.a".into()),
+                    KernelValue::String("agent.b".into()),
+                ])),
             ),
-            (
-                KernelValue::String("step-b".into()),
-                KernelValue::Seq(vec![
-                    KernelValue::String("dep-1".into()),
-                    KernelValue::String("dep-2".into()),
-                ]),
-            ),
+            (KernelValue::String("count".into()), KernelValue::U64(2)),
         ]));
 
         let encoded = serde_json::to_string(&value).expect("serialize kernel value");

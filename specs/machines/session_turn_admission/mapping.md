@@ -8,58 +8,55 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SessionTurnAdmissionMachine`
 
 ### Code Anchors
-- `session_ephemeral`: `meerkat-session/src/ephemeral.rs` — session task shell executing admission authority effects and projections
-- `session_turn_admission_authority`: `meerkat-session/src/session_turn_admission_authority.rs` — canonical session turn admission authority
+- `turn_admission`: `meerkat-core/src/turn_execution_authority.rs` — turn admission and gating authority
 
 ### Scenarios
-- `admit-begin-resolve-finalize` — a single turn claims the session slot, runs, resolves, and releases admission canonically
-- `abort-admitted-pre_run-failure` — pre-run failures after admission release the slot without leaving a busy session behind
-- `graceful-shutdown-drain` — shutdown drains running turns and blocks new admissions once shutting down
+- `turn_admission_accept_reject` — session turn admission accepts or rejects inputs according to machine-owned policy
 
 ### Transitions
 - `RequestStartTurn`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `AbortAdmittedTurn`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `BeginRun`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `ShutdownFromAdmitted`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `ResolveRun`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `RequestInterrupt`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `RequestShutdownFromRunning`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `RequestShutdownFromCompleting`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `FinalizeTurnToIdle`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `FinalizeTurnToShuttingDown`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 - `RequestShutdownFromIdle`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 
 ### Effects
 - `WakeInterrupt`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 
 ### Invariants
 - `interrupt_pending_only_while_active`
-  - anchors: `session_ephemeral`, `session_turn_admission_authority`
-  - scenarios: `admit-begin-resolve-finalize`
+  - anchors: `turn_admission`
+  - scenarios: `turn_admission_accept_reject`
 
 
 <!-- GENERATED_COVERAGE_END -->

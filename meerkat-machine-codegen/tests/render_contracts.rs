@@ -7,135 +7,105 @@ use meerkat_machine_codegen::{
 };
 use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
-    mob_orchestrator_machine, peer_runtime_bundle_composition, runtime_control_machine,
-    runtime_pipeline_composition,
+    meerkat_machine, meerkat_mob_seam_composition, mob_machine,
 };
 
 #[test]
-fn renders_machine_fixture_with_stable_sections() {
-    let rendered = render_machine_module(&mob_orchestrator_machine());
+fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
+    let rendered = render_machine_module(&meerkat_machine());
 
-    assert!(rendered.starts_with("---- MODULE Machine_MobOrchestratorMachine ----"));
+    assert!(rendered.starts_with("---- MODULE Machine_MeerkatMachine ----"));
+    assert!(rendered.contains(
+        "STATE\n  phase : {\"Initializing\", \"Idle\", \"Attached\", \"Running\", \"Recovering\", \"Retired\", \"Stopped\", \"Destroyed\"}"
+    ));
+    assert!(rendered.contains("INPUTS\n  MeerkatMachineInput = {\"Initialize\", \"RegisterSession\", \"PrepareBindings\", \"SubmitMobWork\", \"InterruptCurrentRun\""));
+    assert!(rendered.contains("TRANSITIONS\n  Initialize"));
+    assert!(rendered.contains("PrepareBindings"));
+    assert!(rendered.ends_with("====\n"));
+}
+
+#[test]
+fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
+    let rendered = render_machine_module(&mob_machine());
+
+    assert!(rendered.starts_with("---- MODULE Machine_MobMachine ----"));
     assert!(rendered.contains(
         "STATE\n  phase : {\"Creating\", \"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}"
     ));
-    assert!(rendered.contains("INPUTS\n  MobOrchestratorInput = {\"InitializeOrchestrator\", \"BindCoordinator\", \"UnbindCoordinator\", \"StageSpawn\", \"CompleteSpawn\", \"StartFlow\", \"CompleteFlow\", \"StopOrchestrator\", \"ResumeOrchestrator\", \"MarkCompleted\", \"DestroyOrchestrator\", \"ForceCancelMember\"}"));
-    assert!(rendered.contains("TRANSITIONS\n  InitializeOrchestrator"));
-    assert!(rendered.ends_with("====\n"));
+    assert!(rendered.contains("INPUTS\n  MobMachineInput = {\"Start\", \"SpawnMember\", \"ObserveRuntimeReady\", \"SubmitWork\""));
+    assert!(rendered.contains("AgentIdentity"));
+    assert!(!rendered.contains("MeerkatId"));
 }
 
 #[test]
-fn renders_composition_fixture_with_routes_and_scheduler_rules() {
-    let rendered = render_composition_module(&runtime_pipeline_composition());
+fn renders_kernel_seam_composition_with_routes() {
+    let rendered = render_composition_module(&meerkat_mob_seam_composition());
 
-    assert!(rendered.starts_with("---- MODULE Composition_runtime_pipeline ----"));
+    assert!(rendered.starts_with("---- MODULE Composition_meerkat_mob_seam ----"));
     assert!(rendered.contains(
-        "staged_run_notifies_control == runtime_ingress.ReadyForRun -> runtime_control.BeginRun [Immediate]"
+        "binding_request_reaches_meerkat == mob.RequestRuntimeBinding -> meerkat.PrepareBindings [Immediate]"
     ));
-    assert!(
-        rendered.contains("SCHEDULER_RULES\n  PreemptWhenReady(control_plane, ordinary_ingress)")
-    );
-    assert!(rendered.contains("execution_failure_is_handled =="));
-    assert!(rendered.ends_with("====\n"));
-}
-
-#[test]
-fn renders_runtime_control_with_transition_content() {
-    let rendered = render_machine_module(&runtime_control_machine());
-
-    assert!(rendered.contains("TRANSITIONS\n  Initialize"));
-    assert!(rendered.contains("BeginRunFromIdle"));
-    assert!(rendered.contains("AdmissionAcceptedIdleSteer"));
-    assert!(rendered.contains("RetireRequestedFromIdle"));
-}
-
-#[test]
-fn renders_route_aliases_and_literals_in_compositions() {
-    let coverage = canonical_composition_coverage_manifests()
-        .into_iter()
-        .find(|item| item.composition == "peer_runtime_bundle")
-        .expect("peer runtime coverage");
-    let rendered = render_composition_module(&peer_runtime_bundle_composition());
-    let mapping =
-        render_composition_mapping_coverage(&peer_runtime_bundle_composition(), &coverage);
-
     assert!(rendered.contains(
-        "peer_candidate_enters_runtime_admission == peer_comms.EnqueueClassifiedEntry -> runtime_control.SubmitWork [Immediate]"
+        "work_completed_reaches_mob == meerkat.WorkCompleted -> mob.ObserveWorkCompleted [Immediate]"
     ));
-    assert!(rendered.contains("raw_item_id ~> work_id"));
-    assert!(rendered.contains("normalized_handling_mode -> handling_mode"));
-    assert!(mapping.contains("### Code Anchors"));
-    assert!(mapping.contains("peer-message-admission"));
+    assert!(rendered.contains("ROUTES"));
+    assert!(rendered.ends_with("====\n"));
 }
 
 #[test]
 fn renders_machine_mapping_coverage_with_named_items() {
     let coverage = canonical_machine_coverage_manifests()
         .into_iter()
-        .find(|item| item.machine == "RuntimeControlMachine")
-        .expect("runtime control coverage");
-    let rendered = render_machine_mapping_coverage(&runtime_control_machine(), &coverage);
+        .find(|item| item.machine == "MeerkatMachine")
+        .expect("meerkat coverage");
+    let rendered = render_machine_mapping_coverage(&meerkat_machine(), &coverage);
 
     assert!(rendered.contains("## Generated Coverage"));
     assert!(rendered.contains("### Code Anchors"));
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Transitions"));
-    assert!(rendered.contains("- `Initialize`"));
-    assert!(rendered.contains("- `ResolveAdmission`"));
-    assert!(rendered.contains("- `running_implies_active_run`"));
+    assert!(rendered.contains("- `PrepareBindings`"));
+    assert!(rendered.contains("- `running_has_active_work`"));
 }
 
 #[test]
-fn renders_composition_mapping_coverage_with_routes_and_scheduler_rules() {
+fn renders_composition_mapping_coverage_with_routes() {
     let coverage = canonical_composition_coverage_manifests()
         .into_iter()
-        .find(|item| item.composition == "runtime_pipeline")
-        .expect("runtime pipeline coverage");
-    let rendered = render_composition_mapping_coverage(&runtime_pipeline_composition(), &coverage);
+        .find(|item| item.composition == "meerkat_mob_seam")
+        .expect("kernel seam coverage");
+    let rendered = render_composition_mapping_coverage(&meerkat_mob_seam_composition(), &coverage);
 
     assert!(rendered.contains("### Code Anchors"));
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Routes"));
-    assert!(rendered.contains("- `staged_run_notifies_control`"));
-    assert!(rendered.contains("### Scheduler Rules"));
-    assert!(rendered.contains("- `PreemptWhenReady(control_plane, ordinary_ingress)`"));
-    assert!(rendered.contains("- `execution_failure_is_handled`"));
+    assert!(rendered.contains("- `binding_request_reaches_meerkat`"));
+    assert!(rendered.contains("- `work_completed_reaches_mob`"));
 }
 
 #[test]
-fn merges_mapping_document_by_appending_generated_block() {
+fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     let coverage = canonical_machine_coverage_manifests()
         .into_iter()
-        .find(|item| item.machine == "RuntimeControlMachine")
-        .expect("runtime control coverage");
-    let merged = merge_mapping_document(
-        Some("# RuntimeControlMachine Mapping Note\n\nManual text."),
-        "RuntimeControlMachine",
-        &render_machine_mapping_coverage(&runtime_control_machine(), &coverage),
+        .find(|item| item.machine == "MeerkatMachine")
+        .expect("meerkat coverage");
+    let generated = render_machine_mapping_coverage(&meerkat_machine(), &coverage);
+
+    let appended = merge_mapping_document(
+        Some("# MeerkatMachine Mapping Note\n\nManual text."),
+        "MeerkatMachine",
+        &generated,
     );
+    assert!(appended.contains("Manual text."));
+    assert!(appended.contains(GENERATED_COVERAGE_START));
+    assert!(appended.contains("- `PrepareBindings`"));
+    assert!(appended.contains(GENERATED_COVERAGE_END));
 
-    assert!(merged.contains("Manual text."));
-    assert!(merged.contains(GENERATED_COVERAGE_START));
-    assert!(merged.contains("- `Initialize`"));
-    assert!(merged.contains(GENERATED_COVERAGE_END));
-}
-
-#[test]
-fn merges_mapping_document_by_replacing_existing_generated_block() {
-    let coverage = canonical_machine_coverage_manifests()
-        .into_iter()
-        .find(|item| item.machine == "RuntimeControlMachine")
-        .expect("runtime control coverage");
     let existing = format!(
-        "# RuntimeControlMachine Mapping Note\n\nManual text.\n\n{GENERATED_COVERAGE_START}\nold block\n{GENERATED_COVERAGE_END}\n"
+        "# MeerkatMachine Mapping Note\n\nManual text.\n\n{GENERATED_COVERAGE_START}\nold block\n{GENERATED_COVERAGE_END}\n"
     );
-    let merged = merge_mapping_document(
-        Some(&existing),
-        "RuntimeControlMachine",
-        &render_machine_mapping_coverage(&runtime_control_machine(), &coverage),
-    );
-
-    assert!(!merged.contains("old block"));
-    assert!(merged.contains("Manual text."));
-    assert!(merged.contains("- `BeginRunFromIdle`"));
+    let replaced = merge_mapping_document(Some(&existing), "MeerkatMachine", &generated);
+    assert!(!replaced.contains("old block"));
+    assert!(replaced.contains("Manual text."));
+    assert!(replaced.contains("- `BeginRunFromIdle`"));
 }

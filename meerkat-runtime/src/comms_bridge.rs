@@ -17,7 +17,7 @@ use crate::input::{
 
 /// Convert a classified comms interaction into the appropriate runtime-owned
 /// input family.
-pub fn peer_input_candidate_to_runtime_input(
+pub fn classified_interaction_to_runtime_input(
     classified: &PeerInputCandidate,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
@@ -54,6 +54,14 @@ pub fn peer_input_candidate_to_runtime_input(
     }
 
     interaction_to_peer_input(interaction, runtime_id)
+}
+
+/// Compatibility alias while callers migrate to the classified bridge naming.
+pub fn peer_input_candidate_to_runtime_input(
+    classified: &PeerInputCandidate,
+    runtime_id: &LogicalRuntimeId,
+) -> Input {
+    classified_interaction_to_runtime_input(classified, runtime_id)
 }
 
 /// Convert an `InboxInteraction` to a v9 `Input::Peer`.

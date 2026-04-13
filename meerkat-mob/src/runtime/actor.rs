@@ -200,7 +200,7 @@ struct RespawnSnapshot {
     profile_name: ProfileName,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
-    old_bridge_session_id: meerkat_core::types::SessionId,
+    old_fence_token: crate::ids::FenceToken,
     /// Generation of the member being respawned (preserved across respawn).
     generation: crate::ids::Generation,
     restore_wiring: RestoreWiringPlan,
@@ -329,8 +329,8 @@ impl MobActor {
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::MeerkatKickoffUpdated {
-                    meerkat_id: meerkat_id.clone(),
+                kind: MobEventKind::MemberKickoffUpdated {
+                    member: AgentIdentity::from(meerkat_id.as_str()),
                     kickoff: kickoff.clone(),
                 },
             })
@@ -559,7 +559,6 @@ impl MobActor {
         }
     }
 
-    #[allow(dead_code)]
     fn pending_spawn_tickets(&self) -> std::collections::BTreeSet<u64> {
         self.pending_spawns.tickets()
     }
@@ -2982,16 +2981,19 @@ impl MobActor {
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::MemberSpawned {
-                    agent_identity: identity.clone(),
-                    generation,
-                    fence_token,
-                    agent_runtime_id: agent_runtime_id.clone(),
-                    role: profile_name.clone(),
-                    runtime_mode,
-                    labels: labels.clone(),
-                    bridge_member_ref: Some(provision.member_ref().clone()),
-                },
+                kind: MobEventKind::MemberSpawned({
+                    let mut event = crate::event::MemberSpawnedEvent::new(
+                        identity.clone(),
+                        generation,
+                        fence_token,
+                        agent_runtime_id.clone(),
+                        profile_name.clone(),
+                    )
+                    .with_bridge_member_ref(Some(provision.member_ref().clone()));
+                    event.runtime_mode = runtime_mode;
+                    event.labels = labels.clone();
+                    event
+                }),
             })
             .await
         {
@@ -3380,14 +3382,13 @@ impl MobActor {
                 .get(&meerkat_id)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
-            let old_bridge_session_id =
-                entry
-                    .member_ref
-                    .bridge_session_id()
-                    .cloned()
-                    .ok_or_else(|| MobRespawnError::NoSessionBridge {
-                        identity: AgentIdentity::from(meerkat_id.as_str()),
-                    })?;
+            entry
+                .member_ref
+                .bridge_session_id()
+                .cloned()
+                .ok_or_else(|| MobRespawnError::NoSessionBridge {
+                    identity: AgentIdentity::from(meerkat_id.as_str()),
+                })?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id, address, ..
@@ -3401,7 +3402,7 @@ impl MobActor {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
-                old_bridge_session_id,
+                old_fence_token: entry.fence_token,
                 generation: entry.generation,
                 restore_wiring: RestoreWiringPlan {
                     local_peers: entry
@@ -3612,8 +3613,12 @@ impl MobActor {
                 Err(MobRespawnError::TopologyRestoreFailed {
                     receipt: super::handle::MemberRespawnReceipt::new(
                         AgentIdentity::from(meerkat_id.as_str()),
-                        Some(snapshot.old_bridge_session_id.clone()),
-                        finalized.receipt.member_ref.bridge_session_id().cloned(),
+                        crate::ids::AgentRuntimeId::new(
+                            AgentIdentity::from(meerkat_id.as_str()),
+                            snapshot.generation,
+                        ),
+                        snapshot.old_fence_token,
+                        respawn_fence,
                     ),
                     failed_peer_ids: finalized.failed_restore_peer_ids.into_iter().map(|mid| AgentIdentity::from(mid.as_str())).collect(),
                 })
@@ -3631,13 +3636,22 @@ impl MobActor {
                 identity: AgentIdentity::from(meerkat_id.as_str()),
                 reason: error.to_string(),
             })?;
-        let replacement = replacement_result?;
+        let _replacement = replacement_result?;
 
         // 5. Build the receipt from the committed replacement member reference.
         Ok(MemberRespawnReceipt::new(
             AgentIdentity::from(meerkat_id.as_str()),
-            Some(snapshot.old_bridge_session_id),
-            replacement.member_ref.bridge_session_id().cloned(),
+            crate::ids::AgentRuntimeId::new(
+                AgentIdentity::from(meerkat_id.as_str()),
+                snapshot.generation,
+            ),
+            snapshot.old_fence_token,
+            self.roster
+                .read()
+                .await
+                .get(&meerkat_id)
+                .map(|entry| entry.fence_token)
+                .unwrap_or(snapshot.old_fence_token),
         ))
     }
 
@@ -3851,7 +3865,8 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_wire preflight")?;
         self.ensure_member_not_broken(&local).await?;
         match target {
-            super::handle::PeerTarget::Local(peer) => {
+            super::handle::PeerTarget::Local(peer_identity) => {
+                let peer = MeerkatId::from(peer_identity.as_str());
                 if local == peer {
                     return Err(MobError::WiringError(format!(
                         "wire requires distinct members (got '{local}')"
@@ -3975,7 +3990,7 @@ impl MobActor {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::ExternalPeerWired {
-                    local: local.clone(),
+                    local: AgentIdentity::from(local.as_str()),
                     spec: spec.clone(),
                 },
             })
@@ -4000,7 +4015,8 @@ impl MobActor {
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_unwire preflight")?;
         match target {
-            super::handle::PeerTarget::Local(peer) => {
+            super::handle::PeerTarget::Local(peer_identity) => {
+                let peer = MeerkatId::from(peer_identity.as_str());
                 if local == peer {
                     return Err(MobError::WiringError(format!(
                         "unwire requires distinct peers (got '{local}')"
@@ -4175,9 +4191,9 @@ impl MobActor {
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::PeersUnwired {
-                    a: a.clone(),
-                    b: b.clone(),
+                kind: MobEventKind::MembersUnwired {
+                    a: AgentIdentity::from(a.as_str()),
+                    b: AgentIdentity::from(b.as_str()),
                 },
             })
             .await
@@ -4267,8 +4283,8 @@ impl MobActor {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::ExternalPeerUnwired {
-                    local: local.clone(),
-                    peer_name: peer_name.clone(),
+                    local: AgentIdentity::from(local.as_str()),
+                    peer_name: peer_name.to_string(),
                 },
             })
             .await
@@ -5618,9 +5634,9 @@ impl MobActor {
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::PeersWired {
-                    a: a.clone(),
-                    b: b.clone(),
+                kind: MobEventKind::MembersWired {
+                    a: AgentIdentity::from(a.as_str()),
+                    b: AgentIdentity::from(b.as_str()),
                 },
             })
             .await

@@ -47,10 +47,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-comms/src/peer_directory_reachability_authority.rs` — canonical transient reachability authority and reconcile/send-result reducer
-- `meerkat-comms/src/runtime/comms_runtime.rs` — runtime-owned resolved peer directory projection and send-result integration
+- `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability authority and transition ownership
 
 ### Scenarios
-- `reconcile-directory` — resolved peer directory snapshot is reconciled into transient reachability state
-- `send-success-marks-reachable` — successful delivery marks an already resolved peer reachable
-- `send-failure-marks-unreachable` — offline or transport failures mark a resolved peer unreachable without inventing unknown peers
+- `peer_reachability_probe` — reachability probes transition peer directory membership across probe outcomes

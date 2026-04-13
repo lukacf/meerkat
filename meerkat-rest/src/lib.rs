@@ -1108,15 +1108,15 @@ pub fn router(state: AppState) -> Router {
         .route("/mob/{id}/fork-helper", post(mob_fork_helper))
         .route("/mob/{id}/wait-kickoff", post(mob_wait_kickoff))
         .route(
-            "/mob/{id}/members/{meerkat_id}/status",
+            "/mob/{id}/members/{agent_identity}/status",
             get(mob_member_status),
         )
         .route(
-            "/mob/{id}/members/{meerkat_id}/cancel",
+            "/mob/{id}/members/{agent_identity}/cancel",
             post(mob_force_cancel),
         )
         .route(
-            "/mob/{id}/members/{meerkat_id}/respawn",
+            "/mob/{id}/members/{agent_identity}/respawn",
             post(mob_member_respawn),
         );
 
@@ -1375,7 +1375,7 @@ struct MobEventStreamQuery {
 
 /// GET /mob/{id}/events — SSE stream of mob or per-member agent events.
 ///
-/// If `?member=<meerkat_id>` is provided, streams that member's session
+/// If `?member=<agent_identity>` is provided, streams that member's session
 /// events. Otherwise streams the mob-wide event bus which merges all
 /// member events tagged with [`AttributedEvent`] attribution.
 #[cfg(feature = "mob")]
@@ -1450,7 +1450,7 @@ async fn mob_event_stream(
 struct SpawnHelperRequest {
     prompt: String,
     #[serde(default)]
-    meerkat_id: Option<String>,
+    agent_identity: Option<String>,
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
@@ -1468,7 +1468,7 @@ async fn mob_spawn_helper(
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let identity = meerkat_mob::AgentIdentity::from(
-        req.meerkat_id
+        req.agent_identity
             .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
     );
     let mut options = meerkat_mob::HelperOptions::default();
@@ -1497,7 +1497,7 @@ struct ForkHelperRequest {
     source_member_id: String,
     prompt: String,
     #[serde(default)]
-    meerkat_id: Option<String>,
+    agent_identity: Option<String>,
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
@@ -1551,7 +1551,7 @@ async fn mob_fork_helper(
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let source_identity = meerkat_mob::AgentIdentity::from(req.source_member_id.as_str());
     let identity = meerkat_mob::AgentIdentity::from(
-        req.meerkat_id
+        req.agent_identity
             .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
     );
     let fork_context = req
@@ -1584,14 +1584,14 @@ async fn mob_fork_helper(
     })))
 }
 
-/// GET /mob/{id}/members/{meerkat_id}/status — member execution snapshot.
+/// GET /mob/{id}/members/{agent_identity}/status — member execution snapshot.
 #[cfg(feature = "mob")]
 async fn mob_member_status(
     State(state): State<AppState>,
-    Path((id, meerkat_id)): Path<(String, String)>,
+    Path((id, agent_identity)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     let snapshot = state
         .mob_state
         .mob_member_status(&mob_id, &identity)
@@ -1600,14 +1600,14 @@ async fn mob_member_status(
     Ok(Json(json!(snapshot)))
 }
 
-/// POST /mob/{id}/members/{meerkat_id}/cancel — force-cancel in-flight turn.
+/// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
 #[cfg(feature = "mob")]
 async fn mob_force_cancel(
     State(state): State<AppState>,
-    Path((id, meerkat_id)): Path<(String, String)>,
+    Path((id, agent_identity)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     state
         .mob_state
         .mob_force_cancel(&mob_id, identity)
@@ -1616,15 +1616,15 @@ async fn mob_force_cancel(
     Ok(Json(json!({"cancelled": true})))
 }
 
-/// POST /mob/{id}/members/{meerkat_id}/respawn — retire + respawn member.
+/// POST /mob/{id}/members/{agent_identity}/respawn — retire + respawn member.
 #[cfg(feature = "mob")]
 async fn mob_member_respawn(
     State(state): State<AppState>,
-    Path((id, meerkat_id)): Path<(String, String)>,
+    Path((id, agent_identity)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     let initial_message = body
         .and_then(|Json(v)| v.get("initial_message").cloned())
         .map(serde_json::from_value::<ContentInput>)
@@ -5404,7 +5404,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn test_mob_spawn_helper_route_returns_additive_bridge_session_id() {
+    async fn test_mob_spawn_helper_route_returns_identity_native_fields() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -5432,7 +5432,7 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({
                     "prompt": "Hello from helper",
-                    "meerkat_id": "helper-rest",
+                    "agent_identity": "helper-rest",
                     "role_name": "worker",
                 })
                 .to_string(),
@@ -5448,8 +5448,9 @@ mod tests {
             String::from_utf8_lossy(&body)
         );
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(payload["session_id"].is_string());
-        assert_eq!(payload["bridge_session_id"], payload["session_id"]);
+        assert_eq!(payload["agent_identity"], "helper-rest");
+        assert!(payload["agent_runtime_id"].is_object());
+        assert!(payload["fence_token"].is_u64());
     }
 
     // -----------------------------------------------------------------------

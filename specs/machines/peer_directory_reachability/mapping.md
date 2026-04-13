@@ -8,35 +8,32 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PeerDirectoryReachabilityMachine`
 
 ### Code Anchors
-- `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — canonical transient reachability authority and reconcile/send-result reducer
-- `comms_runtime_directory_projection`: `meerkat-comms/src/runtime/comms_runtime.rs` — runtime-owned resolved peer directory projection and send-result integration
+- `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability authority and transition ownership
 
 ### Scenarios
-- `reconcile-directory` — resolved peer directory snapshot is reconciled into transient reachability state
-- `send-success-marks-reachable` — successful delivery marks an already resolved peer reachable
-- `send-failure-marks-unreachable` — offline or transport failures mark a resolved peer unreachable without inventing unknown peers
+- `peer_reachability_probe` — reachability probes transition peer directory membership across probe outcomes
 
 ### Transitions
 - `ReconcileResolvedDirectory`
-  - anchors: `peer_directory_reachability_authority`, `comms_runtime_directory_projection`
-  - scenarios: `reconcile-directory`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 - `RecordSendSucceeded`
-  - anchors: `peer_directory_reachability_authority`, `comms_runtime_directory_projection`
-  - scenarios: `send-success-marks-reachable`, `send-failure-marks-unreachable`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 - `RecordSendFailed`
-  - anchors: `peer_directory_reachability_authority`, `comms_runtime_directory_projection`
-  - scenarios: `send-success-marks-reachable`, `send-failure-marks-unreachable`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 
 ### Effects
 - `(none)`
 
 ### Invariants
 - `reachability_keys_are_resolved`
-  - anchors: `peer_directory_reachability_authority`, `comms_runtime_directory_projection`
-  - scenarios: `send-success-marks-reachable`, `send-failure-marks-unreachable`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 - `last_reason_keys_are_resolved`
-  - anchors: `peer_directory_reachability_authority`, `comms_runtime_directory_projection`
-  - scenarios: `send-success-marks-reachable`, `send-failure-marks-unreachable`
+  - anchors: `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`
 
 
 <!-- GENERATED_COVERAGE_END -->

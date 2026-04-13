@@ -366,7 +366,7 @@ pub struct HelperOptions {
 }
 
 /// Result from a helper spawn-and-wait operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct HelperResult {
     /// The member's final output text.
@@ -386,20 +386,20 @@ pub struct HelperResult {
 #[serde(rename_all = "snake_case")]
 pub enum PeerTarget {
     /// Another member in the same mob roster.
-    Local(MeerkatId),
+    Local(AgentIdentity),
     /// A trusted peer that lives outside the local mob roster.
     External(TrustedPeerSpec),
 }
 
 impl From<MeerkatId> for PeerTarget {
     fn from(value: MeerkatId) -> Self {
-        Self::Local(value)
+        Self::Local(AgentIdentity::from(value.as_str()))
     }
 }
 
 impl From<AgentIdentity> for PeerTarget {
     fn from(value: AgentIdentity) -> Self {
-        Self::Local(MeerkatId::from(value.as_str()))
+        Self::Local(value)
     }
 }
 
@@ -629,12 +629,12 @@ impl SpawnMemberSpec {
 
     pub fn from_wire(
         profile: String,
-        meerkat_id: String,
+        agent_identity: String,
         initial_message: Option<ContentInput>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Self {
-        let mut spec = Self::new(profile, meerkat_id);
+        let mut spec = Self::new(profile, agent_identity);
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
@@ -2892,6 +2892,7 @@ impl MemberHandle {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ids::Generation;
 
     #[test]
     fn member_projection_types_omit_bridge_session_fields_in_serialized_output() {
@@ -2958,7 +2959,10 @@ mod tests {
         let receipt_value =
             serde_json::to_value(&receipt).expect("respawn receipt should serialize to json");
         assert_eq!(receipt_value["identity"], "worker");
-        assert_eq!(receipt_value["agent_runtime_id"], runtime_id.to_string());
+        assert_eq!(
+            receipt_value["agent_runtime_id"],
+            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
+        );
         assert_eq!(receipt_value["previous_fence_token"], 7);
         assert_eq!(receipt_value["fence_token"], 8);
 
@@ -2997,7 +3001,10 @@ mod tests {
 
         let value = serde_json::to_value(&result).expect("helper result should serialize to json");
         assert_eq!(value["agent_identity"], "worker");
-        assert_eq!(value["agent_runtime_id"], runtime_id.to_string());
+        assert_eq!(
+            value["agent_runtime_id"],
+            serde_json::to_value(&runtime_id).expect("runtime id should serialize to json")
+        );
         assert_eq!(value["fence_token"], 9);
         assert!(value.get("session_id").is_none());
         assert!(value.get("bridge_session_id").is_none());

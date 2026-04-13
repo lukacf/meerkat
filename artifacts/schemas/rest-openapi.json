@@ -56,17 +56,17 @@
         "summary": "Fork a helper member in a mob"
       }
     },
-    "/mob/{id}/members/{meerkat_id}/cancel": {
+    "/mob/{id}/members/{agent_identity}/cancel": {
       "post": {
         "summary": "Force-cancel a mob member"
       }
     },
-    "/mob/{id}/members/{meerkat_id}/respawn": {
+    "/mob/{id}/members/{agent_identity}/respawn": {
       "post": {
         "summary": "Respawn a mob member with topology restore"
       }
     },
-    "/mob/{id}/members/{meerkat_id}/status": {
+    "/mob/{id}/members/{agent_identity}/status": {
       "get": {
         "summary": "Get live status for a mob member"
       }

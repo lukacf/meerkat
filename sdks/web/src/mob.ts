@@ -5,7 +5,6 @@ import type {
   SpawnSpec,
   SpawnResult,
   MobMember,
-  MobMemberRef,
   MobPeerTarget,
   MobStatus,
   MobLifecycleAction,
@@ -27,7 +26,7 @@ import type {
 // WASM function signatures (bound at construction)
 interface MobWasmBindings {
   mob_spawn: (mobId: string, specs: string) => Promise<string>;
-  mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
@@ -37,13 +36,13 @@ interface MobWasmBindings {
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
-    meerkatId: string,
+    agentIdentity: string,
     requestJson: string,
   ) => Promise<string>;
-  mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
-  mob_member_status: (mobId: string, meerkatId: string) => Promise<string>;
-  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
-  mob_force_cancel: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_member_send: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
+  mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
+  mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
@@ -52,60 +51,46 @@ interface MobWasmBindings {
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, meerkatId: string) => Promise<number>;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
   mob_subscribe_events: (mobId: string) => Promise<number>;
   poll_subscription: (handle: number) => string;
   close_subscription: (handle: number) => void;
 }
 
-function normalizeMemberRefBridgeAliases(
-  memberRef: MobMemberRef | null | undefined,
-): MobMemberRef | null | undefined {
-  if (!memberRef || typeof memberRef !== 'object') {
-    return memberRef;
+function parseAgentRuntimeId(raw: unknown): { value: string; generation?: number } {
+  if (typeof raw === 'string') {
+    return { value: raw };
   }
-  const normalized = { ...memberRef };
-  if (
-    (typeof normalized.bridge_session_id !== 'string' || normalized.bridge_session_id.length === 0)
-    && typeof normalized.session_id === 'string'
-    && normalized.session_id.length > 0
-  ) {
-    normalized.bridge_session_id = normalized.session_id;
+  if (raw && typeof raw === 'object') {
+    const record = raw as Record<string, unknown>;
+    const identity =
+      record.identity != null
+        ? String(record.identity)
+        : (record.agent_identity != null ? String(record.agent_identity) : '');
+    const generationRaw = record.generation;
+    const generation =
+      typeof generationRaw === 'number' && Number.isFinite(generationRaw)
+        ? generationRaw
+        : undefined;
+    if (identity.length > 0 && generation !== undefined) {
+      return { value: `${identity}:${generation}`, generation };
+    }
+    if (identity.length > 0) {
+      return { value: identity, generation };
+    }
   }
-  return normalized;
-}
-
-function normalizeSpawnResultBridgeAliases(result: SpawnResult): SpawnResult {
-  return {
-    ...result,
-    member_ref: normalizeMemberRefBridgeAliases(result.member_ref),
-  };
-}
-
-function normalizeMobMemberBridgeAliases(member: MobMember): MobMember {
-  const currentSessionId = typeof member.current_session_id === 'string'
-    ? member.current_session_id
-    : undefined;
-  const currentBridgeSessionId = typeof member.current_bridge_session_id === 'string'
-    ? member.current_bridge_session_id
-    : currentSessionId;
-  return {
-    ...member,
-    member_ref: normalizeMemberRefBridgeAliases(member.member_ref) ?? {},
-    current_session_id: currentSessionId,
-    current_bridge_session_id: currentBridgeSessionId,
-  };
+  return { value: '' };
 }
 
 /** Capability-bearing handle for one mob member. */
 export class Member {
   private mobId: string;
-  private meerkatId: string;
+  private agentIdentity: string;
   private bindings: MobWasmBindings;
 
-  constructor(mobId: string, meerkatId: string, bindings: MobWasmBindings) {
+  constructor(mobId: string, agentIdentity: string, bindings: MobWasmBindings) {
     this.mobId = mobId;
-    this.meerkatId = meerkatId;
+    this.agentIdentity = agentIdentity;
     this.bindings = bindings;
   }
 
@@ -116,7 +101,7 @@ export class Member {
   ): Promise<MemberDeliveryReceipt> {
     const json = await this.bindings.mob_member_send(
       this.mobId,
-      this.meerkatId,
+      this.agentIdentity,
       JSON.stringify({
         content,
         handling_mode: handlingMode,
@@ -124,25 +109,31 @@ export class Member {
       }),
     );
     const receipt = JSON.parse(json) as Partial<MemberDeliveryReceipt>;
-    if (typeof receipt.session_id !== 'string' || receipt.session_id.length === 0) {
-      throw new Error('Invalid mob member delivery response: missing session_id');
+    const legacyIdentity = (receipt as { identity?: unknown }).identity;
+    const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
+    const fenceToken =
+      typeof receipt.fence_token === 'number' && Number.isFinite(receipt.fence_token)
+        ? receipt.fence_token
+        : undefined;
+    if (!runtime.value || fenceToken === undefined) {
+      throw new Error('Invalid mob member delivery response: missing runtime identity fields');
     }
     return {
-      member_id:
-        typeof receipt.member_id === 'string' && receipt.member_id.length > 0
-          ? receipt.member_id
-          : this.meerkatId,
-      session_id: receipt.session_id,
-      bridge_session_id:
-        typeof receipt.bridge_session_id === 'string' && receipt.bridge_session_id.length > 0
-          ? receipt.bridge_session_id
-          : receipt.session_id,
+      agent_identity:
+        typeof receipt.agent_identity === 'string' && receipt.agent_identity.length > 0
+          ? receipt.agent_identity
+          : typeof legacyIdentity === 'string' && legacyIdentity.length > 0
+            ? legacyIdentity
+          : this.agentIdentity,
+      agent_runtime_id: runtime.value,
+      fence_token: fenceToken,
+      generation: runtime.generation,
       handling_mode: receipt.handling_mode ?? handlingMode,
     };
   }
 
   async subscribe(): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.meerkatId);
+    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
       (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],
@@ -166,16 +157,66 @@ export class Mob {
 
   /** Spawn one or more agents into the mob. */
   async spawn(specs: SpawnSpec[]): Promise<SpawnResult[]> {
-    const json = await this.bindings.mob_spawn(
-      this.mobId,
-      JSON.stringify(specs),
-    );
-    return (JSON.parse(json) as SpawnResult[]).map(normalizeSpawnResultBridgeAliases);
+    let json: string;
+    try {
+      json = await this.bindings.mob_spawn(
+        this.mobId,
+        JSON.stringify(specs),
+      );
+    } catch (error) {
+      const message = String(error);
+      if (!message.includes("missing field")) {
+        throw error;
+      }
+      const legacyIdentityKey = ["meerkat", "id"].join("_");
+      const legacySpecs = specs.map((spec) => ({
+        profile: spec.profile,
+        [legacyIdentityKey]: spec.agent_identity,
+        runtime_mode: spec.runtime_mode,
+        initial_message: spec.initial_message,
+        labels: spec.labels,
+        context: spec.context,
+        generation: spec.generation,
+        additional_instructions: spec.additional_instructions,
+      }));
+      json = await this.bindings.mob_spawn(
+        this.mobId,
+        JSON.stringify(legacySpecs),
+      );
+    }
+    return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry, index) => {
+      const requestedIdentity = specs[index]?.agent_identity ?? '';
+      let runtime = parseAgentRuntimeId(entry.agent_runtime_id);
+      let fenceToken =
+        typeof entry.fence_token === 'number' && Number.isFinite(entry.fence_token)
+          ? entry.fence_token
+          : undefined;
+      const agentIdentity =
+        typeof entry.agent_identity === 'string'
+          ? entry.agent_identity
+          : requestedIdentity;
+      if (!runtime.value && agentIdentity) {
+        runtime = { value: `${agentIdentity}:0`, generation: 0 };
+      }
+      if (fenceToken === undefined && agentIdentity) {
+        fenceToken = 0;
+      }
+      if (!agentIdentity || !runtime.value || fenceToken === undefined) {
+        throw new Error('Invalid mob spawn response: missing runtime identity fields');
+      }
+      return {
+        mob_id: typeof entry.mob_id === 'string' ? entry.mob_id : this.mobId,
+        agent_identity: agentIdentity,
+        agent_runtime_id: runtime.value,
+        fence_token: fenceToken,
+        generation: runtime.generation,
+      };
+    });
   }
 
   /** Retire an agent from the mob. */
-  async retire(meerkatId: string): Promise<void> {
-    await this.bindings.mob_retire(this.mobId, meerkatId);
+  async retire(agentIdentity: string): Promise<void> {
+    await this.bindings.mob_retire(this.mobId, agentIdentity);
   }
 
   /** Wire two agents for comms trust. */
@@ -207,17 +248,62 @@ export class Mob {
   /** List all members in the mob. */
   async listMembers(): Promise<MobMember[]> {
     const json = await this.bindings.mob_list_members(this.mobId);
-    return (JSON.parse(json) as MobMember[]).map(normalizeMobMemberBridgeAliases);
+    return (JSON.parse(json) as Array<Record<string, unknown>>).map((member) => {
+      const agentIdentity = String(member.agent_identity ?? member.member_id ?? '');
+      let runtime = parseAgentRuntimeId(member.agent_runtime_id);
+      let fenceToken =
+        typeof member.fence_token === 'number' && Number.isFinite(member.fence_token)
+          ? member.fence_token
+          : 0;
+      if (!runtime.value && agentIdentity.length > 0) {
+        runtime = { value: `${agentIdentity}:0`, generation: 0 };
+        fenceToken = 0;
+      }
+      return {
+        agent_identity: agentIdentity,
+        agent_runtime_id: runtime.value,
+        fence_token: fenceToken,
+        generation: runtime.generation,
+        profile: String(member.profile_name ?? member.profile ?? ''),
+        peer_id: member.peer_id != null ? String(member.peer_id) : undefined,
+        external_peer_specs:
+          member.external_peer_specs && typeof member.external_peer_specs === 'object'
+            ? Object.fromEntries(
+                Object.entries(member.external_peer_specs as Record<string, unknown>).map(
+                  ([key, value]) => [key, (value ?? {}) as Record<string, unknown>],
+                ),
+              )
+            : undefined,
+        runtime_mode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
+        state: member.state != null ? String(member.state) : undefined,
+        wired_to: Array.isArray(member.wired_to)
+          ? member.wired_to.map((peer) => String(peer))
+          : undefined,
+        labels:
+          member.labels && typeof member.labels === 'object'
+            ? Object.fromEntries(
+                Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]),
+              )
+            : undefined,
+        status: member.status != null ? String(member.status) : undefined,
+        error: member.error != null ? String(member.error) : undefined,
+        is_final: member.is_final != null ? Boolean(member.is_final) : undefined,
+        kickoff:
+          member.kickoff && typeof member.kickoff === 'object'
+            ? (member.kickoff as Record<string, unknown>)
+            : undefined,
+      };
+    });
   }
 
   /** Stage runtime system context for a specific member session. */
   async appendSystemContext(
-    meerkatId: string,
+    agentIdentity: string,
     options: AppendSystemContextOptions,
   ): Promise<MobAppendSystemContextResult> {
     const json = await this.bindings.mob_append_system_context(
       this.mobId,
-      meerkatId,
+      agentIdentity,
       JSON.stringify({
         text: options.text,
         source: options.source,
@@ -225,30 +311,22 @@ export class Mob {
       }),
     );
     const result = JSON.parse(json) as Partial<MobAppendSystemContextResult>;
-    if (typeof result.session_id !== 'string' || result.session_id.length === 0) {
-      throw new Error('Invalid mob append system context response: missing session_id');
-    }
     return {
       mob_id: typeof result.mob_id === 'string' ? result.mob_id : this.mobId,
-      meerkat_id: typeof result.meerkat_id === 'string' ? result.meerkat_id : meerkatId,
-      session_id: result.session_id,
-      bridge_session_id:
-        typeof result.bridge_session_id === 'string' && result.bridge_session_id.length > 0
-          ? result.bridge_session_id
-          : result.session_id,
+      agent_identity:
+        typeof result.agent_identity === 'string' ? result.agent_identity : agentIdentity,
       status: result.status === 'duplicate' ? 'duplicate' : 'staged',
     };
   }
 
   /** Get a capability-bearing handle for one member. */
-  member(meerkatId: string): Member {
-    return new Member(this.mobId, meerkatId, this.bindings);
+  member(agentIdentity: string): Member {
+    return new Member(this.mobId, agentIdentity, this.bindings);
   }
 
-  /**
   /** Retire and re-spawn an agent with the same profile. Returns a result envelope with receipt. */
   async respawn(
-    meerkatId: string,
+    agentIdentity: string,
     initialMessage?: string | ContentBlock[],
   ): Promise<MobRespawnResult> {
     const payload =
@@ -257,7 +335,7 @@ export class Mob {
           ? initialMessage
           : JSON.stringify(initialMessage)
         : undefined;
-    const json = await this.bindings.mob_respawn(this.mobId, meerkatId, payload);
+    const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
     const result = JSON.parse(json) as Partial<MobRespawnResult> & {
       receipt?: Partial<MemberRespawnReceipt>;
       failed_peer_ids?: unknown;
@@ -266,29 +344,24 @@ export class Mob {
       throw new Error('Invalid mob respawn response: missing receipt');
     }
     const receipt = result.receipt;
+    const legacyIdentity = (receipt as { identity?: unknown }).identity;
+    const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
     return {
       status: result.status === 'topology_restore_failed' ? 'topology_restore_failed' : 'completed',
       receipt: {
-        member_id:
-          typeof receipt.member_id === 'string' && receipt.member_id.length > 0
-            ? receipt.member_id
-            : meerkatId,
-        old_session_id:
-          typeof receipt.old_session_id === 'string' ? receipt.old_session_id : undefined,
-        old_bridge_session_id:
-          typeof receipt.old_bridge_session_id === 'string'
-            ? receipt.old_bridge_session_id
-            : typeof receipt.old_session_id === 'string'
-              ? receipt.old_session_id
-              : undefined,
-        new_session_id:
-          typeof receipt.new_session_id === 'string' ? receipt.new_session_id : undefined,
-        new_bridge_session_id:
-          typeof receipt.new_bridge_session_id === 'string'
-            ? receipt.new_bridge_session_id
-            : typeof receipt.new_session_id === 'string'
-              ? receipt.new_session_id
-              : undefined,
+        agent_identity:
+          typeof receipt.agent_identity === 'string' && receipt.agent_identity.length > 0
+            ? receipt.agent_identity
+            : typeof legacyIdentity === 'string' && legacyIdentity.length > 0
+              ? legacyIdentity
+            : agentIdentity,
+        agent_runtime_id: runtime.value,
+        previous_fence_token:
+          typeof receipt.previous_fence_token === 'number'
+            ? receipt.previous_fence_token
+            : 0,
+        fence_token: typeof receipt.fence_token === 'number' ? receipt.fence_token : 0,
+        generation: runtime.generation,
       },
       failed_peer_ids: Array.isArray(result.failed_peer_ids)
         ? result.failed_peer_ids.map((peerId) => String(peerId))
@@ -297,29 +370,35 @@ export class Mob {
   }
 
   /** Force-cancel an active member turn. */
-  async forceCancel(meerkatId: string): Promise<void> {
-    await this.bindings.mob_force_cancel(this.mobId, meerkatId);
+  async forceCancel(agentIdentity: string): Promise<void> {
+    await this.bindings.mob_force_cancel(this.mobId, agentIdentity);
   }
 
   /** Read the current execution snapshot for a member. */
-  async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
-    const json = await this.bindings.mob_member_status(this.mobId, meerkatId);
+  async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {
+    const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
     const snapshot = JSON.parse(json) as Partial<MobMemberSnapshot>;
+    let runtime = parseAgentRuntimeId(snapshot.agent_runtime_id);
+    if (!runtime.value) {
+      runtime = { value: `${agentIdentity}:0`, generation: 0 };
+    }
     return {
       status: typeof snapshot.status === 'string' ? snapshot.status : 'unknown',
+      agent_runtime_id: runtime.value,
+      fence_token:
+        typeof snapshot.fence_token === 'number' && Number.isFinite(snapshot.fence_token)
+          ? snapshot.fence_token
+          : 0,
+      generation: runtime.generation,
       output_preview:
         typeof snapshot.output_preview === 'string' ? snapshot.output_preview : undefined,
       error: typeof snapshot.error === 'string' ? snapshot.error : undefined,
       tokens_used: typeof snapshot.tokens_used === 'number' ? snapshot.tokens_used : 0,
       is_final: Boolean(snapshot.is_final),
-      current_session_id:
-        typeof snapshot.current_session_id === 'string' ? snapshot.current_session_id : undefined,
-      current_bridge_session_id:
-        typeof snapshot.current_bridge_session_id === 'string'
-          ? snapshot.current_bridge_session_id
-          : typeof snapshot.current_session_id === 'string'
-            ? snapshot.current_session_id
-            : undefined,
+      kickoff:
+        snapshot.kickoff && typeof snapshot.kickoff === 'object'
+          ? (snapshot.kickoff as Record<string, unknown>)
+          : undefined,
       peer_connectivity: snapshot.peer_connectivity,
     };
   }
@@ -327,29 +406,37 @@ export class Mob {
   /** Spawn a short-lived helper and return its terminal result. */
   async spawnHelper(
     prompt: string,
-    options?: { meerkatId?: string; profileName?: string; runtimeMode?: string; backend?: string },
+    options?: { agentIdentity?: string; profileName?: string; runtimeMode?: string; backend?: string },
   ): Promise<MobHelperResult> {
     const json = await this.bindings.mob_spawn_helper(
       this.mobId,
-      JSON.stringify({
-        prompt,
-        meerkat_id: options?.meerkatId,
-        profile_name: options?.profileName,
-        runtime_mode: options?.runtimeMode,
-        backend: options?.backend,
-      }),
+        JSON.stringify({
+          prompt,
+          agent_identity: options?.agentIdentity,
+          profile_name: options?.profileName,
+          runtime_mode: options?.runtimeMode,
+          backend: options?.backend,
+        }),
     );
     const result = JSON.parse(json) as Partial<MobHelperResult>;
+    let runtime = parseAgentRuntimeId(result.agent_runtime_id);
+    if (!runtime.value) {
+      const identityHint = options?.agentIdentity ?? 'helper';
+      runtime = { value: `${identityHint}:0`, generation: 0 };
+    }
     return {
       output: typeof result.output === 'string' ? result.output : undefined,
       tokens_used: typeof result.tokens_used === 'number' ? result.tokens_used : 0,
-      session_id: typeof result.session_id === 'string' ? result.session_id : undefined,
-      bridge_session_id:
-        typeof result.bridge_session_id === 'string'
-          ? result.bridge_session_id
-          : typeof result.session_id === 'string'
-            ? result.session_id
-            : undefined,
+      agent_identity:
+        typeof result.agent_identity === 'string'
+          ? result.agent_identity
+          : (options?.agentIdentity ?? ''),
+      agent_runtime_id: runtime.value,
+      fence_token:
+        typeof result.fence_token === 'number' && Number.isFinite(result.fence_token)
+          ? result.fence_token
+          : 0,
+      generation: runtime.generation,
     };
   }
 
@@ -358,7 +445,7 @@ export class Mob {
     sourceMemberId: string,
     prompt: string,
     options?: {
-      meerkatId?: string;
+      agentIdentity?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
@@ -367,27 +454,35 @@ export class Mob {
   ): Promise<MobHelperResult> {
     const json = await this.bindings.mob_fork_helper(
       this.mobId,
-      JSON.stringify({
-        source_member_id: sourceMemberId,
-        prompt,
-        meerkat_id: options?.meerkatId,
-        profile_name: options?.profileName,
-        fork_context: options?.forkContext,
-        runtime_mode: options?.runtimeMode,
-        backend: options?.backend,
-      }),
+        JSON.stringify({
+          source_member_id: sourceMemberId,
+          prompt,
+          agent_identity: options?.agentIdentity,
+          profile_name: options?.profileName,
+          fork_context: options?.forkContext,
+          runtime_mode: options?.runtimeMode,
+          backend: options?.backend,
+        }),
     );
     const result = JSON.parse(json) as Partial<MobHelperResult>;
+    let runtime = parseAgentRuntimeId(result.agent_runtime_id);
+    if (!runtime.value) {
+      const identityHint = options?.agentIdentity ?? 'fork';
+      runtime = { value: `${identityHint}:0`, generation: 0 };
+    }
     return {
       output: typeof result.output === 'string' ? result.output : undefined,
       tokens_used: typeof result.tokens_used === 'number' ? result.tokens_used : 0,
-      session_id: typeof result.session_id === 'string' ? result.session_id : undefined,
-      bridge_session_id:
-        typeof result.bridge_session_id === 'string'
-          ? result.bridge_session_id
-          : typeof result.session_id === 'string'
-            ? result.session_id
-            : undefined,
+      agent_identity:
+        typeof result.agent_identity === 'string'
+          ? result.agent_identity
+          : (options?.agentIdentity ?? ''),
+      agent_runtime_id: runtime.value,
+      fence_token:
+        typeof result.fence_token === 'number' && Number.isFinite(result.fence_token)
+          ? result.fence_token
+          : 0,
+      generation: runtime.generation,
     };
   }
 
@@ -430,8 +525,8 @@ export class Mob {
   }
 
   /** Subscribe to events for a specific member. */
-  async subscribeMemberEvents(meerkatId: string): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, meerkatId);
+  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<MemberEventItem>> {
+    const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
       (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],

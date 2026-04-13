@@ -63,8 +63,8 @@ pub use error::MobError;
 pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
-    LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin,
-    WorkRef, WorkSpec,
+    LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin, WorkRef,
+    WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
@@ -102,6 +102,8 @@ pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
+
+pub(crate) use ids::MeerkatId;
 
 /// Closure called at each member spawn to get a fresh snapshot of external tools.
 ///

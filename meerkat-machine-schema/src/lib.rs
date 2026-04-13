@@ -1,22 +1,20 @@
 pub mod catalog;
+/// Compatibility-only absorbed machine schemas retained for generated kernel
+/// consumers during the two-kernel collapse. These are intentionally excluded
+/// from the canonical registry.
+pub mod compat;
 mod composition;
 mod machine;
 
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas,
-    comms_drain_lifecycle_composition, comms_drain_lifecycle_machine,
-    external_tool_bundle_composition, external_tool_surface_machine, flow_frame_loop_composition,
-    flow_frame_machine, flow_run_machine, input_lifecycle_machine, loop_iteration_machine,
-    mob_bundle_composition, mob_lifecycle_machine, mob_member_bootstrap_machine,
-    mob_member_lifecycle_machine, mob_orchestrator_machine, mob_runtime_bridge_machine,
-    mob_wiring_machine, occurrence_lifecycle_machine, ops_lifecycle_machine,
-    ops_peer_bundle_composition, ops_runtime_bundle_composition, peer_comms_machine,
-    peer_directory_reachability_machine, peer_runtime_bundle_composition, runtime_control_machine,
-    runtime_ingress_machine, runtime_pipeline_composition, schedule_lifecycle_machine,
-    session_tool_visibility_machine, session_turn_admission_machine, turn_execution_machine,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_machine,
+    meerkat_mob_seam_composition, mob_machine, occurrence_lifecycle_machine,
+    peer_directory_reachability_machine, schedule_lifecycle_machine,
+    session_tool_visibility_machine, session_turn_admission_machine,
 };
+pub use compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine};
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriverRustBinding,
     CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionSchemaError,
@@ -107,6 +105,21 @@ mod tests {
                     .iter()
                     .any(|effect| effect.variant == "SupersedePendingOccurrences"),
                 "{transition_name} should supersede older pending occurrences"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_registry_excludes_compat_flow_machine_schemas() {
+        let machine_names: Vec<_> = canonical_machine_schemas()
+            .into_iter()
+            .map(|schema| schema.machine)
+            .collect();
+
+        for compat_name in ["FlowRunMachine", "FlowFrameMachine", "LoopIterationMachine"] {
+            assert!(
+                !machine_names.iter().any(|name| name == compat_name),
+                "{compat_name} should remain compat-only, not canonical"
             );
         }
     }

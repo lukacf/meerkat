@@ -388,9 +388,9 @@ mod tests {
             make_event(1, MobEventKind::MobCompleted),
             make_event(
                 2,
-                MobEventKind::PeersWired {
-                    a: MeerkatId::from("a"),
-                    b: MeerkatId::from("b"),
+                MobEventKind::MembersWired {
+                    a: MeerkatId::from("a").into(),
+                    b: MeerkatId::from("b").into(),
                 },
             ),
         ];

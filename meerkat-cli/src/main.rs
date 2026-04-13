@@ -9943,7 +9943,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let names: std::collections::BTreeSet<String> =
             composed.tools().iter().map(|t| t.name.clone()).collect();
         assert!(names.contains("mob_create"));
-        assert!(names.contains("mob_spawn_member"));
+        assert!(names.contains("meerkat_spawn"));
     }
 
     #[tokio::test]
@@ -10157,10 +10157,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher_a,
             "t-spawn-a",
-            "mob_spawn_member",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "lead", "member_id": "lead-1", "runtime_mode": "turn_driven"}]
+                "specs": [{"profile": "lead", "agent_identity": "lead-1", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -10190,10 +10190,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher_b,
             "t-spawn-b",
-            "mob_spawn_member",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": created["mob_id"].as_str().expect("mob id"),
-                "specs": [{"profile": "worker", "member_id": "worker-1", "runtime_mode": "turn_driven"}]
+                "specs": [{"profile": "worker", "agent_identity": "worker-1", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;
@@ -10227,10 +10227,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher,
             "t-spawn-turn",
-            "mob_spawn_member",
+            "meerkat_spawn",
             serde_json::json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "lead", "member_id": "lead-turn", "runtime_mode": "turn_driven"}]
+                "specs": [{"profile": "lead", "agent_identity": "lead-turn", "runtime_mode": "turn_driven"}]
             }),
         )
         .await;

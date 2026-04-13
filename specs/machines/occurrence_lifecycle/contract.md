@@ -125,12 +125,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/authority.rs` — occurrence lifecycle authority that owns claim, dispatch, lease expiry, and terminal outcomes
-- `meerkat-schedule/src/driver.rs` — mechanical scheduler driver precursor for due claims, probes, dispatch, and feedback
-- `meerkat-schedule/src/store.rs` — durable claim-time and occurrence state precursor
-- `meerkat-machine-schema/src/catalog/occurrence_lifecycle.rs` — formal OccurrenceLifecycleMachine schema
+- `meerkat-schedule/src/authority.rs` — occurrence lifecycle authority
 
 ### Scenarios
-- `occurrence-claim-dispatch-complete` — occurrences claim, dispatch, and reach a terminal outcome with attempt ownership preserved
-- `occurrence-supersede` — pending occurrences supersede when a newer schedule revision invalidates them
-- `occurrence-lease-expiry` — live claimed work returns to pending when a lease expires before completion
+- `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states

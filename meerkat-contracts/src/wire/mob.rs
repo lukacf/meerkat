@@ -383,7 +383,7 @@ const fn default_event_router_buffer_size() -> usize {
 /// Public mob definition input for `mob/create`.
 ///
 /// This mirrors the public creation contract shape. Runtime-owned lifecycle and
-/// bookkeeping fields such as `owner_session_id`, `owner_bridge_session_id`,
+/// bookkeeping fields such as internal owner/runtime bindings,
 /// `session_cleanup_policy`, `is_implicit`, and internal-only profile tool
 /// bundles are intentionally not part of this schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -679,7 +679,7 @@ mod tests {
         let err = serde_json::from_value::<MobCreateParams>(serde_json::json!({
             "definition": {
                 "id": "mob-1",
-                "owner_session_id": "session-123",
+                "owner_runtime_binding": "runtime:worker:0",
                 "profiles": {
                     "worker": { "model": "claude-sonnet-4-6" }
                 }
@@ -688,7 +688,8 @@ mod tests {
         .expect_err("reserved runtime lifecycle fields must be rejected");
 
         assert!(
-            err.to_string().contains("unknown field `owner_session_id`"),
+            err.to_string()
+                .contains("unknown field `owner_runtime_binding`"),
             "unexpected error: {err}"
         );
     }
@@ -698,7 +699,7 @@ mod tests {
         let err = serde_json::from_value::<MobCreateParams>(serde_json::json!({
             "definition": {
                 "id": "mob-1",
-                "owner_bridge_session_id": "session-123",
+                "owner_transport_binding": "transport:worker:0",
                 "profiles": {
                     "worker": { "model": "claude-sonnet-4-6" }
                 }
@@ -708,7 +709,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("unknown field `owner_bridge_session_id`"),
+                .contains("unknown field `owner_transport_binding`"),
             "unexpected error: {err}"
         );
     }

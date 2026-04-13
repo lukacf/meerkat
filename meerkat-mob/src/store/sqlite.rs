@@ -7,7 +7,7 @@ use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
 use crate::error::MobError;
-use crate::event::{MobEvent, NewMobEvent};
+use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event};
 use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
 use crate::profile::Profile;
 use crate::run::{
@@ -209,7 +209,8 @@ impl MobEventStore for SqliteMobEventStore {
                 mob_id: event.mob_id,
                 kind: event.kind,
             };
-            let encoded = encode_json(&stored)?;
+            let encoded = encode_stored_mob_event(&stored)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
             tx.execute(
                 "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
                 params![cursor_to_i64(cursor)?, encoded],
@@ -236,7 +237,8 @@ impl MobEventStore for SqliteMobEventStore {
                     mob_id: event.mob_id,
                     kind: event.kind,
                 };
-                let encoded = encode_json(&stored)?;
+                let encoded = encode_stored_mob_event(&stored)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
                 tx.execute(
                     "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
                     params![cursor_to_i64(cursor)?, encoded],
@@ -273,7 +275,10 @@ impl MobEventStore for SqliteMobEventStore {
             let mut result = Vec::new();
             for row in rows {
                 let bytes = row.map_err(se)?;
-                result.push(decode_json(&bytes)?);
+                result.push(
+                    decode_stored_mob_event(&bytes)
+                        .map_err(|e| MobStoreError::Serialization(e.to_string()))?,
+                );
             }
             Ok(result)
         })
@@ -293,7 +298,10 @@ impl MobEventStore for SqliteMobEventStore {
             let mut result = Vec::new();
             for row in rows {
                 let bytes = row.map_err(se)?;
-                result.push(decode_json(&bytes)?);
+                result.push(
+                    decode_stored_mob_event(&bytes)
+                        .map_err(|e| MobStoreError::Serialization(e.to_string()))?,
+                );
             }
             Ok(result)
         })
@@ -337,7 +345,8 @@ impl MobEventStore for SqliteMobEventStore {
 
             let mut removed = 0u64;
             for (cursor_val, bytes) in rows {
-                let event: MobEvent = decode_json(&bytes)?;
+                let event: MobEvent = decode_stored_mob_event(&bytes)
+                    .map_err(|e| MobStoreError::Serialization(e.to_string()))?;
                 if event.timestamp < older_than {
                     tx.execute(
                         "DELETE FROM mob_events WHERE cursor = ?1",
@@ -1753,6 +1762,39 @@ mod tests {
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_rejects_pre_0_6_unversioned_history() {
+        let (_dir, path) = temp_db_path();
+        let raw_event = serde_json::to_vec(&MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobCompleted,
+        })
+        .unwrap();
+
+        {
+            let conn = open_connection(&path).unwrap();
+            conn.execute(
+                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
+                params![1i64, raw_event],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+        let error = store
+            .replay_all()
+            .await
+            .expect_err("pre-0.6 unversioned history must be rejected");
+        match error {
+            MobStoreError::Serialization(message) => {
+                assert!(message.contains("pre-0.6 mob event history is unsupported"));
+            }
+            other => panic!("expected serialization error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

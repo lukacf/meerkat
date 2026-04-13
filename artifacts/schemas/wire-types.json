@@ -1342,7 +1342,7 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as `owner_session_id`, `session_cleanup_policy`,\n`is_implicit`, and internal-only profile tool bundles are intentionally not\npart of this schema.",
+    "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.",
     "properties": {
       "backend": {
         "$ref": "#/$defs/MobBackendConfigInput",
@@ -1652,15 +1652,15 @@
     "additionalProperties": false,
     "description": "Request payload for host-side mob member delivery.",
     "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
       "content": {
         "$ref": "#/$defs/WireContentInput"
       },
       "handling_mode": {
         "$ref": "#/$defs/WireHandlingMode",
         "default": "queue"
-      },
-      "meerkat_id": {
-        "type": "string"
       },
       "mob_id": {
         "type": "string"
@@ -1678,7 +1678,7 @@
     },
     "required": [
       "mob_id",
-      "meerkat_id",
+      "agent_identity",
       "content"
     ],
     "title": "MobMemberSendParams",
@@ -1698,23 +1698,32 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for host-side mob member delivery.",
     "properties": {
+      "agent_identity": {
+        "description": "Identity-native member identity (0.6).",
+        "type": "string"
+      },
+      "agent_runtime_id": {
+        "description": "Identity-native runtime ID for this incarnation (0.6).",
+        "type": "string"
+      },
+      "fence_token": {
+        "description": "Fence token for the current incarnation (0.6).",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
       "handling_mode": {
         "$ref": "#/$defs/WireHandlingMode"
       },
-      "member_id": {
-        "type": "string"
-      },
       "mob_id": {
-        "type": "string"
-      },
-      "session_id": {
         "type": "string"
       }
     },
     "required": [
       "mob_id",
-      "member_id",
-      "session_id",
+      "agent_identity",
+      "agent_runtime_id",
+      "fence_token",
       "handling_mode"
     ],
     "title": "MobMemberSendResult",

@@ -213,10 +213,22 @@ async def test_spawn_many_uses_explicit_rpc_method():
     client = MeerkatClient()
     client._process = MagicMock()
     client._dispatcher = MagicMock()
-    client._request = AsyncMock(return_value=[{"ok": True, "meerkat_id": "m1"}])
+    client._request = AsyncMock(
+        return_value={
+            "results": [
+                {
+                    "ok": True,
+                    "mob_id": "mob1",
+                    "agent_identity": "m1",
+                    "agent_runtime_id": "m1:1",
+                    "fence_token": 3,
+                }
+            ]
+        }
+    )
 
     mob = Mob(client, "mob1")
-    specs = [{"profile": "p1", "meerkat_id": "m1"}]
+    specs = [{"profile": "p1", "agent_identity": "m1"}]
     results = await mob.spawn_many(specs)
 
     client._request.assert_called_with(
@@ -226,7 +238,7 @@ async def test_spawn_many_uses_explicit_rpc_method():
             "specs": specs,
         },
     )
-    assert results[0]["meerkat_id"] == "m1"
+    assert results[0]["agent_identity"] == "m1"
 
 
 @pytest.mark.asyncio
@@ -246,7 +258,7 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
         {
             "mob_id": "mob1",
             "prompt": "hello",
-            "meerkat_id": None,
+            "agent_identity": None,
             "role_name": "legacy-role",
             "runtime_mode": None,
             "backend": None,
@@ -265,7 +277,7 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
             "mob_id": "mob1",
             "source_member_id": "source-id",
             "prompt": "hello",
-            "meerkat_id": None,
+            "agent_identity": None,
             "role_name": "worker-role",
             "fork_context": None,
             "runtime_mode": None,

@@ -1,5 +1,9 @@
 # schedule_mob_bundle Mapping Note
 
+This composition was audited during the two-kernel collapse and retained
+unchanged because it does not route through any absorbed Meerkat or Mob
+internal machine.
+
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage
 This section is generated from the Rust composition catalog. Do not edit it by hand.
@@ -23,9 +27,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `(none)`
 
 ### Invariants
-- `mob_delivery_protocol_covered`
-  - anchors: `schedule_driver`, `mob_delivery_precursor`, `schedule_mob_bundle_schema`
-  - scenarios: `mob-delivery-feedback`
+- `(none)`
 
 
 <!-- GENERATED_COVERAGE_END -->

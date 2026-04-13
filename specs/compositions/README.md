@@ -1,32 +1,38 @@
-# Meerkat 0.5 Composition Specs
+# Meerkat 0.6 Composition Specs
 
-This directory is the checked-in formal composition bundle for the `0.5`
-machine-authority package.
+This directory is the canonical executable composition-spec home for the
+two-kernel `0.6` architecture.
 
-Companion workflow docs:
-
-- `docs/architecture/0.5/meerkat_machine_formalization_strategy.md`
-- `docs/architecture/0.5/meerkat_machine_schema_workflow_spec.md`
-- `docs/architecture/0.5/meerkat_0_5_execution_plan.md`
-
-Each canonical composition bundle lives under its own directory:
+Each composition directory contains:
 
 - `contract.md`
 - `model.tla`
 - `ci.cfg`
 - `deep.cfg`
 - `mapping.md`
-- witness configs when the bundle declares bounded witness paths
+- optional witness or liveness configs when the composition has additional
+  proof lanes
+
+Canonical composition set:
+
+- `meerkat_mob_seam`
+- perimeter compositions retained after audit:
+  - `schedule_bundle`
+  - `schedule_runtime_bundle`
+  - `schedule_mob_bundle`
 
 Status:
 
-- canonical composition authority is authored in
-  `meerkat-machine-schema/src/catalog/compositions.rs`
-- checked-in composition artifacts under `specs/compositions/` are refreshed
-  from that authority
-- `mapping.md` may retain hand-authored explanatory text, but its generated
-  coverage block is authoritative for route, scheduler-rule, and invariant
-  inventory
+- internal routes inside `MeerkatMachine` and `MobMachine` are no longer
+  modeled as inter-machine compositions
+- `meerkat_mob_seam` is the sole inter-kernel composition
+- the retained perimeter compositions were audited during the two-kernel
+  collapse:
+  - `schedule_bundle` remains the pure schedule/occurrence perimeter bundle
+  - `schedule_runtime_bundle` remains because it references only
+    schedule/occurrence delivery protocol edges into the runtime perimeter
+  - `schedule_mob_bundle` remains because it references only
+    schedule/occurrence delivery protocol edges into the mob perimeter
 
 Validation:
 
@@ -36,17 +42,3 @@ Validation:
 - `cargo xtask machine-codegen --all`
 - `cargo xtask machine-check-drift --all`
 - `cargo xtask machine-verify --all`
-
-When the workspace is busy, prefer the `make machine-*` targets. They build
-`xtask` into an isolated target dir and then run the binary directly, which
-avoids confusing `cargo run` lock waits.
-
-Canonical composition set:
-
-- `runtime_pipeline`
-- `peer_runtime_bundle`
-- `ops_runtime_bundle`
-- `surface_event_runtime_bundle`
-- `continuation_runtime_bundle`
-- `external_tool_bundle`
-- `mob_bundle`

@@ -404,7 +404,8 @@ class AttributedEvent:
     """Mob event annotated with the emitting member identity."""
 
     source: str = ""
-    profile: str = ""
+    source_fence_token: int | None = None
+    role: str = ""
     envelope: EventEnvelope = field(default_factory=EventEnvelope)
 
 

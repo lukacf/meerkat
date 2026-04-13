@@ -865,12 +865,12 @@ async fn rest_session_info(
 async fn rest_mob_member_status(
     port: u16,
     mob_id: &str,
-    meerkat_id: &str,
+    agent_identity: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let response = http_request(
         port,
         format!(
-            "GET /mob/{mob_id}/members/{meerkat_id}/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            "GET /mob/{mob_id}/members/{agent_identity}/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
         ),
     )
     .await?;

@@ -4,7 +4,7 @@
 //! The router runs as an independent tokio task:
 //! 1. Bootstraps by subscribing to all current roster members.
 //! 2. Polls the machine-routed mob event surface for
-//!    `MeerkatSpawned`/`MeerkatRetired` to track roster changes and
+//!    `MemberSpawned`/`MemberRetired` to track roster changes and
 //!    subscribe/unsubscribe streams.
 //! 3. Tags events with [`AttributedEvent`] and forwards to the receiver.
 //!
@@ -149,37 +149,16 @@ async fn run_event_router(
                 for mob_event in new_events {
                     mob_cursor = mob_event.cursor;
                     match mob_event.kind {
-                        crate::event::MobEventKind::MeerkatSpawned {
-                            meerkat_id,
-                            role,
-                            ..
-                        } => {
-                            if tracked_ids.insert(meerkat_id.clone())
-                                && let Some(stream) =
-                                    subscribe_member(&handle, meerkat_id, role).await
-                            {
-                                merged.push(stream);
-                            }
-                        }
-                        crate::event::MobEventKind::MemberSpawned {
-                            ref agent_identity,
-                            ref role,
-                            ..
-                        } => {
+                        crate::event::MobEventKind::MemberSpawned(ref event) => {
                             let meerkat_id =
-                                crate::ids::MeerkatId::from(agent_identity.as_str());
+                                crate::ids::MeerkatId::from(event.agent_identity.as_str());
                             if tracked_ids.insert(meerkat_id.clone())
                                 && let Some(stream) =
-                                    subscribe_member(&handle, meerkat_id, role.clone())
+                                    subscribe_member(&handle, meerkat_id, event.role.clone())
                                         .await
                             {
                                 merged.push(stream);
                             }
-                        }
-                        crate::event::MobEventKind::MeerkatRetired {
-                            meerkat_id, ..
-                        } => {
-                            tracked_ids.remove(&meerkat_id);
                         }
                         crate::event::MobEventKind::MemberRetired {
                             ref agent_identity,

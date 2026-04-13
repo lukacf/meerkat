@@ -123,9 +123,10 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
+    let kernel_export_schemas = generated_kernel_export_schemas(&registry);
     write_generated(
         &generated_kernel_mod_path(root),
-        &render_generated_kernel_mod(&registry.machines),
+        &render_generated_kernel_mod(&kernel_export_schemas),
     )?;
 
     for machine in &selection.machines {
@@ -318,6 +319,7 @@ fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
 pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let registry = CanonicalRegistry::load();
+    let kernel_export_schemas = generated_kernel_export_schemas(&registry);
 
     for machine in &selection.machines {
         collect_legacy_authority_mismatch(
@@ -361,7 +363,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
 
     compare_generated(
         &generated_kernel_mod_path(root),
-        &render_generated_kernel_mod(&registry.machines),
+        &render_generated_kernel_mod(&kernel_export_schemas),
         &mut mismatches,
     )?;
 
@@ -1240,6 +1242,7 @@ fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec
                 .find(|entry| {
                     entry.schema.machine == *wanted
                         || entry.slug == *wanted
+                        || legacy_machine_slug(&entry.schema.machine) == Some(wanted.as_str())
                         || entry.schema.machine.strip_suffix("Machine") == Some(wanted.as_str())
                 })
                 .cloned()
@@ -1552,18 +1555,6 @@ struct OwnerTestSpec {
 }
 
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
-    const PEER_COMMS: &[OwnerTestSpec] = &[
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "peer_comms_kernel",
-            filter: "peer_comms_kernel_preserves_reservation_and_trust_snapshot_for_trusted_requests",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "peer_comms_kernel",
-            filter: "peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage",
-        },
-    ];
     const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
@@ -1576,53 +1567,28 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
         },
     ];
-    const TURN_EXECUTION: &[OwnerTestSpec] = &[
+    const SESSION_TURN_ADMISSION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
-            target: "turn_execution_kernel",
-            filter: "turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary",
+            target: "session_turn_admission_kernel",
+            filter: "session_turn_admission_kernel_gracefully_drains_running_shutdown",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
-            target: "turn_execution_kernel",
-            filter: "turn_execution_kernel_immediate_context_completes_without_llm_loop",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "turn_execution_kernel",
-            filter: "turn_execution_kernel_cancel_and_failure_paths_emit_terminal_effects",
+            target: "session_turn_admission_kernel",
+            filter: "session_turn_admission_kernel_interrupt_only_wakes_running_turns",
         },
     ];
-    const EXTERNAL_TOOL_SURFACE: &[OwnerTestSpec] = &[
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "external_tool_surface_kernel",
-            filter: "external_tool_surface_kernel_add_and_reload_emit_canonical_deltas",
-        },
-        OwnerTestSpec {
-            package: "meerkat-integration-tests",
-            target: "external_tool_surface_kernel",
-            filter: "external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit_deltas",
-        },
-    ];
-    const FLOW_RUN: &[OwnerTestSpec] = &[OwnerTestSpec {
+    const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
         target: "flow_run_kernel",
         filter: "flow_run_kernel_persists_pending_and_terminal_truth_for_machine_verify",
     }];
-    const MOB_ORCHESTRATOR: &[OwnerTestSpec] = &[OwnerTestSpec {
-        package: "meerkat-mob",
-        target: "mob_orchestrator_kernel",
-        filter: "mob_orchestrator_kernel_tracks_binding_pending_spawn_and_resume_semantics_for_machine_verify",
-    }];
 
     match slug {
-        "peer_comms" => PEER_COMMS,
         "peer_directory_reachability" => PEER_DIRECTORY_REACHABILITY,
-        "turn_execution" => TURN_EXECUTION,
-        "external_tool_surface" => EXTERNAL_TOOL_SURFACE,
-        "flow_run" => FLOW_RUN,
-        "mob_orchestrator" => MOB_ORCHESTRATOR,
+        "session_turn_admission" => SESSION_TURN_ADMISSION,
+        "mob_machine" => MOB,
         _ => &[],
     }
 }
@@ -1944,9 +1910,29 @@ fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Resul
     ))
 }
 
+fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineSchema> {
+    let mut schemas = registry.machines.clone();
+    schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
+    schemas.dedup_by(|a, b| a.machine == b.machine);
+    schemas
+}
+
 pub fn machine_slug(machine_name: &str) -> String {
+    match machine_name {
+        "MeerkatMachine" => return "meerkat_machine".into(),
+        "MobMachine" => return "mob_machine".into(),
+        _ => {}
+    }
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
+}
+
+fn legacy_machine_slug(machine_name: &str) -> Option<&'static str> {
+    match machine_name {
+        "MeerkatMachine" => Some("meerkat"),
+        "MobMachine" => Some("mob"),
+        _ => None,
+    }
 }
 
 pub fn composition_slug(name: &str) -> String {

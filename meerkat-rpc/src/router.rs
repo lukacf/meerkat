@@ -1699,7 +1699,7 @@ impl MethodRouter {
         struct MobStreamOpenParams {
             mob_id: String,
             #[serde(default)]
-            member_id: Option<String>,
+            agent_identity: Option<String>,
         }
 
         let params = match handlers::parse_params::<MobStreamOpenParams>(params) {
@@ -1727,9 +1727,9 @@ impl MethodRouter {
         let closed_mob_streams = self.closed_mob_streams.clone();
         let stream_id_for_task = stream_id;
 
-        if let Some(member_id_str) = params.member_id {
+        if let Some(agent_identity) = params.agent_identity {
             // Per-member stream: subscribe to a specific member's agent events.
-            let identity = meerkat_mob::AgentIdentity::from(member_id_str.as_str());
+            let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
             let stream: meerkat_core::comms::EventStream =
                 match handle.subscribe_agent_events(&identity).await {
                     Ok(s) => s,
@@ -2298,10 +2298,10 @@ mod tests {
     async fn resolve_mob_bridge_session_id(
         router: &MethodRouter,
         mob_id: &str,
-        meerkat_id: &str,
+        agent_identity: &str,
     ) -> String {
         let mob_id = meerkat_mob::MobId::from(mob_id);
-        let identity = meerkat_mob::AgentIdentity::from(meerkat_id);
+        let identity = meerkat_mob::AgentIdentity::from(agent_identity);
         let handle = router.mob_state().handle_for(&mob_id).await.unwrap();
         handle
             .resolve_bridge_session_id(&identity)
@@ -2733,21 +2733,21 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
             .await
             .unwrap();
         let spawned = result_value(&spawn_resp);
-        assert_eq!(spawned["meerkat_id"], "worker-1");
+        assert_eq!(spawned["agent_identity"], "worker-1");
 
         let append_resp = router
             .dispatch(make_request(
                 "mob/append_system_context",
                 serde_json::json!({
                     "mob_id": mob_id,
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "text": "Prioritize the lead.",
                     "source": "mob",
                     "idempotency_key": "ctx-worker-1"
@@ -2793,14 +2793,14 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
             .await
             .unwrap();
         let spawned = result_value(&spawn_resp);
-        assert_eq!(spawned["meerkat_id"], "worker-1");
+        assert_eq!(spawned["agent_identity"], "worker-1");
 
         let send_resp = router
             .dispatch(make_request(
@@ -2852,14 +2852,14 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
             .await
             .unwrap();
         let spawned = result_value(&spawn_resp);
-        assert_eq!(spawned["meerkat_id"], "worker-1");
+        assert_eq!(spawned["agent_identity"], "worker-1");
 
         let send_resp = router
             .dispatch(make_request(
@@ -2915,14 +2915,14 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
             .await
             .unwrap();
         let spawned = result_value(&spawn_resp);
-        assert_eq!(spawned["meerkat_id"], "worker-1");
+        assert_eq!(spawned["agent_identity"], "worker-1");
         let session_id =
             resolve_mob_bridge_session_id(&router, "mob-routed-session", "worker-1").await;
 
@@ -2980,7 +2980,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3047,7 +3047,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3100,7 +3100,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3156,7 +3156,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3231,7 +3231,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3299,7 +3299,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3365,7 +3365,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3740,7 +3740,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3825,7 +3825,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": &mob_id,
                     "profile": "lead",
-                    "meerkat_id": "lead-1",
+                    "agent_identity": "lead-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -3868,7 +3868,7 @@ mod tests {
                 "mob/send",
                 serde_json::json!({
                     "mob_id": &mob_id,
-                    "meerkat_id": "lead-1",
+                    "agent_identity": "lead-1",
                     "content": "do work while retiring"
                 }),
             ))
@@ -3913,7 +3913,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": mob_id,
                     "profile": "worker",
-                    "meerkat_id": "worker-1",
+                    "agent_identity": "worker-1",
                     "runtime_mode": "turn_driven"
                 }),
             ))
@@ -4236,7 +4236,7 @@ mod tests {
             "mob/send",
             serde_json::json!({
                 "mob_id": "mob-1",
-                "meerkat_id": "worker-1",
+                "agent_identity": "worker-1",
                 "message": "legacy payload"
             }),
         );

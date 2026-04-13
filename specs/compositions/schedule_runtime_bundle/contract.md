@@ -20,7 +20,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Structural Requirements
-- `runtime_delivery_protocol_covered` — runtime delivery feedback closes occurrence obligations only through the explicit runtime delivery protocol
+- `(none)`
 
 ## Behavioral Invariants
 - `(none)`

@@ -127,6 +127,21 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
     ]
 
 
+def _parse_agent_runtime_id_wire(raw: Any) -> tuple[str, int | None]:
+    if isinstance(raw, str) and raw:
+        return raw, None
+    if isinstance(raw, dict):
+        identity = raw.get("identity")
+        if not isinstance(identity, str) or not identity:
+            identity = raw.get("agent_identity")
+        generation = raw.get("generation")
+        if isinstance(identity, str) and identity:
+            if isinstance(generation, int):
+                return f"{identity}:{generation}", generation
+            return identity, None
+    return "", None
+
+
 class MeerkatClient:
     """Async client that manages a Meerkat agent runtime via rkat-rpc.
 
@@ -827,6 +842,34 @@ class MeerkatClient:
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         return await self._request("mob/status", {"mob_id": mob_id})
 
+    @staticmethod
+    def _legacy_member_identity_key() -> str:
+        return "_".join(("meerkat", "id"))
+
+    async def _request_with_member_identity_compat(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return await self._request(method, params)
+        except MeerkatError as error:
+            legacy_identity_key = self._legacy_member_identity_key()
+            message = str(error)
+            agent_identity = params.get("agent_identity")
+            missing_legacy = "missing field" in message and legacy_identity_key in message
+            unknown_agent_identity = "unknown field `agent_identity`" in message
+            if (
+                not (missing_legacy or unknown_agent_identity)
+                or not isinstance(agent_identity, str)
+                or not agent_identity
+            ):
+                raise
+            legacy_params = dict(params)
+            legacy_params[legacy_identity_key] = agent_identity
+            legacy_params.pop("agent_identity", None)
+            return await self._request(method, legacy_params)
+
     async def list_mob_members(self, mob_id: str) -> list[MobMember]:
         result = await self._request("mob/members", {"mob_id": mob_id})
         members = result.get("members", [])
@@ -836,86 +879,130 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            member = dict(entry)
-            current_session_id = member.get("current_session_id")
-            current_bridge_session_id = member.get("current_bridge_session_id")
-            if (
-                isinstance(current_session_id, str)
-                and current_session_id
-                and not (
-                    isinstance(current_bridge_session_id, str)
-                    and current_bridge_session_id
-                )
-            ):
-                member["current_bridge_session_id"] = current_session_id
-            elif (
-                isinstance(current_bridge_session_id, str)
-                and current_bridge_session_id
-                and not (isinstance(current_session_id, str) and current_session_id)
-            ):
-                member["current_session_id"] = current_bridge_session_id
-            raw_member_ref = member.get("member_ref")
-            if isinstance(raw_member_ref, dict):
-                member_ref = dict(raw_member_ref)
-                session_id = member_ref.get("session_id")
-                bridge_session_id = member_ref.get("bridge_session_id")
-                if (
-                    isinstance(session_id, str)
-                    and session_id
-                    and not (
-                        isinstance(bridge_session_id, str) and bridge_session_id
-                    )
-                ):
-                    member_ref["bridge_session_id"] = session_id
-                elif (
-                    isinstance(bridge_session_id, str)
-                    and bridge_session_id
-                    and not (isinstance(session_id, str) and session_id)
-                ):
-                    member_ref["session_id"] = bridge_session_id
-                member["member_ref"] = member_ref
-            normalized.append(member)
+            runtime_id, generation = _parse_agent_runtime_id_wire(
+                entry.get("agent_runtime_id")
+            )
+            normalized.append(
+                {
+                    "agent_identity": (
+                        str(entry.get("agent_identity", ""))
+                        if entry.get("agent_identity") is not None
+                        else ""
+                    ),
+                    "agent_runtime_id": runtime_id,
+                    "fence_token": (
+                        int(entry["fence_token"])
+                        if isinstance(entry.get("fence_token"), int)
+                        else 0
+                    ),
+                    **({"generation": generation} if generation is not None else {}),
+                    "profile": str(entry.get("profile_name") or entry.get("profile") or ""),
+                    **(
+                        {"peer_id": str(entry["peer_id"])}
+                        if entry.get("peer_id") is not None
+                        else {}
+                    ),
+                    **(
+                        {"external_peer_specs": entry["external_peer_specs"]}
+                        if isinstance(entry.get("external_peer_specs"), dict)
+                        else {}
+                    ),
+                    **(
+                        {"runtime_mode": str(entry["runtime_mode"])}
+                        if entry.get("runtime_mode") is not None
+                        else {}
+                    ),
+                    **(
+                        {"state": str(entry["state"])}
+                        if entry.get("state") is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "wired_to": [
+                                str(peer) for peer in entry["wired_to"]
+                            ]
+                        }
+                        if isinstance(entry.get("wired_to"), list)
+                        else {}
+                    ),
+                    **(
+                        {
+                            "labels": {
+                                str(key): str(value)
+                                for key, value in entry["labels"].items()
+                            }
+                        }
+                        if isinstance(entry.get("labels"), dict)
+                        else {}
+                    ),
+                    **(
+                        {"status": str(entry["status"])}
+                        if entry.get("status") is not None
+                        else {}
+                    ),
+                    **(
+                        {"error": str(entry["error"])}
+                        if entry.get("error") is not None
+                        else {}
+                    ),
+                    **(
+                        {"is_final": bool(entry["is_final"])}
+                        if entry.get("is_final") is not None
+                        else {}
+                    ),
+                    **(
+                        {"kickoff": entry["kickoff"]}
+                        if isinstance(entry.get("kickoff"), dict)
+                        else {}
+                    ),
+                }
+            )
         return normalized
 
     async def send_mob_member_content(
         self,
         mob_id: str,
-        meerkat_id: str,
+        agent_identity: str,
         content: str | list[dict[str, Any]],
         *,
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
-    ) -> MobSpawnResult:
-        result = await self._request(
+    ) -> dict[str, Any]:
+        result = await self._request_with_member_identity_compat(
             "mob/member_send",
             {
                 "mob_id": mob_id,
-                "meerkat_id": meerkat_id,
+                "agent_identity": agent_identity,
                 "content": content,
                 "handling_mode": handling_mode,
                 "render_metadata": render_metadata,
             },
         )
-        session_id = result.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
+        runtime_id, generation = _parse_agent_runtime_id_wire(
+            result.get("agent_runtime_id")
+        )
+        fence_token = result.get("fence_token")
+        if not runtime_id or not isinstance(fence_token, int):
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/member_send response: missing session_id",
+                "Invalid mob/member_send response: missing runtime identity fields",
             )
         receipt_handling_mode = result.get("handling_mode")
         return {
-            "member_id": (
-                result["member_id"]
-                if isinstance(result.get("member_id"), str) and result["member_id"]
-                else meerkat_id
+            "agent_identity": (
+                result["agent_identity"]
+                if isinstance(result.get("agent_identity"), str)
+                and result["agent_identity"]
+                else (
+                    result["identity"]
+                    if isinstance(result.get("identity"), str) and result["identity"]
+                    else agent_identity
+                )
             ),
-            "session_id": session_id,
-            "bridge_session_id": (
-                result["bridge_session_id"]
-                if isinstance(result.get("bridge_session_id"), str)
-                and result["bridge_session_id"]
-                else session_id
-            ),
+            "agent_runtime_id": runtime_id,
+            "fence_token": fence_token,
+            **({"generation": generation} if generation is not None else {}),
             "handling_mode": (
                 receipt_handling_mode
                 if receipt_handling_mode in {"queue", "steer"}
@@ -928,48 +1015,58 @@ class MeerkatClient:
         mob_id: str,
         *,
         profile: str,
-        meerkat_id: str,
+        agent_identity: str,
         initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
-        resume_bridge_session_id: str | None = None,
-        resume_session_id: str | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
-    ) -> dict[str, Any]:
-        result = await self._request("mob/spawn", {
+    ) -> MobSpawnResult:
+        params: dict[str, Any] = {
             "mob_id": mob_id,
             "profile": profile,
-            "meerkat_id": meerkat_id,
+            "agent_identity": agent_identity,
             "initial_message": initial_message,
             "runtime_mode": runtime_mode,
             "backend": backend,
-            "resume_bridge_session_id": resume_bridge_session_id,
-            "resume_session_id": resume_session_id,
             "labels": labels,
             "context": context,
             "additional_instructions": additional_instructions,
-        })
-        session_id = result.get("session_id")
-        if (
-            isinstance(session_id, str)
-            and session_id
-            and not (
-                isinstance(result.get("bridge_session_id"), str)
-                and result["bridge_session_id"]
+        }
+        result = await self._request_with_member_identity_compat("mob/spawn", params)
+        runtime_id, generation = _parse_agent_runtime_id_wire(
+            result.get("agent_runtime_id")
+        )
+        fence_token = result.get("fence_token")
+        resolved_identity = (
+            result["agent_identity"]
+            if isinstance(result.get("agent_identity"), str)
+            and result["agent_identity"]
+            else (
+                result["identity"]
+                if isinstance(result.get("identity"), str) and result["identity"]
+                else agent_identity
             )
-        ):
-            result = dict(result)
-            result["bridge_session_id"] = session_id
-        elif (
-            isinstance(result.get("bridge_session_id"), str)
-            and result["bridge_session_id"]
-            and not (isinstance(session_id, str) and session_id)
-        ):
-            result = dict(result)
-            result["session_id"] = result["bridge_session_id"]
-        return result
+        )
+        if not runtime_id and resolved_identity:
+            runtime_id = f"{resolved_identity}:0"
+            if generation is None:
+                generation = 0
+        if not isinstance(fence_token, int):
+            fence_token = 0 if runtime_id else None
+        if not runtime_id or fence_token is None:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/spawn response: missing runtime identity fields",
+            )
+        return {
+            "mob_id": str(result.get("mob_id", mob_id)),
+            "agent_identity": resolved_identity,
+            "agent_runtime_id": runtime_id,
+            "fence_token": fence_token,
+            **({"generation": generation} if generation is not None else {}),
+        }
 
 
     async def spawn_mob_members(
@@ -977,10 +1074,70 @@ class MeerkatClient:
         mob_id: str,
         specs: list[MobSpawnSpec],
     ) -> list[MobSpawnResult]:
-        return await self._request("mob/spawn_many", {
+        params: dict[str, Any] = {
             "mob_id": mob_id,
             "specs": specs,
-        })
+        }
+        legacy_identity_key = self._legacy_member_identity_key()
+        try:
+            result = await self._request("mob/spawn_many", params)
+        except MeerkatError as error:
+            message = str(error)
+            if "missing field" not in message or legacy_identity_key not in message:
+                raise
+            legacy_specs: list[dict[str, Any]] = []
+            for spec in specs:
+                legacy_spec = dict(spec)
+                if "agent_identity" in legacy_spec:
+                    legacy_spec[legacy_identity_key] = legacy_spec.pop("agent_identity")
+                legacy_specs.append(legacy_spec)
+            result = await self._request(
+                "mob/spawn_many",
+                {"mob_id": mob_id, "specs": legacy_specs},
+            )
+        entries = result.get("results", [])
+        if not isinstance(entries, list):
+            return []
+        normalized: list[MobSpawnResult] = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or not bool(entry.get("ok")):
+                continue
+            runtime_id, generation = _parse_agent_runtime_id_wire(
+                entry.get("agent_runtime_id")
+            )
+            fence_token = entry.get("fence_token")
+            requested_identity = (
+                str(specs[index].get("agent_identity", ""))
+                if index < len(specs)
+                else ""
+            )
+            resolved_identity = (
+                str(entry["agent_identity"])
+                if isinstance(entry.get("agent_identity"), str)
+                and str(entry["agent_identity"])
+                else requested_identity
+            )
+            if not runtime_id and resolved_identity:
+                runtime_id = f"{resolved_identity}:0"
+                if generation is None:
+                    generation = 0
+            if not isinstance(fence_token, int):
+                fence_token = 0 if runtime_id else None
+            if not runtime_id or fence_token is None:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/spawn_many response: missing runtime identity fields",
+                )
+            normalized.append(
+                {
+                    "mob_id": str(entry.get("mob_id", mob_id)),
+                    "agent_identity": resolved_identity,
+                    "agent_runtime_id": runtime_id,
+                    "fence_token": fence_token,
+                    **({"generation": generation} if generation is not None else {}),
+                }
+            )
+        return normalized
 
     async def read_mob_events(
         self,
@@ -1000,70 +1157,119 @@ class MeerkatClient:
         events = raw.get("events", [])
         return {"events": events if isinstance(events, list) else []}
 
-    async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
-        await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+    async def retire_mob_member(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/retire", {"mob_id": mob_id, "agent_identity": agent_identity}
+        )
 
     async def respawn_mob_member(
         self,
         mob_id: str,
-        meerkat_id: str,
+        agent_identity: str,
         initial_message: str | list[dict] | None = None,
-    ) -> dict[str, Any]:
-        result = await self._request(
+    ) -> MobRespawnResult:
+        result = await self._request_with_member_identity_compat(
             "mob/respawn",
-            {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message},
+            {
+                "mob_id": mob_id,
+                "agent_identity": agent_identity,
+                "initial_message": initial_message,
+            },
         )
         receipt = result.get("receipt")
         if isinstance(receipt, dict):
-            normalized_receipt = dict(receipt)
-            old_session_id = normalized_receipt.get("old_session_id")
-            if (
-                isinstance(old_session_id, str)
-                and old_session_id
-                and not (
-                    isinstance(normalized_receipt.get("old_bridge_session_id"), str)
-                    and normalized_receipt["old_bridge_session_id"]
-                )
-            ):
-                normalized_receipt["old_bridge_session_id"] = old_session_id
-            new_session_id = normalized_receipt.get("new_session_id")
-            if (
-                isinstance(new_session_id, str)
-                and new_session_id
-                and not (
-                    isinstance(normalized_receipt.get("new_bridge_session_id"), str)
-                    and normalized_receipt["new_bridge_session_id"]
-                )
-            ):
-                normalized_receipt["new_bridge_session_id"] = new_session_id
-            result = dict(result)
-            result["receipt"] = normalized_receipt
-        return result
-
-    async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
-        await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
-
-    async def mob_member_status(self, mob_id: str, meerkat_id: str) -> MobMemberSnapshot:
-        result = await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
-        current_session_id = result.get("current_session_id")
-        if (
-            isinstance(current_session_id, str)
-            and current_session_id
-            and not (
-                isinstance(result.get("current_bridge_session_id"), str)
-                and result["current_bridge_session_id"]
+            runtime_id, generation = _parse_agent_runtime_id_wire(
+                receipt.get("agent_runtime_id")
             )
-        ):
+            if not runtime_id:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/respawn response: missing runtime identity fields",
+                )
             result = dict(result)
-            result["current_bridge_session_id"] = current_session_id
-        elif (
-            isinstance(result.get("current_bridge_session_id"), str)
-            and result["current_bridge_session_id"]
-            and not (isinstance(current_session_id, str) and current_session_id)
-        ):
-            result = dict(result)
-            result["current_session_id"] = result["current_bridge_session_id"]
-        return result
+            result["receipt"] = {
+                "agent_identity": (
+                    receipt["agent_identity"]
+                    if isinstance(receipt.get("agent_identity"), str)
+                    and receipt["agent_identity"]
+                    else (
+                        receipt["identity"]
+                        if isinstance(receipt.get("identity"), str)
+                        and receipt["identity"]
+                        else agent_identity
+                    )
+                ),
+                "agent_runtime_id": runtime_id,
+                "previous_fence_token": int(receipt.get("previous_fence_token", 0)),
+                "fence_token": int(receipt.get("fence_token", 0)),
+                **({"generation": generation} if generation is not None else {}),
+            }
+        return {
+            "status": (
+                "topology_restore_failed"
+                if result.get("status") == "topology_restore_failed"
+                else "completed"
+            ),
+            "receipt": result["receipt"],
+            **(
+                {
+                    "failed_peer_ids": [
+                        str(peer_id) for peer_id in result["failed_peer_ids"]
+                    ]
+                }
+                if isinstance(result.get("failed_peer_ids"), list)
+                else {}
+            ),
+        }
+
+    async def force_cancel_mob_member(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/force_cancel",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def mob_member_status(
+        self, mob_id: str, agent_identity: str
+    ) -> MobMemberSnapshot:
+        result = await self._request_with_member_identity_compat(
+            "mob/member_status",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+        runtime_id, generation = _parse_agent_runtime_id_wire(
+            result.get("agent_runtime_id")
+        )
+        return {
+            "status": str(result.get("status", "unknown")),
+            "agent_runtime_id": runtime_id,
+            "fence_token": (
+                int(result["fence_token"])
+                if isinstance(result.get("fence_token"), int)
+                else 0
+            ),
+            **({"generation": generation} if generation is not None else {}),
+            **(
+                {"output_preview": str(result["output_preview"])}
+                if result.get("output_preview") is not None
+                else {}
+            ),
+            **(
+                {"error": str(result["error"])}
+                if result.get("error") is not None
+                else {}
+            ),
+            "tokens_used": int(result.get("tokens_used", 0)),
+            "is_final": bool(result.get("is_final", False)),
+            **(
+                {"peer_connectivity": result["peer_connectivity"]}
+                if isinstance(result.get("peer_connectivity"), dict)
+                else {}
+            ),
+            **(
+                {"kickoff": result["kickoff"]}
+                if isinstance(result.get("kickoff"), dict)
+                else {}
+            ),
+        }
 
     async def wait_mob_kickoff(
         self,
@@ -1085,24 +1291,44 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            member = dict(entry)
-            current_session_id = member.get("current_session_id")
-            if (
-                isinstance(current_session_id, str)
-                and current_session_id
-                and not (
-                    isinstance(member.get("current_bridge_session_id"), str)
-                    and member["current_bridge_session_id"]
-                )
-            ):
-                member["current_bridge_session_id"] = current_session_id
-            elif (
-                isinstance(member.get("current_bridge_session_id"), str)
-                and member["current_bridge_session_id"]
-                and not (isinstance(current_session_id, str) and current_session_id)
-            ):
-                member["current_session_id"] = member["current_bridge_session_id"]
-            normalized.append(member)
+            runtime_id, generation = _parse_agent_runtime_id_wire(
+                entry.get("agent_runtime_id")
+            )
+            normalized.append(
+                {
+                    "agent_identity": str(entry.get("agent_identity", "")),
+                    "agent_runtime_id": runtime_id,
+                    "fence_token": (
+                        int(entry["fence_token"])
+                        if isinstance(entry.get("fence_token"), int)
+                        else 0
+                    ),
+                    **({"generation": generation} if generation is not None else {}),
+                    "status": str(entry.get("status", "unknown")),
+                    **(
+                        {"output_preview": str(entry["output_preview"])}
+                        if entry.get("output_preview") is not None
+                        else {}
+                    ),
+                    **(
+                        {"error": str(entry["error"])}
+                        if entry.get("error") is not None
+                        else {}
+                    ),
+                    "tokens_used": int(entry.get("tokens_used", 0)),
+                    "is_final": bool(entry.get("is_final", False)),
+                    **(
+                        {"peer_connectivity": entry["peer_connectivity"]}
+                        if isinstance(entry.get("peer_connectivity"), dict)
+                        else {}
+                    ),
+                    **(
+                        {"kickoff": entry["kickoff"]}
+                        if isinstance(entry.get("kickoff"), dict)
+                        else {}
+                    ),
+                }
+            )
         return normalized
 
     async def spawn_mob_helper(
@@ -1110,40 +1336,41 @@ class MeerkatClient:
         mob_id: str,
         prompt: str,
         *,
-        meerkat_id: str | None = None,
+        agent_identity: str | None = None,
         role_name: str | None = None,
         profile_name: str | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
     ) -> MobHelperResult:
         canonical_role_name = role_name if role_name is not None else profile_name
-        result = await self._request("mob/spawn_helper", {
+        result = await self._request_with_member_identity_compat("mob/spawn_helper", {
             "mob_id": mob_id,
             "prompt": prompt,
-            "meerkat_id": meerkat_id,
+            "agent_identity": agent_identity,
             "role_name": canonical_role_name,
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        session_id = result.get("session_id")
-        if (
-            isinstance(session_id, str)
-            and session_id
-            and not (
-                isinstance(result.get("bridge_session_id"), str)
-                and result["bridge_session_id"]
-            )
-        ):
-            result = dict(result)
-            result["bridge_session_id"] = session_id
-        elif (
-            isinstance(result.get("bridge_session_id"), str)
-            and result["bridge_session_id"]
-            and not (isinstance(session_id, str) and session_id)
-        ):
-            result = dict(result)
-            result["session_id"] = result["bridge_session_id"]
-        return result
+        runtime_id, generation = _parse_agent_runtime_id_wire(
+            result.get("agent_runtime_id")
+        )
+        return {
+            "output": str(result["output"]) if result.get("output") is not None else None,
+            "tokens_used": int(result.get("tokens_used", 0)),
+            "agent_identity": (
+                result["agent_identity"]
+                if isinstance(result.get("agent_identity"), str)
+                and result["agent_identity"]
+                else (agent_identity or "")
+            ),
+            "agent_runtime_id": runtime_id,
+            "fence_token": (
+                int(result["fence_token"])
+                if isinstance(result.get("fence_token"), int)
+                else 0
+            ),
+            **({"generation": generation} if generation is not None else {}),
+        }
 
     async def fork_mob_helper(
         self,
@@ -1151,7 +1378,7 @@ class MeerkatClient:
         source_member_id: str,
         prompt: str,
         *,
-        meerkat_id: str | None = None,
+        agent_identity: str | None = None,
         role_name: str | None = None,
         profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
@@ -1159,35 +1386,36 @@ class MeerkatClient:
         backend: str | None = None,
     ) -> MobHelperResult:
         canonical_role_name = role_name if role_name is not None else profile_name
-        result = await self._request("mob/fork_helper", {
+        result = await self._request_with_member_identity_compat("mob/fork_helper", {
             "mob_id": mob_id,
             "source_member_id": source_member_id,
             "prompt": prompt,
-            "meerkat_id": meerkat_id,
+            "agent_identity": agent_identity,
             "role_name": canonical_role_name,
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        session_id = result.get("session_id")
-        if (
-            isinstance(session_id, str)
-            and session_id
-            and not (
-                isinstance(result.get("bridge_session_id"), str)
-                and result["bridge_session_id"]
-            )
-        ):
-            result = dict(result)
-            result["bridge_session_id"] = session_id
-        elif (
-            isinstance(result.get("bridge_session_id"), str)
-            and result["bridge_session_id"]
-            and not (isinstance(session_id, str) and session_id)
-        ):
-            result = dict(result)
-            result["session_id"] = result["bridge_session_id"]
-        return result
+        runtime_id, generation = _parse_agent_runtime_id_wire(
+            result.get("agent_runtime_id")
+        )
+        return {
+            "output": str(result["output"]) if result.get("output") is not None else None,
+            "tokens_used": int(result.get("tokens_used", 0)),
+            "agent_identity": (
+                result["agent_identity"]
+                if isinstance(result.get("agent_identity"), str)
+                and result["agent_identity"]
+                else (agent_identity or "")
+            ),
+            "agent_runtime_id": runtime_id,
+            "fence_token": (
+                int(result["fence_token"])
+                if isinstance(result.get("fence_token"), int)
+                else 0
+            ),
+            **({"generation": generation} if generation is not None else {}),
+        }
 
     async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
         return await self._request("mob/profile/create", {"name": name, "profile": profile})
@@ -1250,38 +1478,38 @@ class MeerkatClient:
     async def append_mob_system_context(
         self,
         mob_id: str,
-        meerkat_id: str,
+        agent_identity: str,
         text: str,
         *,
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        result = await self._request("mob/append_system_context", {
+        result = await self._request_with_member_identity_compat("mob/append_system_context", {
             "mob_id": mob_id,
-            "meerkat_id": meerkat_id,
+            "agent_identity": agent_identity,
             "text": text,
             "source": source,
             "idempotency_key": idempotency_key,
         })
-        session_id = result.get("session_id")
-        if (
-            isinstance(session_id, str)
-            and session_id
-            and not (
-                isinstance(result.get("bridge_session_id"), str)
-                and result["bridge_session_id"]
-            )
-        ):
-            result = dict(result)
-            result["bridge_session_id"] = session_id
-        elif (
-            isinstance(result.get("bridge_session_id"), str)
-            and result["bridge_session_id"]
-            and not (isinstance(session_id, str) and session_id)
-        ):
-            result = dict(result)
-            result["session_id"] = result["bridge_session_id"]
-        return result
+        return {
+            "mob_id": str(result.get("mob_id", mob_id)),
+            "agent_identity": (
+                str(result["agent_identity"])
+                if isinstance(result.get("agent_identity"), str)
+                and str(result["agent_identity"])
+                else (
+                    str(result["identity"])
+                    if isinstance(result.get("identity"), str)
+                    and str(result["identity"])
+                    else agent_identity
+                )
+            ),
+            "status": (
+                "duplicate"
+                if result.get("status") == "duplicate"
+                else "staged"
+            ),
+        }
 
     async def list_mob_flows(self, mob_id: str) -> list[str]:
         result = await self._request("mob/flows", {"mob_id": mob_id})
@@ -1306,10 +1534,10 @@ class MeerkatClient:
             self._parse_attributed_mob_event,
         )
 
-    async def subscribe_mob_member_events(self, mob_id: str, meerkat_id: str) -> EventSubscription:
+    async def subscribe_mob_member_events(self, mob_id: str, agent_identity: str) -> EventSubscription:
         return await self._open_event_subscription(
             "mob/stream_open",
-            {"mob_id": mob_id, "member_id": meerkat_id},
+            {"mob_id": mob_id, "agent_identity": agent_identity},
             "mob/stream_close",
             self._parse_agent_event_envelope,
         )
@@ -1323,7 +1551,10 @@ class MeerkatClient:
     ) -> EventSubscription:
         if not self._dispatcher:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
-        result = await self._request(open_method, params)
+        if open_method == "mob/stream_open" and "agent_identity" in params:
+            result = await self._request_with_member_identity_compat(open_method, params)
+        else:
+            result = await self._request(open_method, params)
         stream_id = str(result.get("stream_id", ""))
         if not stream_id:
             raise MeerkatError("INVALID_RESPONSE", f"{open_method} did not return stream_id")
@@ -1355,7 +1586,12 @@ class MeerkatClient:
         envelope = raw.get("envelope", {})
         return AttributedEvent(
             source=str(raw.get("source", "")),
-            profile=str(raw.get("profile", "")),
+            source_fence_token=(
+                int(raw["source_fence_token"])
+                if raw.get("source_fence_token") is not None
+                else None
+            ),
+            role=str(raw.get("role", "")),
             envelope=MeerkatClient._parse_agent_event_envelope(
                 envelope if isinstance(envelope, dict) else {}
             ),

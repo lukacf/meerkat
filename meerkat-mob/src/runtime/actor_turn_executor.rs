@@ -298,15 +298,10 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         let scoped_event_tx = self.handle.flow_streams.lock().await.get(run_id).cloned();
         let scope_frame = StreamScopeFrame::MobMember {
             flow_run_id: run_id.to_string(),
-            member_ref: target.to_string(),
-            // `StreamScopeFrame::MobMember.session_id` is the stable event field
-            // name, but in the identity-first regime it carries the canonical
-            // bridge-session binding for the member.
-            session_id: entry
-                .member_ref
-                .bridge_session_id()
-                .map(std::string::ToString::to_string)
-                .unwrap_or_default(),
+            agent_identity: entry.agent_identity.to_string(),
+            agent_runtime_id: Some(entry.agent_runtime_id.to_string()),
+            fence_token: Some(entry.fence_token.get()),
+            generation: Some(entry.agent_runtime_id.generation.get()),
         };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {

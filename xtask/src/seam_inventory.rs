@@ -61,315 +61,107 @@ pub struct SurfaceContractEntry {
 /// Effects not listed here get a default classification based on disposition type.
 fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassification, &'static str)> {
     vec![
-        // === CommsDrainLifecycleMachine ===
+        // === MeerkatMachine ===
         (
-            "CommsDrainLifecycleMachine",
-            "SpawnDrainTask",
-            SeamClassification::OwnerRealizationPlusFeedback,
-            "Shell must spawn task AND feed back TaskSpawned/TaskExited",
+            "MeerkatMachine",
+            "RequestCancellationAtBoundary",
+            SeamClassification::NoOwnerRealization,
+            "Local boundary-cancel intent retained entirely inside the Meerkat kernel",
         ),
         (
-            "CommsDrainLifecycleMachine",
-            "AbortDrainTask",
-            SeamClassification::OwnerRealizationPlusFeedback,
-            "Shell must abort task AND feed back AbortObserved",
-        ),
-        // === TurnExecutionMachine ===
-        (
-            "TurnExecutionMachine",
-            "RunStarted",
+            "MeerkatMachine",
+            "CommittedVisibleSetPublished",
             SeamClassification::SurfaceResultAlignment,
-            "External signal: surface must emit run-started event matching machine truth",
+            "Committed visibility publication must align exactly with the kernel truth seen at boundary apply",
         ),
         (
-            "TurnExecutionMachine",
-            "RunCompleted",
+            "MeerkatMachine",
+            "RuntimeNotice",
             SeamClassification::SurfaceResultAlignment,
-            "Terminal outcome routed to ingress/control — surface result must match",
+            "External Meerkat notices must reflect kernel lifecycle and runtime truth accurately",
         ),
+        // === MobMachine ===
         (
-            "TurnExecutionMachine",
-            "RunFailed",
+            "MobMachine",
+            "EmitMemberLifecycleNotice",
             SeamClassification::SurfaceResultAlignment,
-            "Terminal outcome routed to ingress/control — surface result must match",
+            "External member lifecycle notices must align with canonical identity/runtime transitions",
         ),
+        // === ScheduleLifecycleMachine ===
         (
-            "TurnExecutionMachine",
-            "RunCancelled",
+            "ScheduleLifecycleMachine",
+            "EmitScheduleNotice",
             SeamClassification::SurfaceResultAlignment,
-            "Terminal outcome routed to ingress/control — surface result must match",
+            "External schedule notices must align with the schedule lifecycle kernel state",
         ),
         (
-            "TurnExecutionMachine",
-            "CheckCompaction",
-            SeamClassification::OwnerRealizationOnly,
-            "Shell checks compaction threshold; no feedback expected by this machine",
-        ),
-        // === OpsLifecycleMachine ===
-        (
-            "OpsLifecycleMachine",
-            "NotifyOpWatcher",
+            "ScheduleLifecycleMachine",
+            "PlanningWindowRecorded",
             SeamClassification::NoOwnerRealization,
-            "Local channel notification — no ownership boundary crossed",
+            "Planning window recording is local bookkeeping inside the schedule kernel",
         ),
+        // === OccurrenceLifecycleMachine ===
         (
-            "OpsLifecycleMachine",
-            "RetainTerminalRecord",
-            SeamClassification::NoOwnerRealization,
-            "Local bookkeeping — retain completed op record",
-        ),
-        (
-            "OpsLifecycleMachine",
-            "EvictCompletedRecord",
-            SeamClassification::NoOwnerRealization,
-            "Local bookkeeping — evict completed op record",
-        ),
-        (
-            "OpsLifecycleMachine",
-            "WaitAllSatisfied",
-            SeamClassification::OwnerRealizationPlusFeedback,
-            "Barrier satisfaction signal — must feed into TurnExecution barrier",
-        ),
-        (
-            "OpsLifecycleMachine",
-            "CollectCompletedResult",
-            SeamClassification::NoOwnerRealization,
-            "Local result collection — no ownership boundary",
-        ),
-        (
-            "OpsLifecycleMachine",
-            "ConcurrencyLimitExceeded",
+            "OccurrenceLifecycleMachine",
+            "Claimed",
             SeamClassification::SurfaceResultAlignment,
-            "External signal — surface must represent concurrency rejection accurately",
-        ),
-        // === RuntimeControlMachine ===
-        (
-            "RuntimeControlMachine",
-            "ResolveAdmission",
-            SeamClassification::NoOwnerRealization,
-            "Local admission resolution mechanics",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeControlMachine",
-            "SignalWake",
-            SeamClassification::NoOwnerRealization,
-            "Local wake signal — no ownership boundary",
-        ),
-        (
-            "RuntimeControlMachine",
-            "SignalImmediateProcess",
-            SeamClassification::NoOwnerRealization,
-            "Local processing signal — no ownership boundary",
-        ),
-        (
-            "RuntimeControlMachine",
-            "EmitRuntimeNotice",
+            "OccurrenceLifecycleMachine",
+            "DispatchStarted",
             SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must emit event matching machine state",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeControlMachine",
-            "ResolveCompletionAsTerminated",
+            "OccurrenceLifecycleMachine",
+            "AwaitingCompletion",
             SeamClassification::SurfaceResultAlignment,
-            "External terminal — surface must represent termination accurately",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeControlMachine",
-            "ApplyControlPlaneCommand",
-            SeamClassification::OwnerRealizationOnly,
-            "External command execution — shell applies but no feedback to machine",
-        ),
-        (
-            "RuntimeControlMachine",
-            "InitiateRecycle",
-            SeamClassification::OwnerRealizationOnly,
-            "Local recycle — shell executes recycle mechanics",
-        ),
-        // === RuntimeIngressMachine ===
-        (
-            "RuntimeIngressMachine",
-            "IngressAccepted",
+            "OccurrenceLifecycleMachine",
+            "Completed",
             SeamClassification::SurfaceResultAlignment,
-            "External signal — surface must confirm ingress acceptance",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeIngressMachine",
-            "InputLifecycleNotice",
-            SeamClassification::NoOwnerRealization,
-            "Local lifecycle projection — drives InputLifecycleMachine locally",
-        ),
-        (
-            "RuntimeIngressMachine",
-            "WakeRuntime",
-            SeamClassification::NoOwnerRealization,
-            "Local wake signal — no ownership boundary",
-        ),
-        (
-            "RuntimeIngressMachine",
-            "RequestImmediateProcessing",
-            SeamClassification::NoOwnerRealization,
-            "Local processing request — no ownership boundary",
-        ),
-        (
-            "RuntimeIngressMachine",
-            "CompletionResolved",
+            "OccurrenceLifecycleMachine",
+            "Skipped",
             SeamClassification::SurfaceResultAlignment,
-            "External completion — surface must represent resolution accurately",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeIngressMachine",
-            "IngressNotice",
+            "OccurrenceLifecycleMachine",
+            "Misfired",
             SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must emit matching event",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "RuntimeIngressMachine",
-            "SilentIntentApplied",
+            "OccurrenceLifecycleMachine",
+            "Superseded",
             SeamClassification::SurfaceResultAlignment,
-            "External signal — surface must represent silent intent accurately",
-        ),
-        // === InputLifecycleMachine ===
-        (
-            "InputLifecycleMachine",
-            "InputLifecycleNotice",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — no ownership boundary",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "InputLifecycleMachine",
-            "RecordTerminalOutcome",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — records terminal outcome locally",
-        ),
-        (
-            "InputLifecycleMachine",
-            "RecordRunAssociation",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — records run association locally",
-        ),
-        (
-            "InputLifecycleMachine",
-            "RecordBoundarySequence",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — records boundary sequence locally",
-        ),
-        // === ExternalToolSurfaceMachine ===
-        (
-            "ExternalToolSurfaceMachine",
-            "ScheduleSurfaceCompletion",
-            SeamClassification::OwnerRealizationPlusFeedback,
-            "Shell must schedule completion AND feed back result via SurfaceCallCompleted",
-        ),
-        (
-            "ExternalToolSurfaceMachine",
-            "RefreshVisibleSurfaceSet",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — refreshes cached tool set",
-        ),
-        (
-            "ExternalToolSurfaceMachine",
-            "EmitExternalToolDelta",
+            "OccurrenceLifecycleMachine",
+            "DeliveryFailed",
             SeamClassification::SurfaceResultAlignment,
-            "External delta — surface must stream tool output matching machine state",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
         (
-            "ExternalToolSurfaceMachine",
-            "CloseSurfaceConnection",
-            SeamClassification::OwnerRealizationOnly,
-            "Shell closes connection — no feedback expected by machine",
-        ),
-        (
-            "ExternalToolSurfaceMachine",
-            "RejectSurfaceCall",
+            "OccurrenceLifecycleMachine",
+            "LeaseExpired",
             SeamClassification::SurfaceResultAlignment,
-            "External rejection — surface must represent rejection accurately",
+            "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
-        // === PeerCommsMachine ===
-        // (Routed — not classified here, handled by composition routes)
-        // === MobLifecycleMachine ===
+        // === SessionTurnAdmissionMachine ===
         (
-            "MobLifecycleMachine",
-            "EmitLifecycleNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must represent mob lifecycle accurately",
-        ),
-        (
-            "MobMemberLifecycleMachine",
-            "MemberLifecycleStateUpdated",
+            "SessionTurnAdmissionMachine",
+            "WakeInterrupt",
             SeamClassification::NoOwnerRealization,
-            "Local canonical state update for member lifecycle ownership",
+            "Wake interrupts stay inside the session-turn admission authority boundary",
         ),
-        (
-            "MobRuntimeBridgeMachine",
-            "RuntimeBridgeStateUpdated",
-            SeamClassification::NoOwnerRealization,
-            "Local canonical state update for runtime bridge ownership",
-        ),
-        (
-            "MobWiringMachine",
-            "WiringStateUpdated",
-            SeamClassification::NoOwnerRealization,
-            "Local canonical state update for wiring ownership",
-        ),
-        (
-            "MobMemberBootstrapMachine",
-            "BootstrapStateUpdated",
-            SeamClassification::NoOwnerRealization,
-            "Local canonical state update for member bootstrap ownership",
-        ),
-        // (RequestCleanup is Routed — not classified here)
-        // === MobOrchestratorMachine ===
-        (
-            "MobOrchestratorMachine",
-            "EmitOrchestratorNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must represent orchestrator state accurately",
-        ),
-        // (All other mob orchestrator effects are Routed)
-        // === FlowRunMachine ===
-        (
-            "FlowRunMachine",
-            "EmitFlowRunNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must represent flow run state accurately",
-        ),
-        (
-            "FlowRunMachine",
-            "EmitStepNotice",
-            SeamClassification::SurfaceResultAlignment,
-            "External notice — surface must represent step state accurately",
-        ),
-        (
-            "FlowRunMachine",
-            "AppendFailureLedger",
-            SeamClassification::NoOwnerRealization,
-            "Local persistence — no ownership boundary",
-        ),
-        (
-            "FlowRunMachine",
-            "PersistStepOutput",
-            SeamClassification::NoOwnerRealization,
-            "Local persistence — no ownership boundary",
-        ),
-        (
-            "FlowRunMachine",
-            "ProjectTargetSuccess",
-            SeamClassification::SurfaceResultAlignment,
-            "External projection — surface must represent target success accurately",
-        ),
-        (
-            "FlowRunMachine",
-            "ProjectTargetFailure",
-            SeamClassification::SurfaceResultAlignment,
-            "External projection — surface must represent target failure accurately",
-        ),
-        (
-            "FlowRunMachine",
-            "ProjectTargetCanceled",
-            SeamClassification::SurfaceResultAlignment,
-            "External projection — surface must represent target cancellation accurately",
-        ),
-        // (AdmitStepWork, FlowTerminalized, EscalateSupervisor are Routed)
     ]
 }
 

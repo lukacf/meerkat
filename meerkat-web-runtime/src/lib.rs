@@ -26,16 +26,16 @@
 //! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/reset/destroy
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
-//! - `mob_retire(mob_id, meerkat_id)`
+//! - `mob_retire(mob_id, agent_identity)`
 //! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
 //! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — low-level local-local wiring
 //! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — low-level aliases
 //! - `mob_list_members(mob_id)` → JSON
-//! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
-//! - `mob_member_send(mob_id, meerkat_id, request_json)` → JSON delivery receipt
-//! - `mob_member_status(mob_id, meerkat_id)` → JSON member snapshot
-//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` → JSON result envelope
-//! - `mob_force_cancel(mob_id, meerkat_id)`
+//! - `mob_append_system_context(mob_id, agent_identity, request_json)` → JSON
+//! - `mob_member_send(mob_id, agent_identity, request_json)` → JSON delivery receipt
+//! - `mob_member_status(mob_id, agent_identity)` → JSON member snapshot
+//! - `mob_respawn(mob_id, agent_identity, initial_message?)` → JSON result envelope
+//! - `mob_force_cancel(mob_id, agent_identity)`
 //! - `mob_spawn_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_fork_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
@@ -43,7 +43,7 @@
 //! - `mob_cancel_flow(mob_id, run_id)`
 //!
 //! ### Event Streaming
-//! - `mob_member_subscribe(mob_id, meerkat_id)` → handle (per-member)
+//! - `mob_member_subscribe(mob_id, agent_identity)` → handle (per-member)
 //! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
 //! - `poll_subscription(handle)` → JSON events
 //! - `close_subscription(handle)`
@@ -70,7 +70,7 @@ use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
-use meerkat_mob::{AgentIdentity, FlowId, MeerkatId, MobDefinition, MobId, RunId};
+use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
 
 // ═══════════════════════════════════════════════════════════
@@ -556,8 +556,9 @@ fn helper_result_payload(result: &meerkat_mob::HelperResult) -> serde_json::Valu
     serde_json::json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id(),
-        "bridge_session_id": result.bridge_session_id(),
+        "agent_identity": result.agent_identity,
+        "agent_runtime_id": result.agent_runtime_id,
+        "fence_token": result.fence_token,
     })
 }
 
@@ -620,17 +621,16 @@ fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
 async fn resolve_mob_member_bridge_session_id(
     mob_state: &MobMcpState,
     mob_id: &MobId,
-    meerkat_id: &MeerkatId,
+    agent_identity: &AgentIdentity,
 ) -> Result<meerkat_core::SessionId, JsValue> {
     let handle = mob_state.handle_for(mob_id).await.map_err(err_mob)?;
-    let identity = meerkat_mob::AgentIdentity::from(meerkat_id.as_str());
     handle
-        .resolve_bridge_session_id(&identity)
+        .resolve_bridge_session_id(agent_identity)
         .await
         .ok_or_else(|| {
             err_js(
                 "no_session",
-                &format!("meerkat '{meerkat_id}' has no bridge session"),
+                &format!("member '{agent_identity}' has no bridge session"),
             )
         })
 }
@@ -1738,9 +1738,9 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
     Ok(JsValue::from_str(&json))
 }
 
-/// Spawn one or more meerkats in a mob.
+/// Spawn one or more members in a mob.
 ///
-/// `specs_json`: JSON array of `{ "profile": "...", "meerkat_id": "...", "initial_message"?: "...",
+/// `specs_json`: JSON array of `{ "profile": "...", "agent_identity": "...", "initial_message"?: "...",
 ///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
 ///
 /// Returns JSON array of results per spec.
@@ -1753,21 +1753,13 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 
     let mut spawn_specs = Vec::with_capacity(specs.len());
     for s in specs {
-        let mut spec = meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
+        let mut spec =
+            meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.agent_identity.as_str());
         spec.initial_message = s.initial_message;
         spec.runtime_mode = s.runtime_mode;
         spec.backend = s.backend;
         spec.context = s.context;
         spec.labels = s.labels;
-        if let Some(id) = s.resume_bridge_session_id.or(s.resume_session_id) {
-            let sid = meerkat_core::SessionId::parse(&id).map_err(|_| {
-                err_js(
-                    "invalid_resume_session_id",
-                    &format!("invalid resume bridge/session ID: {id}"),
-                )
-            })?;
-            spec = spec.with_resume_bridge_session_id(sid);
-        }
         spec.additional_instructions = s.additional_instructions;
         spawn_specs.push(spec);
     }
@@ -1793,21 +1785,16 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnSpecInput {
     profile: String,
-    meerkat_id: String,
+    agent_identity: String,
     #[serde(default)]
     initial_message: Option<meerkat_core::types::ContentInput>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
     backend: Option<meerkat_mob::MobBackendKind>,
-    /// Resume an existing session instead of creating a new one.
-    #[serde(default)]
-    resume_bridge_session_id: Option<String>,
-    /// Resume an existing bridge session instead of creating a new one.
-    #[serde(default)]
-    resume_session_id: Option<String>,
     /// Application-defined labels for this member.
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
@@ -1819,16 +1806,16 @@ struct SpawnSpecInput {
     additional_instructions: Option<Vec<String>>,
 }
 
-/// Retire a meerkat from a mob.
+/// Retire a member from a mob.
 #[wasm_bindgen]
-pub async fn mob_retire(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
+pub async fn mob_retire(mob_id: &str, agent_identity: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let identity = AgentIdentity::from(meerkat_id);
+    let identity = AgentIdentity::from(agent_identity);
     mob_state.mob_retire(&id, identity).await.map_err(err_mob)
 }
 
-/// Wire bidirectional trust between two meerkats.
+/// Wire bidirectional trust between two members.
 #[wasm_bindgen]
 pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1837,13 +1824,13 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
         .mob_wire(
             &id,
             AgentIdentity::from(a),
-            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+            meerkat_mob::PeerTarget::Local(AgentIdentity::from(b)),
         )
         .await
         .map_err(err_mob)
 }
 
-/// Wire a local meerkat to a local or external peer target.
+/// Wire a local member to a local or external peer target.
 #[wasm_bindgen]
 pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
     mob_wire_peer(mob_id, local, target_json).await
@@ -1862,7 +1849,7 @@ pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Resul
         .map_err(err_mob)
 }
 
-/// Unwire bidirectional trust between two meerkats.
+/// Unwire bidirectional trust between two members.
 #[wasm_bindgen]
 pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1871,13 +1858,13 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
         .mob_unwire(
             &id,
             AgentIdentity::from(a),
-            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+            meerkat_mob::PeerTarget::Local(AgentIdentity::from(b)),
         )
         .await
         .map_err(err_mob)
 }
 
-/// Unwire a local meerkat from a local or external peer target.
+/// Unwire a local member from a local or external peer target.
 #[wasm_bindgen]
 pub async fn mob_unwire_target(
     mob_id: &str,
@@ -1916,18 +1903,19 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub async fn mob_append_system_context(
     mob_id: &str,
-    meerkat_id: &str,
+    agent_identity: &str,
     request_json: &str,
 ) -> Result<JsValue, JsValue> {
     let req: AppendSystemContextOptions =
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_id_typed = MobId::from(mob_id);
-    let meerkat_id_typed = MeerkatId::from(meerkat_id);
+    let agent_identity_typed = AgentIdentity::from(agent_identity);
 
     let (mob_state, session_service) =
         with_runtime_state(|state| Ok((state.mob_state.clone(), state.session_service.clone())))?;
     let bridge_session_id =
-        resolve_mob_member_bridge_session_id(&mob_state, &mob_id_typed, &meerkat_id_typed).await?;
+        resolve_mob_member_bridge_session_id(&mob_state, &mob_id_typed, &agent_identity_typed)
+            .await?;
     let result = session_service
         .append_system_context(
             &bridge_session_id,
@@ -1943,9 +1931,7 @@ pub async fn mob_append_system_context(
     Ok(JsValue::from_str(
         &serde_json::json!({
             "mob_id": mob_id,
-            "meerkat_id": meerkat_id,
-            "session_id": bridge_session_id.to_string(),
-            "bridge_session_id": bridge_session_id.to_string(),
+            "agent_identity": agent_identity,
             "status": result.status,
         })
         .to_string(),
@@ -1960,15 +1946,15 @@ pub async fn mob_append_system_context(
 #[wasm_bindgen]
 pub async fn wire_cross_mob(
     mob_a: &str,
-    meerkat_a: &str,
+    agent_a: &str,
     mob_b: &str,
-    meerkat_b: &str,
+    agent_b: &str,
 ) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
 
     // Resolve roster entries and bridge session IDs via mob handles.
-    let identity_a = meerkat_mob::AgentIdentity::from(meerkat_a);
-    let identity_b = meerkat_mob::AgentIdentity::from(meerkat_b);
+    let identity_a = meerkat_mob::AgentIdentity::from(agent_a);
+    let identity_b = meerkat_mob::AgentIdentity::from(agent_b);
 
     let handle_a = mob_state
         .handle_for(&MobId::from(mob_a))
@@ -1977,11 +1963,11 @@ pub async fn wire_cross_mob(
     let entry_a = handle_a
         .get_member(&identity_a)
         .await
-        .ok_or_else(|| err_js("no_member", meerkat_a))?;
+        .ok_or_else(|| err_js("no_member", agent_a))?;
     let sid_a = handle_a
         .resolve_bridge_session_id(&identity_a)
         .await
-        .ok_or_else(|| err_js("no_session", meerkat_a))?;
+        .ok_or_else(|| err_js("no_session", agent_a))?;
 
     let handle_b = mob_state
         .handle_for(&MobId::from(mob_b))
@@ -1990,11 +1976,11 @@ pub async fn wire_cross_mob(
     let entry_b = handle_b
         .get_member(&identity_b)
         .await
-        .ok_or_else(|| err_js("no_member", meerkat_b))?;
+        .ok_or_else(|| err_js("no_member", agent_b))?;
     let sid_b = handle_b
         .resolve_bridge_session_id(&identity_b)
         .await
-        .ok_or_else(|| err_js("no_session", meerkat_b))?;
+        .ok_or_else(|| err_js("no_session", agent_b))?;
 
     // Get comms runtimes from the shared session service
     let svc = RUNTIME_STATE.with(|cell| {
@@ -2008,22 +1994,22 @@ pub async fn wire_cross_mob(
     let comms_a = svc
         .comms_runtime(&sid_a)
         .await
-        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_a} has no comms runtime")))?;
+        .ok_or_else(|| err_js("no_comms", &format!("{agent_a} has no comms runtime")))?;
     let comms_b = svc
         .comms_runtime(&sid_b)
         .await
-        .ok_or_else(|| err_js("no_comms", &format!("{meerkat_b} has no comms runtime")))?;
+        .ok_or_else(|| err_js("no_comms", &format!("{agent_b} has no comms runtime")))?;
 
     let key_a = comms_a
         .public_key()
-        .ok_or_else(|| err_js("no_key", meerkat_a))?;
+        .ok_or_else(|| err_js("no_key", agent_a))?;
     let key_b = comms_b
         .public_key()
-        .ok_or_else(|| err_js("no_key", meerkat_b))?;
+        .ok_or_else(|| err_js("no_key", agent_b))?;
 
     // Build peer specs with full mob/profile/meerkat addressing
-    let name_a = format!("{mob_a}/{}/{meerkat_a}", entry_a.role);
-    let name_b = format!("{mob_b}/{}/{meerkat_b}", entry_b.role);
+    let name_a = format!("{mob_a}/{}/{agent_a}", entry_a.role);
+    let name_b = format!("{mob_b}/{}/{agent_b}", entry_b.role);
 
     let spec_b = meerkat_core::comms::TrustedPeerSpec::new(
         &name_b,
@@ -2060,7 +2046,7 @@ struct MobMemberSendOptions {
 struct MobSpawnHelperOptions {
     prompt: String,
     #[serde(default)]
-    meerkat_id: Option<String>,
+    agent_identity: Option<String>,
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
@@ -2074,7 +2060,7 @@ struct MobForkHelperOptions {
     source_member_id: String,
     prompt: String,
     #[serde(default)]
-    meerkat_id: Option<String>,
+    agent_identity: Option<String>,
     #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
@@ -2085,20 +2071,20 @@ struct MobForkHelperOptions {
     backend: Option<meerkat_mob::MobBackendKind>,
 }
 
-/// Send external work to a spawned meerkat through the canonical member path.
+/// Send external work to a spawned member through the canonical member path.
 ///
 /// Returns a JSON-encoded delivery receipt.
 #[wasm_bindgen]
 pub async fn mob_member_send(
     mob_id: &str,
-    meerkat_id: &str,
+    agent_identity: &str,
     request_json: &str,
 ) -> Result<String, JsValue> {
     let req: MobMemberSendOptions =
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = AgentIdentity::from(meerkat_id);
+    let mid = AgentIdentity::from(agent_identity);
     let receipt = mob_state
         .mob_member_send(
             &id,
@@ -2114,10 +2100,10 @@ pub async fn mob_member_send(
 
 /// Read the current execution snapshot for a mob member.
 #[wasm_bindgen]
-pub async fn mob_member_status(mob_id: &str, meerkat_id: &str) -> Result<JsValue, JsValue> {
+pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = AgentIdentity::from(meerkat_id);
+    let mid = AgentIdentity::from(agent_identity);
     let snapshot = mob_state
         .mob_member_status(&id, &mid)
         .await
@@ -2126,18 +2112,18 @@ pub async fn mob_member_status(mob_id: &str, meerkat_id: &str) -> Result<JsValue
     Ok(JsValue::from_str(&json))
 }
 
-/// Retire and re-spawn a meerkat with the same profile.
+/// Retire and re-spawn a member with the same profile.
 ///
 /// Returns JSON result envelope with receipt.
 #[wasm_bindgen]
 pub async fn mob_respawn(
     mob_id: &str,
-    meerkat_id: &str,
+    agent_identity: &str,
     initial_message: Option<String>,
 ) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = AgentIdentity::from(meerkat_id);
+    let mid = AgentIdentity::from(agent_identity);
     let initial_message = initial_message.map(|message| {
         serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
             .unwrap_or_else(|_| message.into())
@@ -2167,10 +2153,10 @@ pub async fn mob_respawn(
 
 /// Force-cancel an active mob member turn.
 #[wasm_bindgen]
-pub async fn mob_force_cancel(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
+pub async fn mob_force_cancel(mob_id: &str, agent_identity: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let mid = AgentIdentity::from(meerkat_id);
+    let mid = AgentIdentity::from(agent_identity);
     mob_state.mob_force_cancel(&id, mid).await.map_err(err_mob)
 }
 
@@ -2183,7 +2169,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     let id = MobId::from(mob_id);
     let identity = AgentIdentity::from(
         request
-            .meerkat_id
+            .agent_identity
             .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
     );
     let mut options = meerkat_mob::HelperOptions::default();
@@ -2211,7 +2197,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     let source_member_id = AgentIdentity::from(request.source_member_id.as_str());
     let identity = AgentIdentity::from(
         request
-            .meerkat_id
+            .agent_identity
             .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
     );
     let fork_context = request
@@ -2295,7 +2281,7 @@ pub async fn mob_cancel_flow(mob_id: &str, run_id: &str) -> Result<(), JsValue> 
 }
 
 // ═══════════════════════════════════════════════════════════
-// Event Streaming — subscribe to individual meerkat sessions
+// Event Streaming — subscribe to individual member sessions
 // ═══════════════════════════════════════════════════════════
 
 /// Subscription inner type: per-member broadcast or mob-wide mpsc.
@@ -2333,10 +2319,10 @@ thread_local! {
 /// The subscription captures ALL agent activity: text deltas, tool calls
 /// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32, JsValue> {
+pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<u32, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
-    let mid = MeerkatId::from(meerkat_id);
+    let mid = AgentIdentity::from(agent_identity);
 
     let bridge_session_id =
         resolve_mob_member_bridge_session_id(&mob_state, &mob_id_typed, &mid).await?;
@@ -2385,7 +2371,7 @@ pub async fn mob_member_subscribe(mob_id: &str, meerkat_id: &str) -> Result<u32,
 /// buffered events. Each call returns all events since the last poll.
 ///
 /// Unlike `mob_member_subscribe` which streams a single member's agent events,
-/// this streams [`AttributedEvent`]s tagged with source meerkat_id and profile
+/// this streams [`AttributedEvent`]s tagged with source runtime identity and role
 /// for every member in the mob, automatically tracking roster changes.
 #[wasm_bindgen]
 pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
@@ -2704,27 +2690,19 @@ mod tests {
     }
 
     #[test]
-    fn spawn_spec_input_deserializes_resume_bridge_session_id_alias() {
+    fn spawn_spec_input_rejects_legacy_resume_session_fields() {
         let sid = meerkat_core::SessionId::new();
         let payload = json!([{
             "profile": "worker",
-            "meerkat_id": "worker-1",
+            "agent_identity": "worker-1",
             "resume_bridge_session_id": sid,
         }]);
 
         let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
         assert!(
-            specs_result.is_ok(),
-            "spawn specs should deserialize: {specs_result:?}"
+            specs_result.is_err(),
+            "legacy resume bridge/session fields should be rejected in 0.6"
         );
-        let specs = specs_result.unwrap_or_default();
-
-        assert_eq!(specs.len(), 1);
-        assert_eq!(
-            specs[0].resume_bridge_session_id.as_ref(),
-            Some(&sid.to_string())
-        );
-        assert_eq!(specs[0].resume_session_id, None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2749,7 +2727,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[tokio::test(flavor = "current_thread")]
-    async fn helper_result_payload_returns_additive_bridge_session_id() {
+    async fn helper_result_payload_returns_identity_native_fields() {
         let mut config = Config::default();
         config.providers.api_keys = Some(HashMap::from([(
             "anthropic".to_string(),
@@ -2785,9 +2763,11 @@ mod tests {
             .expect("spawn helper");
 
         let payload = helper_result_payload(&result);
-        assert_eq!(payload["session_id"], payload["bridge_session_id"]);
         assert!(payload.get("output").is_some());
         assert!(payload["tokens_used"].as_u64().is_some());
+        assert_eq!(payload["agent_identity"], "helper-1");
+        assert!(!payload["agent_runtime_id"].is_null());
+        assert!(!payload["fence_token"].is_null());
     }
 
     #[cfg(target_arch = "wasm32")]

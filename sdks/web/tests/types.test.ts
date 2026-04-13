@@ -79,9 +79,7 @@ const sessionState: SessionState = {
 
 const mobAppendSystemContextResult: MobAppendSystemContextResult = {
   mob_id: 'mob-1',
-  meerkat_id: 'worker-1',
-  session_id: '00000000-0000-0000-0000-000000000001',
-  bridge_session_id: '00000000-0000-0000-0000-000000000001',
+  agent_identity: 'worker-1',
   status: 'staged',
 };
 
@@ -107,7 +105,7 @@ const mobDef: MobDefinition = {
 
 const spawnSpec: SpawnSpec = {
   profile: 'worker',
-  meerkat_id: 'w1',
+  agent_identity: 'w1',
   runtime_mode: 'autonomous_host',
   initial_message: 'Hello',
   labels: { role: 'worker' },

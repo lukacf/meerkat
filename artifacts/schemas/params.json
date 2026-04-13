@@ -480,7 +480,7 @@
       },
       "MobDefinitionInput": {
         "additionalProperties": false,
-        "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as `owner_session_id`, `session_cleanup_policy`,\n`is_implicit`, and internal-only profile tool bundles are intentionally not\npart of this schema.",
+        "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as internal owner/runtime bindings,\n`session_cleanup_policy`, `is_implicit`, and internal-only profile tool\nbundles are intentionally not part of this schema.",
         "properties": {
           "backend": {
             "$ref": "#/$defs/MobBackendConfigInput",

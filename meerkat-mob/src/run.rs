@@ -766,6 +766,12 @@ fn topological_steps(flow_spec: &FlowSpec) -> Result<Vec<StepId>, MobError> {
 
     for (step_id, step) in &flow_spec.steps {
         for dependency in &step.depends_on {
+            // TLA+ NoSelfDependencyInvariant: a step cannot depend on itself.
+            if dependency == step_id {
+                return Err(MobError::Internal(format!(
+                    "step '{step_id}' has a self-dependency"
+                )));
+            }
             if !in_degree.contains_key(dependency) {
                 return Err(MobError::Internal(format!(
                     "step '{step_id}' depends on unknown step '{dependency}'"
@@ -1431,5 +1437,47 @@ mod tests {
         let decoded: FlowContext = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.step_outputs.len(), 1);
         assert_eq!(decoded.activation_params["input"], "x");
+    }
+
+    #[test]
+    fn topological_steps_rejects_self_dependency() {
+        let mut steps = IndexMap::new();
+        steps.insert(
+            StepId::from("s1"),
+            FlowStepSpec {
+                role: ProfileName::from("worker"),
+                message: ContentInput::from("do it"),
+                depends_on: vec![StepId::from("s1")],
+                dispatch_mode: DispatchMode::FanOut,
+                collection_policy: crate::definition::CollectionPolicy::All,
+                condition: None,
+                timeout_ms: None,
+                expected_schema_ref: None,
+                branch: None,
+                depends_on_mode: crate::definition::DependencyMode::All,
+                allowed_tools: None,
+                blocked_tools: None,
+                output_format: crate::definition::StepOutputFormat::Json,
+            },
+        );
+        let spec = FlowSpec {
+            description: None,
+            steps,
+            root: None,
+        };
+        let error = topological_steps(&spec).expect_err("self-dependency should be rejected");
+        assert!(
+            error.to_string().contains("self-dependency"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn step_run_status_terminal_classification() {
+        assert!(StepRunStatus::Completed.is_terminal());
+        assert!(StepRunStatus::Failed.is_terminal());
+        assert!(StepRunStatus::Skipped.is_terminal());
+        assert!(StepRunStatus::Canceled.is_terminal());
+        assert!(!StepRunStatus::Dispatched.is_terminal());
     }
 }

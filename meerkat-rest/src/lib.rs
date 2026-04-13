@@ -4493,7 +4493,16 @@ mod tests {
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
-        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        state.llm_client_override = Some(mock_client.clone());
+        state.mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                state.session_service.clone(),
+                Some(state.runtime_adapter.clone()),
+            )
+            .with_persistent_storage_root(Some(temp.path().to_path_buf()))
+            .with_default_llm_client(Some(mock_client)),
+        );
         let app = router(state);
 
         let response = app

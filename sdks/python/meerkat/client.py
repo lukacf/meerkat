@@ -848,6 +848,12 @@ class MeerkatClient:
                 )
             ):
                 member["current_bridge_session_id"] = current_session_id
+            elif (
+                isinstance(current_bridge_session_id, str)
+                and current_bridge_session_id
+                and not (isinstance(current_session_id, str) and current_session_id)
+            ):
+                member["current_session_id"] = current_bridge_session_id
             raw_member_ref = member.get("member_ref")
             if isinstance(raw_member_ref, dict):
                 member_ref = dict(raw_member_ref)
@@ -861,6 +867,12 @@ class MeerkatClient:
                     )
                 ):
                     member_ref["bridge_session_id"] = session_id
+                elif (
+                    isinstance(bridge_session_id, str)
+                    and bridge_session_id
+                    and not (isinstance(session_id, str) and session_id)
+                ):
+                    member_ref["session_id"] = bridge_session_id
                 member["member_ref"] = member_ref
             normalized.append(member)
         return normalized
@@ -950,6 +962,13 @@ class MeerkatClient:
         ):
             result = dict(result)
             result["bridge_session_id"] = session_id
+        elif (
+            isinstance(result.get("bridge_session_id"), str)
+            and result["bridge_session_id"]
+            and not (isinstance(session_id, str) and session_id)
+        ):
+            result = dict(result)
+            result["session_id"] = result["bridge_session_id"]
         return result
 
 
@@ -1037,6 +1056,13 @@ class MeerkatClient:
         ):
             result = dict(result)
             result["current_bridge_session_id"] = current_session_id
+        elif (
+            isinstance(result.get("current_bridge_session_id"), str)
+            and result["current_bridge_session_id"]
+            and not (isinstance(current_session_id, str) and current_session_id)
+        ):
+            result = dict(result)
+            result["current_session_id"] = result["current_bridge_session_id"]
         return result
 
     async def wait_mob_kickoff(
@@ -1070,6 +1096,12 @@ class MeerkatClient:
                 )
             ):
                 member["current_bridge_session_id"] = current_session_id
+            elif (
+                isinstance(member.get("current_bridge_session_id"), str)
+                and member["current_bridge_session_id"]
+                and not (isinstance(current_session_id, str) and current_session_id)
+            ):
+                member["current_session_id"] = member["current_bridge_session_id"]
             normalized.append(member)
         return normalized
 
@@ -1104,6 +1136,13 @@ class MeerkatClient:
         ):
             result = dict(result)
             result["bridge_session_id"] = session_id
+        elif (
+            isinstance(result.get("bridge_session_id"), str)
+            and result["bridge_session_id"]
+            and not (isinstance(session_id, str) and session_id)
+        ):
+            result = dict(result)
+            result["session_id"] = result["bridge_session_id"]
         return result
 
     async def fork_mob_helper(
@@ -1141,6 +1180,13 @@ class MeerkatClient:
         ):
             result = dict(result)
             result["bridge_session_id"] = session_id
+        elif (
+            isinstance(result.get("bridge_session_id"), str)
+            and result["bridge_session_id"]
+            and not (isinstance(session_id, str) and session_id)
+        ):
+            result = dict(result)
+            result["session_id"] = result["bridge_session_id"]
         return result
 
     async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
@@ -1228,6 +1274,13 @@ class MeerkatClient:
         ):
             result = dict(result)
             result["bridge_session_id"] = session_id
+        elif (
+            isinstance(result.get("bridge_session_id"), str)
+            and result["bridge_session_id"]
+            and not (isinstance(session_id, str) and session_id)
+        ):
+            result = dict(result)
+            result["session_id"] = result["bridge_session_id"]
         return result
 
     async def list_mob_flows(self, mob_id: str) -> list[str]:

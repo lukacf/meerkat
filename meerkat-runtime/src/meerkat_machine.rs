@@ -1,8 +1,8 @@
-//! MeerkatMachine — wraps a SessionService with per-session RuntimeDrivers.
+//! MeerkatMachine — owns per-session runtime state and command authority.
 //!
-//! This adapter lives in meerkat-runtime so that meerkat-session doesn't need
-//! to depend on meerkat-runtime. Surfaces use this adapter to get v9 runtime
-//! capabilities on top of any SessionService implementation.
+//! It lives in `meerkat-runtime` so `meerkat-session` doesn't need to depend
+//! on runtime execution internals. Surfaces use this authority to get v9
+//! runtime capabilities on top of any `SessionService` implementation.
 //!
 //! When a session is registered with a `CoreExecutor`, a background RuntimeLoop
 //! task is spawned per session. `accept_input()` queues the input in the driver

@@ -420,7 +420,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-runtime/src/runtime_control_authority.rs` — canonical runtime control authority and transition reducer
 - `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
 - `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
-- `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor
+- `meerkat-runtime/src/meerkat_machine.rs` — surface-facing lifecycle and completion owner precursor
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work

@@ -15,7 +15,7 @@ current `0.4` execution anchors.
   - `meerkat-core/src/lifecycle/core_executor.rs`
 - runtime driver/execution bridge:
   - `meerkat-runtime/src/runtime_loop.rs`
-  - `meerkat-runtime/src/session_adapter.rs`
+  - `meerkat-runtime/src/meerkat_machine.rs`
 - persistence/session-runtime bridge:
   - `meerkat-session/src/persistent.rs`
   - `meerkat-rpc/src/session_runtime.rs`

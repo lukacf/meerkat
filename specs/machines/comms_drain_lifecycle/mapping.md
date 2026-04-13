@@ -9,7 +9,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Code Anchors
 - `comms_drain_authority`: `meerkat-runtime/src/comms_drain_lifecycle_authority.rs` — comms drain lifecycle authority (sealed mutator + evaluate)
-- `session_adapter_drain`: `meerkat-runtime/src/session_adapter.rs` — session adapter comms drain slot wiring and effect execution
+- `session_adapter_drain`: `meerkat-runtime/src/meerkat_machine.rs` — session adapter comms drain slot wiring and effect execution
 - `comms_drain_spawn`: `meerkat-runtime/src/comms_drain.rs` — comms drain task spawn and loop implementation
 
 ### Scenarios

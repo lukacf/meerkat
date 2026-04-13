@@ -7,7 +7,7 @@ Primary anchors in today's code:
 - `meerkat-runtime/src/runtime_state.rs`
 - `meerkat-runtime/src/state_machine.rs`
 - `meerkat-runtime/src/runtime_loop.rs`
-- `meerkat-runtime/src/session_adapter.rs`
+- `meerkat-runtime/src/meerkat_machine.rs`
 - `meerkat-runtime/src/traits.rs`
 - `meerkat-runtime/src/policy_table.rs`
 
@@ -31,7 +31,7 @@ The model keeps:
 
 1. runtime control and ingress still share an implementation owner
 
-Today, `RuntimeDriver` plus `RuntimeSessionAdapter` embody both control and
+Today, `RuntimeDriver` plus `MeerkatMachine` embody both control and
 ingress concerns. The formal split is architectural: `RuntimeControlMachine`
 owns lifecycle/control/admission coordination, while `RuntimeIngressMachine`
 owns the admitted queue/ledger.
@@ -62,7 +62,7 @@ Best candidates for Rust-side tests:
 - channel closure behavior
 - executor error propagation
 - completion registry resolution on shutdown
-- exact `RuntimeSessionAdapter` surface semantics
+- exact `MeerkatMachine` surface semantics
 
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage
@@ -76,7 +76,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `runtime_control_authority`: `meerkat-runtime/src/runtime_control_authority.rs` — canonical runtime control authority and transition reducer
 - `runtime_loop`: `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
 - `runtime_control_plane`: `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
-- `runtime_session_adapter`: `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor
+- `runtime_session_adapter`: `meerkat-runtime/src/meerkat_machine.rs` — surface-facing lifecycle and completion owner precursor
 
 ### Scenarios
 - `control-preempts-ingress` — control commands preempt ordinary ingress work

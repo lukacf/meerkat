@@ -141,6 +141,7 @@ export interface MobAppendSystemContextResult {
   mob_id: string;
   meerkat_id: string;
   session_id: string;
+  bridge_session_id?: string;
   status: 'staged' | 'duplicate';
 }
 
@@ -148,6 +149,7 @@ export interface MobAppendSystemContextResult {
 export interface MemberDeliveryReceipt {
   member_id: string;
   session_id: string;
+  bridge_session_id?: string;
   handling_mode: HandlingMode;
 }
 
@@ -155,7 +157,9 @@ export interface MemberDeliveryReceipt {
 export interface MemberRespawnReceipt {
   member_id: string;
   old_session_id?: string | null;
+  old_bridge_session_id?: string | null;
   new_session_id?: string | null;
+  new_bridge_session_id?: string | null;
 }
 
 /** Result envelope for a member respawn operation. */
@@ -325,9 +329,18 @@ export interface SpawnSpec {
 }
 
 /** Result of a spawn operation. */
+export interface MobMemberRef {
+  kind?: string;
+  session_id?: string;
+  bridge_session_id?: string;
+  peer_id?: string;
+  address?: string;
+}
+
+/** Result of a spawn operation. */
 export interface SpawnResult {
   status: 'ok' | 'error';
-  member_ref?: Record<string, unknown> | null;
+  member_ref?: MobMemberRef | null;
   error?: string;
 }
 
@@ -335,7 +348,7 @@ export interface SpawnResult {
 export interface MobMember {
   meerkat_id: string;
   profile: string;
-  member_ref: Record<string, unknown>;
+  member_ref: MobMemberRef;
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
@@ -346,6 +359,7 @@ export interface MobMember {
   error?: string;
   is_final?: boolean;
   current_session_id?: string;
+  current_bridge_session_id?: string;
 }
 
 export interface ExternalPeerTarget {
@@ -385,6 +399,7 @@ export interface MobMemberSnapshot {
   tokens_used: number;
   is_final: boolean;
   current_session_id?: string;
+  current_bridge_session_id?: string;
   peer_connectivity?: MobPeerConnectivitySnapshot;
 }
 
@@ -393,6 +408,7 @@ export interface MobHelperResult {
   output?: string;
   tokens_used: number;
   session_id?: string;
+  bridge_session_id?: string;
 }
 
 /** Mob lifecycle actions. */

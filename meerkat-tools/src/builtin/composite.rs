@@ -543,19 +543,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let mut owned =
             Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
         #[allow(clippy::redundant_clone)]
-        // clone needed on non-wasm32 where owner_session_id is reused
+        // clone needed on non-wasm32 where owner_bridge_session_id is reused
         let rebound_external = match owned.external.take() {
             Some(external)
                 if external.capabilities().ops_lifecycle && Arc::strong_count(&external) == 1 =>
             {
                 Some(
                     external
-                        .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?
+                        .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?
                         .into_dispatcher(),
                 )
             }
@@ -575,7 +575,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 owned.project_root.clone(),
                 owned.shell_config.clone(),
                 rebound_external,
-                Some(owner_session_id.to_string()),
+                Some(owner_bridge_session_id.to_string()),
                 Some(registry),
                 owned.image_tool_results,
             )
@@ -592,7 +592,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = registry;
-            let _ = owner_session_id;
+            let _ = owner_bridge_session_id;
             let _ = rebound_external;
             Err(OpsLifecycleBindError::Unsupported)
         }

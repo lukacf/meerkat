@@ -1002,7 +1002,24 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         if method == "mob/status":
             return {"mob_id": "mob-1", "status": "running"}
         if method == "mob/members":
-            return {"members": [{"meerkat_id": "agent-a"}]}
+            return {
+                "members": [
+                    {
+                        "meerkat_id": "agent-a",
+                        "current_bridge_session_id": "session-agent-a",
+                        "member_ref": {"bridge_session_id": "session-agent-a"},
+                    }
+                ]
+            }
+        if method == "mob/spawn":
+            return {"bridge_session_id": "spawn-session"}
+        if method == "mob/member_status":
+            return {
+                "status": "active",
+                "tokens_used": 5,
+                "is_final": False,
+                "current_bridge_session_id": "session-agent-a",
+            }
         if method == "mob/flows":
             return {"flows": ["incident"]}
         if method == "mob/flow_run":
@@ -1017,9 +1034,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                         "status": "active",
                         "tokens_used": 3,
                         "is_final": False,
+                        "current_bridge_session_id": "session-agent-a",
                     }
                 ]
             }
+        if method == "mob/append_system_context":
+            return {"bridge_session_id": "session-agent-a", "accepted": True}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -1029,9 +1049,29 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert mob.id == "mob-1"
     assert await client.list_mobs() == [{"mob_id": "mob-1"}]
     assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}
-    assert await client.list_mob_members("mob-1") == [{"meerkat_id": "agent-a"}]
-    await client.spawn_mob_member("mob-1", profile="planner", meerkat_id="agent-a")
+    assert await client.list_mob_members("mob-1") == [
+        {
+            "meerkat_id": "agent-a",
+            "current_bridge_session_id": "session-agent-a",
+            "current_session_id": "session-agent-a",
+            "member_ref": {
+                "bridge_session_id": "session-agent-a",
+                "session_id": "session-agent-a",
+            },
+        }
+    ]
+    spawn_receipt = await client.spawn_mob_member(
+        "mob-1",
+        profile="planner",
+        meerkat_id="agent-a",
+        resume_bridge_session_id="bridge-session-123",
+    )
+    assert spawn_receipt["bridge_session_id"] == "spawn-session"
     await client.retire_mob_member("mob-1", "agent-a")
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["current_bridge_session_id"] == "session-agent-a"
+
+    client._request = fake_request  # type: ignore[method-assign]
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
     await client.wire_mob_members("mob-1", "a", "b")
     await client.unwire_mob_members(
@@ -1047,12 +1087,14 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     )
     assert wait_members[0]["meerkat_id"] == "agent-a"
     assert wait_members[0]["status"] == "active"
+    assert wait_members[0]["current_bridge_session_id"] == "session-agent-a"
 
     mob_handle = client.mob("mob-1")
     scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
     assert scoped_wait_members[0]["meerkat_id"] == "agent-a"
 
-    await client.append_mob_system_context("mob-1", "agent-a", "context")
+    append_result = await client.append_mob_system_context("mob-1", "agent-a", "context")
+    assert append_result["bridge_session_id"] == "session-agent-a"
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"
     assert await client.get_mob_flow_status("mob-1", "run-1") == {"status": "running"}
@@ -1065,6 +1107,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/members",
         "mob/spawn",
         "mob/retire",
+        "mob/member_status",
         "mob/respawn",
         "mob/wire",
         "mob/unwire",
@@ -1077,8 +1120,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
-    assert calls[7][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
-    assert calls[8][1] == {
+    assert calls[8][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
+    assert calls[9][1] == {
         "mob_id": "mob-1",
         "member": "a",
         "peer": {
@@ -1089,12 +1132,53 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
-    assert calls[10][1] == {
+    assert calls[11][1] == {
         "mob_id": "mob-1",
         "member_ids": ["agent-a"],
         "timeout_ms": 1234,
     }
-    assert calls[11][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[4][1]["resume_bridge_session_id"] == "bridge-session-123"
+    assert calls[4][1]["resume_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_mob_helper_and_respawn_paths_fill_bridge_session_aliases() -> None:
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        if method == "mob/spawn_helper":
+            return {"output": "ok", "tokens_used": 1, "session_id": "helper-session"}
+        if method == "mob/fork_helper":
+            return {"output": "forked", "tokens_used": 2, "session_id": "fork-session"}
+        if method == "mob/respawn":
+            return {
+                "status": "completed",
+                "receipt": {
+                    "member_id": "agent-a",
+                    "old_session_id": "old-session",
+                    "new_session_id": "new-session",
+                },
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    helper = await client.spawn_mob_helper("mob-1", "help", role_name="worker")
+    forked = await client.fork_mob_helper("mob-1", "agent-a", "help", profile_name="legacy")
+    respawned = await client.respawn_mob_member("mob-1", "agent-a")
+
+    assert helper["bridge_session_id"] == "helper-session"
+    assert forked["bridge_session_id"] == "fork-session"
+    assert respawned["receipt"]["old_bridge_session_id"] == "old-session"
+    assert respawned["receipt"]["new_bridge_session_id"] == "new-session"
+    assert [method for method, _ in calls] == [
+        "mob/spawn_helper",
+        "mob/fork_helper",
+        "mob/respawn",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1123,6 +1207,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
     assert receipt == {
         "member_id": "agent-a",
         "session_id": "session-123",
+        "bridge_session_id": "session-123",
         "handling_mode": "steer",
     }
     assert calls == [

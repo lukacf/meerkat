@@ -506,7 +506,7 @@ async fn discard_live_session_with_mob_cleanup(
 ) -> Result<(), SessionError> {
     let discard_result = service.discard_live_session(session_id).await;
     if let Err(error) = mob_state
-        .destroy_session_mobs(&session_id.to_string())
+        .destroy_bridge_session_mobs(&session_id.to_string())
         .await
     {
         eprintln!("[target] warning: cleanup mobs for session {session_id}: {error}");
@@ -2455,7 +2455,7 @@ mod tests {
         assert!(
             surface
                 .mob_state
-                .find_implicit_mob(&session_id.to_string())
+                .find_implicit_mob_for_bridge_session(&session_id.to_string())
                 .await
                 .is_some()
         );
@@ -2466,7 +2466,7 @@ mod tests {
         assert!(
             surface
                 .mob_state
-                .find_implicit_mob(&session_id.to_string())
+                .find_implicit_mob_for_bridge_session(&session_id.to_string())
                 .await
                 .is_none()
         );

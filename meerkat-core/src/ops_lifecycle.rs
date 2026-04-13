@@ -35,11 +35,29 @@ impl OperationKind {
 pub struct OperationSpec {
     pub id: OperationId,
     pub kind: OperationKind,
+    /// Compatibility owner binding field.
+    ///
+    /// Under the identity-first Mob regime this carries the canonical bridge
+    /// session binding, even though the stored field name still says
+    /// `owner_session_id`.
     pub owner_session_id: SessionId,
     pub display_name: String,
     pub source_label: String,
     pub child_session_id: Option<SessionId>,
     pub expect_peer_channel: bool,
+}
+
+impl OperationSpec {
+    /// Canonical owner bridge binding for this operation.
+    pub fn owner_bridge_session_id(&self) -> &SessionId {
+        &self.owner_session_id
+    }
+
+    /// Compatibility alias retained while older surfaces still speak in
+    /// session-centric terms.
+    pub fn owner_session_id(&self) -> &SessionId {
+        &self.owner_session_id
+    }
 }
 
 /// Peer-facing connection handoff surfaced once an operation is ready.

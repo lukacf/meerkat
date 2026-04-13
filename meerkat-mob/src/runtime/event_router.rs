@@ -3,28 +3,24 @@
 //!
 //! The router runs as an independent tokio task:
 //! 1. Bootstraps by subscribing to all current roster members.
-//! 2. Polls the [`MobEventStore`] for `MeerkatSpawned`/`MeerkatRetired` to
-//!    track roster changes and subscribe/unsubscribe streams.
+//! 2. Polls the machine-routed mob event surface for
+//!    `MeerkatSpawned`/`MeerkatRetired` to track roster changes and
+//!    subscribe/unsubscribe streams.
 //! 3. Tags events with [`AttributedEvent`] and forwards to the receiver.
 //!
 //! Streams for retired members end naturally when sessions are archived.
 
 use crate::event::AttributedEvent;
 use crate::ids::{MeerkatId, ProfileName};
-use crate::store::MobEventStore;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
-use super::RosterAuthority;
-use super::session_service::MobSessionService;
+use super::MobHandle;
 use futures::stream::{SelectAll, StreamExt};
 use meerkat_core::comms::EventStream;
-use meerkat_core::service::SessionService;
-use meerkat_core::types::SessionId;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Configuration for the [`MobEventRouter`].
@@ -66,9 +62,7 @@ impl Drop for MobEventRouterHandle {
 
 /// Spawn the event router task and return its handle.
 pub(super) fn spawn_event_router(
-    session_service: Arc<dyn MobSessionService>,
-    events: Arc<dyn MobEventStore>,
-    roster: Arc<RwLock<RosterAuthority>>,
+    handle: MobHandle,
     config: MobEventRouterConfig,
 ) -> MobEventRouterHandle {
     let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
@@ -76,15 +70,7 @@ pub(super) fn spawn_event_router(
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        run_event_router(
-            session_service,
-            events,
-            roster,
-            config,
-            event_tx,
-            cancel_clone,
-        )
-        .await;
+        run_event_router(handle, config, event_tx, cancel_clone).await;
     });
 
     MobEventRouterHandle { event_rx, cancel }
@@ -92,9 +78,7 @@ pub(super) fn spawn_event_router(
 
 #[allow(clippy::ignored_unit_patterns)]
 async fn run_event_router(
-    session_service: Arc<dyn MobSessionService>,
-    events: Arc<dyn MobEventStore>,
-    roster: Arc<RwLock<RosterAuthority>>,
+    handle: MobHandle,
     config: MobEventRouterConfig,
     event_tx: mpsc::Sender<AttributedEvent>,
     cancel: CancellationToken,
@@ -105,17 +89,10 @@ async fn run_event_router(
 
     // Bootstrap: subscribe to all current roster members.
     {
-        let roster_snap = roster.read().await;
-        for entry in roster_snap.list() {
-            if let Some(session_id) = entry.member_ref.session_id()
-                && tracked_ids.insert(entry.meerkat_id.clone())
-                && let Some(stream) = subscribe_member(
-                    &session_service,
-                    session_id,
-                    entry.meerkat_id.clone(),
-                    entry.profile.clone(),
-                )
-                .await
+        for entry in handle.list_members().await {
+            if tracked_ids.insert(entry.meerkat_id.clone())
+                && let Some(stream) =
+                    subscribe_member(&handle, entry.meerkat_id.clone(), entry.profile.clone()).await
             {
                 merged.push(stream);
             }
@@ -123,7 +100,7 @@ async fn run_event_router(
     }
 
     // Seed cursor from current event store.
-    if let Ok(all_events) = events.poll(0, usize::MAX).await
+    if let Ok(all_events) = handle.poll_events(0, usize::MAX).await
         && let Some(last) = all_events.last()
     {
         mob_cursor = last.cursor;
@@ -152,7 +129,7 @@ async fn run_event_router(
 
             // Poll mob events for roster changes.
             _ = poll_interval.tick() => {
-                let new_events = match events.poll(mob_cursor, 100).await {
+                let new_events = match handle.poll_events(mob_cursor, 100).await {
                     Ok(evts) => evts,
                     Err(_) => continue,
                 };
@@ -162,18 +139,11 @@ async fn run_event_router(
                         crate::event::MobEventKind::MeerkatSpawned {
                             meerkat_id,
                             role,
-                            member_ref,
                             ..
                         } => {
-                            if let Some(sid) = member_ref.session_id()
-                                && tracked_ids.insert(meerkat_id.clone())
-                                && let Some(stream) = subscribe_member(
-                                    &session_service,
-                                    sid,
-                                    meerkat_id,
-                                    role,
-                                )
-                                .await
+                            if tracked_ids.insert(meerkat_id.clone())
+                                && let Some(stream) =
+                                    subscribe_member(&handle, meerkat_id, role).await
                             {
                                 merged.push(stream);
                             }
@@ -206,14 +176,11 @@ type TaggedStream = futures::stream::Map<
 >;
 
 async fn subscribe_member(
-    session_service: &Arc<dyn MobSessionService>,
-    session_id: &SessionId,
+    handle: &MobHandle,
     meerkat_id: MeerkatId,
     profile: ProfileName,
 ) -> Option<TaggedStream> {
-    let stream = SessionService::subscribe_session_events(session_service.as_ref(), session_id)
-        .await
-        .ok()?;
+    let stream = handle.subscribe_agent_events(&meerkat_id).await.ok()?;
     let mid = meerkat_id;
     let prof = profile;
     Some(stream.map(

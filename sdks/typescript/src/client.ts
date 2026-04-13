@@ -80,6 +80,7 @@ import type {
   MobCreateOptions,
   MobFlowStatus,
   MobMember,
+  MobMemberRef,
   MobProfile,
   MobProfileDeleteResult,
   MobProfileLookupResult,
@@ -131,6 +132,26 @@ interface PlatformTarget {
   target: string;
   archiveExt: "tar.gz" | "zip";
   binaryName: string;
+}
+
+function normalizeMobMemberRef(
+  memberRef: Record<string, unknown> | undefined,
+): MobMemberRef | undefined {
+  if (!memberRef || typeof memberRef !== "object") {
+    return undefined;
+  }
+  const sessionId =
+    memberRef.session_id != null ? String(memberRef.session_id) : undefined;
+  return {
+    kind: memberRef.kind != null ? String(memberRef.kind) : undefined,
+    sessionId,
+    bridgeSessionId:
+      memberRef.bridge_session_id != null
+        ? String(memberRef.bridge_session_id)
+        : sessionId,
+    peerId: memberRef.peer_id != null ? String(memberRef.peer_id) : undefined,
+    address: memberRef.address != null ? String(memberRef.address) : undefined,
+  };
 }
 
 /** Options for connecting to the rkat-rpc runtime. */
@@ -728,10 +749,16 @@ export class MeerkatClient {
   async listMobMembers(mobId: string): Promise<MobMember[]> {
     const result = await this.request("mob/members", { mob_id: mobId });
     const members = (result.members as Array<Record<string, unknown>>) ?? [];
-    return members.map((member) => ({
-      meerkatId: String(member.meerkat_id ?? member.meerkatId ?? ""),
-      profile: String(member.profile_name ?? member.profile ?? ""),
-      memberRef: (member.member_ref as Record<string, unknown> | undefined),
+    return members.map((member) => {
+      const memberRef = normalizeMobMemberRef(
+        member.member_ref && typeof member.member_ref === "object"
+          ? (member.member_ref as Record<string, unknown>)
+          : undefined,
+      );
+      return {
+        memberRef,
+        meerkatId: String(member.meerkat_id ?? member.meerkatId ?? ""),
+        profile: String(member.profile_name ?? member.profile ?? ""),
       peerId: member.peer_id != null ? String(member.peer_id) : undefined,
       externalPeerSpecs:
         member.external_peer_specs && typeof member.external_peer_specs === "object"
@@ -754,12 +781,16 @@ export class MeerkatClient {
       isFinal: member.is_final != null ? Boolean(member.is_final) : undefined,
       currentSessionId:
         member.current_session_id != null ? String(member.current_session_id) : undefined,
-      sessionId: member.member_ref && typeof member.member_ref === 'object'
-        ? (member.member_ref as Record<string, unknown>).session_id != null
-          ? String((member.member_ref as Record<string, unknown>).session_id)
-          : undefined
-        : undefined,
-    }));
+      currentBridgeSessionId:
+        member.current_bridge_session_id != null
+          ? String(member.current_bridge_session_id)
+          : member.current_session_id != null
+            ? String(member.current_session_id)
+            : undefined,
+        sessionId: memberRef?.sessionId,
+        bridgeSessionId: memberRef?.bridgeSessionId,
+      };
+    });
   }
 
   async sendMobMemberContent(
@@ -788,6 +819,10 @@ export class MeerkatClient {
           ? result.member_id
           : meerkatId,
       sessionId,
+      bridgeSessionId:
+        typeof result.bridge_session_id === "string" && result.bridge_session_id.length > 0
+          ? result.bridge_session_id
+          : sessionId,
       handlingMode:
         result.handling_mode === "steer" || result.handling_mode === "queue"
           ? result.handling_mode
@@ -799,18 +834,33 @@ export class MeerkatClient {
     mobId: string,
     options: SpawnSpec,
   ): Promise<Record<string, unknown>> {
-    return this.request("mob/spawn", {
+    const result = await this.request("mob/spawn", {
       mob_id: mobId,
       profile: options.profile,
       meerkat_id: options.meerkatId,
       initial_message: options.initialMessage,
       runtime_mode: options.runtimeMode,
       backend: options.backend,
+      resume_bridge_session_id: options.resumeBridgeSessionId,
       resume_session_id: options.resumeSessionId,
       labels: options.labels,
       context: options.context,
       additional_instructions: options.additionalInstructions,
     });
+    const sessionId =
+      typeof result.session_id === "string" && result.session_id.length > 0
+        ? result.session_id
+        : undefined;
+    if (
+      sessionId !== undefined
+      && !(typeof result.bridge_session_id === "string" && result.bridge_session_id.length > 0)
+    ) {
+      return {
+        ...result,
+        bridge_session_id: sessionId,
+      };
+    }
+    return result;
   }
 
   async spawnMobMembers(
@@ -825,6 +875,7 @@ export class MeerkatClient {
         initial_message: spec.initialMessage,
         runtime_mode: spec.runtimeMode,
         backend: spec.backend,
+        resume_bridge_session_id: spec.resumeBridgeSessionId,
         resume_session_id: spec.resumeSessionId,
         labels: spec.labels,
         context: spec.context,
@@ -836,11 +887,18 @@ export class MeerkatClient {
       : [];
     return entries.map((entry) => ({
       ok: Boolean(entry.ok),
-      memberRef:
+      memberRef: normalizeMobMemberRef(
         entry.member_ref && typeof entry.member_ref === "object"
           ? (entry.member_ref as Record<string, unknown>)
           : undefined,
+      ),
       sessionId: entry.session_id != null ? String(entry.session_id) : undefined,
+      bridgeSessionId:
+        entry.bridge_session_id != null
+          ? String(entry.bridge_session_id)
+          : entry.session_id != null
+            ? String(entry.session_id)
+            : undefined,
       error: entry.error != null ? String(entry.error) : undefined,
     }));
   }
@@ -858,7 +916,9 @@ export class MeerkatClient {
     receipt: {
       memberId: string;
       oldSessionId?: string;
+      oldBridgeSessionId?: string;
       newSessionId?: string;
+      newBridgeSessionId?: string;
     };
     failedPeerIds?: string[];
   }> {
@@ -884,8 +944,20 @@ export class MeerkatClient {
         memberId: String(receipt.member_id ?? meerkatId),
         oldSessionId:
           receipt.old_session_id != null ? String(receipt.old_session_id) : undefined,
+        oldBridgeSessionId:
+          receipt.old_bridge_session_id != null
+            ? String(receipt.old_bridge_session_id)
+            : receipt.old_session_id != null
+              ? String(receipt.old_session_id)
+              : undefined,
         newSessionId:
           receipt.new_session_id != null ? String(receipt.new_session_id) : undefined,
+        newBridgeSessionId:
+          receipt.new_bridge_session_id != null
+            ? String(receipt.new_bridge_session_id)
+            : receipt.new_session_id != null
+              ? String(receipt.new_session_id)
+              : undefined,
       },
       failedPeerIds: rawFailed.map((peerId) => String(peerId)),
     };
@@ -905,6 +977,7 @@ export class MeerkatClient {
     tokensUsed: number;
     isFinal: boolean;
     currentSessionId?: string;
+    currentBridgeSessionId?: string;
     peerConnectivity?: {
       reachablePeerCount: number;
       unknownPeerCount: number;
@@ -924,6 +997,12 @@ export class MeerkatClient {
       isFinal: Boolean(result.is_final),
       currentSessionId:
         result.current_session_id != null ? String(result.current_session_id) : undefined,
+      currentBridgeSessionId:
+        result.current_bridge_session_id != null
+          ? String(result.current_bridge_session_id)
+          : result.current_session_id != null
+            ? String(result.current_session_id)
+            : undefined,
       peerConnectivity: rawConnectivity
         ? {
             reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -973,6 +1052,12 @@ export class MeerkatClient {
         isFinal: Boolean(member.is_final),
         currentSessionId:
           member.current_session_id != null ? String(member.current_session_id) : undefined,
+        currentBridgeSessionId:
+          member.current_bridge_session_id != null
+            ? String(member.current_bridge_session_id)
+            : member.current_session_id != null
+              ? String(member.current_session_id)
+              : undefined,
         peerConnectivity: rawConnectivity
           ? {
               reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -1010,7 +1095,7 @@ export class MeerkatClient {
       runtimeMode?: string;
       backend?: string;
     },
-  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string; bridgeSessionId?: string }> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/spawn_helper", {
       mob_id: mobId,
@@ -1024,6 +1109,12 @@ export class MeerkatClient {
       output: result.output != null ? String(result.output) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       sessionId: result.session_id != null ? String(result.session_id) : undefined,
+      bridgeSessionId:
+        result.bridge_session_id != null
+          ? String(result.bridge_session_id)
+          : result.session_id != null
+            ? String(result.session_id)
+            : undefined,
     };
   }
 
@@ -1039,7 +1130,7 @@ export class MeerkatClient {
       runtimeMode?: string;
       backend?: string;
     },
-  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string; bridgeSessionId?: string }> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/fork_helper", {
       mob_id: mobId,
@@ -1055,6 +1146,12 @@ export class MeerkatClient {
       output: result.output != null ? String(result.output) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       sessionId: result.session_id != null ? String(result.session_id) : undefined,
+      bridgeSessionId:
+        result.bridge_session_id != null
+          ? String(result.bridge_session_id)
+          : result.session_id != null
+            ? String(result.session_id)
+            : undefined,
     };
   }
 
@@ -1084,13 +1181,27 @@ export class MeerkatClient {
     text: string,
     options?: { source?: string; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
-    return this.request("mob/append_system_context", {
+    const result = await this.request("mob/append_system_context", {
       mob_id: mobId,
       meerkat_id: meerkatId,
       text,
       source: options?.source,
       idempotency_key: options?.idempotencyKey,
     });
+    const sessionId =
+      typeof result.session_id === "string" && result.session_id.length > 0
+        ? result.session_id
+        : undefined;
+    if (
+      sessionId !== undefined
+      && !(typeof result.bridge_session_id === "string" && result.bridge_session_id.length > 0)
+    ) {
+      return {
+        ...result,
+        bridge_session_id: sessionId,
+      };
+    }
+    return result;
   }
 
   async readMobEvents(

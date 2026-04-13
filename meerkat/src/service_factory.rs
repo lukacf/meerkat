@@ -641,12 +641,12 @@ mod tests {
         fn bind_ops_lifecycle(
             self: Arc<Self>,
             registry: Arc<dyn OpsLifecycleRegistry>,
-            owner_session_id: SessionId,
+            owner_bridge_session_id: SessionId,
         ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError>
         {
             self.bound.store(true, Ordering::SeqCst);
             *self.seen_registry.lock().expect("probe lock") = Some(registry);
-            *self.seen_session_id.lock().expect("probe lock") = Some(owner_session_id);
+            *self.seen_session_id.lock().expect("probe lock") = Some(owner_bridge_session_id);
             Ok(meerkat_core::agent::BindOutcome::Bound(self))
         }
     }

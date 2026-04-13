@@ -3,7 +3,6 @@ use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, MobPeerTarget, MobUnwireParams, MobWireParams,
     WireContentInput, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
 };
-use meerkat_core::error::invalid_session_id_message;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -11,6 +10,26 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
+
+fn insert_bridge_session_aliases(
+    value: &mut Value,
+    bridge_session_id: Option<&meerkat_core::types::SessionId>,
+) {
+    let payload = value
+        .as_object_mut()
+        .expect("bridge session aliases require object payload");
+    let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
+    payload.insert("session_id".to_string(), json!(bridge_session_id));
+    payload.insert("bridge_session_id".to_string(), json!(bridge_session_id));
+}
+
+fn member_ref_result_payload(member_ref: &meerkat_mob::MemberRef) -> Value {
+    let mut payload = json!({
+        "member_ref": member_ref,
+    });
+    insert_bridge_session_aliases(&mut payload, member_ref.bridge_session_id());
+    payload
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +58,8 @@ struct MeerkatMobSpawnInput {
     backend: Option<WireMobBackendKind>,
     #[serde(default)]
     binding: Option<WireRuntimeBinding>,
+    #[serde(default)]
+    resume_bridge_session_id: Option<String>,
     #[serde(default)]
     resume_session_id: Option<String>,
     #[serde(default)]
@@ -69,6 +90,8 @@ struct MeerkatMobSpawnInputSpec {
     backend: Option<WireMobBackendKind>,
     #[serde(default)]
     binding: Option<WireRuntimeBinding>,
+    #[serde(default)]
+    resume_bridge_session_id: Option<String>,
     #[serde(default)]
     resume_session_id: Option<String>,
     #[serde(default)]
@@ -451,6 +474,7 @@ pub async fn handle_public_tools_call(
                 input.runtime_mode,
                 input.backend,
                 input.binding,
+                input.resume_bridge_session_id,
                 input.resume_session_id,
                 input.labels,
                 input.context,
@@ -460,12 +484,10 @@ pub async fn handle_public_tools_call(
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({
-                "mob_id": mob_id,
-                "meerkat_id": input.meerkat_id,
-                "member_ref": member_ref,
-                "session_id": member_ref.session_id(),
-            }))
+            let mut payload = member_ref_result_payload(&member_ref);
+            payload["mob_id"] = json!(mob_id);
+            payload["meerkat_id"] = json!(input.meerkat_id);
+            Ok(payload)
         }
         "meerkat_mob_spawn_many" => {
             let input: MeerkatMobSpawnManyInput = parse_args(arguments)?;
@@ -481,6 +503,7 @@ pub async fn handle_public_tools_call(
                         spec.runtime_mode,
                         spec.backend,
                         spec.binding,
+                        spec.resume_bridge_session_id,
                         spec.resume_session_id,
                         spec.labels,
                         spec.context,
@@ -494,11 +517,11 @@ pub async fn handle_public_tools_call(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
                 "results": results.into_iter().map(|result| match result {
-                    Ok(member_ref) => json!({
-                        "ok": true,
-                        "member_ref": member_ref,
-                        "session_id": member_ref.session_id().map(std::string::ToString::to_string),
-                    }),
+                    Ok(member_ref) => {
+                        let mut payload = member_ref_result_payload(&member_ref);
+                        payload["ok"] = json!(true);
+                        payload
+                    }
                     Err(error) => json!({
                         "ok": false,
                         "error": error.to_string(),
@@ -591,18 +614,19 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({
+            let mut payload = json!({
                 "mob_id": mob_id,
                 "member_id": receipt.member_id,
-                "session_id": receipt.session_id,
                 "handling_mode": input.handling_mode,
-            }))
+            });
+            insert_bridge_session_aliases(&mut payload, Some(receipt.bridge_session_id()));
+            Ok(payload)
         }
         "meerkat_mob_append_system_context" => {
             let input: MeerkatMobAppendSystemContextInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
             let meerkat_id = meerkat_mob::MeerkatId::from(input.meerkat_id.as_str());
-            let (session_id, result) = state
+            let (bridge_session_id, result) = state
                 .mob_append_system_context(
                     &mob_id,
                     &meerkat_id,
@@ -614,12 +638,13 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({
+            let mut payload = json!({
                 "mob_id": mob_id,
                 "meerkat_id": meerkat_id,
-                "session_id": session_id,
                 "status": result.status,
-            }))
+            });
+            insert_bridge_session_aliases(&mut payload, Some(&bridge_session_id));
+            Ok(payload)
         }
         "meerkat_mob_events" => {
             let input: MeerkatMobEventsInput = parse_args(arguments)?;
@@ -831,6 +856,7 @@ fn build_spawn_spec(
     runtime_mode: Option<WireMobRuntimeMode>,
     backend: Option<WireMobBackendKind>,
     binding: Option<WireRuntimeBinding>,
+    resume_bridge_session_id: Option<String>,
     resume_session_id: Option<String>,
     labels: Option<BTreeMap<String, String>>,
     context: Option<Value>,
@@ -869,11 +895,11 @@ fn build_spawn_spec(
     spec.labels = labels;
     spec.context = context;
     spec.additional_instructions = additional_instructions;
-    if let Some(session_id) = resume_session_id {
+    if let Some(session_id) = resume_bridge_session_id.or(resume_session_id) {
         let parsed = meerkat_core::types::SessionId::parse(&session_id)
-            .map_err(invalid_session_id_message)
+            .map_err(|error| format!("invalid resume_bridge_session_id/resume_session_id: {error}"))
             .map_err(McpToolError::invalid_params)?;
-        spec = spec.with_resume_session_id(parsed);
+        spec = spec.with_resume_bridge_session_id(parsed);
     }
     Ok(spec)
 }
@@ -953,5 +979,30 @@ mod tests {
             .collect();
         assert!(names.contains(&"meerkat_mob_create".to_string()));
         assert!(!names.contains(&"mob_create".to_string()));
+    }
+
+    #[test]
+    fn build_spawn_spec_rejects_invalid_bridge_resume_aliases_with_bridge_native_message() {
+        let err = build_spawn_spec(
+            "worker".to_string(),
+            "worker-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("not-a-session-id".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("invalid resume bridge session id should fail");
+
+        assert!(
+            err.message
+                .contains("invalid resume_bridge_session_id/resume_session_id"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 }

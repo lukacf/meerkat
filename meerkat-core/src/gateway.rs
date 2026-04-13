@@ -460,7 +460,7 @@ impl AgentToolDispatcher for ToolGateway {
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
-        owner_session_id: crate::types::SessionId,
+        owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
@@ -473,7 +473,7 @@ impl AgentToolDispatcher for ToolGateway {
             {
                 let outcome = entry
                     .dispatcher
-                    .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?;
                 if outcome.was_bound() {
                     any_bound = true;
                 }
@@ -730,7 +730,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
-        owner_session_id: crate::types::SessionId,
+        owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
@@ -739,7 +739,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
         for d in owned.dispatchers {
             if d.capabilities().ops_lifecycle && Arc::strong_count(&d) == 1 {
                 let outcome =
-                    d.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
+                    d.bind_ops_lifecycle(Arc::clone(&registry), owner_bridge_session_id.clone())?;
                 if outcome.was_bound() {
                     any_bound = true;
                 }

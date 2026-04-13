@@ -43,7 +43,15 @@ from .generated.types import (
     WireInputState,
     WireInputStateHistoryEntry,
 )
-from .mob import Mob, MobHelperResult, MobKickoffMemberSnapshot, MobMemberSnapshot, MobSpawnSpec
+from .mob import (
+    Mob,
+    MobHelperResult,
+    MobKickoffMemberSnapshot,
+    MobMember,
+    MobMemberSnapshot,
+    MobSpawnResult,
+    MobSpawnSpec,
+)
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
@@ -819,9 +827,43 @@ class MeerkatClient:
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         return await self._request("mob/status", {"mob_id": mob_id})
 
-    async def list_mob_members(self, mob_id: str) -> list[dict[str, Any]]:
+    async def list_mob_members(self, mob_id: str) -> list[MobMember]:
         result = await self._request("mob/members", {"mob_id": mob_id})
-        return result.get("members", [])
+        members = result.get("members", [])
+        if not isinstance(members, list):
+            return []
+        normalized: list[MobMember] = []
+        for entry in members:
+            if not isinstance(entry, dict):
+                continue
+            member = dict(entry)
+            current_session_id = member.get("current_session_id")
+            current_bridge_session_id = member.get("current_bridge_session_id")
+            if (
+                isinstance(current_session_id, str)
+                and current_session_id
+                and not (
+                    isinstance(current_bridge_session_id, str)
+                    and current_bridge_session_id
+                )
+            ):
+                member["current_bridge_session_id"] = current_session_id
+            raw_member_ref = member.get("member_ref")
+            if isinstance(raw_member_ref, dict):
+                member_ref = dict(raw_member_ref)
+                session_id = member_ref.get("session_id")
+                bridge_session_id = member_ref.get("bridge_session_id")
+                if (
+                    isinstance(session_id, str)
+                    and session_id
+                    and not (
+                        isinstance(bridge_session_id, str) and bridge_session_id
+                    )
+                ):
+                    member_ref["bridge_session_id"] = session_id
+                member["member_ref"] = member_ref
+            normalized.append(member)
+        return normalized
 
     async def send_mob_member_content(
         self,
@@ -831,7 +873,7 @@ class MeerkatClient:
         *,
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobSpawnResult:
         result = await self._request(
             "mob/member_send",
             {
@@ -856,6 +898,12 @@ class MeerkatClient:
                 else meerkat_id
             ),
             "session_id": session_id,
+            "bridge_session_id": (
+                result["bridge_session_id"]
+                if isinstance(result.get("bridge_session_id"), str)
+                and result["bridge_session_id"]
+                else session_id
+            ),
             "handling_mode": (
                 receipt_handling_mode
                 if receipt_handling_mode in {"queue", "steer"}
@@ -872,30 +920,44 @@ class MeerkatClient:
         initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
+        resume_bridge_session_id: str | None = None,
         resume_session_id: str | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await self._request("mob/spawn", {
+        result = await self._request("mob/spawn", {
             "mob_id": mob_id,
             "profile": profile,
             "meerkat_id": meerkat_id,
             "initial_message": initial_message,
             "runtime_mode": runtime_mode,
             "backend": backend,
+            "resume_bridge_session_id": resume_bridge_session_id,
             "resume_session_id": resume_session_id,
             "labels": labels,
             "context": context,
             "additional_instructions": additional_instructions,
         })
+        session_id = result.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and not (
+                isinstance(result.get("bridge_session_id"), str)
+                and result["bridge_session_id"]
+            )
+        ):
+            result = dict(result)
+            result["bridge_session_id"] = session_id
+        return result
 
 
     async def spawn_mob_members(
         self,
         mob_id: str,
         specs: list[MobSpawnSpec],
-    ) -> list[dict[str, Any]]:
+    ) -> list[MobSpawnResult]:
         return await self._request("mob/spawn_many", {
             "mob_id": mob_id,
             "specs": specs,
@@ -928,16 +990,54 @@ class MeerkatClient:
         meerkat_id: str,
         initial_message: str | list[dict] | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
+        result = await self._request(
             "mob/respawn",
             {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message},
         )
+        receipt = result.get("receipt")
+        if isinstance(receipt, dict):
+            normalized_receipt = dict(receipt)
+            old_session_id = normalized_receipt.get("old_session_id")
+            if (
+                isinstance(old_session_id, str)
+                and old_session_id
+                and not (
+                    isinstance(normalized_receipt.get("old_bridge_session_id"), str)
+                    and normalized_receipt["old_bridge_session_id"]
+                )
+            ):
+                normalized_receipt["old_bridge_session_id"] = old_session_id
+            new_session_id = normalized_receipt.get("new_session_id")
+            if (
+                isinstance(new_session_id, str)
+                and new_session_id
+                and not (
+                    isinstance(normalized_receipt.get("new_bridge_session_id"), str)
+                    and normalized_receipt["new_bridge_session_id"]
+                )
+            ):
+                normalized_receipt["new_bridge_session_id"] = new_session_id
+            result = dict(result)
+            result["receipt"] = normalized_receipt
+        return result
 
     async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
     async def mob_member_status(self, mob_id: str, meerkat_id: str) -> MobMemberSnapshot:
-        return await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+        result = await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+        current_session_id = result.get("current_session_id")
+        if (
+            isinstance(current_session_id, str)
+            and current_session_id
+            and not (
+                isinstance(result.get("current_bridge_session_id"), str)
+                and result["current_bridge_session_id"]
+            )
+        ):
+            result = dict(result)
+            result["current_bridge_session_id"] = current_session_id
+        return result
 
     async def wait_mob_kickoff(
         self,
@@ -953,7 +1053,25 @@ class MeerkatClient:
             params["timeout_ms"] = timeout_ms
         result = await self._request("mob/wait_kickoff", params)
         members = result.get("members", [])
-        return members if isinstance(members, list) else []
+        if not isinstance(members, list):
+            return []
+        normalized: list[MobKickoffMemberSnapshot] = []
+        for entry in members:
+            if not isinstance(entry, dict):
+                continue
+            member = dict(entry)
+            current_session_id = member.get("current_session_id")
+            if (
+                isinstance(current_session_id, str)
+                and current_session_id
+                and not (
+                    isinstance(member.get("current_bridge_session_id"), str)
+                    and member["current_bridge_session_id"]
+                )
+            ):
+                member["current_bridge_session_id"] = current_session_id
+            normalized.append(member)
+        return normalized
 
     async def spawn_mob_helper(
         self,
@@ -967,7 +1085,7 @@ class MeerkatClient:
         backend: str | None = None,
     ) -> MobHelperResult:
         canonical_role_name = role_name if role_name is not None else profile_name
-        return await self._request("mob/spawn_helper", {
+        result = await self._request("mob/spawn_helper", {
             "mob_id": mob_id,
             "prompt": prompt,
             "meerkat_id": meerkat_id,
@@ -975,6 +1093,18 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
+        session_id = result.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and not (
+                isinstance(result.get("bridge_session_id"), str)
+                and result["bridge_session_id"]
+            )
+        ):
+            result = dict(result)
+            result["bridge_session_id"] = session_id
+        return result
 
     async def fork_mob_helper(
         self,
@@ -990,7 +1120,7 @@ class MeerkatClient:
         backend: str | None = None,
     ) -> MobHelperResult:
         canonical_role_name = role_name if role_name is not None else profile_name
-        return await self._request("mob/fork_helper", {
+        result = await self._request("mob/fork_helper", {
             "mob_id": mob_id,
             "source_member_id": source_member_id,
             "prompt": prompt,
@@ -1000,6 +1130,18 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
+        session_id = result.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and not (
+                isinstance(result.get("bridge_session_id"), str)
+                and result["bridge_session_id"]
+            )
+        ):
+            result = dict(result)
+            result["bridge_session_id"] = session_id
+        return result
 
     async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
         return await self._request("mob/profile/create", {"name": name, "profile": profile})
@@ -1068,13 +1210,25 @@ class MeerkatClient:
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        return await self._request("mob/append_system_context", {
+        result = await self._request("mob/append_system_context", {
             "mob_id": mob_id,
             "meerkat_id": meerkat_id,
             "text": text,
             "source": source,
             "idempotency_key": idempotency_key,
         })
+        session_id = result.get("session_id")
+        if (
+            isinstance(session_id, str)
+            and session_id
+            and not (
+                isinstance(result.get("bridge_session_id"), str)
+                and result["bridge_session_id"]
+            )
+        ):
+            result = dict(result)
+            result["bridge_session_id"] = session_id
+        return result
 
     async def list_mob_flows(self, mob_id: str) -> list[str]:
         result = await self._request("mob/flows", {"mob_id": mob_id})

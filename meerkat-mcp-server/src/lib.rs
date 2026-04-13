@@ -1873,7 +1873,7 @@ async fn handle_meerkat_archive(
     #[cfg(feature = "mob")]
     let _ = state
         .mob_state
-        .destroy_session_mobs(&session_id.to_string())
+        .destroy_bridge_session_mobs(&session_id.to_string())
         .await;
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),

@@ -1486,6 +1486,7 @@ async fn mob_spawn_helper(
         "output": result.output,
         "tokens_used": result.tokens_used,
         "session_id": result.session_id,
+        "bridge_session_id": result.bridge_session_id,
     })))
 }
 
@@ -1577,6 +1578,7 @@ async fn mob_fork_helper(
         "output": result.output,
         "tokens_used": result.tokens_used,
         "session_id": result.session_id,
+        "bridge_session_id": result.bridge_session_id,
     })))
 }
 
@@ -3007,7 +3009,7 @@ async fn archive_session(
             #[cfg(feature = "mob")]
             let _ = state
                 .mob_state
-                .destroy_session_mobs(&session_id.to_string())
+                .destroy_bridge_session_mobs(&session_id.to_string())
                 .await;
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
@@ -5316,7 +5318,7 @@ mod tests {
             .await
             .unwrap();
         let definition = meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n",
+            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
         )
         .expect("minimal mob definition");
         let mob_id = state
@@ -5357,7 +5359,7 @@ mod tests {
             .await
             .unwrap();
         let definition = meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n",
+            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\ncomms = true\n",
         )
         .expect("minimal mob definition");
         let mob_id = state
@@ -5387,6 +5389,56 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0]["meerkat_id"], "lead-filter");
         assert_eq!(members[0]["status"], "unknown");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_spawn_helper_route_returns_additive_bridge_session_id() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n\n[profiles.worker.tools]\nbuiltins = true\ncomms = true\n",
+        )
+        .expect("minimal mob definition");
+        let mob_id = state
+            .mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("create mob");
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/spawn-helper"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "prompt": "Hello from helper",
+                    "meerkat_id": "helper-rest",
+                    "role_name": "worker",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "spawn helper route failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload["session_id"].is_string());
+        assert_eq!(payload["bridge_session_id"], payload["session_id"]);
     }
 
     // -----------------------------------------------------------------------

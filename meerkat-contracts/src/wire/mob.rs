@@ -383,9 +383,9 @@ const fn default_event_router_buffer_size() -> usize {
 /// Public mob definition input for `mob/create`.
 ///
 /// This mirrors the public creation contract shape. Runtime-owned lifecycle and
-/// bookkeeping fields such as `owner_session_id`, `session_cleanup_policy`,
-/// `is_implicit`, and internal-only profile tool bundles are intentionally not
-/// part of this schema.
+/// bookkeeping fields such as `owner_session_id`, `owner_bridge_session_id`,
+/// `session_cleanup_policy`, `is_implicit`, and internal-only profile tool
+/// bundles are intentionally not part of this schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -505,6 +505,8 @@ pub struct MobMemberSendResult {
     pub member_id: String,
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub session_id: SessionId,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub bridge_session_id: SessionId,
     pub handling_mode: WireHandlingMode,
 }
 
@@ -686,6 +688,26 @@ mod tests {
 
         assert!(
             err.to_string().contains("unknown field `owner_session_id`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mob_create_params_reject_reserved_runtime_bridge_owner_field() {
+        let err = serde_json::from_value::<MobCreateParams>(serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "owner_bridge_session_id": "session-123",
+                "profiles": {
+                    "worker": { "model": "claude-sonnet-4-6" }
+                }
+            }
+        }))
+        .expect_err("reserved runtime bridge owner field must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("unknown field `owner_bridge_session_id`"),
             "unexpected error: {err}"
         );
     }

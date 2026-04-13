@@ -220,7 +220,7 @@ mod tests {
             entry: RosterEntry {
                 meerkat_id: MeerkatId::from("test-member"),
                 profile: ProfileName::from("worker"),
-                member_ref: MemberRef::from_session_id(SessionId::new()),
+                member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,
                 state: MemberState::Retiring,

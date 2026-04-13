@@ -40,13 +40,16 @@ export interface MemberSendOptions {
 export interface MemberDeliveryReceipt {
   memberId: string;
   sessionId: string;
+  bridgeSessionId?: string;
   handlingMode: MobHandlingMode;
 }
 
 export interface MemberRespawnReceipt {
   memberId: string;
   oldSessionId?: string;
+  oldBridgeSessionId?: string;
   newSessionId?: string;
+  newBridgeSessionId?: string;
 }
 
 export interface MobRespawnResult {
@@ -62,6 +65,7 @@ export interface MobMemberSnapshot {
   tokensUsed: number;
   isFinal: boolean;
   currentSessionId?: string;
+  currentBridgeSessionId?: string;
   peerConnectivity?: {
     reachablePeerCount: number;
     unknownPeerCount: number;
@@ -95,6 +99,7 @@ export interface MobHelperResult {
   output?: string;
   tokensUsed: number;
   sessionId?: string;
+  bridgeSessionId?: string;
 }
 
 export class Member {

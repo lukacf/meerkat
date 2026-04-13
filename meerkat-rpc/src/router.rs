@@ -566,8 +566,11 @@ impl MethodRouter {
     // freshest lifecycle state instead of routing off a cached snapshot.
     async fn resolve_session_owner(&self, session_id: &SessionId) -> Option<SessionOwner> {
         #[cfg(feature = "mob")]
-        if self.mob_state.owns_live_session(session_id).await
-            || self.mob_state.owns_persisted_session(session_id).await
+        if self.mob_state.owns_live_bridge_session(session_id).await
+            || self
+                .mob_state
+                .owns_persisted_bridge_session(session_id)
+                .await
         {
             return Some(SessionOwner::Mob);
         }
@@ -1168,7 +1171,7 @@ impl MethodRouter {
                     #[cfg(feature = "mob")]
                     let _ = self
                         .mob_state
-                        .destroy_session_mobs(&session_id.to_string())
+                        .destroy_bridge_session_mobs(&session_id.to_string())
                         .await;
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))
@@ -1178,7 +1181,7 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             Some(SessionOwner::Mob) => match self
                 .mob_state
-                .retire_member_by_session_id(&session_id)
+                .retire_member_by_bridge_session_id(&session_id)
                 .await
             {
                 Ok(()) => RpcResponse::success(id, json!({"archived": true})),
@@ -1830,7 +1833,7 @@ impl MethodRouter {
             );
         } else {
             // Mob-wide stream: subscribe to all members' events (attributed).
-            let mut router_handle = handle.subscribe_mob_events();
+            let mut router_handle = handle.subscribe_mob_events().await;
 
             let task = tokio::spawn(async move {
                 let mut stop_rx = stop_rx;

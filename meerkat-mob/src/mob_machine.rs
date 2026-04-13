@@ -12,9 +12,13 @@ use crate::runtime::{
     MobHandle, MobKernelDiagnosticSnapshot, MobMemberListEntry, MobMemberStatus,
     MobOrchestratorSnapshot, MobState,
 };
+use crate::tasks::MobTask;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_runtime::{MeerkatMachineSpineSnapshot, RuntimeState};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// Joined diagnostic view over the current mob lifecycle state plus the live
 /// roster and member-status projection.
@@ -144,6 +148,154 @@ pub(crate) struct TwoKernelShadowReportSessionSummary {
     pub meerkat_bucket_count: u64,
     pub mob_bucket_count: u64,
     pub seam_bucket_count: u64,
+}
+
+/// Public Mob mutations now route through a single top-level machine command
+/// surface instead of each `MobHandle` method hand-sending actor commands.
+pub(crate) enum MobMachineCommand {
+    RunFlow {
+        flow_id: FlowId,
+        activation_params: serde_json::Value,
+        scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+    },
+    CancelFlow {
+        run_id: RunId,
+    },
+    FlowStatus {
+        run_id: RunId,
+    },
+    Spawn {
+        spec: Box<crate::runtime::SpawnMemberSpec>,
+        owner_context: Option<crate::runtime::CanonicalOpsOwnerContext>,
+    },
+    Retire {
+        meerkat_id: MeerkatId,
+    },
+    Respawn {
+        meerkat_id: MeerkatId,
+        initial_message: Option<meerkat_core::types::ContentInput>,
+    },
+    RetireAll,
+    Wire {
+        local: MeerkatId,
+        target: crate::PeerTarget,
+    },
+    Unwire {
+        local: MeerkatId,
+        target: crate::PeerTarget,
+    },
+    ExternalTurn {
+        meerkat_id: MeerkatId,
+        content: meerkat_core::types::ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    },
+    InternalTurn {
+        meerkat_id: MeerkatId,
+        content: meerkat_core::types::ContentInput,
+    },
+    Stop,
+    Resume,
+    Complete,
+    Reset,
+    Destroy,
+    TaskCreate {
+        subject: String,
+        description: String,
+        blocked_by: Vec<crate::ids::TaskId>,
+    },
+    TaskUpdate {
+        task_id: crate::ids::TaskId,
+        status: crate::tasks::TaskStatus,
+        owner: Option<MeerkatId>,
+    },
+    TaskList,
+    TaskGet {
+        task_id: crate::ids::TaskId,
+    },
+    McpServerStates,
+    RosterSnapshot,
+    ListMembers,
+    ListMembersIncludingRetiring,
+    ListAllMembers,
+    MemberStatus {
+        meerkat_id: MeerkatId,
+    },
+    SubscribeAgentEvents {
+        meerkat_id: MeerkatId,
+    },
+    SubscribeAllAgentEvents,
+    SubscribeMobEvents {
+        config: crate::runtime::MobEventRouterConfig,
+    },
+    PollEvents {
+        after_cursor: u64,
+        limit: usize,
+    },
+    ReplayAllEvents,
+    RecordOperatorActionProvenance {
+        tool_name: String,
+        authority_context: meerkat_core::service::MobToolAuthorityContext,
+    },
+    RestoreFailuresSnapshot,
+    DiagnosticRuntimeAdapter,
+    DiagnosticHasLiveSession {
+        bridge_session_id: meerkat_core::types::SessionId,
+    },
+    DiagnosticMeerkatShadowInputs {
+        bridge_session_id: meerkat_core::types::SessionId,
+    },
+    GetMember {
+        meerkat_id: MeerkatId,
+    },
+    #[cfg(test)]
+    FlowTrackerCounts,
+    OrchestratorSnapshot,
+    DiagnosticKernelSnapshot,
+    KickoffBarrierSnapshot {
+        meerkat_ids: Vec<MeerkatId>,
+    },
+    SetSpawnPolicy {
+        policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
+    },
+    Shutdown,
+    ForceCancel {
+        meerkat_id: MeerkatId,
+    },
+}
+
+pub(crate) enum MobMachineCommandResult {
+    Unit,
+    RunId(RunId),
+    FlowStatus(Option<MobRun>),
+    SpawnReceipt(crate::runtime::MemberSpawnReceipt),
+    Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),
+    BridgeSessionId(meerkat_core::types::SessionId),
+    TaskId(crate::ids::TaskId),
+    TaskList(Vec<MobTask>),
+    TaskGet(Option<MobTask>),
+    McpServerStates(BTreeMap<String, bool>),
+    RosterSnapshot(Roster),
+    ListMembers(Vec<MobMemberListEntry>),
+    ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
+    ListAllMembers(Vec<RosterEntry>),
+    MemberStatus(crate::runtime::MobMemberSnapshot),
+    EventStream(meerkat_core::EventStream),
+    AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
+    MobEventRouter(crate::runtime::MobEventRouterHandle),
+    MobEvents(Vec<crate::event::MobEvent>),
+    RestoreFailuresSnapshot(BTreeMap<MeerkatId, crate::runtime::RestoreFailureDiagnostic>),
+    DiagnosticRuntimeAdapter(Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>),
+    DiagnosticHasLiveSession(bool),
+    DiagnosticMeerkatShadowInputs(
+        Result<crate::runtime::MeerkatShadowInputsSnapshot, meerkat_core::service::SessionError>,
+    ),
+    GetMember(Option<RosterEntry>),
+    #[cfg(test)]
+    FlowTrackerCounts((usize, usize)),
+    OrchestratorSnapshot(crate::runtime::MobOrchestratorSnapshot),
+    DiagnosticKernelSnapshot(crate::runtime::MobKernelDiagnosticSnapshot),
+    KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
 }
 
 fn shadow_mismatch_triage_label(triage: ShadowMismatchTriage) -> &'static str {
@@ -371,6 +523,7 @@ pub(crate) fn summarize_mob_shadow_taxonomy_reports(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RestoreFailureSnapshot {
     pub session_id: meerkat_core::types::SessionId,
+    pub bridge_session_id: meerkat_core::types::SessionId,
     pub reason: String,
 }
 
@@ -748,7 +901,8 @@ pub(crate) async fn capture_mob_machine_snapshot(handle: &MobHandle) -> MobMachi
             (
                 meerkat_id.clone(),
                 RestoreFailureSnapshot {
-                    session_id: diag.session_id.clone(),
+                    session_id: diag.bridge_session_id.clone(),
+                    bridge_session_id: diag.bridge_session_id.clone(),
                     reason: diag.reason.clone(),
                 },
             )
@@ -896,7 +1050,7 @@ pub(crate) fn validate_mob_machine_snapshot(
                 });
             }
             MobMemberStatus::Active => {
-                if projected.current_session_id.is_none() {
+                if projected.current_bridge_session_id().is_none() {
                     violations.push(
                         MobMachineInvariantViolation::ActiveMemberMissingSessionBinding {
                             meerkat_id: projected.meerkat_id.clone(),
@@ -1852,7 +2006,7 @@ fn capture_composition_work_bridge_shadow_mismatches(
     let mut work_visible_members = Vec::new();
 
     for member in &snapshot.members {
-        let Some(session_id) = &member.current_session_id else {
+        let Some(session_id) = member.current_bridge_session_id() else {
             continue;
         };
         let Some(spine) = runtime_spines
@@ -1915,7 +2069,7 @@ fn capture_composition_lifecycle_supersession_shadow_mismatches(
         HashMap::new();
 
     for member in &snapshot.members {
-        if let Some(session_id) = &member.current_session_id {
+        if let Some(session_id) = member.current_bridge_session_id() {
             session_owners
                 .entry(session_id.clone())
                 .or_default()
@@ -1936,7 +2090,7 @@ fn capture_composition_lifecycle_supersession_shadow_mismatches(
     }
 
     for member in &snapshot.members {
-        let Some(session_id) = &member.current_session_id else {
+        let Some(session_id) = member.current_bridge_session_id() else {
             if member.state == MemberState::Active && member.status == MobMemberStatus::Active {
                 mismatches.push(composition_lifecycle_supersession_mismatch(
                     "lifecycle",
@@ -1949,14 +2103,14 @@ fn capture_composition_lifecycle_supersession_shadow_mismatches(
             continue;
         };
 
-        if member.member_ref.session_id() != Some(session_id) {
+        if member.member_ref.bridge_session_id() != Some(session_id) {
             mismatches.push(composition_lifecycle_supersession_mismatch(
                 "supersession",
                 Some(member.meerkat_id.to_string()),
                 "projected bridge session should match canonical roster member_ref",
                 format!(
-                    "member_ref session {:?} != projected current_session_id {}",
-                    member.member_ref.session_id(),
+                    "member_ref session {:?} != projected current_bridge_session_id {}",
+                    member.member_ref.bridge_session_id(),
                     session_id
                 ),
                 ShadowMismatchTriage::DogmaViolation,
@@ -2004,7 +2158,7 @@ fn capture_composition_lifecycle_supersession_shadow_mismatches(
                         Some(member.meerkat_id.to_string()),
                         "runtime snapshot should be keyed by the projected bridge session",
                         format!(
-                            "runtime snapshot session {} != projected current_session_id {}",
+                            "runtime snapshot session {} != projected current_bridge_session_id {}",
                             spine.binding.session_id, session_id
                         ),
                         ShadowMismatchTriage::DogmaViolation,
@@ -2038,11 +2192,11 @@ pub(crate) async fn capture_composition_shadow_report(
     let session_ids: Vec<_> = snapshot
         .members
         .iter()
-        .filter_map(|member| member.current_session_id.clone())
+        .filter_map(|member| member.current_bridge_session_id().cloned())
         .collect();
     let mut session_live = HashMap::new();
     let mut runtime_spines = HashMap::new();
-    let runtime_adapter = handle.diagnostic_runtime_adapter();
+    let runtime_adapter = handle.diagnostic_runtime_adapter().await;
     for session_id in session_ids {
         let live = handle.diagnostic_has_live_session(&session_id).await;
         session_live.insert(session_id.clone(), live);
@@ -2269,7 +2423,7 @@ fn push_kickoff_barrier_mismatches(
             continue;
         };
 
-        if projected.current_session_id.is_none() {
+        if projected.current_bridge_session_id().is_none() {
             violations.push(
                 MobMachineInvariantViolation::KickoffPendingMemberMissingSessionBinding {
                     meerkat_id: meerkat_id.clone(),
@@ -2731,7 +2885,7 @@ fn push_restore_failure_mismatches(
                 },
             );
         }
-        if projected.current_session_id.as_ref() != Some(&failure.session_id) {
+        if projected.current_bridge_session_id() != Some(&failure.bridge_session_id) {
             violations.push(
                 MobMachineInvariantViolation::RestoreFailureProjectedSessionMismatch {
                     meerkat_id: meerkat_id.clone(),
@@ -2817,10 +2971,10 @@ fn push_structural_mismatches(
             field: "labels",
         });
     }
-    if projected.current_session_id != roster_entry.member_ref.session_id().cloned() {
+    if projected.current_bridge_session_id() != roster_entry.member_ref.bridge_session_id() {
         violations.push(MobMachineInvariantViolation::ProjectedStructuralMismatch {
             meerkat_id,
-            field: "current_session_id",
+            field: "current_bridge_session_id",
         });
     }
 }
@@ -2867,7 +3021,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             effective_profile_override: None,
             runtime_mode: MobRuntimeMode::AutonomousHost,
-            member_ref: MemberRef::from_session_id(session_id.clone()),
+            member_ref: MemberRef::from_bridge_session_id(session_id.clone()),
             peer_id: Some(format!("peer-{name}")),
             labels: Default::default(),
         });
@@ -2880,7 +3034,7 @@ mod tests {
             .get(&MeerkatId::from(name))
             .expect("roster entry must exist")
             .clone();
-        let current_session_id = entry.member_ref.session_id().cloned();
+        let current_bridge_session_id = entry.member_ref.bridge_session_id().cloned();
         MobMemberListEntry {
             meerkat_id: entry.meerkat_id,
             profile: entry.profile,
@@ -2894,9 +3048,11 @@ mod tests {
             status: MobMemberStatus::Active,
             error: None,
             is_final: false,
-            current_session_id,
+            current_session_id: None,
+            current_bridge_session_id: None,
             kickoff: entry.kickoff,
         }
+        .with_current_bridge_session_id(current_bridge_session_id)
     }
 
     fn active_meerkat_spine(
@@ -2973,6 +3129,7 @@ mod tests {
         let mut projected = projected_entry(&roster, "worker-1");
         projected.status = MobMemberStatus::Retiring;
         projected.current_session_id = None;
+        projected.current_bridge_session_id = None;
         projected.is_final = true;
         projected.profile = ProfileName::from("lead");
 
@@ -3045,6 +3202,7 @@ mod tests {
                 MeerkatId::from("worker-1"),
                 RestoreFailureSnapshot {
                     session_id: worker_sid.clone(),
+                    bridge_session_id: worker_sid.clone(),
                     reason: "restore failed".into(),
                 },
             )]),
@@ -3095,7 +3253,7 @@ mod tests {
         assert!(violations.iter().any(|violation| matches!(
             violation,
             MobMachineInvariantViolation::ProjectedStructuralMismatch { meerkat_id, field }
-                if meerkat_id == &MeerkatId::from("worker-1") && *field == "current_session_id"
+                if meerkat_id == &MeerkatId::from("worker-1") && *field == "current_bridge_session_id"
         )));
         assert!(violations.iter().any(|violation| matches!(
             violation,
@@ -3261,7 +3419,7 @@ mod tests {
             snapshot
                 .roster
                 .get(&MeerkatId::from("worker-1"))
-                .and_then(|entry| entry.member_ref.session_id()),
+                .and_then(|entry| entry.member_ref.bridge_session_id()),
             Some(&worker_sid)
         );
     }
@@ -3273,6 +3431,7 @@ mod tests {
         let mut projected = projected_entry(&roster, "worker-broken");
         projected.status = MobMemberStatus::Retiring;
         projected.current_session_id = None;
+        projected.current_bridge_session_id = None;
 
         let mut kernel = valid_kernel_snapshot();
         kernel.lifecycle.phase = MobState::Completed;
@@ -3295,6 +3454,7 @@ mod tests {
             restore_failures: BTreeMap::from([(
                 MeerkatId::from("worker-broken"),
                 RestoreFailureSnapshot {
+                    bridge_session_id: worker_sid.clone(),
                     session_id: worker_sid,
                     reason: "restore failed".into(),
                 },
@@ -3450,6 +3610,7 @@ mod tests {
         broken_projected.error = Some("projected reason".into());
         broken_projected.is_final = true;
         broken_projected.current_session_id = Some(meerkat_core::types::SessionId::new());
+        broken_projected.current_bridge_session_id = Some(meerkat_core::types::SessionId::new());
 
         let flow_run_id = RunId::new();
         let snapshot = MobMachineSnapshot {
@@ -3468,6 +3629,7 @@ mod tests {
             restore_failures: BTreeMap::from([(
                 MeerkatId::from("worker-broken"),
                 RestoreFailureSnapshot {
+                    bridge_session_id: broken_sid.clone(),
                     session_id: broken_sid,
                     reason: "restore failed".into(),
                 },
@@ -3548,6 +3710,7 @@ mod tests {
         let projected = projected_entry(&roster, "worker-1");
         let mut duplicate = projected_entry(&roster, "worker-2");
         duplicate.current_session_id = Some(worker_sid.clone());
+        duplicate.current_bridge_session_id = Some(worker_sid.clone());
 
         let snapshot = MobMachineSnapshot {
             phase: MobState::Running,
@@ -3814,7 +3977,8 @@ mod tests {
         projected.status = MobMemberStatus::Broken;
         projected.error = Some("restore failed".into());
         projected.is_final = true;
-        projected.current_session_id = Some(session_id);
+        projected.current_session_id = Some(session_id.clone());
+        projected.current_bridge_session_id = Some(session_id);
 
         let snapshot = MobMachineSnapshot {
             phase: MobState::Running,
@@ -3844,10 +4008,12 @@ mod tests {
         broken_projected.status = MobMemberStatus::Broken;
         broken_projected.error = Some("restore failed".into());
         broken_projected.is_final = true;
-        broken_projected.current_session_id = Some(broken_session_id);
+        broken_projected.current_session_id = Some(broken_session_id.clone());
+        broken_projected.current_bridge_session_id = Some(broken_session_id);
 
         let mut no_session_projected = projected_entry(&roster, "worker-no-session");
         no_session_projected.current_session_id = None;
+        no_session_projected.current_bridge_session_id = None;
 
         let mut kernel = valid_kernel_snapshot();
         kernel

@@ -19,14 +19,30 @@ pub enum MemberLaunchMode {
     /// Start with a brand-new session (default).
     #[default]
     Fresh,
-    /// Resume an existing session by ID.
-    Resume { session_id: SessionId },
+    /// Resume an existing bridge session binding by ID.
+    Resume {
+        #[serde(alias = "session_id")]
+        bridge_session_id: SessionId,
+    },
     /// Fork from another member's conversation history.
     Fork {
         source_member_id: MeerkatId,
         #[serde(default)]
         fork_context: ForkContext,
     },
+}
+
+impl MemberLaunchMode {
+    pub fn resume_bridge_session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::Resume { bridge_session_id } => Some(bridge_session_id),
+            _ => None,
+        }
+    }
+
+    pub fn resume_session_id(&self) -> Option<&SessionId> {
+        self.resume_bridge_session_id()
+    }
 }
 
 /// Controls how much conversation history is included when forking.
@@ -55,4 +71,35 @@ pub enum BudgetSplitPolicy {
     Remaining,
     /// Fixed token budget for the new member.
     Fixed(u64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_launch_mode_bridge_session_accessors_stay_additive() {
+        let sid = SessionId::new();
+        let mode = MemberLaunchMode::Resume {
+            bridge_session_id: sid.clone(),
+        };
+
+        assert_eq!(mode.resume_bridge_session_id(), Some(&sid));
+        assert_eq!(mode.resume_session_id(), Some(&sid));
+    }
+
+    #[test]
+    fn resume_launch_mode_deserializes_bridge_session_id_alias() {
+        let sid = SessionId::new();
+        let payload = serde_json::json!({
+            "mode": "resume",
+            "bridge_session_id": sid,
+        });
+
+        let mode: MemberLaunchMode =
+            serde_json::from_value(payload).expect("resume launch mode should deserialize");
+
+        assert_eq!(mode.resume_bridge_session_id(), Some(&sid));
+        assert_eq!(mode.resume_session_id(), Some(&sid));
+    }
 }

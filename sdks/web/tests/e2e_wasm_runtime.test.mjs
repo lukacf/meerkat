@@ -444,7 +444,15 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify([]);
     },
     async mob_spawn() {
-      return JSON.stringify([]);
+      return JSON.stringify([
+        {
+          status: "ok",
+          member_ref: {
+            kind: "session",
+            session_id: "spawn-session-1",
+          },
+        },
+      ]);
     },
     async mob_retire(mobId, meerkatId) {
       calls.push(["retire", mobId, meerkatId]);
@@ -462,13 +470,24 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       calls.push(["unwire_target", mobId, member, JSON.parse(targetJson)]);
     },
     async mob_list_members() {
-      return JSON.stringify([]);
+      return JSON.stringify([
+        {
+          meerkat_id: "worker-1",
+          profile: "worker",
+          member_ref: {
+            kind: "session",
+            session_id: "listed-session-1",
+          },
+          current_session_id: "listed-current-session-1",
+        },
+      ]);
     },
     async mob_append_system_context(_mobId, meerkatId) {
       return JSON.stringify({
         mob_id: "mob-web-parity",
         meerkat_id: meerkatId,
         session_id: "sess-ctx",
+        bridge_session_id: "bridge-ctx",
         status: "staged",
       });
     },
@@ -477,6 +496,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({
         member_id: meerkatId,
         session_id: "sess-send",
+        bridge_session_id: "bridge-send",
         handling_mode: "queue",
       });
     },
@@ -486,6 +506,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         tokens_used: 7,
         is_final: false,
         current_session_id: `${meerkatId}-session`,
+        current_bridge_session_id: `${meerkatId}-bridge-session`,
       });
     },
     async mob_respawn(_mobId, meerkatId) {
@@ -494,7 +515,9 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         receipt: {
           member_id: meerkatId,
           old_session_id: "sess-old",
+          old_bridge_session_id: "bridge-old",
           new_session_id: "sess-new",
+          new_bridge_session_id: "bridge-new",
         },
       });
     },
@@ -507,6 +530,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         output: "helper complete",
         tokens_used: 11,
         session_id: "sess-helper",
+        bridge_session_id: "bridge-helper",
       });
     },
     async mob_fork_helper(mobId, requestJson) {
@@ -515,6 +539,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         output: "fork complete",
         tokens_used: 13,
         session_id: "sess-fork",
+        bridge_session_id: "bridge-fork",
       });
     },
     async mob_run_flow() {
@@ -554,11 +579,42 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       },
     });
 
+    const spawned = await mob.spawn([
+      {
+        profile: "worker",
+        meerkat_id: "worker-1",
+      },
+    ]);
+    assert.equal(spawned[0].member_ref.session_id, "spawn-session-1");
+    assert.equal(spawned[0].member_ref.bridge_session_id, "spawn-session-1");
+
+    const listed = await mob.listMembers();
+    assert.equal(listed[0].member_ref.session_id, "listed-session-1");
+    assert.equal(listed[0].member_ref.bridge_session_id, "listed-session-1");
+    assert.equal(listed[0].current_session_id, "listed-current-session-1");
+    assert.equal(listed[0].current_bridge_session_id, "listed-current-session-1");
+
     const receipt = await mob.member("worker-1").send("hello");
     assert.equal(receipt.session_id, "sess-send");
+    assert.equal(receipt.bridge_session_id, "bridge-send");
 
     const snapshot = await mob.memberStatus("worker-1");
     assert.equal(snapshot.current_session_id, "worker-1-session");
+    assert.equal(snapshot.current_bridge_session_id, "worker-1-bridge-session");
+
+    const appended = await mob.appendSystemContext("worker-1", {
+      text: "Remember [BRIDGE-CTX].",
+      source: "web-parity",
+      idempotencyKey: "bridge-ctx",
+    });
+    assert.equal(appended.session_id, "sess-ctx");
+    assert.equal(appended.bridge_session_id, "bridge-ctx");
+
+    const respawn = await mob.respawn("worker-1");
+    assert.equal(respawn.receipt.old_session_id, "sess-old");
+    assert.equal(respawn.receipt.old_bridge_session_id, "bridge-old");
+    assert.equal(respawn.receipt.new_session_id, "sess-new");
+    assert.equal(respawn.receipt.new_bridge_session_id, "bridge-new");
 
     await mob.forceCancel("worker-1");
 
@@ -567,6 +623,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       profileName: "worker",
     });
     assert.equal(helper.session_id, "sess-helper");
+    assert.equal(helper.bridge_session_id, "bridge-helper");
 
     const fork = await mob.forkHelper("worker-1", "Review the draft.", {
       meerkatId: "fork-1",
@@ -574,6 +631,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       forkContext: { mode: "full_history" },
     });
     assert.equal(fork.session_id, "sess-fork");
+    assert.equal(fork.bridge_session_id, "bridge-fork");
 
     assert.deepEqual(
       calls.filter(([name]) =>

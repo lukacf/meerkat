@@ -474,6 +474,7 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
         spawn_policy: None,
         event_router: None,
         owner_session_id: None,
+        owner_bridge_session_id: None,
         session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
         is_implicit: false,
     }

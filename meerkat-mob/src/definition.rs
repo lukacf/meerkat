@@ -316,10 +316,10 @@ fn default_event_router_buffer_size() -> usize {
     256
 }
 
-/// Canonical cleanup semantics for mobs indexed to an owning session.
+/// Canonical cleanup semantics for mobs indexed to an owning bridge session.
 ///
-/// `owner_session_id` remains lookup/indexing metadata only. Cleanup eligibility
-/// is owned exclusively by this policy.
+/// `owner_session_id` / `owner_bridge_session_id` remain lookup/indexing
+/// metadata only. Cleanup eligibility is owned exclusively by this policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCleanupPolicy {
@@ -383,10 +383,19 @@ pub struct MobDefinition {
     /// Optional declarative event router configuration.
     #[serde(default)]
     pub event_router: Option<EventRouterConfig>,
-    /// If set, this mob is indexed to the given session.
-    /// Used for lookup, resume plumbing, and host-side bookkeeping only.
+    /// Compatibility owner session index for older payloads and lookups.
+    ///
+    /// The identity-first canonical owner binding is `owner_bridge_session_id`.
+    /// This field remains additive compatibility metadata only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Canonical identity-first owner bridge session binding for lookup/indexing.
+    ///
+    /// This is the primary semantic owner-binding field. Older payloads may
+    /// still populate only `owner_session_id`; bridge-aware helpers continue to
+    /// fall back to that compatibility field when needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_bridge_session_id: Option<String>,
     /// Canonical cleanup policy for session-indexed mobs.
     #[serde(default, skip_serializing_if = "SessionCleanupPolicy::is_manual")]
     pub session_cleanup_policy: SessionCleanupPolicy,
@@ -441,14 +450,15 @@ struct TomlDefinition {
 }
 
 impl MobDefinition {
-    /// Create a minimal implicit delegation mob indexed to the given session.
+    /// Create a minimal implicit delegation mob indexed to the given bridge session.
     ///
-    /// The mob is tagged with `owner_session_id` for session-indexed lookup
+    /// The mob is tagged with `owner_bridge_session_id` plus the compatibility
+    /// `owner_session_id` alias for bridge-session-indexed lookup
     /// and marked session-scoped for cleanup. It also has
     /// `auto_wire_orchestrator = true` so spawned members are automatically
     /// wired to the lead agent.
-    pub fn implicit(session_id: &str, model: &str) -> Self {
-        let mob_id = MobId::from(format!("implicit-{session_id}"));
+    pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
+        let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
@@ -486,10 +496,11 @@ impl MobDefinition {
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: true,
         };
-        definition.mark_session_scoped(session_id);
+        definition.mark_owner_bridge_session_indexed(bridge_session_id);
         definition
     }
 
@@ -517,23 +528,76 @@ impl MobDefinition {
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: false,
         })
     }
 
-    pub fn is_owned_by_session(&self, session_id: &str) -> bool {
-        self.owner_session_id.as_deref() == Some(session_id)
+    pub fn owner_bridge_session_index(&self) -> Option<&str> {
+        self.owner_bridge_session_id
+            .as_deref()
+            .or(self.owner_session_id.as_deref())
     }
 
-    pub fn is_session_scoped_to(&self, session_id: &str) -> bool {
-        self.is_owned_by_session(session_id)
+    pub fn has_owner_bridge_session_index(&self, bridge_session_id: &str) -> bool {
+        self.owner_bridge_session_index() == Some(bridge_session_id)
+    }
+
+    pub fn is_indexed_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
+        self.has_owner_bridge_session_index(bridge_session_id)
+    }
+
+    pub fn is_cleanup_scoped_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
+        self.has_owner_bridge_session_index(bridge_session_id)
             && self.session_cleanup_policy == SessionCleanupPolicy::DestroyOnOwnerArchive
     }
 
-    pub fn mark_session_scoped(&mut self, session_id: &str) {
-        self.owner_session_id = Some(session_id.to_string());
+    pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: &str) {
+        let bridge_session_id = bridge_session_id.to_string();
+        self.owner_session_id = Some(bridge_session_id.clone());
+        self.owner_bridge_session_id = Some(bridge_session_id);
         self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
+    }
+
+    pub fn is_owned_by_bridge_session(&self, bridge_session_id: &str) -> bool {
+        self.has_owner_bridge_session_index(bridge_session_id)
+    }
+
+    pub fn is_bridge_session_scoped_to(&self, bridge_session_id: &str) -> bool {
+        self.is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
+    }
+
+    pub fn mark_bridge_session_scoped(&mut self, bridge_session_id: &str) {
+        self.mark_owner_bridge_session_indexed(bridge_session_id);
+    }
+
+    pub fn has_owner_session_index(&self, session_id: &str) -> bool {
+        self.has_owner_bridge_session_index(session_id)
+    }
+
+    pub fn is_indexed_to_owner_session(&self, session_id: &str) -> bool {
+        self.is_indexed_to_owner_bridge_session(session_id)
+    }
+
+    pub fn is_cleanup_scoped_to_owner_session(&self, session_id: &str) -> bool {
+        self.is_cleanup_scoped_to_owner_bridge_session(session_id)
+    }
+
+    pub fn mark_owner_session_indexed(&mut self, session_id: &str) {
+        self.mark_owner_bridge_session_indexed(session_id);
+    }
+
+    pub fn is_owned_by_session(&self, session_id: &str) -> bool {
+        self.is_owned_by_bridge_session(session_id)
+    }
+
+    pub fn is_session_scoped_to(&self, session_id: &str) -> bool {
+        self.is_bridge_session_scoped_to(session_id)
+    }
+
+    pub fn mark_session_scoped(&mut self, session_id: &str) {
+        self.mark_bridge_session_scoped(session_id);
     }
 
     pub fn clear_internal_lifecycle_flags(&mut self) {
@@ -753,6 +817,7 @@ path = "skills/reviewer.md"
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: false,
         };
@@ -781,6 +846,37 @@ id = "minimal"
         assert!(def.topology.is_none());
         assert!(def.supervisor.is_none());
         assert!(def.limits.is_none());
+    }
+
+    #[test]
+    fn test_owner_bridge_session_index_is_additive_and_back_compatible() {
+        let mut def = MobDefinition::implicit("bridge-session", "gpt-5.4");
+        assert_eq!(
+            def.owner_session_id.as_deref(),
+            Some("bridge-session"),
+            "compatibility owner_session_id should still be populated"
+        );
+        assert_eq!(
+            def.owner_bridge_session_id.as_deref(),
+            Some("bridge-session"),
+            "identity-first owner_bridge_session_id should also be populated"
+        );
+        assert!(def.has_owner_bridge_session_index("bridge-session"));
+        assert!(def.is_indexed_to_owner_bridge_session("bridge-session"));
+        assert!(def.is_cleanup_scoped_to_owner_bridge_session("bridge-session"));
+        assert!(def.is_owned_by_bridge_session("bridge-session"));
+        assert!(def.is_bridge_session_scoped_to("bridge-session"));
+        assert!(def.has_owner_session_index("bridge-session"));
+
+        def.owner_bridge_session_id = None;
+        assert!(
+            def.has_owner_bridge_session_index("bridge-session"),
+            "bridge-aware helpers must still honor legacy owner_session_id payloads"
+        );
+        assert!(
+            def.has_owner_session_index("bridge-session"),
+            "legacy owner_session_id should still be honored on older payloads"
+        );
     }
 
     #[test]

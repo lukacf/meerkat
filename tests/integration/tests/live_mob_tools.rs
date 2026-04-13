@@ -286,7 +286,9 @@ async fn e2e_agent_tools_surface_present() {
     .await;
 
     // Assert via authoritative state: delegate was called → implicit mob exists.
-    let implicit = mob_state.find_implicit_mob(&session_id.to_string()).await;
+    let implicit = mob_state
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
+        .await;
     assert!(
         implicit.is_some(),
         "delegate should have created an implicit mob for session {session_id}"
@@ -323,7 +325,7 @@ async fn e2e_delegate_creates_implicit_mob() {
 
     // Assert: implicit mob exists
     let mob_id = mob_state
-        .find_implicit_mob(&session_id.to_string())
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
         .expect("implicit mob should exist after delegate");
 
@@ -346,7 +348,7 @@ async fn e2e_delegate_creates_implicit_mob() {
     // Assert: implicit mob cleaned up
     assert!(
         mob_state
-            .find_implicit_mob(&session_id.to_string())
+            .find_implicit_mob_for_bridge_session(&session_id.to_string())
             .await
             .is_none(),
         "implicit mob should be cleaned up after archive"
@@ -373,7 +375,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     .await;
 
     let mob_id_1 = mob_state
-        .find_implicit_mob(&session_id.to_string())
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
         .expect("implicit mob after first delegate");
 
@@ -387,7 +389,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     .await;
 
     let mob_id_2 = mob_state
-        .find_implicit_mob(&session_id.to_string())
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
         .expect("implicit mob after second delegate");
 
@@ -408,7 +410,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
 
     // Only one mob owned by this session
     let owned = mob_state
-        .find_mobs_for_session(&session_id.to_string())
+        .find_mobs_for_bridge_session(&session_id.to_string())
         .await;
     assert_eq!(
         owned.len(),
@@ -454,7 +456,7 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
 
     // Assert: explicit mob exists and is NOT implicit
     let owned = mob_state
-        .find_mobs_for_session(&session_id.to_string())
+        .find_mobs_for_bridge_session(&session_id.to_string())
         .await;
     assert!(
         !owned.is_empty(),
@@ -587,7 +589,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
     .await;
 
     let a_mobs = mob_state
-        .find_mobs_for_session(&session_a.to_string())
+        .find_mobs_for_bridge_session(&session_a.to_string())
         .await;
     assert_eq!(a_mobs.len(), 1);
     let a_mob_id = a_mobs[0].clone();
@@ -602,7 +604,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
 
     // B should own zero mobs
     let b_mobs = mob_state
-        .find_mobs_for_session(&session_b.to_string())
+        .find_mobs_for_bridge_session(&session_b.to_string())
         .await;
     assert!(b_mobs.is_empty(), "session B should not own any mobs");
 
@@ -674,7 +676,7 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
 
     // Assert: 2 mobs owned by this session
     let owned = mob_state
-        .find_mobs_for_session(&session_id.to_string())
+        .find_mobs_for_bridge_session(&session_id.to_string())
         .await;
     assert_eq!(
         owned.len(),
@@ -688,7 +690,7 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
 
     // Assert: 0 mobs owned
     let owned_after = mob_state
-        .find_mobs_for_session(&session_id.to_string())
+        .find_mobs_for_bridge_session(&session_id.to_string())
         .await;
     assert_eq!(
         owned_after.len(),
@@ -726,7 +728,7 @@ async fn e2e_tool_error_contracts() {
     .await;
 
     let implicit_mob_id = mob_state
-        .find_implicit_mob(&session_id.to_string())
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
         .expect("implicit mob");
 
@@ -774,14 +776,16 @@ async fn e2e_tool_error_contracts() {
 
     // Assert: spoofed mob is owned by the CURRENT session, not the spoofed one
     let owned = mob_state
-        .find_mobs_for_session(&session_id.to_string())
+        .find_mobs_for_bridge_session(&session_id.to_string())
         .await;
     // Should own 2: implicit + the "spoofed" one (which was re-tagged)
     assert!(
         owned.len() >= 2,
         "session should own the spoofed mob (re-tagged to current session)"
     );
-    let spoofed_mobs = mob_state.find_mobs_for_session("spoofed-session-999").await;
+    let spoofed_mobs = mob_state
+        .find_mobs_for_bridge_session("spoofed-session-999")
+        .await;
     assert!(
         spoofed_mobs.is_empty(),
         "no mobs should be owned by the spoofed session"
@@ -825,7 +829,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
     .await;
 
     let mob_id_a = mob_state
-        .find_implicit_mob(&session_id.to_string())
+        .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
         .expect("implicit mob after first delegate");
 
@@ -869,7 +873,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
     //   or explicit ensure_implicit_mob_for_model call
     assert!(
         mob_state
-            .find_implicit_mob(&session_id.to_string())
+            .find_implicit_mob_for_bridge_session(&session_id.to_string())
             .await
             .as_ref()
             == Some(&mob_id_a),
@@ -981,7 +985,10 @@ async fn e2e_delegate_bidirectional_comms() {
     // Wait for the implicit mob to be created (delegate was called).
     let deadline = Instant::now() + Duration::from_secs(120);
     let mob_id = loop {
-        if let Some(id) = mob_state.find_implicit_mob(&session_id.to_string()).await {
+        if let Some(id) = mob_state
+            .find_implicit_mob_for_bridge_session(&session_id.to_string())
+            .await
+        {
             break id;
         }
         assert!(

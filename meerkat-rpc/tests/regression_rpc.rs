@@ -791,11 +791,11 @@ async fn initialize_methods_list_complete() {
     send_request(&mut writer, &req).await;
     let resp = read_response(&mut reader).await;
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
-    let expected_contract_version = ContractVersion::CURRENT.to_string();
+    let expected_version = ContractVersion::CURRENT.to_string();
 
     assert_eq!(
         resp["result"]["contract_version"].as_str(),
-        Some(expected_contract_version.as_str()),
+        Some(expected_version.as_str()),
         "initialize must report the current contract version"
     );
 

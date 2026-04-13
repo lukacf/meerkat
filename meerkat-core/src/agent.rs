@@ -318,11 +318,14 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Bind a session-canonical ops registry into this dispatcher.
     ///
     /// Dispatchers that emit session-visible `AsyncOpRef`s must route those
-    /// operation IDs into the bound registry. Default returns Unsupported.
+    /// operation IDs into the bound registry. Under the identity-first Mob
+    /// regime the owner binding passed here is the canonical bridge session
+    /// binding, even though many compatibility surfaces still spell it
+    /// `session_id`. Default returns Unsupported.
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
-        _owner_session_id: crate::types::SessionId,
+        _owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         Err(OpsLifecycleBindError::Unsupported)
     }
@@ -452,11 +455,13 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
-        owner_session_id: crate::types::SessionId,
+        owner_bridge_session_id: crate::types::SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
         if Arc::strong_count(&owned.inner) == 1 {
-            let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+            let outcome = owned
+                .inner
+                .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
             let bound = outcome.was_bound();
             let d = outcome.into_dispatcher();
             Ok(if bound {

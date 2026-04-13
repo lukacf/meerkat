@@ -85,6 +85,7 @@ impl Pack for ImplementPack {
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             is_implicit: false,
             session_cleanup_policy: SessionCleanupPolicy::Manual,
         }

@@ -23,6 +23,7 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::time_compat::SystemTime;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -171,7 +172,7 @@ pub(super) struct PendingSpawn {
     pub(super) prompt: ContentInput,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
-    pub(super) owner_session_id: Option<SessionId>,
+    pub(super) owner_bridge_session_id: Option<SessionId>,
     pub(super) auto_wire_parent: bool,
     /// Peer wiring to restore after respawn completes.
     pub(super) restore_wiring: Option<RestoreWiringPlan>,
@@ -184,7 +185,7 @@ pub(super) struct PendingSpawn {
 
 #[derive(Debug, Default)]
 pub(super) struct PendingSpawnProgress {
-    pub(super) session_id: Option<meerkat_core::types::SessionId>,
+    pub(super) bridge_session_id: Option<meerkat_core::types::SessionId>,
     pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
 }
 
@@ -198,7 +199,7 @@ struct RespawnSnapshot {
     profile_name: ProfileName,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
-    old_session_id: meerkat_core::types::SessionId,
+    old_bridge_session_id: meerkat_core::types::SessionId,
     restore_wiring: RestoreWiringPlan,
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
@@ -274,7 +275,7 @@ impl MobActor {
         if let Some(diag) = self.restore_failure_for(meerkat_id).await {
             return Err(MobError::MemberRestoreFailed {
                 member_id: meerkat_id.clone(),
-                session_id: diag.session_id,
+                session_id: diag.bridge_session_id,
                 reason: diag.reason,
             });
         }
@@ -289,11 +290,9 @@ impl MobActor {
         MobHandle {
             command_tx: self.command_tx.clone(),
             roster: self.roster.clone(),
-            task_board: self.task_board.clone(),
             definition: self.definition.clone(),
             state: self.state.clone(),
             events: self.events.clone(),
-            mcp_servers: self.mcp_servers.clone(),
             flow_streams: self.flow_streams.clone(),
             session_service: self.session_service.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
@@ -309,7 +308,7 @@ impl MobActor {
         let kickoff = crate::roster::MobMemberKickoffSnapshot {
             phase,
             error,
-            updated_at: std::time::SystemTime::now(),
+            updated_at: SystemTime::now(),
         };
         self.events
             .append(NewMobEvent {
@@ -429,10 +428,12 @@ impl MobActor {
         self.lifecycle_tasks.spawn(async move {
             let result = match runtime_mode {
                 crate::MobRuntimeMode::AutonomousHost => {
-                    let Some(session_id) = member_ref.session_id() else {
+                    let Some(bridge_session_id) = member_ref.bridge_session_id() else {
                         return;
                     };
-                    let Some(injector) = provisioner.interaction_event_injector(session_id).await
+                    let Some(injector) = provisioner
+                        .interaction_event_injector(bridge_session_id)
+                        .await
                     else {
                         return;
                     };
@@ -799,7 +800,7 @@ impl MobActor {
         self.ensure_autonomous_runtime_ready(meerkat_id, member_ref)
             .await?;
 
-        let session_id = member_ref.session_id().ok_or_else(|| {
+        let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
                 "autonomous member '{meerkat_id}' must be session-backed"
             ))
@@ -836,7 +837,7 @@ impl MobActor {
             });
 
             let (_outcome, completion_handle) = adapter
-                .accept_input_with_completion(session_id, input)
+                .accept_input_with_completion(bridge_session_id, input)
                 .await
                 .map_err(|e| {
                     MobError::Internal(format!(
@@ -899,7 +900,7 @@ impl MobActor {
         // (only aborts the drain), so resume just needs to re-spawn the drain.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let session_id = member_ref.session_id().ok_or_else(|| {
+            let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
                 MobError::Internal(format!(
                     "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
                 ))
@@ -908,12 +909,12 @@ impl MobActor {
             if let Some(adapter) = self.runtime_adapter.clone() {
                 let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
                 let spawned = adapter
-                    .maybe_spawn_comms_drain(&session_id, true, comms_runtime)
+                    .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
                     .await;
                 if spawned {
                     tracing::debug!(
                         meerkat_id = %meerkat_id,
-                        session_id = %session_id,
+                        bridge_session_id = %bridge_session_id,
                         "updated peer ingress for autonomous member"
                     );
                 }
@@ -925,9 +926,10 @@ impl MobActor {
     }
 
     async fn teardown_autonomous_runtime(&self, member_ref: &MemberRef) {
-        if let (Some(adapter), Some(session_id)) = (&self.runtime_adapter, member_ref.session_id())
+        if let (Some(adapter), Some(bridge_session_id)) =
+            (&self.runtime_adapter, member_ref.bridge_session_id())
         {
-            adapter.unregister_session(session_id).await;
+            adapter.unregister_session(bridge_session_id).await;
         }
     }
 
@@ -936,13 +938,13 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
-        let session_id = member_ref.session_id().ok_or_else(|| {
+        let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
                 "autonomous member '{meerkat_id}' must be session-backed for injector dispatch"
             ))
         })?;
         if provisioner
-            .interaction_event_injector(session_id)
+            .interaction_event_injector(bridge_session_id)
             .await
             .is_none()
         {
@@ -1039,7 +1041,8 @@ impl MobActor {
             return Err(error);
         }
         // Abort the comms drain but keep the session registered.
-        if let (Some(adapter), Some(session_id)) = (&self.runtime_adapter, member_ref.session_id())
+        if let (Some(adapter), Some(session_id)) =
+            (&self.runtime_adapter, member_ref.bridge_session_id())
         {
             adapter.abort_comms_drain(session_id).await;
         }
@@ -1260,7 +1263,7 @@ impl MobActor {
             match cmd {
                 MobCommand::Spawn {
                     spec,
-                    owner_session_id,
+                    owner_bridge_session_id,
                     ops_registry,
                     reply_tx,
                 } => {
@@ -1269,7 +1272,7 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.enqueue_spawn(*spec, owner_session_id, ops_registry, reply_tx)
+                    self.enqueue_spawn(*spec, owner_bridge_session_id, ops_registry, reply_tx)
                         .await;
                 }
                 MobCommand::SpawnProvisioned {
@@ -1714,6 +1717,160 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::TaskList { reply_tx } => {
+                    let tasks = self.task_board.read().await.list().cloned().collect();
+                    let _ = reply_tx.send(tasks);
+                }
+                MobCommand::TaskGet { task_id, reply_tx } => {
+                    let task = self.task_board.read().await.get(&task_id).cloned();
+                    let _ = reply_tx.send(task);
+                }
+                MobCommand::McpServerStates { reply_tx } => {
+                    let states = self
+                        .mcp_servers
+                        .lock()
+                        .await
+                        .iter()
+                        .map(|(name, entry)| (name.clone(), entry.running))
+                        .collect();
+                    let _ = reply_tx.send(states);
+                }
+                MobCommand::SubscribeAgentEvents {
+                    meerkat_id,
+                    reply_tx,
+                } => {
+                    let result = async {
+                        let session_id = self
+                            .roster
+                            .read()
+                            .await
+                            .entry(&meerkat_id)
+                            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
+                            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                        crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                            self.session_service.as_ref(),
+                            &session_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            MobError::Internal(format!(
+                                "failed to subscribe to agent events for '{meerkat_id}': {e}"
+                            ))
+                        })
+                    }
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::SubscribeAllAgentEvents { reply_tx } => {
+                    let entries: Vec<_> = self
+                        .roster
+                        .read()
+                        .await
+                        .list()
+                        .into_iter()
+                        .filter_map(|entry| {
+                            entry
+                                .member_ref
+                                .bridge_session_id()
+                                .cloned()
+                                .map(|session_id| (entry.meerkat_id.clone(), session_id))
+                        })
+                        .collect();
+                    let mut streams = Vec::with_capacity(entries.len());
+                    for (meerkat_id, session_id) in entries {
+                        if let Ok(stream) =
+                            crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                                self.session_service.as_ref(),
+                                &session_id,
+                            )
+                            .await
+                        {
+                            streams.push((meerkat_id, stream));
+                        }
+                    }
+                    let _ = reply_tx.send(streams);
+                }
+                MobCommand::PollEvents {
+                    after_cursor,
+                    limit,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .events
+                        .poll(after_cursor, limit)
+                        .await
+                        .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ReplayAllEvents { reply_tx } => {
+                    let result = self.events.replay_all().await.map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RecordOperatorActionProvenance {
+                    tool_name,
+                    authority_context,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .events
+                        .append(NewMobEvent {
+                            mob_id: self.definition.id.clone(),
+                            timestamp: None,
+                            kind: MobEventKind::OperatorActionRecorded {
+                                tool_name,
+                                principal_token: authority_context.principal_token().clone(),
+                                caller_provenance: authority_context.caller_provenance().cloned(),
+                                audit_invocation_id: authority_context
+                                    .audit_invocation_id()
+                                    .map(ToOwned::to_owned),
+                            },
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::DiagnosticRuntimeAdapter { reply_tx } => {
+                    let _ = reply_tx.send(self.runtime_adapter.clone());
+                }
+                MobCommand::DiagnosticHasLiveSession {
+                    bridge_session_id,
+                    reply_tx,
+                } => {
+                    let has_live = self
+                        .session_service
+                        .has_live_session(&bridge_session_id)
+                        .await
+                        .unwrap_or(false);
+                    let _ = reply_tx.send(has_live);
+                }
+                MobCommand::DiagnosticMeerkatShadowInputs {
+                    bridge_session_id,
+                    reply_tx,
+                } => {
+                    let result = async {
+                        Ok(super::handle::MeerkatShadowInputsSnapshot {
+                            execution: self
+                                .session_service
+                                .execution_snapshot(&bridge_session_id)
+                                .await?,
+                            tool_scope: self
+                                .session_service
+                                .tool_scope_snapshot(&bridge_session_id)
+                                .await?,
+                            tool_surface: self
+                                .session_service
+                                .external_tool_surface_snapshot(&bridge_session_id)
+                                .await?,
+                            peer_ingress: self
+                                .session_service
+                                .peer_ingress_runtime_snapshot(&bridge_session_id)
+                                .await?,
+                        })
+                    }
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ForceCancel {
                     meerkat_id,
                     reply_tx,
@@ -1823,7 +1980,7 @@ impl MobActor {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             progress
-                .session_id
+                .bridge_session_id
                 .clone()
                 .zip(progress.operation_id.clone())
         };
@@ -1831,7 +1988,7 @@ impl MobActor {
             && let Err(error) = self
                 .provisioner
                 .abort_member_provision(
-                    &MemberRef::from_session_id(session_id),
+                    &MemberRef::from_bridge_session_id(session_id),
                     &operation_id,
                     reason,
                 )
@@ -1888,14 +2045,14 @@ impl MobActor {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     progress
-                        .session_id
+                        .bridge_session_id
                         .clone()
                         .zip(progress.operation_id.clone())
                 };
                 if let Some((session_id, operation_id)) = snapshot
                     && let Err(error) = provisioner
                         .abort_member_provision(
-                            &MemberRef::from_session_id(session_id),
+                            &MemberRef::from_bridge_session_id(session_id),
                             &operation_id,
                             &reason_owned,
                         )
@@ -1939,7 +2096,7 @@ impl MobActor {
     async fn enqueue_spawn(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
-        owner_session_id: Option<SessionId>,
+        owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
@@ -1962,13 +2119,13 @@ impl MobActor {
             override_profile,
         } = spec;
         // Normalize launch-mode resume/fork details for the provisioning path.
-        let (resume_session_id, fork_spec) = match launch_mode {
-            crate::launch::MemberLaunchMode::Fresh => (None, None),
-            crate::launch::MemberLaunchMode::Resume { session_id } => (Some(session_id), None),
+        let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
+        let fork_spec = match launch_mode {
             crate::launch::MemberLaunchMode::Fork {
                 source_member_id,
                 fork_context,
-            } => (None, Some((source_member_id, fork_context))),
+            } => Some((source_member_id, fork_context)),
+            _ => None,
         };
         let prepare_result = async {
             if meerkat_id
@@ -2026,11 +2183,12 @@ impl MobActor {
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
 
-            // ---------- Resume session fast-path ----------
-            // When resume_session_id is set, skip provisioning and go straight
-            // to finalization. The session must already exist and be usable.
-            if let Some(resume_id) = resume_session_id {
-                let member_ref = MemberRef::from_session_id(resume_id.clone());
+            // ---------- Resume bridge-session fast-path ----------
+            // When resume_bridge_session_id is set, skip provisioning and go
+            // straight to finalization. The bridge session must already exist
+            // and be usable.
+            if let Some(resume_id) = resume_bridge_session_id {
+                let member_ref = MemberRef::from_bridge_session_id(resume_id.clone());
 
                 // Validate the session exists and is active.
                 let is_active = self
@@ -2039,7 +2197,7 @@ impl MobActor {
                     .await
                     .map_err(|e| {
                         MobError::Internal(format!(
-                            "resume session check failed for '{meerkat_id}': {e}"
+                            "resume bridge session check failed for '{meerkat_id}': {e}"
                         ))
                     })?;
                 if is_active.unwrap_or(false) {
@@ -2080,7 +2238,7 @@ impl MobActor {
                         resolved_labels,
                         Some(member_ref),
                         None,
-                        owner_session_id.clone(),
+                        owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
                     ));
@@ -2142,7 +2300,7 @@ impl MobActor {
                         create_session: req,
                         binding: selected_binding,
                         peer_name,
-                        owner_session_id: owner_session_id.clone(),
+                        owner_bridge_session_id: owner_bridge_session_id.clone(),
                         ops_registry: ops_registry.clone(),
                     };
                     let resolved_labels = labels.unwrap_or_default();
@@ -2154,7 +2312,7 @@ impl MobActor {
                         resolved_labels,
                         None::<MemberRef>,
                         Some(provision_request),
-                        owner_session_id.clone(),
+                        owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
                     ));
@@ -2176,7 +2334,7 @@ impl MobActor {
                     })?;
                     source_entry
                         .member_ref
-                        .session_id()
+                        .bridge_session_id()
                         .cloned()
                         .ok_or_else(|| {
                             MobError::Internal(format!(
@@ -2275,7 +2433,7 @@ impl MobActor {
                 create_session: req,
                 binding: selected_binding,
                 peer_name,
-                owner_session_id: owner_session_id.clone(),
+                owner_bridge_session_id: owner_bridge_session_id.clone(),
                 ops_registry: ops_registry.clone(),
             };
             let resolved_labels = labels.unwrap_or_default();
@@ -2287,7 +2445,7 @@ impl MobActor {
                 resolved_labels,
                 None::<MemberRef>,
                 Some(provision_request),
-                owner_session_id.clone(),
+                owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
             ))
@@ -2302,7 +2460,7 @@ impl MobActor {
             resolved_labels,
             resume_member_ref,
             maybe_provision_request,
-            spawn_owner_session_id,
+            spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
         ) = match prepare_result {
@@ -2315,11 +2473,11 @@ impl MobActor {
 
         // ---------- Resume fast-path: skip async provisioning ----------
         if let Some(member_ref) = resume_member_ref {
-            if let (Some(owner_session_id), Some(ops_registry)) =
-                (owner_session_id.clone(), ops_registry.clone())
+            if let (Some(owner_bridge_session_id), Some(ops_registry)) =
+                (owner_bridge_session_id.clone(), ops_registry.clone())
                 && let Err(error) = self
                     .provisioner
-                    .bind_member_owner_context(&member_ref, owner_session_id, ops_registry)
+                    .bind_member_owner_context(&member_ref, owner_bridge_session_id, ops_registry)
                     .await
             {
                 let _ = reply_tx.send(Err(error));
@@ -2353,7 +2511,7 @@ impl MobActor {
                     resolved_labels,
                     provision,
                     operation_id,
-                    spawn_owner_session_id,
+                    spawn_owner_bridge_session_id,
                     auto_wire_parent,
                     None,
                     effective_profile_override,
@@ -2390,7 +2548,7 @@ impl MobActor {
             prompt,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
-            owner_session_id: spawn_owner_session_id,
+            owner_bridge_session_id: spawn_owner_bridge_session_id,
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
@@ -2405,11 +2563,13 @@ impl MobActor {
             let panic_meerkat_id = spawn_meerkat_id.clone();
             let provision_result = std::panic::AssertUnwindSafe(async {
                 let spawn_receipt = provisioner.provision_member(provision_request).await?;
-                if let Some(session_id) = spawn_receipt.member_ref.session_id().cloned() {
+                if let Some(bridge_session_id) =
+                    spawn_receipt.member_ref.bridge_session_id().cloned()
+                {
                     let mut progress = pending_progress
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    progress.session_id = Some(session_id);
+                    progress.bridge_session_id = Some(bridge_session_id);
                     progress.operation_id = Some(spawn_receipt.operation_id.clone());
                 }
                 if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
@@ -2538,7 +2698,7 @@ impl MobActor {
                 prompt,
                 runtime_mode,
                 labels,
-                owner_session_id,
+                owner_bridge_session_id,
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
@@ -2572,7 +2732,7 @@ impl MobActor {
                                 labels,
                                 provision,
                                 spawn_receipt.operation_id,
-                                owner_session_id,
+                                owner_bridge_session_id,
                                 auto_wire_parent,
                                 restore_wiring,
                                 effective_profile_override,
@@ -2677,7 +2837,7 @@ impl MobActor {
             create_session: req,
             binding: selected_binding,
             peer_name,
-            owner_session_id: None,
+            owner_bridge_session_id: None,
             ops_registry: None,
         };
 
@@ -2691,7 +2851,7 @@ impl MobActor {
             prompt: prompt.clone(),
             runtime_mode,
             labels: labels.clone(),
-            owner_session_id: None,
+            owner_bridge_session_id: None,
             auto_wire_parent: false,
             restore_wiring: None,
             effective_profile_override: None,
@@ -2803,7 +2963,7 @@ impl MobActor {
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
         operation_id: meerkat_core::ops::OperationId,
-        owner_session_id: Option<SessionId>,
+        owner_bridge_session_id: Option<SessionId>,
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
@@ -2921,7 +3081,7 @@ impl MobActor {
         // request came from a session-owned mob tool call.
         if auto_wire_parent
             && let Some(parent_id) = self
-                .resolve_auto_wire_parent_target(owner_session_id.as_ref(), meerkat_id)
+                .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), meerkat_id)
                 .await
             && let Err(error) = self.do_wire(meerkat_id, &parent_id).await
         {
@@ -3054,10 +3214,10 @@ impl MobActor {
 
     async fn resolve_auto_wire_parent_target(
         &self,
-        owner_session_id: Option<&SessionId>,
+        owner_bridge_session_id: Option<&SessionId>,
         spawned_meerkat_id: &MeerkatId,
     ) -> Option<MeerkatId> {
-        let owner_session_id = owner_session_id?;
+        let owner_bridge_session_id = owner_bridge_session_id?;
         let broken_members = self
             .restore_diagnostics
             .read()
@@ -3072,7 +3232,7 @@ impl MobActor {
                 entry.state == crate::roster::MemberState::Active
                     && entry.meerkat_id != *spawned_meerkat_id
                     && !broken_members.contains(&entry.meerkat_id)
-                    && entry.member_ref.session_id() == Some(owner_session_id)
+                    && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
             })
             .map(|entry| entry.meerkat_id.clone())
     }
@@ -3204,11 +3364,14 @@ impl MobActor {
                 .get(&meerkat_id)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
-            let old_session_id = entry.member_ref.session_id().cloned().ok_or_else(|| {
-                MobRespawnError::NoSessionBridge {
-                    member_id: meerkat_id.clone(),
-                }
-            })?;
+            let old_bridge_session_id =
+                entry
+                    .member_ref
+                    .bridge_session_id()
+                    .cloned()
+                    .ok_or_else(|| MobRespawnError::NoSessionBridge {
+                        member_id: meerkat_id.clone(),
+                    })?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id, address, ..
@@ -3222,7 +3385,7 @@ impl MobActor {
                 profile_name: entry.profile.clone(),
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
-                old_session_id,
+                old_bridge_session_id,
                 restore_wiring: RestoreWiringPlan {
                     local_peers: entry
                         .wired_to
@@ -3281,7 +3444,7 @@ impl MobActor {
             create_session: req,
             binding: snapshot.binding.clone(),
             peer_name,
-            owner_session_id: None,
+            owner_bridge_session_id: None,
             ops_registry: None,
         };
 
@@ -3299,7 +3462,7 @@ impl MobActor {
             prompt: prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
-            owner_session_id: None,
+            owner_bridge_session_id: None,
             auto_wire_parent: false,
             restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
                 || !snapshot.restore_wiring.external_peers.is_empty())
@@ -3424,11 +3587,11 @@ impl MobActor {
                 Ok(finalized.receipt)
             } else {
                 Err(MobRespawnError::TopologyRestoreFailed {
-                    receipt: super::handle::MemberRespawnReceipt {
-                        member_id: meerkat_id.clone(),
-                        old_session_id: Some(snapshot.old_session_id.clone()),
-                        new_session_id: finalized.receipt.member_ref.session_id().cloned(),
-                    },
+                    receipt: super::handle::MemberRespawnReceipt::from_bridge_session_ids(
+                        meerkat_id.clone(),
+                        Some(snapshot.old_bridge_session_id.clone()),
+                        finalized.receipt.member_ref.bridge_session_id().cloned(),
+                    ),
                     failed_peer_ids: finalized.failed_restore_peer_ids,
                 })
             }
@@ -3448,11 +3611,11 @@ impl MobActor {
         let replacement = replacement_result?;
 
         // 5. Build the receipt from the committed replacement member reference.
-        Ok(MemberRespawnReceipt {
-            member_id: meerkat_id,
-            old_session_id: Some(snapshot.old_session_id),
-            new_session_id: replacement.member_ref.session_id().cloned(),
-        })
+        Ok(MemberRespawnReceipt::from_bridge_session_ids(
+            meerkat_id,
+            Some(snapshot.old_bridge_session_id),
+            replacement.member_ref.bridge_session_id().cloned(),
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -4547,7 +4710,7 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
-                let session_id = entry.member_ref.session_id().ok_or_else(|| {
+                let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
                     MobError::Internal(format!(
                         "autonomous dispatch requires session-backed member ref for '{}'",
                         entry.meerkat_id
@@ -4559,7 +4722,7 @@ impl MobActor {
 
                 let injector = self
                     .provisioner
-                    .interaction_event_injector(session_id)
+                    .interaction_event_injector(bridge_session_id)
                     .await
                     .ok_or_else(|| {
                         MobError::Internal(format!(
@@ -4580,15 +4743,20 @@ impl MobActor {
                             entry.meerkat_id, error
                         ))
                     })?;
-                Ok(session_id.clone())
+                Ok(bridge_session_id.clone())
             }
             crate::MobRuntimeMode::TurnDriven => {
-                let session_id = entry.member_ref.session_id().cloned().ok_or_else(|| {
-                    MobError::Internal(format!(
-                        "turn-driven dispatch requires session for '{}'",
-                        entry.meerkat_id
-                    ))
-                })?;
+                let bridge_session_id =
+                    entry
+                        .member_ref
+                        .bridge_session_id()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "turn-driven dispatch requires session for '{}'",
+                                entry.meerkat_id
+                            ))
+                        })?;
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
                     system_prompt: None,
@@ -4601,7 +4769,7 @@ impl MobActor {
                     execution_kind: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
-                Ok(session_id)
+                Ok(bridge_session_id)
             }
         }
     }

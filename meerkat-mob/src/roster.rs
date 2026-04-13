@@ -15,10 +15,10 @@ use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{MeerkatId, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::SystemTime;
 
 /// Lifecycle state for a roster member.
 ///
@@ -353,21 +353,29 @@ impl Roster {
     }
 
     /// Update the bridge session ID while preserving backend-specific identity.
-    pub fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
+    pub fn set_bridge_session_id(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        bridge_session_id: SessionId,
+    ) -> bool {
         if let Some(entry) = self.entries.get_mut(meerkat_id) {
             entry.member_ref = match &entry.member_ref {
-                MemberRef::Session { .. } => MemberRef::Session { session_id },
+                MemberRef::Session { .. } => MemberRef::from_bridge_session_id(bridge_session_id),
                 MemberRef::BackendPeer {
                     peer_id, address, ..
                 } => MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
-                    session_id: Some(session_id),
+                    session_id: Some(bridge_session_id),
                 },
             };
             return true;
         }
         false
+    }
+
+    pub fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
+        self.set_bridge_session_id(meerkat_id, session_id)
     }
 
     /// Update the resolved comms peer id for an existing meerkat.
@@ -436,13 +444,17 @@ impl Roster {
         })
     }
 
-    /// Look up the session ID for a meerkat by its ID.
+    /// Look up the current bridge session ID for a meerkat by its ID.
     ///
     /// Returns `Some(&SessionId)` for `Session` members and `BackendPeer`
     /// members with a bridge session. Returns `None` if the meerkat is not
     /// in the roster or its member ref has no session bridge.
+    pub fn bridge_session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
+        self.entries.get(meerkat_id)?.member_ref.bridge_session_id()
+    }
+
     pub fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
-        self.entries.get(meerkat_id)?.member_ref.session_id()
+        self.bridge_session_id(meerkat_id)
     }
 
     /// Get the set of peer meerkat IDs wired to a given meerkat.
@@ -480,8 +492,12 @@ impl Roster {
 }
 
 impl RosterEntry {
+    pub fn bridge_session_id(&self) -> Option<&SessionId> {
+        self.member_ref.bridge_session_id()
+    }
+
     pub fn session_id(&self) -> Option<&SessionId> {
-        self.member_ref.session_id()
+        self.bridge_session_id()
     }
 }
 
@@ -578,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_session_id_preserves_backend_member_ref_identity() {
+    fn test_set_bridge_session_id_preserves_backend_member_ref_identity() {
         let mut roster = Roster::new();
         let old_sid = session_id();
         add_member(
@@ -594,7 +610,7 @@ mod tests {
         );
 
         let new_sid = session_id();
-        assert!(roster.set_session_id(&MeerkatId::from("ext-1"), new_sid.clone()));
+        assert!(roster.set_bridge_session_id(&MeerkatId::from("ext-1"), new_sid.clone()));
         let entry = roster
             .get(&MeerkatId::from("ext-1"))
             .expect("entry should remain present");
@@ -1078,6 +1094,7 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_session_id(sid.clone()),
         );
+        assert_eq!(roster.bridge_session_id(&MeerkatId::from("a")), Some(&sid));
         assert_eq!(roster.session_id(&MeerkatId::from("a")), Some(&sid));
     }
 
@@ -1095,6 +1112,10 @@ mod tests {
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
                 session_id: Some(sid.clone()),
             },
+        );
+        assert_eq!(
+            roster.bridge_session_id(&MeerkatId::from("ext-1")),
+            Some(&sid)
         );
         assert_eq!(roster.session_id(&MeerkatId::from("ext-1")), Some(&sid));
     }

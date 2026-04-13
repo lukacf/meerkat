@@ -299,9 +299,12 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         let scope_frame = StreamScopeFrame::MobMember {
             flow_run_id: run_id.to_string(),
             member_ref: target.to_string(),
+            // `StreamScopeFrame::MobMember.session_id` is the stable event field
+            // name, but in the identity-first regime it carries the canonical
+            // bridge-session binding for the member.
             session_id: entry
                 .member_ref
-                .session_id()
+                .bridge_session_id()
                 .map(std::string::ToString::to_string)
                 .unwrap_or_default(),
         };
@@ -313,14 +316,14 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                          use turn_driven runtime mode for steps with allowed_tools/blocked_tools"
                     )));
                 }
-                let session_id = entry.member_ref.session_id().ok_or_else(|| {
+                let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
                     MobError::Internal(format!(
                         "autonomous flow dispatch requires session-backed member ref for '{target}'"
                     ))
                 })?;
                 let injector = self
                     .provisioner
-                    .interaction_event_injector(session_id)
+                    .interaction_event_injector(bridge_session_id)
                     .await
                     .ok_or_else(|| {
                         MobError::Internal(format!(

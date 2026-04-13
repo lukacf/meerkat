@@ -300,7 +300,9 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         runtimeMode: "turn_driven",
       });
       assert.ok(lead.session_id);
+      assert.equal(lead.bridge_session_id, lead.session_id);
       assert.ok(reviewer.session_id);
+      assert.equal(reviewer.bridge_session_id, reviewer.session_id);
 
       await mob.wire("lead-1", "reviewer-1");
       const append = await mob.appendSystemContext(
@@ -309,6 +311,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         { source: "typescript-sdk", idempotencyKey: "ts-swarm-marker" },
       );
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(append.status)));
+      assert.equal(append.bridge_session_id, reviewer.bridge_session_id);
 
       const subscription = await mob.subscribeMemberEvents("reviewer-1");
       try {
@@ -358,14 +361,16 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         (member) => member.meerkatId === "reviewer-1",
       );
       assert.ok(respawnedReviewer?.sessionId);
+      assert.equal(respawnedReviewer?.bridgeSessionId, respawnedReviewer?.sessionId);
       await waitFor(
         async () => client.request("runtime/state", { session_id: respawnedReviewer.sessionId }),
         (payload) => payload.state === "attached" || payload.state === "idle",
         { timeoutMs: 120000, intervalMs: 200 },
       );
-      await mob.member("reviewer-1").send(
+      const respawnReceipt = await mob.member("reviewer-1").send(
         "Reply with REVIEWER_RESPAWN_44.",
       );
+      assert.equal(respawnReceipt.bridgeSessionId, respawnedReviewer.sessionId);
       await waitFor(
         async () => client.readSession(respawnedReviewer.sessionId),
         (state) => String(state.lastAssistantText ?? "").toLowerCase().includes("reviewer_respawn_44"),

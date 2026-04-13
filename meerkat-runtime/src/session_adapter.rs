@@ -35,8 +35,13 @@ use crate::input_state::InputState;
 use crate::meerkat_machine::{
     MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,
     MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
-    MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot,
+    MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineControlCommand,
+    MeerkatMachineControlCommandResult, MeerkatMachineDrainCommand,
+    MeerkatMachineDrainCommandResult, MeerkatMachineDrainLocalCommand,
+    MeerkatMachineIngressCommand, MeerkatMachineIngressCommandResult,
+    MeerkatMachineLegacyRunCommand, MeerkatMachineLegacyRunCommandResult,
+    MeerkatMachineLegacyRunPrepared, MeerkatMachineSessionCommand,
+    MeerkatMachineSessionCommandResult, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
 };
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -575,9 +580,774 @@ impl RuntimeSessionAdapter {
         }
     }
 
+    async fn execute_meerkat_machine_session_command(
+        &self,
+        command: MeerkatMachineSessionCommand,
+    ) -> Result<MeerkatMachineSessionCommandResult, RuntimeDriverError> {
+        match command {
+            MeerkatMachineSessionCommand::RegisterSession { session_id } => {
+                self.register_session_inner(session_id).await;
+                Ok(MeerkatMachineSessionCommandResult::Unit)
+            }
+            MeerkatMachineSessionCommand::UnregisterSession { session_id } => {
+                self.unregister_session_inner(&session_id).await;
+                Ok(MeerkatMachineSessionCommandResult::Unit)
+            }
+            MeerkatMachineSessionCommand::EnsureSessionWithExecutor {
+                session_id,
+                executor,
+            } => {
+                self.ensure_session_with_executor_inner(session_id, executor)
+                    .await;
+                Ok(MeerkatMachineSessionCommandResult::Unit)
+            }
+            MeerkatMachineSessionCommand::SetSilentIntents {
+                session_id,
+                intents,
+            } => {
+                self.set_session_silent_intents_inner(&session_id, intents)
+                    .await;
+                Ok(MeerkatMachineSessionCommandResult::Unit)
+            }
+            MeerkatMachineSessionCommand::InterruptCurrentRun { session_id } => self
+                .interrupt_current_run_inner(&session_id)
+                .await
+                .map(|_| MeerkatMachineSessionCommandResult::Unit),
+            MeerkatMachineSessionCommand::StopRuntimeExecutor {
+                session_id,
+                command,
+            } => self
+                .stop_runtime_executor_inner(&session_id, command)
+                .await
+                .map(|_| MeerkatMachineSessionCommandResult::Unit),
+            MeerkatMachineSessionCommand::ContainsSession { session_id } => {
+                Ok(MeerkatMachineSessionCommandResult::Bool(
+                    self.sessions.read().await.contains_key(&session_id),
+                ))
+            }
+            MeerkatMachineSessionCommand::SessionHasExecutor { session_id } => {
+                let sessions = self.sessions.read().await;
+                Ok(MeerkatMachineSessionCommandResult::Bool(
+                    sessions
+                        .get(&session_id)
+                        .map(RuntimeSessionEntry::has_attachment_or_attaching)
+                        .unwrap_or(false),
+                ))
+            }
+            MeerkatMachineSessionCommand::SessionHasComms { session_id } => {
+                let slots = self.comms_drain_slots.read().await;
+                Ok(MeerkatMachineSessionCommandResult::Bool(
+                    slots.contains_key(&session_id),
+                ))
+            }
+            MeerkatMachineSessionCommand::OpsLifecycleRegistry { session_id } => {
+                let sessions = self.sessions.read().await;
+                Ok(MeerkatMachineSessionCommandResult::OpsLifecycleRegistry(
+                    sessions
+                        .get(&session_id)
+                        .map(|e| Arc::clone(&e.ops_lifecycle)),
+                ))
+            }
+            MeerkatMachineSessionCommand::PrepareBindings { session_id } => {
+                self.register_session_inner(session_id.clone()).await;
+                let sessions = self.sessions.read().await;
+                let entry = sessions
+                    .get(&session_id)
+                    .ok_or(RuntimeDriverError::Internal(format!(
+                        "session {session_id} missing after register_session_inner"
+                    )))?;
+                Ok(MeerkatMachineSessionCommandResult::Bindings(
+                    meerkat_core::SessionRuntimeBindings {
+                        session_id,
+                        epoch_id: entry.epoch_id.clone(),
+                        ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
+                            as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+                        cursor_state: Arc::clone(&entry.cursor_state),
+                    },
+                ))
+            }
+            MeerkatMachineSessionCommand::InputState {
+                session_id,
+                input_id,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?;
+                    entry.driver.clone()
+                };
+                let driver = driver.lock().await;
+                Ok(MeerkatMachineSessionCommandResult::InputState(
+                    driver.as_driver().input_state(&input_id).cloned(),
+                ))
+            }
+            MeerkatMachineSessionCommand::ListActiveInputs { session_id } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?;
+                    entry.driver.clone()
+                };
+                let driver = driver.lock().await;
+                Ok(MeerkatMachineSessionCommandResult::ActiveInputs(
+                    driver.as_driver().active_input_ids(),
+                ))
+            }
+        }
+    }
+
+    async fn execute_meerkat_machine_drain_command(
+        self: &Arc<Self>,
+        command: MeerkatMachineDrainCommand,
+    ) -> MeerkatMachineDrainCommandResult {
+        match command {
+            MeerkatMachineDrainCommand::SetPeerIngressContext {
+                session_id,
+                keep_alive,
+                comms_runtime,
+            } => MeerkatMachineDrainCommandResult::Spawned(
+                self.update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
+                    .await,
+            ),
+            MeerkatMachineDrainCommand::NotifyDrainExited { session_id, reason } => {
+                self.notify_comms_drain_exited_inner(&session_id, reason)
+                    .await;
+                MeerkatMachineDrainCommandResult::Notified
+            }
+        }
+    }
+
+    async fn execute_meerkat_machine_drain_local_command(
+        &self,
+        command: MeerkatMachineDrainLocalCommand,
+    ) {
+        match command {
+            MeerkatMachineDrainLocalCommand::AbortAll => {
+                let mut slots = self.comms_drain_slots.write().await;
+                for (_, slot) in slots.iter_mut() {
+                    abort_slot(slot);
+                }
+            }
+            MeerkatMachineDrainLocalCommand::Abort { session_id } => {
+                let mut slots = self.comms_drain_slots.write().await;
+                if let Some(slot) = slots.get_mut(&session_id) {
+                    abort_slot(slot);
+                }
+            }
+            MeerkatMachineDrainLocalCommand::Wait { session_id } => {
+                let handle = {
+                    let mut slots = self.comms_drain_slots.write().await;
+                    slots
+                        .get_mut(&session_id)
+                        .and_then(|slot| slot.handle.take())
+                };
+                if let Some(handle) = handle {
+                    let _ = handle.await;
+                }
+                let mut slots = self.comms_drain_slots.write().await;
+                if let Some(slot) = slots.get_mut(&session_id)
+                    && slot.authority.phase()
+                        == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
+                {
+                    tracing::warn!(
+                        "comms_drain: task exited without notifying authority (likely panicked), \
+                         submitting Failed safety net"
+                    );
+                    match protocol_comms_drain_spawn::notify_task_exited(
+                        &mut slot.authority,
+                        DrainExitReason::Failed,
+                    ) {
+                        Ok(effects) => {
+                            apply_runtime_drain_effects(slot, &effects);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "comms drain authority rejected safety-net TaskExited"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn execute_meerkat_machine_control_command(
+        &self,
+        command: MeerkatMachineControlCommand,
+    ) -> Result<MeerkatMachineControlCommandResult, RuntimeControlPlaneError> {
+        match command {
+            MeerkatMachineControlCommand::Ingest { runtime_id, input } => {
+                let (_session_id, driver, _completions, wake_tx, control_tx) = {
+                    let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
+                    let ctrl = {
+                        let sessions = self.sessions.read().await;
+                        sessions
+                            .get(&sid)
+                            .and_then(RuntimeSessionEntry::control_sender)
+                    };
+                    (sid, d, c, w, ctrl)
+                };
+
+                let (outcome, signal) = {
+                    let mut drv = driver.lock().await;
+                    let result = drv
+                        .as_driver_mut()
+                        .accept_input(input)
+                        .await
+                        .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                    let signal = drv.take_post_admission_signal();
+                    (result, signal)
+                };
+
+                if signal.should_wake()
+                    && let Some(ref tx) = wake_tx
+                {
+                    let _ = tx.try_send(());
+                }
+                if signal.should_interrupt_yielding() {
+                    if let Some(ref tx) = control_tx {
+                        let _ = tx.try_send(
+                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                        );
+                    }
+                }
+
+                Ok(MeerkatMachineControlCommandResult::AcceptOutcome(outcome))
+            }
+            MeerkatMachineControlCommand::PublishEvent { event } => {
+                let runtime_id = event.runtime_id.clone();
+                let (_session_id, driver, _completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+
+                let mut drv = driver.lock().await;
+                drv.as_driver_mut()
+                    .on_runtime_event(event)
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                Ok(MeerkatMachineControlCommandResult::Unit)
+            }
+            MeerkatMachineControlCommand::Retire { runtime_id } => {
+                let (session_id, driver, completions, wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+                let _ = session_id;
+
+                let mut drv = driver.lock().await;
+                let mut report = drv
+                    .as_driver_mut()
+                    .retire()
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                drop(drv);
+
+                if report.inputs_pending_drain > 0 {
+                    if let Some(ref tx) = wake_tx
+                        && tx.send(()).await.is_ok()
+                    {
+                        return Ok(MeerkatMachineControlCommandResult::RetireReport(report));
+                    }
+
+                    let mut drv = driver.lock().await;
+                    let abandoned = drv
+                        .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                        .await
+                        .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                    drop(drv);
+                    let mut comp = completions.lock().await;
+                    comp.resolve_all_terminated("retired without runtime loop");
+                    report.inputs_abandoned += abandoned;
+                    report.inputs_pending_drain = 0;
+                }
+
+                Ok(MeerkatMachineControlCommandResult::RetireReport(report))
+            }
+            MeerkatMachineControlCommand::Recycle { runtime_id } => {
+                let (_session_id, driver, completions, wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+
+                let (transferred, active_after_recycle) = {
+                    let mut drv = driver.lock().await;
+                    let state = drv.as_driver().runtime_state();
+                    if matches!(state, RuntimeState::Running) {
+                        return Err(RuntimeControlPlaneError::InvalidState { state });
+                    }
+                    let should_restore_attached = matches!(state, RuntimeState::Attached);
+
+                    let transferred =
+                        match &mut *drv {
+                            DriverEntry::Ephemeral(driver) => driver
+                                .recycle_preserving_work()
+                                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+                            DriverEntry::Persistent(driver) => driver
+                                .recycle_preserving_work()
+                                .await
+                                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+                        };
+
+                    if should_restore_attached
+                        && matches!(drv.as_driver().runtime_state(), RuntimeState::Idle)
+                    {
+                        drv.attach()
+                            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                    }
+
+                    let active_after_recycle = drv.as_driver().active_input_ids();
+                    (transferred, active_after_recycle)
+                };
+
+                {
+                    let pending_after: HashSet<InputId> =
+                        active_after_recycle.into_iter().collect();
+                    let mut comp = completions.lock().await;
+                    comp.resolve_not_pending(
+                        |input_id| pending_after.contains(input_id),
+                        "recycled input no longer pending",
+                    );
+                }
+
+                if let Some(ref tx) = wake_tx {
+                    let _ = tx.try_send(());
+                }
+
+                Ok(MeerkatMachineControlCommandResult::RecycleReport(
+                    RecycleReport {
+                        inputs_transferred: transferred,
+                    },
+                ))
+            }
+            MeerkatMachineControlCommand::Reset { runtime_id } => {
+                let (_session_id, driver, completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+
+                let mut drv = driver.lock().await;
+                if matches!(drv.as_driver().runtime_state(), RuntimeState::Running) {
+                    return Err(RuntimeControlPlaneError::InvalidState {
+                        state: RuntimeState::Running,
+                    });
+                }
+                let report = drv
+                    .as_driver_mut()
+                    .reset()
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                drop(drv);
+
+                let mut comp = completions.lock().await;
+                comp.resolve_all_terminated("runtime reset");
+
+                Ok(MeerkatMachineControlCommandResult::ResetReport(report))
+            }
+            MeerkatMachineControlCommand::Recover { runtime_id } => {
+                let (_session_id, driver, completions, wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+
+                let (report, active_after_recover) = {
+                    let mut drv = driver.lock().await;
+                    let report = drv
+                        .as_driver_mut()
+                        .recover()
+                        .await
+                        .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                    let active_after_recover = drv.as_driver().active_input_ids();
+                    (report, active_after_recover)
+                };
+
+                {
+                    let pending_after: HashSet<InputId> =
+                        active_after_recover.into_iter().collect();
+                    let mut comp = completions.lock().await;
+                    comp.resolve_not_pending(
+                        |input_id| pending_after.contains(input_id),
+                        "recovered input no longer pending",
+                    );
+                }
+
+                if let Some(ref tx) = wake_tx {
+                    let _ = tx.try_send(());
+                }
+
+                Ok(MeerkatMachineControlCommandResult::RecoveryReport(report))
+            }
+            MeerkatMachineControlCommand::Destroy { runtime_id } => {
+                let (_session_id, driver, completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+
+                let mut drv = driver.lock().await;
+                let report = drv
+                    .as_driver_mut()
+                    .destroy()
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                drop(drv);
+
+                let mut comp = completions.lock().await;
+                comp.resolve_all_terminated("runtime destroyed");
+
+                Ok(MeerkatMachineControlCommandResult::DestroyReport(report))
+            }
+            MeerkatMachineControlCommand::RuntimeState { runtime_id } => {
+                let (_session_id, driver, _completions, _wake_tx) =
+                    self.lookup_entry(&runtime_id).await?;
+                let drv = driver.lock().await;
+                Ok(MeerkatMachineControlCommandResult::RuntimeState(
+                    drv.as_driver().runtime_state(),
+                ))
+            }
+            MeerkatMachineControlCommand::LoadBoundaryReceipt {
+                runtime_id,
+                run_id,
+                sequence,
+            } => {
+                let receipt = match &self.store {
+                    Some(store) => store
+                        .load_boundary_receipt(&runtime_id, &run_id, sequence)
+                        .await
+                        .map_err(|e| RuntimeControlPlaneError::StoreError(e.to_string()))?,
+                    None => None,
+                };
+                Ok(MeerkatMachineControlCommandResult::BoundaryReceipt(receipt))
+            }
+        }
+    }
+
+    async fn execute_meerkat_machine_ingress_command(
+        &self,
+        command: MeerkatMachineIngressCommand,
+    ) -> Result<MeerkatMachineIngressCommandResult, RuntimeDriverError> {
+        match command {
+            MeerkatMachineIngressCommand::AcceptWithCompletion { session_id, input } => {
+                let (driver, completions, wake_tx, control_tx) = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?;
+                    (
+                        entry.driver.clone(),
+                        entry.completions.clone(),
+                        entry.wake_sender(),
+                        entry.control_sender(),
+                    )
+                };
+
+                let (outcome, signal, handle) = {
+                    let mut driver = driver.lock().await;
+                    let result = driver.as_driver_mut().accept_input(input).await?;
+
+                    match &result {
+                        AcceptOutcome::Accepted { input_id, .. } => {
+                            let is_terminal = driver
+                                .as_driver()
+                                .input_state(input_id)
+                                .map(|state| state.current_state().is_terminal())
+                                .unwrap_or(true);
+                            let handle = if is_terminal {
+                                None
+                            } else {
+                                Some({
+                                    let mut completions = completions.lock().await;
+                                    completions.register(input_id.clone())
+                                })
+                            };
+                            let signal = driver.take_post_admission_signal();
+                            (result, signal, handle)
+                        }
+                        AcceptOutcome::Deduplicated { existing_id, .. } => {
+                            let existing_state = driver.as_driver().input_state(existing_id);
+                            let is_terminal = existing_state
+                                .map(|s| s.current_state().is_terminal())
+                                .unwrap_or(true);
+
+                            if is_terminal {
+                                (
+                                    result,
+                                    crate::driver::ephemeral::PostAdmissionSignal::None,
+                                    None,
+                                )
+                            } else {
+                                let handle = {
+                                    let mut completions = completions.lock().await;
+                                    completions.register(existing_id.clone())
+                                };
+                                (
+                                    result,
+                                    crate::driver::ephemeral::PostAdmissionSignal::None,
+                                    Some(handle),
+                                )
+                            }
+                        }
+                        AcceptOutcome::Rejected { reason } => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: reason.to_string(),
+                            });
+                        }
+                    }
+                };
+
+                if signal.should_wake()
+                    && let Some(ref wake_tx) = wake_tx
+                {
+                    let _ = wake_tx.try_send(());
+                }
+                if signal.should_interrupt_yielding()
+                    && let Some(ref tx) = control_tx
+                {
+                    let _ = tx.try_send(
+                        meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                    );
+                }
+
+                Ok(MeerkatMachineIngressCommandResult::AcceptWithCompletion { outcome, handle })
+            }
+            MeerkatMachineIngressCommand::AcceptWithoutWake { session_id, input } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?;
+                    entry.driver.clone()
+                };
+
+                let outcome = {
+                    let mut driver = driver.lock().await;
+                    let result = driver.as_driver_mut().accept_input(input).await?;
+                    let signal = driver.take_post_admission_signal();
+                    debug_assert!(
+                        !signal.should_process_immediately(),
+                        "queue-only admission unexpectedly requested immediate processing"
+                    );
+                    result
+                };
+
+                Ok(MeerkatMachineIngressCommandResult::AcceptOutcome(outcome))
+            }
+        }
+    }
+
+    async fn execute_meerkat_machine_legacy_run_command(
+        &self,
+        command: MeerkatMachineLegacyRunCommand,
+    ) -> Result<MeerkatMachineLegacyRunCommandResult, RuntimeDriverError> {
+        match command {
+            MeerkatMachineLegacyRunCommand::Prepare { session_id, input } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?
+                        .driver
+                        .clone()
+                };
+
+                let prepared = {
+                    let mut driver = driver.lock().await;
+                    if !driver.is_idle_or_attached() {
+                        return Err(RuntimeDriverError::NotReady {
+                            state: driver.as_driver().runtime_state(),
+                        });
+                    }
+
+                    let active_input_ids = driver.as_driver().active_input_ids();
+                    if !active_input_ids.is_empty() {
+                        let duplicate_active_input =
+                            input.header().idempotency_key.as_ref().and_then(|key| {
+                                active_input_ids.iter().find(|active_id| {
+                                    driver
+                                        .as_driver()
+                                        .input_state(active_id)
+                                        .and_then(|state| state.idempotency_key.as_ref())
+                                        == Some(key)
+                                })
+                            });
+                        if let Some(existing_id) = duplicate_active_input {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: format!(
+                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                                ),
+                            });
+                        }
+                        return Err(RuntimeDriverError::NotReady {
+                            state: driver.as_driver().runtime_state(),
+                        });
+                    }
+
+                    let outcome = driver.as_driver_mut().accept_input(input).await?;
+                    let input_id = match outcome {
+                        AcceptOutcome::Accepted { input_id, .. } => input_id,
+                        AcceptOutcome::Deduplicated { existing_id, .. } => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: format!(
+                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                                ),
+                            });
+                        }
+                        AcceptOutcome::Rejected { reason } => {
+                            return Err(RuntimeDriverError::ValidationFailed {
+                                reason: reason.to_string(),
+                            });
+                        }
+                    };
+
+                    if !driver.is_idle_or_attached() {
+                        return Err(RuntimeDriverError::NotReady {
+                            state: driver.as_driver().runtime_state(),
+                        });
+                    }
+
+                    let (dequeued_id, dequeued_input) = driver.dequeue_next().ok_or_else(|| {
+                        RuntimeDriverError::Internal(
+                            "accepted input was not queued for execution".into(),
+                        )
+                    })?;
+                    if dequeued_id != input_id {
+                        return Err(RuntimeDriverError::NotReady {
+                            state: driver.as_driver().runtime_state(),
+                        });
+                    }
+
+                    let run_id = RunId::new();
+                    driver.start_run(run_id.clone()).map_err(|err| {
+                        RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
+                    })?;
+                    driver.stage_input(&dequeued_id, &run_id).map_err(|err| {
+                        RuntimeDriverError::Internal(format!(
+                            "failed to stage accepted input: {err}"
+                        ))
+                    })?;
+
+                    MeerkatMachineLegacyRunPrepared {
+                        input_id,
+                        run_id,
+                        primitive: crate::runtime_loop::input_to_primitive(
+                            &dequeued_input,
+                            dequeued_id,
+                        ),
+                    }
+                };
+
+                Ok(MeerkatMachineLegacyRunCommandResult::Prepared(prepared))
+            }
+            MeerkatMachineLegacyRunCommand::Commit {
+                session_id,
+                input_id,
+                run_id,
+                output,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?
+                        .driver
+                        .clone()
+                };
+
+                let mut driver = driver.lock().await;
+                if let Err(err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        receipt: output.receipt,
+                        session_snapshot: output.session_snapshot,
+                    })
+                    .await
+                {
+                    if let Err(unwind_err) = driver
+                        .as_driver_mut()
+                        .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                            run_id,
+                            error: format!("boundary commit failed: {err}"),
+                            recoverable: true,
+                        })
+                        .await
+                    {
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "runtime boundary commit failed: {err}; additionally failed to unwind runtime state: {unwind_err}"
+                        )));
+                    }
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "runtime boundary commit failed: {err}"
+                    )));
+                }
+                if let Err(err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunCompleted {
+                        run_id,
+                        consumed_input_ids: vec![input_id],
+                    })
+                    .await
+                {
+                    drop(driver);
+                    self.unregister_session(&session_id).await;
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to persist runtime completion snapshot: {err}"
+                    )));
+                }
+
+                Ok(MeerkatMachineLegacyRunCommandResult::Unit)
+            }
+            MeerkatMachineLegacyRunCommand::Fail {
+                session_id,
+                run_id,
+                error,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?
+                        .driver
+                        .clone()
+                };
+
+                let mut driver = driver.lock().await;
+                if let Err(run_err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                        run_id,
+                        error,
+                        recoverable: true,
+                    })
+                    .await
+                {
+                    drop(driver);
+                    self.unregister_session(&session_id).await;
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to persist runtime failure snapshot: {run_err}"
+                    )));
+                }
+
+                Ok(MeerkatMachineLegacyRunCommandResult::Unit)
+            }
+        }
+    }
+
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
+        let _ = self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::RegisterSession { session_id },
+            )
+            .await;
+    }
+
+    async fn register_session_inner(&self, session_id: SessionId) {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get_mut(&session_id) {
@@ -617,6 +1387,17 @@ impl RuntimeSessionAdapter {
     /// Peer requests whose intent matches one of these strings will be accepted
     /// without triggering an LLM turn (ApplyMode::Ignore, WakeMode::None).
     pub async fn set_session_silent_intents(&self, session_id: &SessionId, intents: Vec<String>) {
+        let _ = self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::SetSilentIntents {
+                    session_id: session_id.clone(),
+                    intents,
+                },
+            )
+            .await;
+    }
+
+    async fn set_session_silent_intents_inner(&self, session_id: &SessionId, intents: Vec<String>) {
         let sessions = self.sessions.read().await;
         if let Some(entry) = sessions.get(session_id) {
             let mut driver = entry.driver.lock().await;
@@ -633,7 +1414,13 @@ impl RuntimeSessionAdapter {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
-        self.ensure_session_with_executor(session_id, executor)
+        let _ = self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::EnsureSessionWithExecutor {
+                    session_id,
+                    executor,
+                },
+            )
             .await;
     }
 
@@ -643,6 +1430,21 @@ impl RuntimeSessionAdapter {
     /// existing driver in place so queued inputs remain attached to the same
     /// runtime ledger and can start draining immediately.
     pub async fn ensure_session_with_executor(
+        &self,
+        session_id: SessionId,
+        executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    ) {
+        let _ = self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::EnsureSessionWithExecutor {
+                    session_id,
+                    executor,
+                },
+            )
+            .await;
+    }
+
+    async fn ensure_session_with_executor_inner(
         &self,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
@@ -909,6 +1711,16 @@ impl RuntimeSessionAdapter {
     /// Detaches the executor (Attached → Idle) before removal, then drops
     /// the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
+        let _ = self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::UnregisterSession {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await;
+    }
+
+    async fn unregister_session_inner(&self, session_id: &SessionId) {
         let entry = {
             let mut sessions = self.sessions.write().await;
             let mut slots = self.comms_drain_slots.write().await;
@@ -932,18 +1744,36 @@ impl RuntimeSessionAdapter {
 
     /// Check whether a runtime driver is already registered for a session.
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
-        self.sessions.read().await.contains_key(session_id)
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::ContainsSession {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
+            Ok(_) => unreachable!("contains_session returned wrong result"),
+            Err(_) => false,
+        }
     }
 
     /// Check whether a session has an active RuntimeLoop or attachment in
     /// progress. Returns `false` only for `Queuing` sessions (registered via
     /// `prepare_bindings()` with no executor) and unknown sessions.
     pub async fn session_has_executor(&self, session_id: &SessionId) -> bool {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(RuntimeSessionEntry::has_attachment_or_attaching)
-            .unwrap_or(false)
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::SessionHasExecutor {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
+            Ok(_) => unreachable!("session_has_executor returned wrong result"),
+            Err(_) => false,
+        }
     }
 
     /// Check whether a session already has a comms runtime configured.
@@ -952,12 +1782,35 @@ impl RuntimeSessionAdapter {
     /// with a non-None comms runtime for this session (e.g., via
     /// `SessionRuntime::enable_comms_drain`).
     pub async fn session_has_comms(&self, session_id: &SessionId) -> bool {
-        let slots = self.comms_drain_slots.read().await;
-        slots.contains_key(session_id)
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::SessionHasComms {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
+            Ok(_) => unreachable!("session_has_comms returned wrong result"),
+            Err(_) => false,
+        }
     }
 
     /// Cancel the currently-running turn for a registered session.
     pub async fn interrupt_current_run(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_session_command(
+            MeerkatMachineSessionCommand::InterruptCurrentRun {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn interrupt_current_run_inner(
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
@@ -990,6 +1843,21 @@ impl RuntimeSessionAdapter {
     /// channel. When no loop is attached yet, a stop command is applied directly
     /// against the driver so queued work is still terminated consistently.
     pub async fn stop_runtime_executor(
+        &self,
+        session_id: &SessionId,
+        command: RunControlCommand,
+    ) -> Result<(), RuntimeDriverError> {
+        self.execute_meerkat_machine_session_command(
+            MeerkatMachineSessionCommand::StopRuntimeExecutor {
+                session_id: session_id.clone(),
+                command,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn stop_runtime_executor_inner(
         &self,
         session_id: &SessionId,
         command: RunControlCommand,
@@ -1053,153 +1921,47 @@ impl RuntimeSessionAdapter {
         F: FnOnce(RunId, meerkat_core::lifecycle::run_primitive::RunPrimitive) -> Fut,
         Fut: Future<Output = Result<(T, CoreApplyOutput), RuntimeDriverError>>,
     {
-        let driver = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?
-                .driver
-                .clone()
+        let MeerkatMachineLegacyRunPrepared {
+            input_id,
+            run_id,
+            primitive,
+        } = match self
+            .execute_meerkat_machine_legacy_run_command(MeerkatMachineLegacyRunCommand::Prepare {
+                session_id: session_id.clone(),
+                input,
+            })
+            .await?
+        {
+            MeerkatMachineLegacyRunCommandResult::Prepared(prepared) => prepared,
+            MeerkatMachineLegacyRunCommandResult::Unit => {
+                return Err(RuntimeDriverError::Internal(
+                    "unexpected unit result preparing legacy Meerkat run".into(),
+                ));
+            }
         };
 
-        let (input_id, run_id, primitive) = {
-            let mut driver = driver.lock().await;
-            if !driver.is_idle_or_attached() {
-                return Err(RuntimeDriverError::NotReady {
-                    state: driver.as_driver().runtime_state(),
-                });
-            }
-
-            let active_input_ids = driver.as_driver().active_input_ids();
-            if !active_input_ids.is_empty() {
-                let duplicate_active_input =
-                    input.header().idempotency_key.as_ref().and_then(|key| {
-                        active_input_ids.iter().find(|active_id| {
-                            driver
-                                .as_driver()
-                                .input_state(active_id)
-                                .and_then(|state| state.idempotency_key.as_ref())
-                                == Some(key)
-                        })
-                    });
-                if let Some(existing_id) = duplicate_active_input {
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: format!(
-                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                        ),
-                    });
-                }
-                return Err(RuntimeDriverError::NotReady {
-                    state: driver.as_driver().runtime_state(),
-                });
-            }
-
-            let outcome = driver.as_driver_mut().accept_input(input).await?;
-            let input_id = match outcome {
-                AcceptOutcome::Accepted { input_id, .. } => input_id,
-                AcceptOutcome::Deduplicated { existing_id, .. } => {
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: format!(
-                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                        ),
-                    });
-                }
-                AcceptOutcome::Rejected { reason } => {
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: reason.to_string(),
-                    });
-                }
-            };
-
-            if !driver.is_idle_or_attached() {
-                return Err(RuntimeDriverError::NotReady {
-                    state: driver.as_driver().runtime_state(),
-                });
-            }
-
-            let (dequeued_id, dequeued_input) = driver.dequeue_next().ok_or_else(|| {
-                RuntimeDriverError::Internal("accepted input was not queued for execution".into())
-            })?;
-            if dequeued_id != input_id {
-                return Err(RuntimeDriverError::NotReady {
-                    state: driver.as_driver().runtime_state(),
-                });
-            }
-            let run_id = RunId::new();
-            driver.start_run(run_id.clone()).map_err(|err| {
-                RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
-            })?;
-            driver.stage_input(&dequeued_id, &run_id).map_err(|err| {
-                RuntimeDriverError::Internal(format!("failed to stage accepted input: {err}"))
-            })?;
-            let primitive = crate::runtime_loop::input_to_primitive(&dequeued_input, dequeued_id);
-            (input_id, run_id, primitive)
-        };
-
-        match op(run_id.clone(), primitive.clone()).await {
+        match op(run_id.clone(), primitive).await {
             Ok((result, output)) => {
-                let mut driver = driver.lock().await;
-                if let Err(err) = driver
-                    .as_driver_mut()
-                    .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
-                        run_id: run_id.clone(),
-                        receipt: output.receipt,
-                        session_snapshot: output.session_snapshot,
-                    })
-                    .await
-                {
-                    if let Err(unwind_err) = driver
-                        .as_driver_mut()
-                        .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
-                            run_id,
-                            error: format!("boundary commit failed: {err}"),
-                            recoverable: true,
-                        })
-                        .await
-                    {
-                        return Err(RuntimeDriverError::Internal(format!(
-                            "runtime boundary commit failed: {err}; additionally failed to unwind runtime state: {unwind_err}"
-                        )));
-                    }
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "runtime boundary commit failed: {err}"
-                    )));
-                }
-                if let Err(err) = driver
-                    .as_driver_mut()
-                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunCompleted {
+                self.execute_meerkat_machine_legacy_run_command(
+                    MeerkatMachineLegacyRunCommand::Commit {
+                        session_id: session_id.clone(),
+                        input_id,
                         run_id,
-                        consumed_input_ids: vec![input_id],
-                    })
-                    .await
-                {
-                    drop(driver);
-                    self.unregister_session(session_id).await;
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "failed to persist runtime completion snapshot: {err}"
-                    )));
-                }
+                        output,
+                    },
+                )
+                .await?;
                 Ok(result)
             }
             Err(err) => {
-                let mut driver = driver.lock().await;
-                if let Err(run_err) = driver
-                    .as_driver_mut()
-                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                self.execute_meerkat_machine_legacy_run_command(
+                    MeerkatMachineLegacyRunCommand::Fail {
+                        session_id: session_id.clone(),
                         run_id,
                         error: err.to_string(),
-                        recoverable: true,
-                    })
-                    .await
-                {
-                    drop(driver);
-                    self.unregister_session(session_id).await;
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "failed to persist runtime failure snapshot: {run_err}"
-                    )));
-                }
+                    },
+                )
+                .await?;
                 Err(err)
             }
         }
@@ -1220,92 +1982,24 @@ impl RuntimeSessionAdapter {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        let (driver, completions, wake_tx, control_tx) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (
-                entry.driver.clone(),
-                entry.completions.clone(),
-                entry.wake_sender(),
-                entry.control_sender(),
+        match self
+            .execute_meerkat_machine_ingress_command(
+                MeerkatMachineIngressCommand::AcceptWithCompletion {
+                    session_id: session_id.clone(),
+                    input,
+                },
             )
-        };
-
-        let (outcome, signal, handle) = {
-            let mut driver = driver.lock().await;
-            let result = driver.as_driver_mut().accept_input(input).await?;
-
-            match &result {
-                AcceptOutcome::Accepted { input_id, .. } => {
-                    let is_terminal = driver
-                        .as_driver()
-                        .input_state(input_id)
-                        .map(|state| state.current_state().is_terminal())
-                        .unwrap_or(true);
-                    let handle = if is_terminal {
-                        None
-                    } else {
-                        Some({
-                            let mut completions = completions.lock().await;
-                            completions.register(input_id.clone())
-                        })
-                    };
-                    let signal = driver.take_post_admission_signal();
-                    (result, signal, handle)
-                }
-                AcceptOutcome::Deduplicated { existing_id, .. } => {
-                    // Check if the existing input is already terminal
-                    let existing_state = driver.as_driver().input_state(existing_id);
-                    let is_terminal = existing_state
-                        .map(|s| s.current_state().is_terminal())
-                        .unwrap_or(true); // missing state = already cleaned up = terminal
-
-                    if is_terminal {
-                        // Input already processed — no handle, no waiter
-                        (
-                            result,
-                            crate::driver::ephemeral::PostAdmissionSignal::None,
-                            None,
-                        )
-                    } else {
-                        // In-flight — join existing waiters via multi-waiter Vec
-                        let handle = {
-                            let mut completions = completions.lock().await;
-                            completions.register(existing_id.clone())
-                        };
-                        (
-                            result,
-                            crate::driver::ephemeral::PostAdmissionSignal::None,
-                            Some(handle),
-                        )
-                    }
-                }
-                AcceptOutcome::Rejected { reason } => {
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: reason.to_string(),
-                    });
-                }
+            .await?
+        {
+            MeerkatMachineIngressCommandResult::AcceptWithCompletion { outcome, handle } => {
+                Ok((outcome, handle))
             }
-        };
-
-        if signal.should_wake()
-            && let Some(ref wake_tx) = wake_tx
-        {
-            let _ = wake_tx.try_send(());
+            MeerkatMachineIngressCommandResult::AcceptOutcome(_) => {
+                Err(RuntimeDriverError::Internal(
+                    "unexpected queue-only result for accept_input_with_completion".into(),
+                ))
+            }
         }
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
-        {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
-        }
-
-        Ok((outcome, handle))
     }
 
     /// Accept an input but intentionally do not wake the runtime loop.
@@ -1318,29 +2012,22 @@ impl RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let driver = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.driver.clone()
-        };
-
-        let outcome = {
-            let mut driver = driver.lock().await;
-            let result = driver.as_driver_mut().accept_input(input).await?;
-            let signal = driver.take_post_admission_signal();
-            debug_assert!(
-                !signal.should_process_immediately(),
-                "queue-only admission unexpectedly requested immediate processing"
-            );
-            // Intentionally discard the signal — this is the no-wake path.
-            result
-        };
-
-        Ok(outcome)
+        match self
+            .execute_meerkat_machine_ingress_command(
+                MeerkatMachineIngressCommand::AcceptWithoutWake {
+                    session_id: session_id.clone(),
+                    input,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineIngressCommandResult::AcceptOutcome(outcome) => Ok(outcome),
+            MeerkatMachineIngressCommandResult::AcceptWithCompletion { .. } => {
+                Err(RuntimeDriverError::Internal(
+                    "unexpected completion result for accept_input_without_wake".into(),
+                ))
+            }
+        }
     }
 
     /// Get the shared ops lifecycle registry for a session/runtime instance.
@@ -1348,10 +2035,18 @@ impl RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .map(|e| Arc::clone(&e.ops_lifecycle))
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::OpsLifecycleRegistry {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineSessionCommandResult::OpsLifecycleRegistry(registry)) => registry,
+            Ok(_) => unreachable!("ops_lifecycle_registry returned wrong result"),
+            Err(_) => None,
+        }
     }
 
     /// Prepare canonical runtime bindings for a session.
@@ -1367,18 +2062,18 @@ impl RuntimeSessionAdapter {
         &self,
         session_id: SessionId,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeBindingsError> {
-        self.register_session(session_id.clone()).await;
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(&session_id)
-            .ok_or(RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
-        Ok(meerkat_core::SessionRuntimeBindings {
-            session_id,
-            epoch_id: entry.epoch_id.clone(),
-            ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
-                as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
-            cursor_state: Arc::clone(&entry.cursor_state),
-        })
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::PrepareBindings {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineSessionCommandResult::Bindings(bindings)) => Ok(bindings),
+            Ok(_) => unreachable!("prepare_bindings returned wrong result"),
+            Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
+        }
     }
 
     /// Capture a diagnostic snapshot of the current Meerkat runtime spine.
@@ -1570,8 +2265,19 @@ impl RuntimeSessionAdapter {
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        self.maybe_spawn_comms_drain(session_id, keep_alive, comms_runtime)
+        match self
+            .execute_meerkat_machine_drain_command(
+                MeerkatMachineDrainCommand::SetPeerIngressContext {
+                    session_id: session_id.clone(),
+                    keep_alive,
+                    comms_runtime,
+                },
+            )
             .await
+        {
+            MeerkatMachineDrainCommandResult::Spawned(spawned) => spawned,
+            MeerkatMachineDrainCommandResult::Notified => false,
+        }
     }
 
     /// Manage the comms drain lifecycle for a session based on keep_alive intent.
@@ -1587,9 +2293,35 @@ impl RuntimeSessionAdapter {
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
+        match self
+            .execute_meerkat_machine_drain_command(
+                MeerkatMachineDrainCommand::SetPeerIngressContext {
+                    session_id: session_id.clone(),
+                    keep_alive,
+                    comms_runtime,
+                },
+            )
+            .await
+        {
+            MeerkatMachineDrainCommandResult::Spawned(spawned) => spawned,
+            MeerkatMachineDrainCommandResult::Notified => false,
+        }
+    }
+
+    async fn update_peer_ingress_context_inner(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        keep_alive: bool,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> bool {
         if !keep_alive {
             // Explicit disable: stop any running drain for this session.
-            self.abort_comms_drain(session_id).await;
+            self.execute_meerkat_machine_drain_local_command(
+                MeerkatMachineDrainLocalCommand::Abort {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await;
             return false;
         }
 
@@ -1672,7 +2404,24 @@ impl RuntimeSessionAdapter {
     /// Called from drain task exit paths (or by wrappers that detect task
     /// completion). The authority decides whether to enter ExitedRespawnable
     /// (PersistentHost + Failed) or Stopped.
-    pub async fn notify_comms_drain_exited(&self, session_id: &SessionId, reason: DrainExitReason) {
+    pub async fn notify_comms_drain_exited(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        reason: DrainExitReason,
+    ) {
+        let _ = self
+            .execute_meerkat_machine_drain_command(MeerkatMachineDrainCommand::NotifyDrainExited {
+                session_id: session_id.clone(),
+                reason,
+            })
+            .await;
+    }
+
+    async fn notify_comms_drain_exited_inner(
+        &self,
+        session_id: &SessionId,
+        reason: DrainExitReason,
+    ) {
         let mut slots = self.comms_drain_slots.write().await;
         if let Some(slot) = slots.get_mut(session_id) {
             slot.handle.take(); // clean up finished handle
@@ -1687,18 +2436,16 @@ impl RuntimeSessionAdapter {
 
     /// Abort all active comms drain tasks.
     pub async fn abort_comms_drains(&self) {
-        let mut slots = self.comms_drain_slots.write().await;
-        for (_, slot) in slots.iter_mut() {
-            abort_slot(slot);
-        }
+        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::AbortAll)
+            .await;
     }
 
     /// Abort the comms drain task for a specific session.
     pub async fn abort_comms_drain(&self, session_id: &SessionId) {
-        let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id) {
-            abort_slot(slot);
-        }
+        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Abort {
+            session_id: session_id.clone(),
+        })
+        .await;
     }
 
     /// Wait for a session's comms drain task to finish.
@@ -1708,39 +2455,10 @@ impl RuntimeSessionAdapter {
     /// for authority state. If the task panicked without notifying, this submits
     /// `TaskExited { Failed }` as a safety net.
     pub async fn wait_comms_drain(&self, session_id: &SessionId) {
-        let handle = {
-            let mut slots = self.comms_drain_slots.write().await;
-            slots
-                .get_mut(session_id)
-                .and_then(|slot| slot.handle.take())
-        };
-        if let Some(handle) = handle {
-            let _ = handle.await;
-        }
-        // Safety net: if the authority is still Running after the task exited,
-        // the task panicked without notifying. Submit Failed to prevent the
-        // authority from being stuck in Running forever.
-        let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id)
-            && slot.authority.phase()
-                == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
-        {
-            tracing::warn!(
-                "comms_drain: task exited without notifying authority (likely panicked), \
-                 submitting Failed safety net"
-            );
-            match protocol_comms_drain_spawn::notify_task_exited(
-                &mut slot.authority,
-                DrainExitReason::Failed,
-            ) {
-                Ok(effects) => {
-                    apply_runtime_drain_effects(slot, &effects);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "comms drain authority rejected safety-net TaskExited");
-                }
-            }
-        }
+        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Wait {
+            session_id: session_id.clone(),
+        })
+        .await;
     }
 }
 
@@ -1756,55 +2474,20 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let (driver, wake_tx, control_tx) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (
-                entry.driver.clone(),
-                entry.wake_sender(),
-                entry.control_sender(),
-            )
-        };
-
-        // Accept input and drain the typed post-admission signal under the driver lock.
-        let (outcome, signal) = {
-            let mut driver = driver.lock().await;
-            let result = driver.as_driver_mut().accept_input(input).await?;
-            let signal = driver.take_post_admission_signal();
-            (result, signal)
-        };
-
-        // Deliver typed post-admission signals.
-        if signal.should_wake() {
-            match wake_tx {
-                Some(ref wake_tx) => {
-                    let _ = wake_tx.try_send(());
-                }
-                None => {
-                    tracing::warn!(
-                        %session_id,
-                        "input accepted but runtime loop is not attached — \
-                         wake signal dropped, input will remain queued until \
-                         a loop is re-attached"
-                    );
-                }
-            }
-        }
-        // InterruptYielding: deliver through the per-session control channel
-        // so the running agent can break out of cooperative yield points.
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
+        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Ingest {
+                runtime_id,
+                input,
+            })
+            .await
+            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
         {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
+            MeerkatMachineControlCommandResult::AcceptOutcome(outcome) => Ok(outcome),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for SessionServiceRuntimeExt::accept_input: {other:?}"
+            ))),
         }
-
-        Ok(outcome)
     }
 
     async fn accept_input_with_completion(
@@ -1820,93 +2503,57 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError> {
-        let driver = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.driver.clone()
-        };
-        let driver = driver.lock().await;
-        Ok(driver.as_driver().runtime_state())
+        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::RuntimeState {
+                runtime_id,
+            })
+            .await
+            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+        {
+            MeerkatMachineControlCommandResult::RuntimeState(state) => Ok(state),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for SessionServiceRuntimeExt::runtime_state: {other:?}"
+            ))),
+        }
     }
 
     async fn retire_runtime(
         &self,
         session_id: &SessionId,
     ) -> Result<RetireReport, RuntimeDriverError> {
-        let (driver_handle, completions, wake_tx) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (
-                entry.driver.clone(),
-                entry.completions.clone(),
-                entry.wake_sender(),
-            )
-        };
-        let mut driver = driver_handle.lock().await;
-        let mut report = driver.as_driver_mut().retire().await?;
-        drop(driver); // Release driver lock before waking
-
-        if report.inputs_pending_drain > 0 {
-            // Wake the runtime loop so it drains already-queued inputs.
-            // Retired state allows processing but rejects new accepts.
-            if let Some(ref wake_tx) = wake_tx
-                && wake_tx.send(()).await.is_ok()
-            {
-                return Ok(report);
-            }
-
-            // No live loop can drain this retired queue. Abandon the queued work
-            // now so later recovery/upgrade paths do not execute inputs whose
-            // waiters were already terminated.
-            let mut driver = driver_handle.lock().await;
-            let abandoned = driver
-                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
-                .await?;
-            drop(driver);
-            let mut completions = completions.lock().await;
-            completions.resolve_all_terminated("retired without runtime loop");
-            report.inputs_abandoned += abandoned;
-            report.inputs_pending_drain = 0;
+        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Retire {
+                runtime_id,
+            })
+            .await
+            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+        {
+            MeerkatMachineControlCommandResult::RetireReport(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for SessionServiceRuntimeExt::retire_runtime: {other:?}"
+            ))),
         }
-
-        Ok(report)
     }
 
     async fn reset_runtime(
         &self,
         session_id: &SessionId,
     ) -> Result<ResetReport, RuntimeDriverError> {
-        let (driver, completions) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (entry.driver.clone(), entry.completions.clone())
-        };
-        let mut driver = driver.lock().await;
-        if matches!(driver.as_driver().runtime_state(), RuntimeState::Running) {
-            return Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Running,
-            });
+        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Reset {
+                runtime_id,
+            })
+            .await
+            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+        {
+            MeerkatMachineControlCommandResult::ResetReport(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for SessionServiceRuntimeExt::reset_runtime: {other:?}"
+            ))),
         }
-        let report = driver.as_driver_mut().reset().await?;
-        drop(driver);
-
-        // Resolve all pending completion waiters — reset discards all queued work
-        let mut completions = completions.lock().await;
-        completions.resolve_all_terminated("runtime reset");
-
-        Ok(report)
     }
 
     async fn input_state(
@@ -1914,34 +2561,37 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> Result<Option<InputState>, RuntimeDriverError> {
-        let driver = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.driver.clone()
-        };
-        let driver = driver.lock().await;
-        Ok(driver.as_driver().input_state(input_id).cloned())
+        match self
+            .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::InputState {
+                session_id: session_id.clone(),
+                input_id: input_id.clone(),
+            })
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::InputState(state) => Ok(state),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for SessionServiceRuntimeExt::input_state: {other:?}"
+            ))),
+        }
     }
 
     async fn list_active_inputs(
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<InputId>, RuntimeDriverError> {
-        let driver = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.driver.clone()
-        };
-        let driver = driver.lock().await;
-        Ok(driver.as_driver().active_input_ids())
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::ListActiveInputs {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::ActiveInputs(inputs) => Ok(inputs),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for SessionServiceRuntimeExt::list_active_inputs: {other:?}"
+            ))),
+        }
     }
 }
 
@@ -1950,6 +2600,23 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
 // ---------------------------------------------------------------------------
 
 impl RuntimeSessionAdapter {
+    fn logical_runtime_id(session_id: &SessionId) -> LogicalRuntimeId {
+        LogicalRuntimeId::new(session_id.to_string())
+    }
+
+    fn driver_error_from_control_plane_error(err: RuntimeControlPlaneError) -> RuntimeDriverError {
+        match err {
+            RuntimeControlPlaneError::NotFound(_) => RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            },
+            RuntimeControlPlaneError::InvalidState { state } => {
+                RuntimeDriverError::NotReady { state }
+            }
+            RuntimeControlPlaneError::StoreError(message)
+            | RuntimeControlPlaneError::Internal(message) => RuntimeDriverError::Internal(message),
+        }
+    }
+
     /// Resolve a LogicalRuntimeId to a SessionId for internal lookup.
     ///
     /// The adapter uses `LogicalRuntimeId::new(session_id.to_string())` when
@@ -2001,239 +2668,137 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         runtime_id: &LogicalRuntimeId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeControlPlaneError> {
-        let (session_id, driver, _completions, wake_tx, control_tx) = {
-            let (sid, d, c, w) = self.lookup_entry(runtime_id).await?;
-            let ctrl = {
-                let sessions = self.sessions.read().await;
-                sessions
-                    .get(&sid)
-                    .and_then(RuntimeSessionEntry::control_sender)
-            };
-            (sid, d, c, w, ctrl)
-        };
-        let _ = session_id;
-
-        let (outcome, signal) = {
-            let mut drv = driver.lock().await;
-            let result = drv
-                .as_driver_mut()
-                .accept_input(input)
-                .await
-                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-            let signal = drv.take_post_admission_signal();
-            (result, signal)
-        };
-
-        if signal.should_wake()
-            && let Some(ref tx) = wake_tx
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Ingest {
+                runtime_id: runtime_id.clone(),
+                input,
+            })
+            .await?
         {
-            let _ = tx.try_send(());
+            MeerkatMachineControlCommandResult::AcceptOutcome(outcome) => Ok(outcome),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for ingest: {other:?}"
+            ))),
         }
-        if signal.should_interrupt_yielding()
-            && let Some(ref tx) = control_tx
-        {
-            let _ = tx.try_send(
-                meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
-            );
-        }
-
-        Ok(outcome)
     }
 
     async fn publish_event(
         &self,
         event: crate::runtime_event::RuntimeEventEnvelope,
     ) -> Result<(), RuntimeControlPlaneError> {
-        let runtime_id = event.runtime_id.clone();
-        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(&runtime_id).await?;
-
-        let mut drv = driver.lock().await;
-        drv.as_driver_mut()
-            .on_runtime_event(event)
-            .await
-            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::PublishEvent {
+                event,
+            })
+            .await?
+        {
+            MeerkatMachineControlCommandResult::Unit => Ok(()),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for publish_event: {other:?}"
+            ))),
+        }
     }
 
     async fn retire(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RetireReport, RuntimeControlPlaneError> {
-        let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
-        let _ = session_id;
-
-        let mut drv = driver.lock().await;
-        let mut report = drv
-            .as_driver_mut()
-            .retire()
-            .await
-            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-        drop(drv);
-
-        if report.inputs_pending_drain > 0 {
-            if let Some(ref tx) = wake_tx
-                && tx.send(()).await.is_ok()
-            {
-                return Ok(report);
-            }
-
-            // No live loop — abandon queued work
-            let mut drv = driver.lock().await;
-            let abandoned = drv
-                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
-                .await
-                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-            drop(drv);
-            let mut comp = completions.lock().await;
-            comp.resolve_all_terminated("retired without runtime loop");
-            report.inputs_abandoned += abandoned;
-            report.inputs_pending_drain = 0;
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Retire {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
+        {
+            MeerkatMachineControlCommandResult::RetireReport(report) => Ok(report),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for retire: {other:?}"
+            ))),
         }
-
-        Ok(report)
     }
 
     async fn recycle(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RecycleReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
-
-        let (transferred, active_after_recycle) = {
-            let mut drv = driver.lock().await;
-            let state = drv.as_driver().runtime_state();
-            if matches!(state, RuntimeState::Running) {
-                return Err(RuntimeControlPlaneError::InvalidState { state });
-            }
-            let should_restore_attached = matches!(state, RuntimeState::Attached);
-
-            let transferred = match &mut *drv {
-                DriverEntry::Ephemeral(driver) => driver
-                    .recycle_preserving_work()
-                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
-                DriverEntry::Persistent(driver) => driver
-                    .recycle_preserving_work()
-                    .await
-                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
-            };
-
-            if should_restore_attached
-                && matches!(drv.as_driver().runtime_state(), RuntimeState::Idle)
-            {
-                drv.attach()
-                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-            }
-
-            let active_after_recycle = drv.as_driver().active_input_ids();
-            (transferred, active_after_recycle)
-        };
-
-        // Reconcile existing waiters: keep waiting only for inputs that remain
-        // active after recycle; terminate stale waiters so they cannot hang.
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Recycle {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
         {
-            let pending_after: HashSet<InputId> = active_after_recycle.into_iter().collect();
-            let mut comp = completions.lock().await;
-            comp.resolve_not_pending(
-                |input_id| pending_after.contains(input_id),
-                "recycled input no longer pending",
-            );
+            MeerkatMachineControlCommandResult::RecycleReport(report) => Ok(report),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for recycle: {other:?}"
+            ))),
         }
-
-        // Wake the runtime loop to process re-queued inputs
-        if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
-        }
-
-        Ok(RecycleReport {
-            inputs_transferred: transferred,
-        })
     }
 
     async fn reset(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<crate::traits::ResetReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
-
-        let mut drv = driver.lock().await;
-        if matches!(drv.as_driver().runtime_state(), RuntimeState::Running) {
-            return Err(RuntimeControlPlaneError::InvalidState {
-                state: RuntimeState::Running,
-            });
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Reset {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
+        {
+            MeerkatMachineControlCommandResult::ResetReport(report) => Ok(report),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for reset: {other:?}"
+            ))),
         }
-        let report = drv
-            .as_driver_mut()
-            .reset()
-            .await
-            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-        drop(drv);
-
-        let mut comp = completions.lock().await;
-        comp.resolve_all_terminated("runtime reset");
-
-        Ok(report)
     }
 
     async fn recover(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RecoveryReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
-
-        let (report, active_after_recover) = {
-            let mut drv = driver.lock().await;
-            let report = drv
-                .as_driver_mut()
-                .recover()
-                .await
-                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-            let active_after_recover = drv.as_driver().active_input_ids();
-            (report, active_after_recover)
-        };
-
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Recover {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
         {
-            let pending_after: HashSet<InputId> = active_after_recover.into_iter().collect();
-            let mut comp = completions.lock().await;
-            comp.resolve_not_pending(
-                |input_id| pending_after.contains(input_id),
-                "recovered input no longer pending",
-            );
+            MeerkatMachineControlCommandResult::RecoveryReport(report) => Ok(report),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for recover: {other:?}"
+            ))),
         }
-
-        if let Some(ref tx) = wake_tx {
-            let _ = tx.try_send(());
-        }
-
-        Ok(report)
     }
 
     async fn destroy(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<DestroyReport, RuntimeControlPlaneError> {
-        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
-
-        let mut drv = driver.lock().await;
-        let report = drv
-            .as_driver_mut()
-            .destroy()
-            .await
-            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-        drop(drv);
-
-        let mut comp = completions.lock().await;
-        comp.resolve_all_terminated("runtime destroyed");
-
-        Ok(report)
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Destroy {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
+        {
+            MeerkatMachineControlCommandResult::DestroyReport(report) => Ok(report),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for destroy: {other:?}"
+            ))),
+        }
     }
 
     async fn runtime_state(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<RuntimeState, RuntimeControlPlaneError> {
-        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
-
-        let drv = driver.lock().await;
-        Ok(drv.as_driver().runtime_state())
+        match self
+            .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::RuntimeState {
+                runtime_id: runtime_id.clone(),
+            })
+            .await?
+        {
+            MeerkatMachineControlCommandResult::RuntimeState(state) => Ok(state),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for runtime_state: {other:?}"
+            ))),
+        }
     }
 
     async fn load_boundary_receipt(
@@ -2242,15 +2807,20 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
         run_id: &RunId,
         sequence: u64,
     ) -> Result<Option<meerkat_core::lifecycle::RunBoundaryReceipt>, RuntimeControlPlaneError> {
-        match &self.store {
-            Some(store) => store
-                .load_boundary_receipt(runtime_id, run_id, sequence)
-                .await
-                .map_err(|e| RuntimeControlPlaneError::StoreError(e.to_string())),
-            None => {
-                // Ephemeral mode — no persisted receipts
-                Ok(None)
-            }
+        match self
+            .execute_meerkat_machine_control_command(
+                MeerkatMachineControlCommand::LoadBoundaryReceipt {
+                    runtime_id: runtime_id.clone(),
+                    run_id: run_id.clone(),
+                    sequence,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineControlCommandResult::BoundaryReceipt(receipt) => Ok(receipt),
+            other => Err(RuntimeControlPlaneError::Internal(format!(
+                "unexpected MeerkatMachineControlCommandResult for load_boundary_receipt: {other:?}"
+            ))),
         }
     }
 }
@@ -2520,6 +3090,76 @@ mod tests {
         assert!(
             !slots.contains_key(&session_id),
             "unregister must remove the comms drain slot entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_service_runtime_ext_write_side_follows_machine_control_surface() {
+        let adapter = RuntimeSessionAdapter::ephemeral();
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+
+        let state = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::runtime_state(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("runtime state should route through the machine seam");
+        assert_eq!(state, RuntimeState::Idle);
+
+        let outcome = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::accept_input(
+            &adapter,
+            &session_id,
+            make_prompt("service-ext-write-side"),
+        )
+        .await
+        .expect("accept_input should route through the machine seam");
+        assert!(
+            matches!(outcome, AcceptOutcome::Accepted { .. }),
+            "prompt should still be admitted through the SessionServiceRuntimeExt seam"
+        );
+
+        let active = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::list_active_inputs(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("active inputs should still be readable");
+        assert_eq!(active.len(), 1, "accepted input should remain active");
+        let active_state = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::input_state(
+            &adapter,
+            &session_id,
+            &active[0],
+        )
+        .await
+        .expect("input_state should route through the machine seam");
+        assert_eq!(
+            active_state.map(|state| state.current_state()),
+            Some(crate::input_state::InputLifecycleState::Queued),
+            "accepted prompt should still be visible through machine-routed input_state"
+        );
+
+        let retire_report = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::retire_runtime(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("retire should route through the machine seam");
+        assert_eq!(
+            retire_report.inputs_abandoned, 1,
+            "retire should still abandon queued work when no runtime loop is attached"
+        );
+        assert_eq!(retire_report.inputs_pending_drain, 0);
+
+        let reset_report = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::reset_runtime(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("reset should route through the machine seam");
+        assert_eq!(
+            reset_report.inputs_abandoned, 0,
+            "reset after retire should not find residual queued work"
         );
     }
 

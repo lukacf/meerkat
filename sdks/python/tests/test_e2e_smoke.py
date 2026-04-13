@@ -300,9 +300,11 @@ if include_scenario(40):
                 runtime_mode="turn_driven",
             )
             assert lead["session_id"]
+            assert lead["bridge_session_id"] == lead["session_id"]
             assert reviewer["session_id"]
+            assert reviewer["bridge_session_id"] == reviewer["session_id"]
 
-            reviewer_session_id = reviewer["session_id"]
+            reviewer_session_id = reviewer["bridge_session_id"]
             await mob.wire("lead-1", "reviewer-1")
 
             append = await mob.append_system_context(
@@ -312,12 +314,14 @@ if include_scenario(40):
                 idempotency_key="py-swarm-40",
             )
             assert append["status"] in {"staged", "duplicate"}
+            assert append["bridge_session_id"] == reviewer_session_id
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:
                 reviewer_receipt = await mob.member("reviewer-1").send(
                     "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
                 )
                 assert reviewer_receipt["session_id"] == reviewer_session_id
+                assert reviewer_receipt["bridge_session_id"] == reviewer_session_id
                 assert reviewer_receipt["member_id"] == "reviewer-1"
                 observed = await next_subscription_event(subscription)
                 assert observed is not None
@@ -379,7 +383,8 @@ if include_scenario(40):
                 timeout_secs=60.0,
             )
             respawned_session_id = next(
-                entry.get("member_ref", {}).get("session_id")
+                entry.get("member_ref", {}).get("bridge_session_id")
+                or entry.get("member_ref", {}).get("session_id")
                 for entry in respawned_members
                 if entry["meerkat_id"] == "reviewer-1"
             )
@@ -394,6 +399,7 @@ if include_scenario(40):
                 "Reply with REVIEWER_RESPAWN_40.",
             )
             assert respawn_receipt["session_id"] == respawned_session_id
+            assert respawn_receipt["bridge_session_id"] == respawned_session_id
             assert respawn_receipt["member_id"] == "reviewer-1"
             respawned_state = await wait_for(
                 "reviewer reply after respawn",

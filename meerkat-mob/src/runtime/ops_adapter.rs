@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 #[derive(Clone)]
 struct SessionOpsBinding {
-    owner_session_id: SessionId,
+    owner_bridge_session_id: SessionId,
     registry: Arc<dyn OpsLifecycleRegistry>,
 }
 
@@ -37,7 +37,7 @@ impl MobOpsAdapter {
     pub(crate) fn bind_session_registry(
         &self,
         child_session_id: SessionId,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
         registry: Arc<dyn OpsLifecycleRegistry>,
     ) {
         self.session_bindings
@@ -46,7 +46,7 @@ impl MobOpsAdapter {
             .insert(
                 child_session_id,
                 SessionOpsBinding {
-                    owner_session_id,
+                    owner_bridge_session_id,
                     registry,
                 },
             );
@@ -63,7 +63,7 @@ impl MobOpsAdapter {
             .get(session_id)
             .cloned()
         {
-            (binding.registry, binding.owner_session_id)
+            (binding.registry, binding.owner_bridge_session_id)
         } else {
             (
                 Arc::clone(&self.fallback_registry) as Arc<dyn OpsLifecycleRegistry>,
@@ -124,7 +124,7 @@ impl MobOpsAdapter {
         member_ref: &MemberRef,
         operation: &str,
     ) -> Result<SessionId, MobError> {
-        member_ref.session_id().cloned().ok_or_else(|| {
+        member_ref.bridge_session_id().cloned().ok_or_else(|| {
             MobError::Internal(format!(
                 "mob ops adapter cannot {operation} member without session-backed identity: {member_ref:?}",
             ))
@@ -248,12 +248,12 @@ impl MobOpsAdapter {
         }
 
         let operation_id = OperationId::new();
-        let (registry, owner_session_id) = self.registry_for_session(session_id);
+        let (registry, owner_bridge_session_id) = self.registry_for_session(session_id);
         registry
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
                 kind: OperationKind::MobMemberChild,
-                owner_session_id,
+                owner_session_id: owner_bridge_session_id,
                 display_name: display_name.to_string(),
                 source_label: "mob_member".to_string(),
                 child_session_id: Some(session_id.clone()),
@@ -413,7 +413,7 @@ mod tests {
     async fn ops_registry_integration_red_ok_member_adapter_tracks_peer_ready_and_retire() {
         let adapter = MobOpsAdapter::new();
         let session_id = SessionId::new();
-        let member_ref = MemberRef::from_session_id(session_id.clone());
+        let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
 
         let operation_id = adapter
             .mark_member_provisioned(&session_id, "mob-a/orchestrator/member-alpha")
@@ -460,12 +460,12 @@ mod tests {
     #[tokio::test]
     async fn bound_session_registry_owns_child_operation_ids() {
         let adapter = MobOpsAdapter::new();
-        let owner_session_id = SessionId::new();
+        let owner_bridge_session_id = SessionId::new();
         let child_session_id = SessionId::new();
         let bound_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
         adapter.bind_session_registry(
             child_session_id.clone(),
-            owner_session_id,
+            owner_bridge_session_id,
             Arc::clone(&bound_registry) as Arc<dyn OpsLifecycleRegistry>,
         );
 
@@ -490,7 +490,7 @@ mod tests {
     async fn mark_member_retired_without_existing_operation_is_noop() {
         let adapter = MobOpsAdapter::new();
         let session_id = SessionId::new();
-        let member_ref = MemberRef::from_session_id(session_id);
+        let member_ref = MemberRef::from_bridge_session_id(session_id);
 
         adapter
             .mark_member_retired(&member_ref)

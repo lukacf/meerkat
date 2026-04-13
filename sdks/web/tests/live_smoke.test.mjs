@@ -308,8 +308,9 @@ test(
       assert.equal(spawned.length, 2);
       assert.ok(spawned.every((entry) => entry.status === "ok"));
 
-      const reviewerSessionId = spawned[1].member_ref?.session_id;
-      assert.ok(reviewerSessionId);
+      const reviewerBridgeSessionId = spawned[1].member_ref?.bridge_session_id;
+      assert.ok(reviewerBridgeSessionId);
+      assert.equal(spawned[1].member_ref?.session_id, reviewerBridgeSessionId);
 
       await mob.wire("lead-1", "reviewer-1");
       const appended = await mob.appendSystemContext("reviewer-1", {
@@ -338,9 +339,11 @@ test(
       const members = await mob.listMembers();
       const reviewer = members.find((member) => member.meerkat_id === "reviewer-1");
       assert.ok(reviewer);
-      assert.equal(reviewer.member_ref.session_id, reviewerSessionId);
+      assert.equal(reviewer.member_ref.bridge_session_id, reviewerBridgeSessionId);
+      assert.equal(reviewer.member_ref.session_id, reviewerBridgeSessionId);
       const reviewerSnapshot = await mob.memberStatus("reviewer-1");
-      assert.equal(reviewerSnapshot.current_session_id, reviewerSessionId);
+      assert.equal(reviewerSnapshot.current_bridge_session_id, reviewerBridgeSessionId);
+      assert.equal(reviewerSnapshot.current_session_id, reviewerBridgeSessionId);
 
       const ledger = await mob.events("", 200);
       assert.ok(Array.isArray(ledger));
@@ -425,7 +428,9 @@ test(
       assert.ok(spawned.every((entry) => entry.status === "ok"));
 
       const reviewerSessionId = spawned[2].member_ref?.session_id;
+      const reviewerBridgeSessionId = spawned[2].member_ref?.bridge_session_id;
       assert.ok(reviewerSessionId);
+      assert.equal(reviewerBridgeSessionId, reviewerSessionId);
 
       const allSubscription = await mob.subscribeEvents();
       try {
@@ -466,12 +471,21 @@ test(
             (member) =>
               member.meerkat_id === "reviewer-1"
               && member.member_ref?.session_id
+              && member.member_ref?.bridge_session_id
               && member.member_ref.session_id !== reviewerSessionId,
-          ),
+        ),
         { timeoutMs: 60000, intervalMs: 200 },
       );
       assert.ok(
         withRespawnedReviewer.some((member) => member.meerkat_id === "reviewer-1"),
+      );
+      assert.ok(
+        withRespawnedReviewer.some(
+          (member) =>
+            member.meerkat_id === "reviewer-1"
+            && member.member_ref?.bridge_session_id
+            && member.member_ref.bridge_session_id !== reviewerBridgeSessionId,
+        ),
       );
 
       await mob.lifecycle("stop");

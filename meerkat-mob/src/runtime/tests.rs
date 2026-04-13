@@ -90,7 +90,7 @@ async fn export_best_effort_meerkat_shadow_sample(
     phase: &str,
     timestamp: &str,
 ) -> Option<meerkat::MeerkatShadowScenarioSample> {
-    let runtime_adapter = handle.diagnostic_runtime_adapter()?;
+    let runtime_adapter = handle.diagnostic_runtime_adapter().await?;
     let spine = runtime_adapter
         .meerkat_machine_spine_snapshot(session_id)
         .await?;
@@ -1905,6 +1905,7 @@ fn sample_definition() -> MobDefinition {
         spawn_policy: None,
         event_router: None,
         owner_session_id: None,
+        owner_bridge_session_id: None,
         session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
         is_implicit: false,
     }
@@ -3940,6 +3941,87 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
         .await
         .expect_err("out-of-scope operator call should be denied before args are parsed");
     assert!(matches!(error, ToolError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let mob_id = handle.definition().id.to_string();
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap();
+    let dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        crate::build::MobToolAccessContext::InjectedAuthority(
+            meerkat_core::service::MobToolAuthorityContext::new(
+                meerkat_core::service::OpaquePrincipalToken::new("in-scope"),
+                false,
+            )
+            .with_managed_mob_scope([mob_id.as_str()]),
+        ),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher should be visible when authority is injected");
+
+    let spawn_args = RawValue::from_string(
+        serde_json::json!({
+            "profile": "worker",
+            "meerkat_id": "w-bridge"
+        })
+        .to_string(),
+    )
+    .expect("spawn args");
+    let spawn_result = dispatcher
+        .dispatch(ToolCallView {
+            id: "call-bridge-spawn",
+            name: "spawn_meerkat",
+            args: &spawn_args,
+        })
+        .await
+        .expect("spawn_meerkat should dispatch");
+    let spawn_payload: serde_json::Value =
+        serde_json::from_str(&spawn_result.result.text_content()).expect("spawn payload");
+    assert_eq!(
+        spawn_payload["session_id"], spawn_payload["bridge_session_id"],
+        "compatibility session_id must mirror the canonical bridge binding"
+    );
+    assert!(
+        spawn_payload["bridge_session_id"].is_string(),
+        "spawn result should surface the canonical bridge binding"
+    );
+
+    let list_args = RawValue::from_string("{}".to_string()).expect("list args");
+    let list_result = dispatcher
+        .dispatch(ToolCallView {
+            id: "call-bridge-list",
+            name: "list_meerkats",
+            args: &list_args,
+        })
+        .await
+        .expect("list_meerkats should dispatch");
+    let list_payload: serde_json::Value =
+        serde_json::from_str(&list_result.result.text_content()).expect("list payload");
+    let meerkat = list_payload["meerkats"]
+        .as_array()
+        .expect("meerkats array")
+        .iter()
+        .find(|entry| entry["meerkat_id"] == "w-bridge")
+        .expect("spawned meerkat should appear in list");
+    assert_eq!(
+        meerkat["session_id"], meerkat["bridge_session_id"],
+        "compatibility bridge binding fields must stay aligned in list output"
+    );
+    assert_eq!(
+        meerkat["current_session_id"], meerkat["current_bridge_session_id"],
+        "current bridge binding compatibility fields must stay aligned in list output"
+    );
 }
 
 #[tokio::test]
@@ -8510,7 +8592,7 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
         .spawn_spec_receipt_with_owner_context(
             spec,
             super::handle::CanonicalOpsOwnerContext {
-                owner_session_id: sid_w1.clone(),
+                owner_bridge_session_id: sid_w1.clone(),
                 ops_registry: Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
             },
         )
@@ -14255,6 +14337,223 @@ async fn test_reset_clears_task_board() {
 }
 
 #[tokio::test]
+async fn test_task_get_round_trips_through_machine_command_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let task_id = handle
+        .task_create("Task A".into(), "do a".into(), vec![])
+        .await
+        .expect("create task a");
+
+    let task = handle
+        .task_get(&task_id)
+        .await
+        .expect("task_get")
+        .expect("task exists");
+    assert_eq!(task.id, task_id);
+
+    handle.reset().await.expect("reset");
+    assert!(
+        handle
+            .task_get(&task_id)
+            .await
+            .expect("task_get after reset")
+            .is_none(),
+        "reset should clear the task board for machine-routed task_get"
+    );
+}
+
+#[tokio::test]
+async fn test_structural_roster_reads_round_trip_through_machine_command_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let roster = handle.roster().await;
+    assert!(
+        roster.get(&MeerkatId::from("w-1")).is_some(),
+        "machine-routed roster snapshot should include spawned member"
+    );
+
+    let all_members = handle.list_all_members().await;
+    assert_eq!(all_members.len(), 1);
+    assert_eq!(all_members[0].meerkat_id, MeerkatId::from("w-1"));
+
+    let active_members = handle.list_members().await;
+    assert_eq!(active_members.len(), 1);
+    assert_eq!(active_members[0].meerkat_id, MeerkatId::from("w-1"));
+
+    let including_retiring = handle.list_members_including_retiring().await;
+    assert_eq!(including_retiring.len(), 1);
+    assert_eq!(including_retiring[0].meerkat_id, MeerkatId::from("w-1"));
+
+    let entry = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("member exists");
+    assert_eq!(entry.meerkat_id, MeerkatId::from("w-1"));
+
+    handle
+        .retire(MeerkatId::from("w-1"))
+        .await
+        .expect("retire worker");
+    assert!(
+        handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "machine-routed get_member should reflect retirement"
+    );
+}
+
+#[tokio::test]
+async fn test_member_status_round_trips_through_machine_command_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let snapshot = handle
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("member status");
+    assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
+    assert_eq!(
+        snapshot.current_session_id.as_ref(),
+        Some(receipt.session_id().expect("session-backed")),
+        "machine-routed member_status should preserve the active session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_member_handle_session_helpers_round_trip_through_machine_projection_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let member = handle
+        .member(&MeerkatId::from("w-1"))
+        .await
+        .expect("member handle");
+
+    let current_session_id = member
+        .current_session_id()
+        .await
+        .expect("current session id");
+    assert_eq!(
+        current_session_id.as_ref(),
+        Some(receipt.session_id().expect("session-backed")),
+        "member handle should expose the machine-routed current session binding"
+    );
+
+    let session_ref = member.session_ref().await.expect("session ref");
+    assert_eq!(
+        session_ref.as_ref().map(|session| &session.session_id),
+        Some(receipt.session_id().expect("session-backed")),
+        "member handle session_ref should follow the same machine-routed binding"
+    );
+}
+
+#[tokio::test]
+async fn test_agent_event_subscriptions_resolve_through_machine_routed_member_reads() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let _stream = handle
+        .subscribe_agent_events(&MeerkatId::from("l-1"))
+        .await
+        .expect("member stream");
+
+    let streams = handle.subscribe_all_agent_events().await;
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].0, MeerkatId::from("l-1"));
+}
+
+#[tokio::test]
+async fn test_mob_events_view_round_trips_through_machine_command_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let replay = handle.events().replay_all().await.expect("replay all");
+    assert!(
+        replay
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MeerkatSpawned { .. })),
+        "replayed event view should include spawn events through the machine command surface"
+    );
+
+    let polled = handle.events().poll(0, 32).await.expect("poll events");
+    assert!(
+        !polled.is_empty(),
+        "polled event view should surface stored events through the machine command surface"
+    );
+
+    let direct_polled = handle.poll_events(0, 32).await.expect("direct poll events");
+    assert!(
+        !direct_polled.is_empty(),
+        "direct handle poll_events should also round-trip through the machine command surface"
+    );
+}
+
+#[tokio::test]
+async fn test_record_operator_action_provenance_round_trips_through_machine_command_surface() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let authority = meerkat_core::service::MobToolAuthorityContext::create_only_generated()
+        .with_audit_invocation_id("audit-machine-surface");
+
+    handle
+        .record_operator_action_provenance("spawn_meerkat", &authority)
+        .await
+        .expect("record operator action");
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::OperatorActionRecorded {
+                tool_name,
+                audit_invocation_id,
+                ..
+            } if tool_name == "spawn_meerkat"
+                && audit_invocation_id.as_deref() == Some("audit-machine-surface")
+        )),
+        "operator action provenance should be appended through the machine command surface"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let mut router = handle
+        .subscribe_mob_events_with_config(MobEventRouterConfig {
+            poll_interval: Duration::from_millis(10),
+            channel_capacity: 32,
+        })
+        .await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        matches!(
+            router.event_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "router should remain live after tracking a spawned member through machine-routed bootstrap"
+    );
+    router.cancel();
+}
+
+#[tokio::test]
 async fn test_reset_append_failure_transitions_to_stopped() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
@@ -16274,6 +16573,7 @@ async fn test_capture_composition_shadow_report_returns_empty_for_live_work_brid
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for seam shadow checks");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -16357,6 +16657,7 @@ async fn test_capture_mob_shadow_suite_report_returns_empty_for_live_system() {
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for aggregate shadow checks");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -16567,6 +16868,7 @@ async fn test_capture_mob_shadow_suite_report_stays_empty_across_single_step_flo
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for aggregate shadow checks");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -16771,6 +17073,7 @@ async fn test_capture_mob_shadow_suite_taxonomy_stays_empty_across_broader_smoke
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for broader shadow smoke run");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -16876,6 +17179,7 @@ async fn test_capture_mob_shadow_suite_taxonomy_reports_live_bridge_loss_drift()
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for aggregate shadow checks");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -17091,6 +17395,7 @@ async fn test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenar
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for aggregate shadow checks");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -17310,6 +17615,7 @@ async fn test_export_two_kernel_shadow_report_session_collects_multiple_live_run
         .expect("run green flow");
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for shared report-session checks");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -17643,6 +17949,7 @@ async fn test_capture_mob_shadow_suite_report_stays_empty_across_destroy_infligh
 
     let runtime_adapter = handle
         .diagnostic_runtime_adapter()
+        .await
         .expect("runtime adapter should be present for aggregate shadow checks");
     let mut active_session_id = None;
 

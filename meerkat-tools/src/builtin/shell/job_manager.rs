@@ -170,8 +170,8 @@ pub struct JobManager {
     resolved_shell_path: Arc<Mutex<Option<PathBuf>>>,
     /// Shared lifecycle registry backing background shell operations.
     ops_registry: Arc<dyn OpsLifecycleRegistry>,
-    /// Session-scoped owner identity for shared lifecycle records.
-    owner_session_id: SessionId,
+    /// Bridge-session-scoped owner identity for shared lifecycle records.
+    owner_bridge_session_id: SessionId,
     /// Whether this manager is bound to a real session-canonical ops context.
     owner_session_bound: bool,
     /// Whether this manager is bound to an injected session-canonical registry.
@@ -190,7 +190,7 @@ impl std::fmt::Debug for JobManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobManager")
             .field("config", &self.config)
-            .field("owner_session_id", &self.owner_session_id)
+            .field("owner_bridge_session_id", &self.owner_bridge_session_id)
             .field(
                 "exports_canonical_async_ops",
                 &self.exports_canonical_async_ops(),
@@ -208,7 +208,7 @@ impl JobManager {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
             ops_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
-            owner_session_id: SessionId::new(),
+            owner_bridge_session_id: SessionId::new(),
             owner_session_bound: false,
             ops_registry_bound: false,
             handles: Arc::new(Mutex::new(HashMap::new())),
@@ -218,11 +218,17 @@ impl JobManager {
         }
     }
 
-    /// Override the owner session ID used in shared lifecycle records.
-    pub(crate) fn with_owner_session_id(mut self, session_id: SessionId) -> Self {
-        self.owner_session_id = session_id;
+    /// Override the canonical owner bridge session ID used in shared lifecycle records.
+    pub(crate) fn with_owner_bridge_session_id(mut self, bridge_session_id: SessionId) -> Self {
+        self.owner_bridge_session_id = bridge_session_id;
         self.owner_session_bound = true;
         self
+    }
+
+    /// Compatibility wrapper retained while older call sites still speak in
+    /// session-centric terms.
+    pub(crate) fn with_owner_session_id(self, session_id: SessionId) -> Self {
+        self.with_owner_bridge_session_id(session_id)
     }
 
     /// Override the lifecycle registry used for background operations.
@@ -238,10 +244,10 @@ impl JobManager {
     /// are anchored to a real owner session and lifecycle registry.
     pub fn bind_canonical_async_ops(
         self,
-        session_id: SessionId,
+        owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Self {
-        self.with_owner_session_id(session_id)
+        self.with_owner_bridge_session_id(owner_bridge_session_id)
             .with_ops_registry(ops_registry)
     }
 
@@ -366,7 +372,7 @@ impl JobManager {
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
                 kind: OperationKind::BackgroundToolOp,
-                owner_session_id: self.owner_session_id.clone(),
+                owner_session_id: self.owner_bridge_session_id.clone(),
                 display_name: format!("shell:{command}"),
                 source_label: "shell_job".to_string(),
                 child_session_id: None,
@@ -486,7 +492,7 @@ impl JobManager {
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
                 kind: OperationKind::BackgroundToolOp,
-                owner_session_id: self.owner_session_id.clone(),
+                owner_session_id: self.owner_bridge_session_id.clone(),
                 display_name: format!("shell:{command}"),
                 source_label: "shell_job".to_string(),
                 child_session_id: None,
@@ -1176,7 +1182,7 @@ mod tests {
     fn bound_job_manager(config: ShellConfig) -> JobManager {
         let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
         JobManager::new(config)
-            .with_owner_session_id(SessionId::new())
+            .with_owner_bridge_session_id(SessionId::new())
             .with_ops_registry(registry)
     }
 
@@ -1228,7 +1234,7 @@ mod tests {
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
                 kind: OperationKind::BackgroundToolOp,
-                owner_session_id: manager.owner_session_id.clone(),
+                owner_session_id: manager.owner_bridge_session_id.clone(),
                 display_name: "shell:sleep".to_string(),
                 source_label: "shell_job".to_string(),
                 child_session_id: None,
@@ -1270,10 +1276,10 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_running_job_registers_into_injected_ops_registry() {
-        let owner_session_id = SessionId::new();
+        let owner_bridge_session_id = SessionId::new();
         let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
         let manager = JobManager::new(ShellConfig::default())
-            .with_owner_session_id(owner_session_id)
+            .with_owner_bridge_session_id(owner_bridge_session_id)
             .with_ops_registry(Arc::clone(&registry));
 
         let job_id = manager
@@ -2814,7 +2820,7 @@ mod tests {
         // Setup: create a JobManager with a real RuntimeOpsLifecycleRegistry
         let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
         let manager = JobManager::new(ShellConfig::default())
-            .with_owner_session_id(SessionId::new())
+            .with_owner_bridge_session_id(SessionId::new())
             .with_ops_registry(Arc::clone(&registry));
 
         // Register a synthetic running job
@@ -2891,7 +2897,7 @@ mod tests {
             ..ShellConfig::default()
         };
         let manager = JobManager::new(config)
-            .with_owner_session_id(SessionId::new())
+            .with_owner_bridge_session_id(SessionId::new())
             .with_ops_registry(Arc::clone(&registry));
 
         // Register + complete a synthetic job
@@ -2962,7 +2968,7 @@ mod tests {
             ..ShellConfig::default()
         };
         let manager = JobManager::new(config)
-            .with_owner_session_id(SessionId::new())
+            .with_owner_bridge_session_id(SessionId::new())
             .with_ops_registry(Arc::clone(&registry));
 
         // Register + complete 4 synthetic jobs

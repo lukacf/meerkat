@@ -7,20 +7,207 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use meerkat_core::RuntimeEpochId;
+use meerkat_core::agent::CommsRuntime;
+use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 use meerkat_core::lifecycle::WaitRequestId;
+use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
+use meerkat_core::lifecycle::core_executor::CoreExecutor;
+use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OperationLifecycleSnapshot;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
 use meerkat_core::{CommsDrainMode, CommsDrainPhase};
 
+use crate::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
+use crate::input::Input;
 use crate::input_state::InputLifecycleState;
+use crate::input_state::InputState;
 use crate::input_state::InputTerminalOutcome;
+use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_ingress_authority::{ContentShape, IngressPhase, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
+use crate::traits::{DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport};
+
+/// Public Meerkat lifecycle/control mutations that now route through the
+/// top-level Meerkat machine seam instead of bespoke adapter entrypoints.
+pub(crate) enum MeerkatMachineSessionCommand {
+    RegisterSession {
+        session_id: SessionId,
+    },
+    UnregisterSession {
+        session_id: SessionId,
+    },
+    EnsureSessionWithExecutor {
+        session_id: SessionId,
+        executor: Box<dyn CoreExecutor>,
+    },
+    SetSilentIntents {
+        session_id: SessionId,
+        intents: Vec<String>,
+    },
+    InterruptCurrentRun {
+        session_id: SessionId,
+    },
+    StopRuntimeExecutor {
+        session_id: SessionId,
+        command: RunControlCommand,
+    },
+    ContainsSession {
+        session_id: SessionId,
+    },
+    SessionHasExecutor {
+        session_id: SessionId,
+    },
+    SessionHasComms {
+        session_id: SessionId,
+    },
+    OpsLifecycleRegistry {
+        session_id: SessionId,
+    },
+    PrepareBindings {
+        session_id: SessionId,
+    },
+    InputState {
+        session_id: SessionId,
+        input_id: InputId,
+    },
+    ListActiveInputs {
+        session_id: SessionId,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum MeerkatMachineSessionCommandResult {
+    Unit,
+    Bool(bool),
+    OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
+    Bindings(meerkat_core::SessionRuntimeBindings),
+    InputState(Option<InputState>),
+    ActiveInputs(Vec<InputId>),
+}
+
+/// Public comms-drain mutations that now route through the Meerkat machine
+/// instead of a wrapper/helper split.
+pub(crate) enum MeerkatMachineDrainCommand {
+    SetPeerIngressContext {
+        session_id: SessionId,
+        keep_alive: bool,
+        comms_runtime: Option<Arc<dyn CommsRuntime>>,
+    },
+    NotifyDrainExited {
+        session_id: SessionId,
+        reason: DrainExitReason,
+    },
+}
+
+pub(crate) enum MeerkatMachineDrainCommandResult {
+    Spawned(bool),
+    Notified,
+}
+
+/// Public comms-drain local lifecycle helpers that do not require `Arc<Self>`
+/// task-spawn authority.
+pub(crate) enum MeerkatMachineDrainLocalCommand {
+    AbortAll,
+    Abort { session_id: SessionId },
+    Wait { session_id: SessionId },
+}
+
+pub(crate) enum MeerkatMachineControlCommand {
+    Ingest {
+        runtime_id: LogicalRuntimeId,
+        input: Input,
+    },
+    PublishEvent {
+        event: RuntimeEventEnvelope,
+    },
+    Retire {
+        runtime_id: LogicalRuntimeId,
+    },
+    Recycle {
+        runtime_id: LogicalRuntimeId,
+    },
+    Reset {
+        runtime_id: LogicalRuntimeId,
+    },
+    Recover {
+        runtime_id: LogicalRuntimeId,
+    },
+    Destroy {
+        runtime_id: LogicalRuntimeId,
+    },
+    RuntimeState {
+        runtime_id: LogicalRuntimeId,
+    },
+    LoadBoundaryReceipt {
+        runtime_id: LogicalRuntimeId,
+        run_id: LifecycleRunId,
+        sequence: u64,
+    },
+}
+
+pub(crate) enum MeerkatMachineIngressCommand {
+    AcceptWithCompletion { session_id: SessionId, input: Input },
+    AcceptWithoutWake { session_id: SessionId, input: Input },
+}
+
+pub(crate) enum MeerkatMachineIngressCommandResult {
+    AcceptWithCompletion {
+        outcome: AcceptOutcome,
+        handle: Option<crate::completion::CompletionHandle>,
+    },
+    AcceptOutcome(AcceptOutcome),
+}
+
+pub(crate) enum MeerkatMachineLegacyRunCommand {
+    Prepare {
+        session_id: SessionId,
+        input: Input,
+    },
+    Commit {
+        session_id: SessionId,
+        input_id: InputId,
+        run_id: RunId,
+        output: CoreApplyOutput,
+    },
+    Fail {
+        session_id: SessionId,
+        run_id: RunId,
+        error: String,
+    },
+}
+
+pub(crate) struct MeerkatMachineLegacyRunPrepared {
+    pub input_id: InputId,
+    pub run_id: RunId,
+    pub primitive: RunPrimitive,
+}
+
+pub(crate) enum MeerkatMachineLegacyRunCommandResult {
+    Prepared(MeerkatMachineLegacyRunPrepared),
+    Unit,
+}
+
+#[derive(Debug)]
+pub(crate) enum MeerkatMachineControlCommandResult {
+    AcceptOutcome(AcceptOutcome),
+    Unit,
+    RetireReport(RetireReport),
+    RecycleReport(RecycleReport),
+    ResetReport(ResetReport),
+    RecoveryReport(RecoveryReport),
+    DestroyReport(DestroyReport),
+    RuntimeState(RuntimeState),
+    BoundaryReceipt(Option<RunBoundaryReceipt>),
+}
 
 /// Snapshot of completion waiters registered for one input.
 ///

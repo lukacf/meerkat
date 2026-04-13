@@ -995,8 +995,21 @@ describe("Parity wrappers", () => {
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
+      if (method === "mob/spawn") {
+        return { meerkat_id: params.meerkat_id, bridge_session_id: "spawn-session" };
+      }
+      if (method === "mob/append_system_context") {
+        return { status: "staged", bridge_session_id: "append-session" };
+      }
       if (method === "mob/spawn_many") {
-        return { results: [{ ok: true, session_id: "s1", member_ref: { session_id: "s1" } }] };
+        return {
+          results: [{
+            ok: true,
+            session_id: "s1",
+            bridge_session_id: "s1",
+            member_ref: { session_id: "s1", bridge_session_id: "s1" },
+          }],
+        };
       }
       if (method === "mob/events") {
         return { events: [{ cursor: 1 }] };
@@ -1025,10 +1038,15 @@ describe("Parity wrappers", () => {
       };
     };
 
+    const spawnedOne = await client.spawnMobMember("mob-1", {
+      profile: "worker",
+      meerkatId: "worker-0",
+    });
     const spawned = await client.spawnMobMembers("mob-1", [{
       profile: "worker",
       meerkatId: "worker-1",
     }]);
+    const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
     const events = await client.readMobEvents("mob-1", { afterCursor: 10, limit: 5 });
     const created = await client.createMobProfile("worker", { model: "claude-sonnet-4-6" });
     const got = await client.getMobProfile("missing");
@@ -1036,7 +1054,12 @@ describe("Parity wrappers", () => {
     const updated = await client.updateMobProfile("worker", { model: "claude-opus-4-6" }, 1);
     const deleted = await client.deleteMobProfile("worker", 2);
 
+    assert.equal(spawnedOne.bridge_session_id, "spawn-session");
     assert.equal(spawned[0].ok, true);
+    assert.equal(spawned[0].bridgeSessionId, "s1");
+    assert.equal(spawned[0].memberRef?.sessionId, "s1");
+    assert.equal(spawned[0].memberRef?.bridgeSessionId, "s1");
+    assert.equal(append.bridge_session_id, "append-session");
     assert.equal(events.events.length, 1);
     assert.equal(created.notFound, false);
     assert.equal(got.notFound, true);
@@ -1044,7 +1067,9 @@ describe("Parity wrappers", () => {
     assert.equal(updated.notFound, false);
     assert.equal(deleted.deletedRevision, 2);
     assert.deepEqual(calls.map((c) => c.method), [
+      "mob/spawn",
       "mob/spawn_many",
+      "mob/append_system_context",
       "mob/events",
       "mob/profile/create",
       "mob/profile/get",
@@ -1052,8 +1077,40 @@ describe("Parity wrappers", () => {
       "mob/profile/update",
       "mob/profile/delete",
     ]);
-    assert.equal(calls[1].params.after_cursor, 10);
-    assert.equal(calls[1].params.limit, 5);
+    assert.equal(calls[3].params.after_cursor, 10);
+    assert.equal(calls[3].params.limit, 5);
+  });
+
+  it("normalizes typed memberRef bridge aliases on mob member listings", async () => {
+    const client = new MeerkatClient();
+    client.request = async (method) => {
+      if (method === "mob/members") {
+        return {
+          members: [
+            {
+              meerkat_id: "worker-1",
+              profile: "worker",
+              member_ref: {
+                kind: "session",
+                bridge_session_id: "listed-session",
+              },
+              current_bridge_session_id: "current-listed-session",
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    };
+
+    const members = await client.listMobMembers("mob-1");
+
+    assert.equal(members.length, 1);
+    assert.equal(members[0].memberRef?.bridgeSessionId, "listed-session");
+    assert.equal(members[0].memberRef?.sessionId, "listed-session");
+    assert.equal(members[0].bridgeSessionId, "listed-session");
+    assert.equal(members[0].sessionId, "listed-session");
+    assert.equal(members[0].currentBridgeSessionId, "current-listed-session");
+    assert.equal(members[0].currentSessionId, "current-listed-session");
   });
 
   it("uses canonical role_name for helper APIs while accepting profileName alias", async () => {
@@ -1064,15 +1121,19 @@ describe("Parity wrappers", () => {
       return { output: "ok", tokens_used: 1, session_id: "s1" };
     };
 
-    await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
-    await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
-    await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
-    await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
+    const spawnByRole = await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
+    const spawnByProfile = await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
+    const forkByRole = await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
+    const forkByProfile = await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
 
     assert.equal(calls[0].params.role_name, "worker");
     assert.equal(calls[1].params.role_name, "legacy-worker");
     assert.equal(calls[2].params.role_name, "worker");
     assert.equal(calls[3].params.role_name, "legacy-worker");
+    assert.equal(spawnByRole.bridgeSessionId, "s1");
+    assert.equal(spawnByProfile.bridgeSessionId, "s1");
+    assert.equal(forkByRole.bridgeSessionId, "s1");
+    assert.equal(forkByProfile.bridgeSessionId, "s1");
   });
 });
 
@@ -1089,6 +1150,7 @@ describe("Mob kickoff wait wrappers", () => {
             status: "active",
             tokens_used: 42,
             is_final: false,
+            current_session_id: "bridge-1",
           },
         ],
       };
@@ -1126,8 +1188,11 @@ describe("Mob kickoff wait wrappers", () => {
     assert.equal(direct[0].meerkatId, "lead");
     assert.equal(direct[0].tokensUsed, 42);
     assert.equal(direct[0].status, "active");
+    assert.equal(direct[0].currentBridgeSessionId, "bridge-1");
     assert.equal(legacy[0].meerkatId, "lead");
+    assert.equal(legacy[0].currentBridgeSessionId, "bridge-1");
     assert.equal(fromHandle[0].meerkatId, "lead");
+    assert.equal(fromHandle[0].currentBridgeSessionId, "bridge-1");
   });
 });
 
@@ -1140,6 +1205,7 @@ describe("Mob member host ingress", () => {
       return {
         member_id: "reviewer-1",
         session_id: "session-123",
+        bridge_session_id: "session-123",
         handling_mode: "steer",
       };
     };
@@ -1158,6 +1224,7 @@ describe("Mob member host ingress", () => {
     assert.deepEqual(receipt, {
       memberId: "reviewer-1",
       sessionId: "session-123",
+      bridgeSessionId: "session-123",
       handlingMode: "steer",
     });
     assert.deepEqual(calls, [

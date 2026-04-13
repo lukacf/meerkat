@@ -64,10 +64,12 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        let outcome = owned
+            .inner
+            .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
         let bound = outcome.was_bound();
         let inner = outcome.into_dispatcher();
         let wrapper = Arc::new(NameFilteredDispatcher {
@@ -160,7 +162,7 @@ struct MobOperatorToolDispatcher {
     handle: MobHandle,
     authority_context: MobToolAuthorityContext,
     tools: Arc<[Arc<ToolDef>]>,
-    owner_session_id: Option<SessionId>,
+    owner_bridge_session_id: Option<SessionId>,
     ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
@@ -182,7 +184,8 @@ impl MobOperatorToolDispatcher {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
                         "initial_message": content_input_schema(),
-                        "resume_session_id": {"type": "string", "description": "Deprecated: use launch_mode.resume instead"},
+                        "resume_bridge_session_id": {"type": "string", "description": "Preferred compatibility field for resume bridge bindings when launch_mode is omitted"},
+                        "resume_session_id": {"type": "string", "description": "Deprecated: use resume_bridge_session_id or launch_mode.resume instead"},
                         "backend": {"type": "string", "enum": ["session", "external"]},
                         "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
                         "launch_mode": {
@@ -217,6 +220,7 @@ impl MobOperatorToolDispatcher {
                                     "profile": {"type": "string"},
                                     "meerkat_id": {"type": "string"},
                                     "initial_message": content_input_schema(),
+                                    "resume_bridge_session_id": {"type": "string"},
                                     "resume_session_id": {"type": "string"},
                                     "backend": {"type": "string", "enum": ["session", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
@@ -396,7 +400,7 @@ impl MobOperatorToolDispatcher {
             handle,
             authority_context,
             tools: defs.into(),
-            owner_session_id: None,
+            owner_bridge_session_id: None,
             ops_registry: None,
         }
     }
@@ -431,6 +435,36 @@ impl MobOperatorToolDispatcher {
             result: ToolResult::new(call.id.to_string(), content, false),
             async_ops,
             session_effects: vec![],
+        })
+    }
+
+    fn member_ref_result_payload(member_ref: &MemberRef) -> serde_json::Value {
+        let bridge_session_id = member_ref.bridge_session_id().cloned();
+        json!({
+            "member_ref": member_ref,
+            "session_id": bridge_session_id,
+            "bridge_session_id": bridge_session_id,
+        })
+    }
+
+    fn member_list_entry_result_payload(entry: &MobMemberListEntry) -> serde_json::Value {
+        let bridge_session_id = entry.bridge_session_id().cloned();
+        let current_bridge_session_id = entry.current_bridge_session_id().cloned();
+        json!({
+            "meerkat_id": entry.meerkat_id,
+            "profile": entry.profile,
+            "runtime_mode": entry.runtime_mode,
+            "member_ref": entry.member_ref,
+            "peer_id": entry.peer_id,
+            "session_id": bridge_session_id,
+            "bridge_session_id": bridge_session_id,
+            "wired_to": entry.wired_to,
+            "external_peer_specs": entry.external_peer_specs,
+            "status": entry.status,
+            "error": entry.error,
+            "is_final": entry.is_final,
+            "current_session_id": current_bridge_session_id,
+            "current_bridge_session_id": current_bridge_session_id,
         })
     }
 
@@ -505,6 +539,8 @@ struct SpawnMeerkatArgs {
     meerkat_id: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
+    #[serde(default)]
+    resume_bridge_session_id: Option<meerkat_core::types::SessionId>,
     #[serde(default)]
     resume_session_id: Option<meerkat_core::types::SessionId>,
     #[serde(default)]
@@ -609,8 +645,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 // then legacy resume_session_id, then default (Fresh).
                 if let Some(launch_mode) = args.launch_mode {
                     spec = spec.with_launch_mode(launch_mode);
-                } else if let Some(session_id) = args.resume_session_id {
-                    spec = spec.with_resume_session_id(session_id);
+                } else if let Some(session_id) =
+                    args.resume_bridge_session_id.or(args.resume_session_id)
+                {
+                    spec = spec.with_resume_bridge_session_id(session_id);
                 }
                 if let Some(policy) = args.tool_access_policy {
                     spec = spec.with_tool_access_policy(policy);
@@ -621,26 +659,22 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
                 }
-                let (result, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
-                    (Some(owner_session_id), Some(ops_registry)) => {
+                let (result, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
+                {
+                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
                         let receipt = self
                             .handle
                             .spawn_spec_receipt_with_owner_context(
                                 spec,
                                 super::handle::CanonicalOpsOwnerContext {
-                                    owner_session_id: owner_session_id.clone(),
+                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
                                     ops_registry: Arc::clone(ops_registry),
                                 },
                             )
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
-                        (
-                            json!({
-                                "member_ref": receipt.member_ref,
-                                "session_id": receipt.member_ref.session_id(),
-                            }),
-                            vec![AsyncOpRef::detached(receipt.operation_id)],
-                        )
+                        let result = Self::member_ref_result_payload(&receipt.member_ref);
+                        (result, vec![AsyncOpRef::detached(receipt.operation_id)])
                     }
                     _ => {
                         let member_ref = self
@@ -648,13 +682,8 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .spawn_spec(spec)
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
-                        (
-                            json!({
-                                "member_ref": member_ref,
-                                "session_id": member_ref.session_id(),
-                            }),
-                            Vec::new(),
-                        )
+                        let result = Self::member_ref_result_payload(&member_ref);
+                        (result, Vec::new())
                     }
                 };
                 self.record_successful_operator_action(call.name).await;
@@ -677,8 +706,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         );
                         if let Some(launch_mode) = spec.launch_mode {
                             spawn_spec = spawn_spec.with_launch_mode(launch_mode);
-                        } else if let Some(session_id) = spec.resume_session_id {
-                            spawn_spec = spawn_spec.with_resume_session_id(session_id);
+                        } else if let Some(session_id) =
+                            spec.resume_bridge_session_id.or(spec.resume_session_id)
+                        {
+                            spawn_spec = spawn_spec.with_resume_bridge_session_id(session_id);
                         }
                         if let Some(policy) = spec.tool_access_policy {
                             spawn_spec = spawn_spec.with_tool_access_policy(policy);
@@ -692,14 +723,15 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let (results, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
-                    (Some(owner_session_id), Some(ops_registry)) => {
+                let (results, async_ops) = match (&self.owner_bridge_session_id, &self.ops_registry)
+                {
+                    (Some(owner_bridge_session_id), Some(ops_registry)) => {
                         let receipts = self
                             .handle
                             .spawn_many_receipts_with_owner_context(
                                 specs,
                                 super::handle::CanonicalOpsOwnerContext {
-                                    owner_session_id: owner_session_id.clone(),
+                                    owner_bridge_session_id: owner_bridge_session_id.clone(),
                                     ops_registry: Arc::clone(ops_registry),
                                 },
                             )
@@ -712,11 +744,12 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                         let results = receipts
                             .into_iter()
                             .map(|result| match result {
-                                Ok(receipt) => json!({
-                                    "ok": true,
-                                    "member_ref": receipt.member_ref,
-                                    "session_id": receipt.member_ref.session_id(),
-                                }),
+                                Ok(receipt) => {
+                                    let mut payload =
+                                        Self::member_ref_result_payload(&receipt.member_ref);
+                                    payload["ok"] = json!(true);
+                                    payload
+                                }
                                 Err(error) => json!({
                                     "ok": false,
                                     "error": error.to_string(),
@@ -732,11 +765,11 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .await
                             .into_iter()
                             .map(|result| match result {
-                                Ok(member_ref) => json!({
-                                    "ok": true,
-                                    "member_ref": member_ref,
-                                    "session_id": member_ref.session_id(),
-                                }),
+                                Ok(member_ref) => {
+                                    let mut payload = Self::member_ref_result_payload(&member_ref);
+                                    payload["ok"] = json!(true);
+                                    payload
+                                }
                                 Err(error) => json!({
                                     "ok": false,
                                     "error": error.to_string(),
@@ -786,22 +819,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 let meerkats = self.handle.list_members().await;
                 let meerkats = meerkats
                     .into_iter()
-                    .map(|entry| {
-                        json!({
-                            "meerkat_id": entry.meerkat_id,
-                            "profile": entry.profile,
-                            "runtime_mode": entry.runtime_mode,
-                            "member_ref": entry.member_ref,
-                            "peer_id": entry.peer_id,
-                            "session_id": entry.session_id(),
-                            "wired_to": entry.wired_to,
-                            "external_peer_specs": entry.external_peer_specs,
-                            "status": entry.status,
-                            "error": entry.error,
-                            "is_final": entry.is_final,
-                            "current_session_id": entry.current_session_id,
-                        })
-                    })
+                    .map(|entry| Self::member_list_entry_result_payload(&entry))
                     .collect::<Vec<_>>();
                 Self::encode_result(call, json!({ "meerkats": meerkats }))
             }
@@ -926,7 +944,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
             return Err(OpsLifecycleBindError::SharedOwnership);
@@ -936,7 +954,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             handle: this.handle,
             authority_context: this.authority_context,
             tools: this.tools,
-            owner_session_id: Some(owner_session_id),
+            owner_bridge_session_id: Some(owner_bridge_session_id),
             ops_registry: Some(registry),
         })))
     }

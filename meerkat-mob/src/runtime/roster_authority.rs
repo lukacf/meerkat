@@ -89,10 +89,6 @@ impl RosterAuthority {
         self.roster.find_by_label(key, value)
     }
 
-    pub(crate) fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
-        self.roster.session_id(meerkat_id)
-    }
-
     /// Get a specific roster entry.
     #[allow(dead_code)]
     pub(crate) fn entry(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
@@ -117,8 +113,13 @@ impl RosterAuthority {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
-        self.roster.set_session_id(meerkat_id, session_id)
+    pub(crate) fn set_bridge_session_id(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        bridge_session_id: SessionId,
+    ) -> bool {
+        self.roster
+            .set_bridge_session_id(meerkat_id, bridge_session_id)
     }
 }
 

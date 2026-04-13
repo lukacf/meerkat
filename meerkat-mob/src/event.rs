@@ -12,6 +12,7 @@ use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -64,14 +65,14 @@ pub struct NewMobEvent {
 
 /// Backend-neutral reference to a mob member.
 ///
-/// Canonical serialization is `{"kind":"...", ...}` while deserialization
-/// also accepts legacy session-only payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// Canonical serialization is `{"kind":"...", ...}` with additive
+/// `bridge_session_id` alongside compatibility `session_id`, while
+/// deserialization also accepts legacy session-only payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberRef {
-    /// Session-backed member identity (legacy/current runtime form).
+    /// Session-backed member identity for the current bridge binding.
     Session {
-        /// Session ID for this member.
+        /// Compatibility carrier for the canonical bridge session ID.
         session_id: SessionId,
     },
     /// Backend-provided identity and address (future external form).
@@ -80,21 +81,63 @@ pub enum MemberRef {
         peer_id: String,
         /// Backend-provided address string.
         address: String,
-        /// Optional session id if this member is bridged to a local session.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Optional bridge session binding when this member is bridged to a
+        /// local session. Serialized additively as both `session_id` and
+        /// `bridge_session_id` for compatibility.
         session_id: Option<SessionId>,
     },
 }
 
 impl MemberRef {
-    pub fn from_session_id(session_id: SessionId) -> Self {
+    pub fn from_bridge_session_id(session_id: SessionId) -> Self {
         Self::Session { session_id }
     }
 
-    pub fn session_id(&self) -> Option<&SessionId> {
+    pub fn from_session_id(session_id: SessionId) -> Self {
+        Self::from_bridge_session_id(session_id)
+    }
+
+    pub fn bridge_session_id(&self) -> Option<&SessionId> {
         match self {
             Self::Session { session_id } => Some(session_id),
             Self::BackendPeer { session_id, .. } => session_id.as_ref(),
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.bridge_session_id()
+    }
+}
+
+impl Serialize for MemberRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Session { session_id } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("kind", "session")?;
+                map.serialize_entry("session_id", session_id)?;
+                map.serialize_entry("bridge_session_id", session_id)?;
+                map.end()
+            }
+            Self::BackendPeer {
+                peer_id,
+                address,
+                session_id,
+            } => {
+                let mut map =
+                    serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
+                map.serialize_entry("kind", "backend_peer")?;
+                map.serialize_entry("peer_id", peer_id)?;
+                map.serialize_entry("address", address)?;
+                if let Some(session_id) = session_id {
+                    map.serialize_entry("session_id", session_id)?;
+                    map.serialize_entry("bridge_session_id", session_id)?;
+                }
+                map.end()
+            }
         }
     }
 }
@@ -111,13 +154,18 @@ enum MemberRefWire {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum MemberRefCanonical {
     Session {
-        session_id: SessionId,
+        #[serde(default)]
+        session_id: Option<SessionId>,
+        #[serde(default)]
+        bridge_session_id: Option<SessionId>,
     },
     BackendPeer {
         peer_id: String,
         address: String,
         #[serde(default)]
         session_id: Option<SessionId>,
+        #[serde(default)]
+        bridge_session_id: Option<SessionId>,
     },
 }
 
@@ -130,17 +178,25 @@ impl<'de> Deserialize<'de> for MemberRef {
         Ok(match wire {
             MemberRefWire::LegacySessionOnly { session_id }
             | MemberRefWire::LegacySessionId(session_id) => Self::Session { session_id },
-            MemberRefWire::Canonical(MemberRefCanonical::Session { session_id }) => {
-                Self::Session { session_id }
-            }
+            MemberRefWire::Canonical(MemberRefCanonical::Session {
+                session_id,
+                bridge_session_id,
+            }) => Self::Session {
+                session_id: bridge_session_id.or(session_id).ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "session member_ref requires bridge_session_id or session_id",
+                    )
+                })?,
+            },
             MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
                 peer_id,
                 address,
                 session_id,
+                bridge_session_id,
             }) => Self::BackendPeer {
                 peer_id,
                 address,
-                session_id,
+                session_id: bridge_session_id.or(session_id),
             },
         })
     }
@@ -372,6 +428,7 @@ mod tests {
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
         }
@@ -629,8 +686,20 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first,
-            r#"{"kind":"session","session_id":"00000000-0000-0000-0000-000000000000"}"#
+            r#"{"kind":"session","session_id":"00000000-0000-0000-0000-000000000000","bridge_session_id":"00000000-0000-0000-0000-000000000000"}"#
         );
+    }
+
+    #[test]
+    fn test_member_ref_deserializes_bridge_session_only_payload() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let parsed: MemberRef = serde_json::from_value(json!({
+            "kind": "session",
+            "bridge_session_id": sid,
+        }))
+        .unwrap();
+
+        assert_eq!(parsed, MemberRef::from_bridge_session_id(sid));
     }
 
     #[test]
@@ -642,6 +711,11 @@ mod tests {
         };
 
         let json = serde_json::to_string(&member_ref).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["bridge_session_id"],
+            "00000000-0000-0000-0000-000000000000"
+        );
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
     }

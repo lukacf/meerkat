@@ -31,7 +31,7 @@ pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
     pub binding: RuntimeBinding,
     pub peer_name: String,
-    pub owner_session_id: Option<SessionId>,
+    pub owner_bridge_session_id: Option<SessionId>,
     pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
@@ -67,7 +67,7 @@ pub trait MobProvisioner: Send + Sync {
     }
     async fn interaction_event_injector(
         &self,
-        session_id: &SessionId,
+        bridge_session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>>;
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError>;
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>>;
@@ -83,7 +83,7 @@ pub trait MobProvisioner: Send + Sync {
     async fn bind_member_owner_context(
         &self,
         member_ref: &MemberRef,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError>;
 
@@ -122,7 +122,7 @@ impl SessionBackend {
         member_ref: &MemberRef,
         operation: &'static str,
     ) -> Result<SessionId, MobError> {
-        member_ref.session_id().cloned().ok_or_else(|| {
+        member_ref.bridge_session_id().cloned().ok_or_else(|| {
             MobError::Internal(format!(
                 "session-backed provisioner cannot {operation} member without session bridge: {member_ref:?}"
             ))
@@ -311,13 +311,13 @@ fn runtime_completion_to_mob_result(
     }
 }
 
-fn session_turn_error_to_mob_error(session_id: &SessionId, error: SessionError) -> MobError {
+fn session_turn_error_to_mob_error(bridge_session_id: &SessionId, error: SessionError) -> MobError {
     match error {
         SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
             tool_name,
             args,
         }) => MobError::CallbackPending {
-            session_id: session_id.clone(),
+            session_id: bridge_session_id.clone(),
             tool_name,
             args,
         },
@@ -463,7 +463,7 @@ mod tests {
 struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Arc<RuntimeSessionAdapter>,
-    session_id: SessionId,
+    bridge_session_id: SessionId,
     state: Arc<RuntimeSessionState>,
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
 }
@@ -472,14 +472,14 @@ impl MobSessionRuntimeExecutor {
     fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Arc<RuntimeSessionAdapter>,
-        session_id: SessionId,
+        bridge_session_id: SessionId,
         state: Arc<RuntimeSessionState>,
         runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
     ) -> Self {
         Self {
             session_service,
             runtime_adapter,
-            session_id,
+            bridge_session_id,
             state,
             runtime_sessions,
         }
@@ -524,7 +524,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 
         self.session_service
             .apply_runtime_turn(
-                &self.session_id,
+                &self.bridge_session_id,
                 run_id,
                 req,
                 match &primitive {
@@ -543,7 +543,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         match command {
             RunControlCommand::CancelCurrentRun { .. } => self
                 .session_service
-                .interrupt(&self.session_id)
+                .interrupt(&self.bridge_session_id)
                 .await
                 .map_err(|err| CoreExecutorError::ControlFailed {
                     reason: err.to_string(),
@@ -551,18 +551,18 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .session_service
-                    .discard_live_session(&self.session_id)
+                    .discard_live_session(&self.bridge_session_id)
                     .await;
                 self.runtime_adapter
-                    .unregister_session(&self.session_id)
+                    .unregister_session(&self.bridge_session_id)
                     .await;
                 let removed = {
                     let mut runtime_sessions = self.runtime_sessions.write().await;
                     let should_remove = runtime_sessions
-                        .get(&self.session_id)
+                        .get(&self.bridge_session_id)
                         .is_some_and(|state| Arc::ptr_eq(state, &self.state));
                     if should_remove {
-                        runtime_sessions.remove(&self.session_id)
+                        runtime_sessions.remove(&self.bridge_session_id)
                     } else {
                         None
                     }
@@ -598,12 +598,12 @@ impl MobProvisioner for SessionBackend {
         );
         // Pre-register with the runtime adapter so the factory receives
         // epoch-local bindings instead of creating a competing registry.
-        let pre_registered_id = if let Some(adapter) = &self.runtime_adapter {
+        let pre_registered_bridge_session_id = if let Some(adapter) = &self.runtime_adapter {
             if req.create_session.build.is_none() {
                 req.create_session.build =
                     Some(meerkat_core::service::SessionBuildOptions::default());
             }
-            let member_session_id = req
+            let member_bridge_session_id = req
                 .create_session
                 .build
                 .as_ref()
@@ -618,14 +618,14 @@ impl MobProvisioner for SessionBackend {
                     id
                 });
             let bindings = adapter
-                .prepare_bindings(member_session_id.clone())
+                .prepare_bindings(member_bridge_session_id.clone())
                 .await
                 .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
             if let Some(ref mut build) = req.create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
-            Some(member_session_id)
+            Some(member_bridge_session_id)
         } else {
             None
         };
@@ -637,43 +637,50 @@ impl MobProvisioner for SessionBackend {
             Ok(created) => created,
             Err(e) => {
                 // Rollback: unregister the pre-registered session on failure
-                if let (Some(adapter), Some(pre_id)) = (&self.runtime_adapter, &pre_registered_id) {
+                if let (Some(adapter), Some(pre_id)) =
+                    (&self.runtime_adapter, &pre_registered_bridge_session_id)
+                {
                     adapter.unregister_session(pre_id).await;
                 }
                 return Err(e.into());
             }
         };
-        // Reconcile: if the session service returned a different ID than we
-        // pre-registered (e.g. LocalSessionService mints fresh IDs), unregister
-        // the orphan and re-register with the real ID.
-        if let (Some(adapter), Some(pre_id)) = (&self.runtime_adapter, &pre_registered_id) {
-            if *pre_id != created.session_id {
+        let created_bridge_session_id = created.session_id.clone();
+        // Reconcile: if the session service returned a different bridge binding
+        // than we pre-registered (e.g. LocalSessionService mints fresh IDs),
+        // unregister the orphan and re-register with the real bridge session.
+        if let (Some(adapter), Some(pre_id)) =
+            (&self.runtime_adapter, &pre_registered_bridge_session_id)
+        {
+            if *pre_id != created_bridge_session_id {
                 tracing::debug!(
                     pre_registered = %pre_id,
-                    actual = %created.session_id,
+                    actual_bridge_session_id = %created_bridge_session_id,
                     "mob provisioner: session service returned different ID; reconciling runtime registration"
                 );
                 adapter.unregister_session(pre_id).await;
             }
-            let _ = self.runtime_session_state(&created.session_id).await;
+            let _ = self.runtime_session_state(&created_bridge_session_id).await;
         }
-        if let (Some(owner_session_id), Some(registry)) = (req.owner_session_id, req.ops_registry) {
+        if let (Some(owner_bridge_session_id), Some(registry)) =
+            (req.owner_bridge_session_id, req.ops_registry)
+        {
             self.ops_adapter.bind_session_registry(
-                created.session_id.clone(),
-                owner_session_id,
+                created_bridge_session_id.clone(),
+                owner_bridge_session_id,
                 registry,
             );
         }
         let operation_id = self
             .ops_adapter
-            .mark_member_provisioned(&created.session_id, &req.peer_name)
+            .mark_member_provisioned(&created_bridge_session_id, &req.peer_name)
             .await?;
         tracing::debug!(
-            session_id = %created.session_id,
-            "SessionBackend::provision_member created session"
+            bridge_session_id = %created_bridge_session_id,
+            "SessionBackend::provision_member created bridge session"
         );
         Ok(MemberSpawnReceipt {
-            member_ref: MemberRef::from_session_id(created.session_id),
+            member_ref: MemberRef::from_bridge_session_id(created_bridge_session_id),
             operation_id,
         })
     }
@@ -684,21 +691,28 @@ impl MobProvisioner for SessionBackend {
         operation_id: &OperationId,
         reason: &str,
     ) -> Result<(), MobError> {
-        let session_id = Self::require_session(member_ref, "abort provision for")?;
-        match self.ops_adapter.operation_status(&session_id, operation_id) {
+        let bridge_session_id = Self::require_session(member_ref, "abort provision for")?;
+        match self
+            .ops_adapter
+            .operation_status(&bridge_session_id, operation_id)
+        {
             Some(OperationStatus::Provisioning) => {
                 if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&session_id).await {
-                        adapter.unregister_session(&session_id).await;
+                    if adapter.contains_session(&bridge_session_id).await {
+                        adapter.unregister_session(&bridge_session_id).await;
                     }
-                    self.remove_runtime_session_state(&session_id).await;
+                    self.remove_runtime_session_state(&bridge_session_id).await;
                 }
-                match self.session_service.archive(&session_id).await {
+                match self.session_service.archive(&bridge_session_id).await {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
                 self.ops_adapter
-                    .abort_member_provision(&session_id, operation_id, Some(reason.to_string()))
+                    .abort_member_provision(
+                        &bridge_session_id,
+                        operation_id,
+                        Some(reason.to_string()),
+                    )
                     .await
             }
             Some(OperationStatus::Running | OperationStatus::Retiring) => {
@@ -713,12 +727,12 @@ impl MobProvisioner for SessionBackend {
                 | OperationStatus::Terminated,
             ) => {
                 if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&session_id).await {
-                        adapter.unregister_session(&session_id).await;
+                    if adapter.contains_session(&bridge_session_id).await {
+                        adapter.unregister_session(&bridge_session_id).await;
                     }
-                    self.remove_runtime_session_state(&session_id).await;
+                    self.remove_runtime_session_state(&bridge_session_id).await;
                 }
-                match self.session_service.archive(&session_id).await {
+                match self.session_service.archive(&bridge_session_id).await {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -726,12 +740,12 @@ impl MobProvisioner for SessionBackend {
             }
             Some(OperationStatus::Absent) | None => {
                 if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&session_id).await {
-                        adapter.unregister_session(&session_id).await;
+                    if adapter.contains_session(&bridge_session_id).await {
+                        adapter.unregister_session(&bridge_session_id).await;
                     }
-                    self.remove_runtime_session_state(&session_id).await;
+                    self.remove_runtime_session_state(&bridge_session_id).await;
                 }
-                match self.session_service.archive(&session_id).await {
+                match self.session_service.archive(&bridge_session_id).await {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -874,19 +888,19 @@ impl MobProvisioner for SessionBackend {
 
     async fn interaction_event_injector(
         &self,
-        session_id: &SessionId,
+        bridge_session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
         self.session_service
-            .interaction_event_injector(session_id)
+            .interaction_event_injector(bridge_session_id)
             .await
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
-        let session_id = match member_ref.session_id() {
+        let bridge_session_id = match member_ref.bridge_session_id() {
             Some(id) => id.clone(),
             None => return Ok(None),
         };
-        match self.session_service.read(&session_id).await {
+        match self.session_service.read(&bridge_session_id).await {
             Ok(view) => Ok(Some(view.state.is_active)),
             Err(meerkat_core::service::SessionError::NotFound { .. }) => Ok(Some(false)),
             Err(error) => Err(error.into()),
@@ -894,8 +908,8 @@ impl MobProvisioner for SessionBackend {
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
-        let session_id = member_ref.session_id()?;
-        self.session_service.comms_runtime(session_id).await
+        let bridge_session_id = member_ref.bridge_session_id()?;
+        self.session_service.comms_runtime(bridge_session_id).await
     }
 
     async fn trusted_peer_spec(
@@ -912,25 +926,28 @@ impl MobProvisioner for SessionBackend {
     }
 
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
-        let session_id = member_ref.session_id()?;
+        let bridge_session_id = member_ref.bridge_session_id()?;
         self.ops_adapter
-            .active_operation_id_for_session(session_id)
+            .active_operation_id_for_session(bridge_session_id)
             .await
     }
 
     async fn bind_member_owner_context(
         &self,
         member_ref: &MemberRef,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError> {
-        let Some(session_id) = member_ref.session_id().cloned() else {
+        let Some(bridge_session_id) = member_ref.bridge_session_id().cloned() else {
             return Err(MobError::Internal(
                 "member has no session bridge for canonical ops binding".into(),
             ));
         };
-        self.ops_adapter
-            .bind_session_registry(session_id, owner_session_id, ops_registry);
+        self.ops_adapter.bind_session_registry(
+            bridge_session_id,
+            owner_bridge_session_id,
+            ops_registry,
+        );
         Ok(())
     }
 
@@ -1007,7 +1024,7 @@ impl MultiBackendProvisioner {
         &self,
         mut create_session: CreateSessionRequest,
         peer_name: String,
-        owner_session_id: Option<SessionId>,
+        owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
         real_peer_id: String,
         real_address: String,
@@ -1026,11 +1043,12 @@ impl MultiBackendProvisioner {
             .as_ref()
             .ok_or_else(|| MobError::WiringError("external backend is not configured".into()))?;
         // Pre-register with the runtime adapter (mirrors SessionBackend::provision_member).
-        let pre_registered_id = if let Some(adapter) = &self.session.runtime_adapter {
+        let pre_registered_bridge_session_id = if let Some(adapter) = &self.session.runtime_adapter
+        {
             if create_session.build.is_none() {
                 create_session.build = Some(meerkat_core::service::SessionBuildOptions::default());
             }
-            let member_session_id = create_session
+            let member_bridge_session_id = create_session
                 .build
                 .as_ref()
                 .and_then(|b| b.resume_session.as_ref())
@@ -1044,14 +1062,14 @@ impl MultiBackendProvisioner {
                     id
                 });
             let bindings = adapter
-                .prepare_bindings(member_session_id.clone())
+                .prepare_bindings(member_bridge_session_id.clone())
                 .await
                 .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
             if let Some(ref mut build) = create_session.build {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
-            Some(member_session_id)
+            Some(member_bridge_session_id)
         } else {
             None
         };
@@ -1062,44 +1080,52 @@ impl MultiBackendProvisioner {
         {
             Ok(created) => created,
             Err(e) => {
-                if let (Some(adapter), Some(pre_id)) =
-                    (&self.session.runtime_adapter, &pre_registered_id)
-                {
+                if let (Some(adapter), Some(pre_id)) = (
+                    &self.session.runtime_adapter,
+                    &pre_registered_bridge_session_id,
+                ) {
                     adapter.unregister_session(pre_id).await;
                 }
                 return Err(e.into());
             }
         };
-        // Reconcile: unregister orphan if session service returned a different ID.
-        if let (Some(adapter), Some(pre_id)) = (&self.session.runtime_adapter, &pre_registered_id) {
-            if *pre_id != created.session_id {
+        let created_bridge_session_id = created.session_id.clone();
+        // Reconcile: unregister orphan if session service returned a different
+        // bridge session than the pre-registered one.
+        if let (Some(adapter), Some(pre_id)) = (
+            &self.session.runtime_adapter,
+            &pre_registered_bridge_session_id,
+        ) {
+            if *pre_id != created_bridge_session_id {
                 tracing::debug!(
                     pre_registered = %pre_id,
-                    actual = %created.session_id,
+                    actual_bridge_session_id = %created_bridge_session_id,
                     "mob external provisioner: reconciling runtime registration"
                 );
                 adapter.unregister_session(pre_id).await;
             }
             let _ = self
                 .session
-                .runtime_session_state(&created.session_id)
+                .runtime_session_state(&created_bridge_session_id)
                 .await;
         }
-        if let (Some(owner_session_id), Some(registry)) = (owner_session_id, ops_registry) {
+        if let (Some(owner_bridge_session_id), Some(registry)) =
+            (owner_bridge_session_id, ops_registry)
+        {
             self.session.ops_adapter.bind_session_registry(
-                created.session_id.clone(),
-                owner_session_id,
+                created_bridge_session_id.clone(),
+                owner_bridge_session_id,
                 registry,
             );
         }
         let operation_id = self
             .session
             .ops_adapter
-            .mark_member_provisioned(&created.session_id, &peer_name)
+            .mark_member_provisioned(&created_bridge_session_id, &peer_name)
             .await?;
         tracing::debug!(
-            session_id = %created.session_id,
-            "ExternalBackend::external_member_ref created session"
+            bridge_session_id = %created_bridge_session_id,
+            "ExternalBackend::external_member_ref created bridge session"
         );
         // Use the real external process identity provided by the caller via
         // RuntimeBinding::External. The bridge session's comms identity is
@@ -1116,7 +1142,7 @@ impl MultiBackendProvisioner {
             member_ref: MemberRef::BackendPeer {
                 peer_id,
                 address,
-                session_id: Some(created.session_id),
+                session_id: Some(created_bridge_session_id),
             },
             operation_id,
         })
@@ -1137,7 +1163,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         create_session: req.create_session,
                         binding: RuntimeBinding::Session,
                         peer_name: req.peer_name,
-                        owner_session_id: req.owner_session_id,
+                        owner_bridge_session_id: req.owner_bridge_session_id,
                         ops_registry: req.ops_registry,
                     })
                     .await
@@ -1146,7 +1172,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 self.external_member_ref(
                     req.create_session,
                     req.peer_name,
-                    req.owner_session_id,
+                    req.owner_bridge_session_id,
                     req.ops_registry,
                     peer_id,
                     address,
@@ -1185,9 +1211,11 @@ impl MobProvisioner for MultiBackendProvisioner {
 
     async fn interaction_event_injector(
         &self,
-        session_id: &SessionId,
+        bridge_session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
-        self.session.interaction_event_injector(session_id).await
+        self.session
+            .interaction_event_injector(bridge_session_id)
+            .await
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
@@ -1242,21 +1270,21 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
-        let session_id = member_ref.session_id()?;
+        let bridge_session_id = member_ref.bridge_session_id()?;
         self.session
             .ops_adapter
-            .active_operation_id_for_session(session_id)
+            .active_operation_id_for_session(bridge_session_id)
             .await
     }
 
     async fn bind_member_owner_context(
         &self,
         member_ref: &MemberRef,
-        owner_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError> {
         self.session
-            .bind_member_owner_context(member_ref, owner_session_id, ops_registry)
+            .bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
             .await
     }
 

@@ -539,6 +539,7 @@ mod tests {
         adapter.shutdown().await;
     }
 
+    #[tokio::test]
     async fn external_tool_surface_snapshot_reflects_staged_surface_state() {
         let mut router = McpRouter::new();
         router.stage_add(test_server_config("planner", Path::new("/bin/echo")));

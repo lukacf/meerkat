@@ -3,7 +3,13 @@
 //! The mob runtime uses an actor pattern where all mutations (retire, wire,
 //! unwire, etc.) are serialized through a single command channel. Spawn
 //! provisioning is parallelized, then finalized through the same actor.
-//! Read-only operations bypass the actor and read from shared state directly.
+//!
+//! The public `MobHandle` surface is being consolidated behind one top-level
+//! machine command seam. Mutations, event surfaces, and diagnostics are routed
+//! through that seam. Canonical member lifecycle projection remains an
+//! intentional lock-free read path over shared roster/session truth so
+//! `Retiring` and supersession windows stay observable even while disposal work
+//! is in flight.
 
 use crate::backend::MobBackendKind;
 use crate::build;
@@ -100,6 +106,9 @@ pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
+pub(crate) use handle::MeerkatShadowInputsSnapshot;
+pub(crate) use handle::RestoreFailureDiagnostic;
+pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
     MemberSessionRef, MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot,

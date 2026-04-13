@@ -16179,6 +16179,1339 @@ Validation:
 - `cargo test -p meerkat-mob --lib`
 - `git diff --check`
 
+## Slice 313 - Owner-bridge semantics reach the deeper Mob spawn/provision path
+
+Goal:
+
+- carry the identity-first naming cleanup from the public/runtime bridge into
+  the deeper Mob spawn/provision/finalize path so internal ownership carriers
+  stop calling bridge bindings `owner_session_id`
+
+What landed:
+
+- renamed the internal canonical owner carrier in:
+  - `meerkat-mob/src/runtime/handle.rs`
+    - `CanonicalOpsOwnerContext.owner_bridge_session_id`
+  - `meerkat-mob/src/runtime/state.rs`
+    - `MobCommand::Spawn.owner_bridge_session_id`
+  - `meerkat-mob/src/runtime/provisioner.rs`
+    - `ProvisionMemberRequest.owner_bridge_session_id`
+    - `bind_member_owner_context(..., owner_bridge_session_id, ...)`
+  - `meerkat-mob/src/runtime/actor.rs`
+    - `PendingSpawn.owner_bridge_session_id`
+    - `enqueue_spawn(..., owner_bridge_session_id, ...)`
+    - attached/auto-wire/finalize locals and receipts
+- updated the remaining `CanonicalOpsOwnerContext` construction sites in:
+  - `meerkat-mob/src/runtime/tools.rs`
+  - `meerkat-mob/src/runtime/tests.rs`
+- cleaned the last runtime-local mock naming straggler in
+  `meerkat-mob/src/runtime/provision_guard.rs`
+
+Important backtrack:
+
+- I did not rename durable/public compatibility surfaces like
+  `OperationSpec.owner_session_id` or mob definition metadata in this slice
+- those remain compatibility fields because they cross older persistence /
+  protocol boundaries; this slice was intentionally limited to the internal
+  runtime carrier path
+
+Why this slice matters:
+
+- the clean-cut regime is now more internally honest: the deeper Mob runtime
+  path names the bridge binding for what it is
+- this reduces the remaining semantic confusion between identity ownership and
+  bridge-session ownership before the next behavior adaptations
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test -p meerkat-rpc --lib --quiet`
+
+## Slice 311 - Bridge-session semantics reach Mob lifecycle projection and spawn surfaces
+
+Goal:
+
+- keep pushing the clean-cut / identity-first adaptation by making the Mob
+  runtime projection speak bridge-session semantics internally instead of
+  treating `current_session_id` as the canonical machine vocabulary
+
+What landed:
+
+- renamed the internal lifecycle-authority material/input fields from
+  `current_session_id` to `current_bridge_session_id` in
+  `meerkat-mob/src/runtime/mob_member_lifecycle_authority.rs`
+- updated `MobHandle` lifecycle materialization in
+  `meerkat-mob/src/runtime/handle.rs` to feed and consume the renamed
+  bridge-session fields
+- added `MobMemberListEntry::current_bridge_session_id()` in
+  `meerkat-mob/src/runtime/handle.rs`
+- rewired internal `MobMachine` validation/composition reads in
+  `meerkat-mob/src/mob_machine.rs` to use bridge-session accessors where that
+  is the actual meaning
+- updated the MCP and RPC spawn surfaces in:
+  - `meerkat-mob-mcp/src/public_mcp.rs`
+  - `meerkat-rpc/src/handlers/mob.rs`
+  so stable JSON field `session_id` is now explicitly sourced from
+  `bridge_session_id()`
+- updated the Mob operator tool surface in `meerkat-mob/src/runtime/tools.rs`
+  so stable JSON fields `session_id` and `current_session_id` are populated
+  from `bridge_session_id()` / `current_bridge_session_id()`
+
+Important backtrack:
+
+- the first rename pass missed the respawn helper path in `MobHandle`
+- the honest fix was to update that runtime convenience layer too rather than
+  sneaking the old field name back into the canonical lifecycle authority
+
+Why this slice matters:
+
+- the branch now treats session IDs more consistently as bridge bindings in
+  internal runtime and machine code
+- public/wire field names remain stable for compatibility, but the canonical
+  internal meaning is less muddled
+- the first broad cutover failure was already behind us; this slice proves we
+  can keep adapting identity-first semantics without destabilizing the clean-cut
+  regime
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test -p meerkat-rpc --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 312 - Owner-bridge semantics reach the Mob runtime tool and ops bridge
+
+Goal:
+
+- keep the identity-first cut moving by removing one more place where the Mob
+- runtime still used `owner_session_id` as the canonical internal name for a
+- bridge binding
+
+What landed:
+
+- renamed the internal ops-adapter binding seam in
+  `meerkat-mob/src/runtime/ops_adapter.rs` from `owner_session_id` to
+  `owner_bridge_session_id`
+- renamed the internal Mob operator tool dispatcher seam in
+  `meerkat-mob/src/runtime/tools.rs` from `owner_session_id` to
+  `owner_bridge_session_id`
+- kept the downstream `OperationSpec.owner_session_id` field and existing
+  external wire names stable, so this is a semantic/runtime cleanup rather than
+  a protocol migration
+- updated the Mob operator tool JSON projection in
+  `meerkat-mob/src/runtime/tools.rs` to source stable `session_id` and
+  `current_session_id` fields from the canonical bridge-session accessors
+
+Important backtrack:
+
+- this slice only renames the canonical internal runtime seam
+- it does not pretend the broader ops/protocol surface has already been renamed;
+  those fields remain compatibility carriers for now
+
+Why this slice matters:
+
+- the Mob runtime tool/ops bridge now matches the bridge-session semantics we
+  already pushed into the lifecycle material, machine validator, and RPC/MCP
+  spawn surfaces
+- that reduces one more source of “session as identity” confusion while keeping
+  the broad cut stable
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## 2026-04-13 — Slice 283: Mob MCP bridge-session helpers replace session-as-identity internals
+
+Goal:
+
+- keep the clean-cut / identity-first push moving by fixing the Mob MCP layer
+  where internal helper code still treated bridge session bindings as if they
+  were semantic member identity
+
+What landed:
+
+- `meerkat-mob-mcp/src/agent_tools.rs`
+  - `AgentMobToolSurface` now stores `owner_bridge_session_id`
+  - delegate wiring and spawn results now read `MemberRef::bridge_session_id()`
+    internally while keeping external JSON fields named `session_id`
+- `meerkat-mob-mcp/src/lib.rs`
+  - added canonical helpers:
+    - `retire_member_by_bridge_session_id(...)`
+    - `owns_live_bridge_session(...)`
+    - `owns_persisted_bridge_session(...)`
+  - kept `*_session_*` entrypoints as compatibility wrappers
+  - switched live roster and persisted-membership checks to
+    `MemberRef::bridge_session_id()`
+  - switched `mob_append_system_context(...)` to resolve bridge bindings
+    explicitly
+- `meerkat-rpc/src/router.rs`
+  - session-owner resolution and archive delegation now use the canonical
+    bridge-session helpers
+
+Important backtrack:
+
+- I did not rename the external payload field `session_id` or the durable
+  `owner_session_id` metadata key in this slice
+- the honest cut is to fix runtime semantics first and preserve compatibility
+  at the outer API boundary until we deliberately choose a protocol/storage
+  migration
+
+Why this slice matters:
+
+- the Mob MCP runtime/control path is now aligned with the identity-first story
+  we already established in Mob runtime hot paths
+- the first broad cutover failure (`e2e_system_rest_resume_metadata`) was a
+  direct stale-field regression from this adaptation and is now fixed
+
+Validation:
+
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test -p meerkat-rest --features integration-real-tests --test system_rest_resume integration_real_rest_resume_metadata -- --ignored --nocapture`
+- `cargo test -p meerkat-rpc --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+
+## 2026-04-13 — Slice 284: bridge-session vocabulary reaches Mob handle snapshots and the broad cut stays green
+
+Goal:
+
+- keep moving the identity-first cut from hot runtime seams into the public-ish
+  Mob handle/snapshot layer without forcing an external wire break
+
+What landed:
+
+- `meerkat-mob/src/runtime/handle.rs`
+  - added bridge-session accessors on:
+    - `MobMemberSnapshot`
+    - `MemberRespawnReceipt`
+    - `MemberDeliveryReceipt`
+    - `MemberSessionRef`
+  - added `MobMemberHandle::current_bridge_session_id(...)`
+  - kept existing `current_session_id(...)` / public fields as compatibility
+    surfaces
+
+Important backtrack:
+
+- I did not rename the serialized/public fields like `current_session_id`,
+  `old_session_id`, `new_session_id`, or `session_id` in this slice
+- the honest cut is to move the runtime/control vocabulary first and preserve
+  the outer compatibility shape until we deliberately choose a protocol break
+
+Why this slice matters:
+
+- the canonical meaning is now explicit all the way from:
+  - `MemberRef`
+  - roster projection
+  - Mob MCP state
+  - RPC owner resolution
+  - Mob handle snapshots / receipts
+- the full clean-cut regime now survives the broad workspace test lane after
+  the identity-first bridge-session adaptation, not just the focused crates
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 308 - Meerkat session query and binding reads join the session command seam
+
+Goal:
+
+- remove the remaining obvious public `RuntimeSessionAdapter` read helpers that
+  still reached directly into shared session maps
+
+What landed:
+
+- added richer `MeerkatMachineSessionCommand` query variants in
+  `meerkat-runtime/src/meerkat_machine.rs`:
+  - `ContainsSession`
+  - `SessionHasExecutor`
+  - `SessionHasComms`
+  - `OpsLifecycleRegistry`
+  - `PrepareBindings`
+- added `MeerkatMachineSessionCommandResult` in the same file so those commands
+  can return typed data instead of only `()`
+- rewired the corresponding public adapter helpers in
+  `meerkat-runtime/src/session_adapter.rs` so they now route through
+  `execute_meerkat_machine_session_command(...)`
+
+Important backtrack:
+
+- `PrepareBindings` still needs to return the canonical binding payload after
+  registration, so the honest cut was to centralize the registration + binding
+  lookup seam inside the machine command executor rather than pretending the
+  payload itself lives in the enum
+
+Why this slice matters:
+
+- the last obvious public Meerkat session/binding reads no longer freehand
+  shared-map access in `RuntimeSessionAdapter`
+- the public adapter surface is now more consistently machine-routed for both
+  mutation and read-side lifecycle/session queries
+
+Validation:
+
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 309 - Canonical Mob member projection remains a lock-free read seam
+
+Goal:
+
+- continue the full cut without sacrificing the `Retiring` visibility window
+  that the cutover tests depend on
+
+What landed:
+
+- attempted actor-side routing for `ListMembers`, `ListMembersIncludingRetiring`,
+  and `MemberStatus`
+- backed that port out after it proved too strong for current Mob lifecycle
+  semantics
+- restored canonical member material projection on `MobHandle` for:
+  - list projections
+  - deep member status
+  - helper completion snapshots
+  - terminal wait classification
+
+Important backtrack:
+
+- putting canonical member projection behind the actor queue caused
+  `Retiring` members to disappear behind in-flight disposal work
+- the honest shape for the clean-cut regime is:
+  - machine-routed event / diagnostic / mutation surfaces
+  - lock-free canonical member projection from shared roster + live session
+    observation
+
+Why this slice matters:
+
+- the brutal cut stays green without lying about lifecycle observability
+- we now have a clearer boundary between:
+  - public old-regime bypasses that should die
+  - canonical read seams that must stay immediate to preserve truth during
+    retirement and supersession windows
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_structural_roster_reads_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib test_member_status_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib test_retiring_member_is_not_routable_before_disposal_completes --quiet`
+- `cargo test -p meerkat-mob --lib test_wait_one_observes_retiring_member_as_non_terminal_until_archive --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 310 - Meerkat input-state reads join the session command seam
+
+Goal:
+
+- remove the remaining obvious public `RuntimeSessionAdapter` input-state reads
+  that still reached directly into runtime drivers
+
+What landed:
+
+- added `InputState` and `ListActiveInputs` to
+  `MeerkatMachineSessionCommand` in
+  `meerkat-runtime/src/meerkat_machine.rs`
+- added matching typed results to
+  `MeerkatMachineSessionCommandResult`
+- rewired `SessionServiceRuntimeExt::input_state(...)` and
+  `SessionServiceRuntimeExt::list_active_inputs(...)` in
+  `meerkat-runtime/src/session_adapter.rs` so they now route through
+  `execute_meerkat_machine_session_command(...)`
+- widened the existing session-service-runtime-ext cutover test so it now
+  proves queued input visibility still works through the machine-routed
+  read seam
+
+Important backtrack:
+
+- the machine seam returns cloned `InputState` snapshots rather than exposing a
+  borrowed driver view; that keeps the public read path typed and honest
+  without pretending the runtime driver itself belongs in the command result
+
+Why this slice matters:
+
+- the public session-runtime extension surface is now more consistently
+  machine-routed for lifecycle writes and input-state reads together
+- this is a better stopping point than forcing another doubtful cut, because
+  most of the remaining read seams are now either intentional lock-free truth
+  boundaries or runtime-adaptation work for the identity-first regime
+
+Validation:
+
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 311 - Mob runtime hot path switches to explicit bridge-session vocabulary
+
+Goal:
+
+- make the clean-cut Mob runtime speak honestly about `SessionId` as bridge
+  binding metadata instead of quietly treating it like semantic member
+  identity
+
+What landed:
+
+- added `MemberRef::from_bridge_session_id(...)` and
+  `MemberRef::bridge_session_id(...)` in `meerkat-mob/src/event.rs`
+- added `Roster::set_bridge_session_id(...)`,
+  `Roster::bridge_session_id(...)`, and
+  `RosterEntry::bridge_session_id(...)` in
+  `meerkat-mob/src/roster.rs`
+- added `RosterAuthority::set_bridge_session_id(...)` in
+  `meerkat-mob/src/runtime/roster_authority.rs`
+- rewired the hot runtime callers to use the bridge-session helpers in:
+  - `meerkat-mob/src/runtime/builder.rs`
+  - `meerkat-mob/src/runtime/actor.rs`
+  - `meerkat-mob/src/runtime/provisioner.rs`
+  - `meerkat-mob/src/runtime/handle.rs`
+  - `meerkat-mob/src/mob_machine.rs`
+- tightened the roster tests so the explicit bridge-session helpers are now
+  asserted directly
+- updated `MemberLaunchMode::Resume` docs in
+  `meerkat-mob/src/launch.rs` to describe resuming a bridge session rather
+  than implying session identity is the semantic member key
+
+Important backtrack:
+
+- I did not try to rename the wire format or flatten every public
+  `session_id`-named API in one pass
+- the landed slice keeps compatibility wrappers where they still help, but
+  moves the canonical runtime path onto bridge-session naming so the
+  identity-first regime is explicit where the actor, builder, provisioner,
+  and diagnostics actually reason about live members
+
+Why this slice matters:
+
+- it shifts the clean-cut runtime toward the identity-first Mob model without
+  destabilizing the post-cut surface
+- it also gives us a sharper line between:
+  - semantic member identity (`MeerkatId` / roster member)
+  - local runtime bridge binding (`SessionId`)
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 312 - Mob owner-session indexing helpers join the identity-first cleanup story
+
+Goal:
+
+- stop the internal mob-definition layer from talking as if
+  `owner_session_id` were semantic member ownership when it is really
+  owner-session indexing plus cleanup policy
+
+What landed:
+
+- added explicit owner-session indexing helpers in
+  `meerkat-mob/src/definition.rs`:
+  - `has_owner_session_index(...)`
+  - `is_indexed_to_owner_session(...)`
+  - `is_cleanup_scoped_to_owner_session(...)`
+  - `mark_owner_session_indexed(...)`
+- kept the older helper names as compatibility wrappers instead of forcing a
+  wire-format or broad API break in one pass
+- rewired the internal creation / cleanup call sites to use the new
+  indexing-scoped names in:
+  - `meerkat-mob/src/definition.rs`
+  - `meerkat-mob-mcp/src/agent_tools.rs`
+  - `meerkat-mob-mcp/src/lib.rs`
+
+Important backtrack:
+
+- I did not rename the durable field itself or every public `owner_session_id`
+  reference in one shot
+- the landed slice keeps storage and compatibility stable while moving the
+  canonical runtime/control paths onto the more honest “owner-session index”
+  language
+
+Why this slice matters:
+
+- it complements Slice 311 by making the two identity-first distinctions
+  explicit in code:
+  - member identity is roster/member based
+  - session ids are bridge or indexing metadata
+- it also makes cleanup eligibility read more honestly, which matters now that
+  we are in the clean-cut regime and runtime adaptation is the active frontier
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 313 - Mob ops/tool/turn helpers finish the bridge-session vocabulary move
+
+Goal:
+
+- finish the low-risk identity-first adaptation in the helper paths that still
+  steer live work but were reading `MemberRef::session_id()` directly
+
+What landed:
+
+- rewired the remaining helper-level session bridge reads to use
+  `MemberRef::bridge_session_id(...)` in:
+  - `meerkat-mob/src/runtime/ops_adapter.rs`
+  - `meerkat-mob/src/runtime/actor_turn_executor.rs`
+  - `meerkat-mob/src/runtime/tools.rs`
+- this covers:
+  - ops lifecycle binding lookups
+  - autonomous flow dispatch bridge resolution
+  - tool-call JSON result/reporting surfaces that expose current bridge
+    session ids
+
+Important backtrack:
+
+- I did not try to rename every public `current_session_id` field or the
+  `Resume { session_id }` wire shape here
+- the landed slice is intentionally about the canonical helper/runtime paths,
+  not a repo-wide naming churn pass
+
+Why this slice matters:
+
+- the identity-first move now reaches the paths that actually launch turns,
+  bind ops lifecycle, and surface bridge metadata back to tools
+- that makes the runtime behavior read more honestly without destabilizing the
+  broader public API and persisted formats in the middle of the clean-cut push
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 305 - Mob event ledger joins the actor seam with destroyed-state replay fallback
+
+Goal:
+
+- finish culling the remaining raw `MobEventStore` touches from `MobHandle`
+  without breaking the terminal destroy contract
+
+What landed:
+
+- moved `PollEvents`, `ReplayAllEvents`, and
+  `RecordOperatorActionProvenance` through `MobCommand` in:
+  - `meerkat-mob/src/runtime/state.rs`
+  - `meerkat-mob/src/runtime/actor.rs`
+  - `meerkat-mob/src/runtime/handle.rs`
+- removed the live handle-side event-store mutation/read path
+- kept an explicit destroyed-state-only replay/poll fallback in `MobHandle`
+  so post-destroy reads still resolve against the canonical persisted ledger
+- updated `MobHandle` docs to match the real post-cut contract
+
+Important backtrack:
+
+- the first full actor-only cut broke `test_destroy_deletes_storage`
+- that was a real contract regression, not a test bug: after `Destroy`, the
+  actor exits by design but terminal event replay still needs to work
+- the landed shape keeps live event authority in the actor while using the
+  persisted event store only as a terminal read-only fallback
+
+Why this slice matters:
+
+- public and internal event operations no longer split authority during the
+  live regime
+- the remaining handle-side event ledger access is now explicit, narrow, and
+  terminal-only instead of being an accidental old-regime bypass
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_mob_events_view_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib test_record_operator_action_provenance_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib test_destroy_deletes_storage --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+
+## Slice 306 - Mob agent event subscriptions join the actor seam
+
+Goal:
+
+- remove the remaining direct `session_service` subscription construction from
+  `MobHandle`
+
+What landed:
+
+- added `SubscribeAgentEvents` / `SubscribeAllAgentEvents` to `MobCommand` in
+  `meerkat-mob/src/runtime/state.rs`
+- moved agent event stream construction into `MobActor` in
+  `meerkat-mob/src/runtime/actor.rs`
+- rewired `MobMachineCommand::SubscribeAgentEvents` and
+  `MobMachineCommand::SubscribeAllAgentEvents` in
+  `meerkat-mob/src/runtime/handle.rs` to use `send_actor_command(...)`
+
+Important backtrack:
+
+- the first actor-side port tried to reuse richer handle-only projection
+  helpers that do not exist on `MobActor`
+- the landed version uses the honest actor-owned surface:
+  canonical `member_ref.session_id()` from roster state
+
+Why this slice matters:
+
+- agent event subscription creation now follows the same authority path as the
+  rest of the public Mob event surface
+- `MobHandle` no longer constructs live agent streams directly from the
+  session service
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_agent_event_subscriptions_resolve_through_machine_routed_member_reads --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 307 - Mob diagnostic session-service reads join the actor seam
+
+Goal:
+
+- remove the remaining direct live-session diagnostic reach-throughs from
+  `MobHandle`
+
+What landed:
+
+- added actor commands for:
+  - `DiagnosticRuntimeAdapter`
+  - `DiagnosticHasLiveSession`
+  - `DiagnosticMeerkatShadowInputs`
+  in `meerkat-mob/src/runtime/state.rs`
+- handled those commands inside `MobActor` in
+  `meerkat-mob/src/runtime/actor.rs`
+- rewired the corresponding `MobMachineCommand` cases in
+  `meerkat-mob/src/runtime/handle.rs` to use `send_actor_command(...)`
+
+Important backtrack:
+
+- the first attempt to move agent-event subscriptions through the actor tried
+  to reuse handle-only canonical projection helpers that do not exist on
+  `MobActor`
+- the landed diagnostic slice keeps the actor side honest: it uses the actor's
+  own `runtime_adapter` and `session_service`, not a second hidden handle-level
+  fallback
+
+Why this slice matters:
+
+- `MobHandle` is no longer the quiet place that knows how to reach directly
+  into live session internals for diagnostics
+- the machine/actor seam now owns event, subscription, and diagnostic session
+  reads together
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_diagnostic_meerkat_shadow_inputs_returns_best_effort_live_member_state --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `git diff --check`
+
+## Slice 302 - Mob-wide event router subscription joins the machine seam
+
+Goal:
+
+- remove the last obvious public Mob event-surface bypass by routing
+  `subscribe_mob_events(...)` and `subscribe_mob_events_with_config(...)`
+  through `MobMachineCommand`
+
+What landed:
+
+- added `SubscribeMobEvents { config }` to `MobMachineCommand` in
+  `meerkat-mob/src/mob_machine.rs`
+- added `MobEventRouter(...)` to `MobMachineCommandResult` in
+  `meerkat-mob/src/mob_machine.rs`
+- rewired `MobHandle::subscribe_mob_events(...)` and
+  `MobHandle::subscribe_mob_events_with_config(...)` in
+  `meerkat-mob/src/runtime/handle.rs` so they now round-trip through
+  `execute_machine_command(...)`
+- updated the direct Rust call sites that consume the public `MobHandle`
+  surface:
+  - `meerkat-rpc/src/router.rs`
+  - `meerkat-mob-mcp/src/lib.rs`
+  - `meerkat-mob/src/runtime/tests.rs`
+
+Important backtrack:
+
+- this cut required an honest API change: the public mob-wide event router
+  subscription helpers are now `async`
+- I checked the repo-wide Rust call sites before doing that; the in-repo users
+  were already in async contexts, so paying the API break was cleaner than
+  preserving the last public bypass behind another local helper
+
+Why this slice matters:
+
+- the public Mob event surface is now machine-routed for:
+  - per-member subscriptions
+  - mob-wide router subscriptions
+  - polling/replay
+  - operator-action audit append
+- the remaining raw event-store handle is now an internal router/runtime
+  implementation detail rather than a public escape hatch
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 304 - Dead Mob diagnostic runtime fallback is culled
+
+Goal:
+
+- remove the remaining dead old-regime diagnostic fallback in
+  `MobHandle::diagnostic_runtime_adapter(...)`
+
+What landed:
+
+- removed the `Err(_) => self.session_service.runtime_adapter()` fallback from
+  `meerkat-mob/src/runtime/handle.rs`
+- the helper now returns `None` if the machine command fails, which is the
+  honest post-cut behavior
+- updated the stale runtime module header in
+  `meerkat-mob/src/runtime/mod.rs` so it no longer claims read-only operations
+  broadly bypass the actor; it now describes the actual machine-seam
+  consolidation posture
+
+Important backtrack:
+
+- I did not cut the broader internal canonical snapshot helpers in this slice
+- the only thing removed here is the dead diagnostic jump-around because the
+  machine command path already returned the same runtime-adapter source
+
+Why this slice matters:
+
+- it removes one more hidden escape hatch from the cutover regime
+- it also makes the runtime module docs stop lying about the current
+  architecture
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_diagnostic_meerkat_shadow_inputs_returns_best_effort_live_member_state --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 303 - Internal Mob event router relay joins the machine seam
+
+Goal:
+
+- remove the remaining internal old-regime relay in the mob-wide event router,
+  which still polled the raw `MobEventStore` directly even after the public
+  router subscription APIs had joined `MobMachineCommand`
+
+What landed:
+
+- rewired `spawn_event_router(...)` in
+  `meerkat-mob/src/runtime/event_router.rs` so it no longer receives an
+  `Arc<dyn MobEventStore>`
+- rewired `run_event_router(...)` in the same file so bootstrap cursor seeding
+  and roster-change tracking now go through `MobHandle::poll_events(...)`
+- simplified the `SubscribeMobEvents { config }` command case in
+  `meerkat-mob/src/runtime/handle.rs` so it now passes only the `MobHandle`
+  clone and router config into the router
+
+Important backtrack:
+
+- I did not try to force the router into the actor itself
+- the honest cut here is to keep the router as an independent runtime task,
+  but make its only event-log input the machine-routed `MobHandle` event
+  surface instead of the raw store handle
+
+Why this slice matters:
+
+- the public Mob event surface was already machine-routed in Slice 302
+- after this slice, the mob-wide router itself also lives on that same event
+  surface for:
+  - bootstrap cursor seeding
+  - `MeerkatSpawned` / `MeerkatRetired` tracking
+- the raw event store is now even more firmly an internal persistence detail
+  rather than router truth
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 296 - Mob event subscriptions and restore diagnostics stop bypassing shared state
+
+Goal:
+
+- remove the next public/helper-era Mob read bypasses that still touched shared
+  roster or restore-diagnostic state directly
+
+What landed:
+
+- added `RestoreFailuresSnapshot` to the top-level Mob machine command/result
+  surface in `meerkat-mob/src/mob_machine.rs`
+- rewired `diagnostic_restore_failures_snapshot(...)` in
+  `meerkat-mob/src/runtime/handle.rs` to use that machine command instead of
+  reading `restore_diagnostics` directly
+- rewired `subscribe_agent_events(...)` and
+  `subscribe_all_agent_events(...)` in
+  `meerkat-mob/src/runtime/handle.rs` so they:
+  - resolve member/session identity through machine-routed projection surfaces
+  - subscribe through the canonical `MobSessionService::subscribe_session_events`
+    seam instead of the base `SessionService` default path
+- added
+  `test_agent_event_subscriptions_resolve_through_machine_routed_member_reads`
+  in `meerkat-mob/src/runtime/tests.rs`
+- removed the now-dead `RosterAuthority::session_id(...)` helper in
+  `meerkat-mob/src/runtime/roster_authority.rs`
+
+Important backtrack:
+
+- the first version of the subscription cut used the base
+  `SessionService::subscribe_session_events(...)` trait method, which produced
+  false `stream not found` failures on the live Mob session-service contract
+- the honest fix was not more roster tweaking; it was to route through the
+  Mob-owned session-service seam that actually exposes session-wide event
+  streams
+
+Why this slice matters:
+
+- public event subscriptions no longer bypass the machine/projection seam to
+  read shared roster state directly
+- restore-failure diagnostics now ride the same top-level command surface as
+  the other read-side cutover work
+- this removes another visible chunk of the old regime without inventing a new
+  privileged bridge
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_agent_event_subscriptions_resolve_through_machine_routed_member_reads`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 297 - Member session helpers stop peeking through the roster
+
+Goal:
+
+- remove the next small public read bypass on `MemberHandle`, where
+  `current_session_id()` and `session_ref()` still read the shared roster
+  directly instead of following the machine-routed member projection seam
+
+What landed:
+
+- rewired `MemberHandle::current_session_id()` in
+  `meerkat-mob/src/runtime/handle.rs` to use `status()` /
+  `MobHandle::member_status(...)`
+- rewired `MemberHandle::session_ref()` in the same file to build on
+  `current_session_id()` instead of touching the roster directly
+- added
+  `test_member_handle_session_helpers_round_trip_through_machine_projection_surface`
+  in `meerkat-mob/src/runtime/tests.rs`
+
+Why this slice matters:
+
+- the public member helper surface now follows the same machine-routed
+  lifecycle/session projection as the other read-side cutover work
+- after this slice, the obvious public Mob member/session reads are no longer
+  split between machine-routed status and raw roster peeks
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_member_handle_session_helpers_round_trip_through_machine_projection_surface`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 298 - Mob diagnostic Meerkat bridge stops bypassing the machine seam
+
+Goal:
+
+- remove the next internal cutover helper bypasses on `MobHandle`, where the
+  diagnostic bridge for live Meerkat shadow inputs still talked to
+  `session_service` directly instead of riding the top-level machine command
+  surface
+
+What landed:
+
+- added `DiagnosticRuntimeAdapter`, `DiagnosticHasLiveSession`, and
+  `DiagnosticMeerkatShadowInputs` to the top-level command/result surface in
+  `meerkat-mob/src/mob_machine.rs`
+- re-exported `MeerkatShadowInputsSnapshot` from `meerkat-mob/src/runtime/mod.rs`
+- rewired:
+  - `diagnostic_runtime_adapter(...)`
+  - `diagnostic_has_live_session(...)`
+  - `diagnostic_meerkat_shadow_inputs(...)`
+  in `meerkat-mob/src/runtime/handle.rs` to use
+  `execute_machine_command(...)`
+- updated the live-member-state proof in
+  `meerkat-mob/src/runtime/tests.rs` so it still validates the best-effort
+  diagnostic bridge after the cut
+
+Important backtrack:
+
+- the first version tried to keep `diagnostic_runtime_adapter(...)` as a sync
+  helper while still riding the machine seam
+- the honest fix was to make that helper async instead of inventing a hidden
+  synchronous bypass around the command surface
+
+Why this slice matters:
+
+- the Mob-side shadow/cutover bridge no longer has a privileged direct path
+  into `session_service`
+- this keeps the diagnostic story aligned with the same machine-routed command
+  surface used by the rest of the cutover work
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_diagnostic_meerkat_shadow_inputs_returns_best_effort_live_member_state --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 299 - Mob event router bootstrap stops depending on raw shared state
+
+Goal:
+
+- remove the next public Mob bypass, where `subscribe_mob_events_with_config`
+  still built the router directly from shared `session_service` and `roster`
+  instead of the machine-routed member projection/subscription surface
+
+What landed:
+
+- rewired `meerkat-mob/src/runtime/event_router.rs` so the router now accepts a
+  cloned `MobHandle` plus the Mob event store
+- bootstrap and spawn tracking now subscribe members through:
+  - `handle.list_members()`
+  - `handle.subscribe_agent_events(...)`
+- rewired `subscribe_mob_events_with_config(...)` in
+  `meerkat-mob/src/runtime/handle.rs` to spawn the router from `self.clone()`
+- added
+  `test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking`
+  in `meerkat-mob/src/runtime/tests.rs`
+
+Important backtrack:
+
+- the first version tried to prove full mob-wide attributed delivery in the
+  generic test harness
+- that overclaimed what the current test services can guarantee
+- the landed proof keeps the event router test honest:
+  - the per-member session-event seam remains proved separately
+  - the router test now proves the router stays live while tracking a spawned
+    member through the machine-routed bootstrap path
+
+Why this slice matters:
+
+- the public mob-wide event router no longer depends on raw shared
+  `session_service` / `roster` surfaces at construction time
+- this removes another visible old-regime public seam without inventing a new
+  privileged bridge
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_mob_event_router_stays_alive_across_machine_routed_spawn_tracking --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 300 - Mob agent event subscriptions join the machine seam
+
+Goal:
+
+- remove the next public Mob bypass, where `subscribe_agent_events(...)` and
+  `subscribe_all_agent_events(...)` still jumped straight from `MobHandle` to
+  `session_service` instead of riding the top-level machine command surface
+
+What landed:
+
+- added `SubscribeAgentEvents` / `SubscribeAllAgentEvents` to
+  `MobMachineCommand`
+- added `EventStream` / `AllAgentEventStreams` to
+  `MobMachineCommandResult`
+- taught `execute_machine_command(...)` in
+  `meerkat-mob/src/runtime/handle.rs` to resolve:
+  - canonical member session binding
+  - single-member session event subscription
+  - point-in-time all-member event subscription
+- rewired:
+  - `subscribe_agent_events(...)`
+  - `subscribe_all_agent_events(...)`
+  in `meerkat-mob/src/runtime/handle.rs`
+- kept the existing subscription regression and let the event router inherit
+  this cut automatically because it already bootstraps through
+  `handle.subscribe_agent_events(...)`
+
+Why this matters:
+
+- the public member/session event subscription surface no longer bypasses the
+  machine seam
+- after this slice, the remaining raw event-store handle is an internal
+  router/runtime detail rather than a public subscription shortcut
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_agent_event_subscriptions_resolve_through_machine_routed_member_reads --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 301 - Mob public event view and operator provenance append join the machine seam
+
+Goal:
+
+- remove the remaining public event-surface bypasses, where:
+  - `handle.events().poll()/replay_all()` cloned the raw store directly
+  - `record_operator_action_provenance(...)` appended directly to the raw store
+
+What landed:
+
+- added `PollEvents`, `ReplayAllEvents`, and
+  `RecordOperatorActionProvenance` to `MobMachineCommand`
+- added `MobEvents(Vec<MobEvent>)` to `MobMachineCommandResult`
+- rewired `MobEventsView` in `meerkat-mob/src/runtime/handle.rs` so it now
+  carries a `MobHandle` and routes:
+  - `poll(...)`
+  - `replay_all(...)`
+  through `execute_machine_command(...)`
+- rewired `record_operator_action_provenance(...)` through the same top-level
+  machine command surface
+- added focused regressions:
+  - `test_mob_events_view_round_trips_through_machine_command_surface`
+  - `test_record_operator_action_provenance_round_trips_through_machine_command_surface`
+
+Why this matters:
+
+- the public Mob event surface is now machine-routed end to end for:
+  - subscription
+  - polling/replay
+  - operator-action audit append
+- this leaves the raw event-store handle as an internal implementation detail
+  instead of a public old-regime escape hatch
+
+Validation:
+
+- `cargo test -p meerkat-mob --lib test_mob_events_view_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib test_record_operator_action_provenance_round_trips_through_machine_command_surface --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 291 - SessionServiceRuntimeExt write-side joins the Meerkat machine seam
+
+Goal:
+
+- remove the last obvious duplicated write-side Meerkat authority path below
+  the public control plane
+
+What landed:
+
+- added `logical_runtime_id(...)` and
+  `driver_error_from_control_plane_error(...)` helpers in
+  `meerkat-runtime/src/session_adapter.rs`
+- rewired `SessionServiceRuntimeExt for RuntimeSessionAdapter` so the write-side
+  methods now ride the same machine command surface as the public control plane:
+  - `accept_input(...)`
+  - `runtime_state(...)`
+  - `retire_runtime(...)`
+  - `reset_runtime(...)`
+- left `input_state(...)` and `list_active_inputs(...)` as direct read
+  projections for now, since they are read-only and not a duplicate authority
+  seam
+- added `session_service_runtime_ext_write_side_follows_machine_control_surface`
+  in `meerkat-runtime/src/session_adapter.rs`
+
+Important backtrack:
+
+- I did not force the read-only projection helpers through the machine command
+  surface in this slice; that would be churn rather than authority cleanup
+- the honest cut here is removing duplicate write-side lifecycle/input logic,
+  not pretending every read must become a command
+
+Why this slice matters:
+
+- `RuntimeControlPlane` and `SessionServiceRuntimeExt` no longer carry two
+  separate implementations of the same Meerkat write-side semantics
+- one more old-regime path is gone before we push deeper into actor/runtime
+  relay cleanup
+
+Validation:
+
+- `cargo test -p meerkat-runtime --lib session_service_runtime_ext_write_side_follows_machine_control_surface`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `cargo test --workspace --tests --quiet` (long e2e lane still draining without
+  early failures at slice capture time)
+- `git diff --check`
+
+## Slice 292 - Mob task-board reads join the machine seam
+
+Goal:
+- remove one more old-regime projection exception from the public `MobHandle`
+  surface by routing task-board reads through `MobMachineCommand` instead of
+  direct handle-side `task_board` access
+
+What landed:
+- added `TaskList` / `TaskGet` to:
+  - `MobMachineCommand`
+  - `MobMachineCommandResult`
+  - `MobCommand`
+- taught the actor to serve those read queries from canonical task-board state
+- rewired `MobHandle::task_list(...)` / `task_get(...)` through
+  `execute_machine_command(...)`
+- removed the now-dead `MobHandle.task_board` field and its constructor wiring
+- added a focused regression proving `task_get(...)` still works across reset
+
+Why this matters:
+- this trims another special-case public bypass before the harder cutover work
+- task-board reads now follow the same top-level machine command seam as the
+  rest of the public Mob API instead of quietly reading shared projection state
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_task_get_round_trips_through_machine_command_surface`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 293 - Mob MCP lifecycle reads join the machine seam
+
+Goal:
+- remove another public handle-side shared-state bypass by routing MCP server
+  lifecycle reads through `MobMachineCommand`
+
+What landed:
+- added `McpServerStates` to:
+  - `MobMachineCommand`
+  - `MobMachineCommandResult`
+  - `MobCommand`
+- taught the actor to answer MCP lifecycle projection reads from canonical
+  `mcp_servers` state
+- rewired `MobHandle::mcp_server_states(...)` through
+  `execute_machine_command(...)`
+- removed the now-dead `MobHandle.mcp_servers` field and its constructor wiring
+
+Why this matters:
+- task-board and MCP lifecycle reads were the two clearest remaining public
+  projection exceptions after the main public cut
+- this keeps the public Mob surface moving toward one top-level machine seam
+  instead of a mix of machine commands plus direct shared-map reads
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_lifecycle_updates_mcp_server_states`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 294 - Mob structural roster reads stay machine-routed without losing retiring visibility
+
+Goal:
+- keep `roster()`, `list_all_members()`, and `get_member()` on the top-level
+  `MobMachineCommand` surface without losing the in-flight `Retiring` window
+  that direct roster reads previously exposed
+
+What landed:
+- kept the public structural roster methods routed through
+  `execute_machine_command(...)`
+- changed `MobMachineCommand::{RosterSnapshot, ListAllMembers, GetMember}` to
+  resolve directly from the shared canonical `RosterAuthority` instead of
+  waiting behind long actor commands like `Retire`
+- removed the now-unnecessary lower actor relay variants for those structural
+  roster reads
+- extended the focused structural roster regression and restored the retiring
+  visibility regression
+
+Important backtrack:
+- the first actor-queued version was a real regression: `list_all_members()`
+  could miss a member in the `Retiring` window because the read waited behind
+  the long-running disposal command
+- the honest fix was to preserve the machine command surface while resolving
+  structural roster reads from the shared canonical authority immediately
+
+Why this matters:
+- public structural roster reads remain on the machine-owned surface
+- we no longer pay for that cut with worse observability during in-flight
+  retirement/disposal
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_structural_roster_reads_round_trip_through_machine_command_surface`
+- `cargo test -p meerkat-mob --lib test_retiring_member_is_not_routable_before_disposal_completes`
+- `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+
+## Slice 295 - Mob member projection status joins the machine seam
+
+Goal:
+- move the remaining rich public member projection read, `member_status()`,
+  onto the top-level machine command surface
+
+What landed:
+- added `MemberStatus` to:
+  - `MobMachineCommand`
+  - `MobMachineCommandResult`
+- rewired `MobHandle::member_status(...)` through
+  `execute_machine_command(...)`
+- removed the dead `MobMachineCommandResult::MemberRef` variant while touching
+  that surface
+- added a focused regression proving `member_status()` still round-trips the
+  active session binding through the machine-owned read path
+
+Why this matters:
+- public Mob reads are no longer split between:
+  - machine-routed structural reads
+  - direct handle-side rich lifecycle projection
+- richer member lifecycle inspection now follows the same top-level machine
+  command seam as the rest of the public cutover surface
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_member_status_round_trips_through_machine_command_surface`
+- `cargo test -p meerkat-mob --lib`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 288 - Remaining public drain helpers move behind the Meerkat machine seam
+
+Goal:
+
+- finish the last meaningful public Meerkat bypass family after the control,
+  ingress, legacy-run, and silent-intent cuts
+
+What landed:
+
+- added `MeerkatMachineDrainLocalCommand` in
+  `meerkat-runtime/src/meerkat_machine.rs`
+- added `execute_meerkat_machine_drain_local_command(...)` in
+  `meerkat-runtime/src/session_adapter.rs`
+- rewired the remaining public drain helpers to go through that typed local
+  machine seam:
+  - `abort_comms_drains(...)`
+  - `abort_comms_drain(...)`
+  - `wait_comms_drain(...)`
+- rewired the explicit disable branch in
+  `update_peer_ingress_context_inner(...)` to use the same local drain command
+  path
+
+Important backtrack:
+
+- I did not try to force `SetPeerIngressContext` into the same `&self` helper,
+  because that seam still honestly needs `Arc<Self>` task-spawn authority
+- the landed split is:
+  - `MeerkatMachineDrainCommand` for the `Arc<Self>` spawn / notify path
+  - `MeerkatMachineDrainLocalCommand` for abort / wait lifecycle helpers that
+    do not need task-spawn authority
+
+Why this slice matters:
+
+- the remaining public comms-drain lifecycle helpers no longer mutate adapter
+  state directly
+- the public Meerkat surface is now consistently machine-routed even in the
+  drain family, without introducing a fake unified abstraction
+
+Validation:
+
+- `cargo check -p meerkat-runtime --all-targets --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `git diff --check`
+
+## Slice 290 - First real post-cutover failure is a stale RPC contract assertion
+
+Goal:
+
+- fix the first genuine runtime-adaptation failure surfaced by the fresh
+  workspace `--tests` lane
+
+What landed:
+
+- updated `meerkat-rpc/tests/regression_rpc.rs` so
+  `initialize_methods_list_complete` now compares
+  `contract_version` against `meerkat_contracts::ContractVersion::CURRENT`
+  instead of a stale hardcoded literal
+
+Why this slice matters:
+
+- the first real red after the public cut was not a machine/seam regression;
+  it was a stale surface assertion
+- tying the regression test to the canonical contracts constant prevents the
+  same low-value failure from resurfacing on the next version bump
+
+Validation:
+
+- `cargo test -p meerkat-rpc --test regression_rpc initialize_methods_list_complete -- --exact --nocapture`
+- `git diff --check`
+
+## Slice 289 - Session unregister joins the Meerkat machine session seam
+
+Goal:
+
+- remove the last obvious old-style public session teardown mutation from the
+  Meerkat adapter surface
+
+What landed:
+
+- added `UnregisterSession` to `MeerkatMachineSessionCommand` in
+  `meerkat-runtime/src/meerkat_machine.rs`
+- added `unregister_session_inner(...)` in
+  `meerkat-runtime/src/session_adapter.rs`
+- rewired public `unregister_session(...)` to route through
+  `execute_meerkat_machine_session_command(...)`
+
+Why this slice matters:
+
+- the public Meerkat session mutation surface is now consistently routed
+  through typed session/control/ingress/drain/legacy-run machine seams
+- unregister is no longer a one-off direct teardown path beside the machine
+
+Validation:
+
+- `cargo check -p meerkat-runtime --all-targets --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+- `git diff --check`
+
+## Slice 283 - Public machine command cutover lands for Meerkat and Mob
+
+Goal:
+
+- remove the remaining public write/control seams that still bypassed the frozen
+  machine layers before the brutal cutover
+
+What landed:
+
+- added `MeerkatMachineControlCommand` /
+  `MeerkatMachineControlCommandResult` in
+  `meerkat-runtime/src/meerkat_machine.rs`
+- routed the full `RuntimeControlPlane for RuntimeSessionAdapter` impl through
+  `execute_meerkat_machine_control_command(...)` in
+  `meerkat-runtime/src/session_adapter.rs`
+- kept the already-landed Meerkat session/drain command routing as the public
+  session mutation seam
+- extended `MobMachineCommand` /
+  `MobMachineCommandResult` in `meerkat-mob/src/mob_machine.rs` so the
+  remaining public diagnostic and kickoff snapshot paths also route through the
+  machine command layer
+- rewired the corresponding `MobHandle` helpers in
+  `meerkat-mob/src/runtime/handle.rs`
+
+Important backtracks:
+
+- the new Meerkat control-command helper surfaced a hidden tuple bug in the
+  `Ingest` arm that had been masked only because the trait impl was still
+  bypassing the helper; that bug was fixed instead of preserving the bypass
+- the Mob diagnostic snapshotters needed explicit command/result variants rather
+  than pretending the two crates already shared one diagnostic result type
+
+Why this slice matters:
+
+- the brutal cut is now real on the public mutation/control surface:
+  - Meerkat public control/session/drain mutation routes through machine
+    command layers
+  - Mob public flow/member/task/diagnostic mutation routes through the
+    machine command layer
+- the old regime is no longer propped up by public helper bypasses
+
+Validation:
+
+- `cargo check -p meerkat-runtime -p meerkat-mob -p meerkat --all-targets --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `git diff --check`
+
 ## Slice 286 - Final cutover-readiness handoff lands
 
 Goal:
@@ -16315,6 +17648,47 @@ Validation:
 - `cargo test -p meerkat-mob --lib export_two_kernel_shadow_report_session_pretty_json_roundtrips_structure`
 - `git diff --check`
 
+## Slice 287 - Legacy sync run helper moves behind the Meerkat machine seam
+
+Goal:
+
+- remove the last substantial public Meerkat compatibility helper that still
+  hand-drove admission, run start, and run terminalization outside the machine
+  command layer
+
+What landed:
+
+- added `MeerkatMachineLegacyRunCommand` /
+  `MeerkatMachineLegacyRunCommandResult` in
+  `meerkat-runtime/src/meerkat_machine.rs`
+- added `execute_meerkat_machine_legacy_run_command(...)` in
+  `meerkat-runtime/src/session_adapter.rs`
+- rewired `accept_input_and_run(...)` to:
+  - `Prepare`
+  - execute the existing caller-supplied operation
+  - `Commit` or `Fail`
+
+Important backtrack:
+
+- I did not try to hide the generic operation closure inside the machine
+  command enum; the honest cut is to centralize the Meerkat-owned prepare /
+  commit / fail seams and leave the caller-provided apply closure outside that
+  boundary for now
+
+Why this slice matters:
+
+- the public Meerkat session surface no longer freehands legacy sync run setup
+  and teardown against the driver
+- after this slice, the old-regime public bypasses are basically gone; the
+  remaining direct command sends are internal actor/runtime relays rather than
+  public control seams
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo check -p meerkat-runtime --all-targets --quiet`
+- `cargo test -p meerkat-runtime --lib session_adapter --quiet`
+
 ## Slice 282 - Shared two-kernel shadow report session lands
 
 Goal:
@@ -16360,4 +17734,1219 @@ Validation:
 
 - `cargo test -p meerkat-mob --lib test_export_two_kernel_shadow_run_batch_collects_green_and_drift_scenarios`
 - `cargo test -p meerkat-mob --lib`
+- `git diff --check`
+## Slice 314 - Mob bridge-session wire outputs become additive across public and helper surfaces
+
+Goal: keep the clean-cut / identity-first runtime semantics moving outward so Mob-facing wire outputs stop speaking bridge bindings only through legacy `session_id` names.
+
+What landed:
+- Added additive `bridge_session_id` / `current_bridge_session_id` outputs alongside compatibility `session_id` / `current_session_id` keys on the major Mob-facing result builders in:
+  - `meerkat-mob/src/runtime/tools.rs`
+  - `meerkat-mob-mcp/src/agent_tools.rs`
+  - `meerkat-mob-mcp/src/public_mcp.rs`
+  - `meerkat-rpc/src/handlers/mob.rs`
+  - `meerkat-mob-mcp/src/lib.rs`
+- Extended `meerkat_contracts::MobMemberSendResult` additively with `bridge_session_id`, and updated the RPC handler to populate both fields from the same bridge binding.
+
+Backtrack:
+- The first additive pass tried to move the same owned `SessionId` twice in several builders. The honest fix was to clone at the wire edge where we intentionally duplicate compatibility and bridge-session fields, instead of pretending the result types were already alias-aware.
+
+Why this matters:
+- The runtime is already identity-first internally, but public Mob surfaces were still speaking almost entirely in old session-centric vocabulary.
+- This slice starts making the bridge-binding meaning explicit for consumers without breaking existing `session_id` readers.
+
+Validation:
+- `cargo test -p meerkat-contracts -p meerkat-mob -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 315 - Orphan cleanup now follows the canonical bridge-owner index
+
+Goal: stop treating compatibility `owner_session_id` as the cleanup/scavenge
+truth now that the identity-first owner bridge binding is explicit.
+
+What landed:
+- `meerkat-mob-mcp/src/lib.rs`
+  - `scavenge_orphaned_session_scoped_mobs_inner()` now collects candidates via
+    `definition.owner_bridge_session_index()` instead of reading
+    `definition.owner_session_id` directly
+  - doc comments on implicit lookup / cleanup / scavenging now speak in terms of
+    the owner bridge-session index, with compatibility fallback explicitly
+    called out
+- added
+  `test_scavenge_orphaned_session_scoped_mobs_honors_bridge_owner_index`
+  proving a session-scoped mob with only `owner_bridge_session_id` populated is
+  still scavenged once the owning bridge session disappears
+- `examples/035-mdm-tux-rs/src/bin/kennel.rs`
+  - hive-mob creation now sets additive `owner_bridge_session_id` alongside the
+    compatibility owner field
+
+Why this matters:
+- cleanup and orphan scavenging are part of the identity-first semantic shift,
+  not just naming
+- after this slice, the canonical cleanup path no longer depends on the old
+  compatibility owner field being present
+
+Validation:
+- `cargo test -p meerkat-mob-mcp --lib test_scavenge_orphaned_session_scoped_mobs_honors_bridge_owner_index --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 316 - Bridge-session semantics become canonical in public Mob outputs
+
+Goal: make the public MCP/RPC result builders source bridge-session outputs from
+the canonical bridge-binding accessors instead of compatibility aliases.
+
+What landed:
+- `meerkat-mob-mcp/src/public_mcp.rs`
+  - `meerkat_mob_member_send` now sources `bridge_session_id` from
+    `receipt.bridge_session_id()`
+  - `meerkat_mob_append_system_context` now uses a bridge-native local binding
+    and emits both `session_id` and `bridge_session_id` from that canonical
+    value
+- `meerkat-rpc/src/handlers/mob.rs`
+  - `MobMemberSendResult.bridge_session_id` now comes from
+    `receipt.bridge_session_id().clone()`
+  - append-system-context response now uses a bridge-native local binding too
+
+Why this matters:
+- additive bridge-session fields are much less useful if we still populate them
+  through the old compatibility alias
+- after this slice, the public wire shape and the runtime meaning line up
+
+Validation:
+- `cargo test -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 317 - Mob-MCP state API gets canonical bridge-session entry points
+
+Goal: stop exposing bridge-bound Mob-MCP state operations only through generic
+`*_session_*` helper names.
+
+What landed:
+- `meerkat-mob-mcp/src/lib.rs`
+  - added canonical bridge-native entry points:
+    - `find_implicit_mob_for_bridge_session(...)`
+    - `find_mobs_for_bridge_session(...)`
+    - `get_or_create_implicit_mob_for_bridge_session(...)`
+    - `destroy_bridge_session_mobs(...)`
+  - kept the older session-centric names as thin compatibility wrappers
+- updated internal callers to prefer the new canonical entry points:
+  - `meerkat-mob-mcp/src/agent_tools.rs`
+  - `meerkat-rest/src/lib.rs`
+  - `meerkat-rpc/src/router.rs`
+
+Why this matters:
+- the state API itself now reflects the bridge-binding truth instead of forcing
+  identity-first logic through generic session naming
+- this keeps the internal cutover story aligned with the runtime semantics
+
+Validation:
+- `cargo test -p meerkat-mob-mcp -p meerkat-rpc -p meerkat-rest --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 318 - Mob machine mismatch labels align to canonical bridge binding
+
+Goal: stop reporting bridge-binding drift under the old
+`current_session_id` label inside `MobMachine` mismatches once the canonical
+projection field is `current_bridge_session_id`.
+
+What landed:
+- `meerkat-mob/src/mob_machine.rs`
+  - composition mismatch text now says
+    `projected current_bridge_session_id`
+  - structural projected mismatch for bridge-binding drift now emits
+    `field: "current_bridge_session_id"`
+  - focused validator expectations were updated to match the canonical field
+
+Why this matters:
+- the machine output itself now matches the identity-first/runtime cutover
+  story instead of leaking compatibility names in the main drift taxonomy
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 351 - In-repo callers now use bridge-session Mob MCP helpers directly
+
+Goal: stop teaching the compatibility `*_session_*` Mob MCP wrappers as the
+primary in-repo interface now that the bridge-session canon is stable.
+
+What landed:
+- `tests/integration/tests/live_mob_tools.rs`
+  - live integration coverage now calls
+    `find_implicit_mob_for_bridge_session(...)` and
+    `find_mobs_for_bridge_session(...)` directly
+- `examples/035-mdm-tux-rs/src/bin/target.rs`
+  - target cleanup and implicit-mob checks now use
+    `destroy_bridge_session_mobs(...)` and
+    `find_implicit_mob_for_bridge_session(...)`
+- `meerkat-mcp-server/src/lib.rs`
+  - archive cleanup now uses `destroy_bridge_session_mobs(...)`
+- `meerkat-mob-mcp/src/lib.rs`
+  - bridge-native restore labels are now used in the canonical lookup paths
+  - in-crate tests now exercise
+    `owns_persisted_bridge_session(...)` and
+    `retire_member_by_bridge_session_id(...)` directly
+- `meerkat-mob-mcp/src/agent_tools.rs`
+  - cleanup docs now name the bridge-session canonical helper rather than the
+    compatibility alias
+
+Why this matters:
+- it pushes the codebase itself to teach the identity-first bridge-binding
+  model instead of keeping the old session-centric wrappers as the normal
+  authoring surface
+- it leaves the compatibility wrappers intact for outside callers and legacy
+  payloads, but makes them clearly additive rather than canonical
+
+Validation:
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test -p meerkat-integration-tests --test live_mob_tools --features integration-real-tests --no-run`
+- `git diff --check`
+
+## Slice 349 - TypeScript SDK now types bridge-native member refs explicitly
+
+Goal: stop leaving the typed Node SDK with an unstructured `memberRef` blob
+once the client already normalizes bridge-session binding at that surface.
+
+What landed:
+- `sdks/typescript/src/types.ts`
+  - added `MobMemberRef`
+  - `MobMember.memberRef` now uses `MobMemberRef`
+  - `MobSpawnManyResultEntry.memberRef` now uses `MobMemberRef`
+- `sdks/typescript/src/client.ts`
+  - added `normalizeMobMemberRef(...)`
+  - `listMobMembers(...)` now emits typed bridge-native `memberRef`
+  - `spawnMobMembers(...)` now emits typed bridge-native `memberRef`
+- `sdks/typescript/tests/types.test.js`
+  - now asserts `memberRef.sessionId` / `memberRef.bridgeSessionId`
+    on both spawn-many and member-listing paths
+
+Why this matters:
+- it turns the bridge-session alias from a duplicated outer convenience field
+  into a real typed part of the public SDK surface
+- it keeps the TypeScript SDK aligned with the browser SDK and the Python
+  client instead of leaving `memberRef` as the last raw old-regime island
+
+Validation:
+- `npm run build && node --test tests/types.test.js` (in `sdks/typescript`)
+- `git diff --check`
+
+## Slice 350 - Python mob wrappers now name bridge-native member projections
+
+Goal: stop having the Python client normalize bridge aliases while the public
+mob module still advertises anonymous `dict[str, Any]` payloads for member
+refs and member listings.
+
+What landed:
+- `sdks/python/meerkat/mob.py`
+  - added `MobMemberRef`
+  - added `MobSpawnResult`
+  - added `MobMember`
+  - `Mob.members()`, `Mob.spawn()`, and `Mob.spawn_many()` now use those
+    named bridge-aware shapes
+- `sdks/python/meerkat/client.py`
+  - `list_mob_members(...)` now returns `list[MobMember]`
+  - `spawn_mob_member(...)` now returns `MobSpawnResult`
+  - `spawn_mob_members(...)` now returns `list[MobSpawnResult]`
+
+Why this matters:
+- it makes the Python mob surface describe the bridge-native member binding
+  explicitly instead of silently normalizing it under anonymous dicts
+- it keeps the three SDKs converging on the same named identity-first shapes
+
+Validation:
+- `python -m py_compile sdks/python/meerkat/client.py sdks/python/meerkat/mob.py`
+- `python -m pytest sdks/python/tests/test_types.py -q`
+- `git diff --check`
+
+## Slice 348 - Web SDK now types bridge-native member refs explicitly
+
+Goal: stop teaching browser-side Mob member identity as an untyped
+`Record<string, unknown>` once the wrapper has already normalized the
+bridge-session aliases.
+
+What landed:
+- `sdks/web/src/types.ts`
+  - added `MobMemberRef`
+  - `SpawnResult.member_ref` now uses `MobMemberRef | null`
+  - `MobMember.member_ref` now uses `MobMemberRef`
+- `sdks/web/src/mob.ts`
+  - bridge-alias normalization helpers now work against the typed
+    `MobMemberRef` shape instead of a generic record
+- `sdks/web/tests/e2e_wasm_runtime.test.mjs`
+  - the mocked parity lane still proves the wrapper fills
+    `bridge_session_id` when only `session_id` is present
+
+Why this matters:
+- it turns the browser SDK boundary into an honest identity-first surface
+  instead of relying on runtime normalization hidden behind raw records
+- it keeps the typed Web facade aligned with the richer Python and TypeScript
+  client behavior we already landed
+
+Validation:
+- `npm test && node --test --test-name-pattern "forwards canonical mob status/helper methods through the wasm binding surface" tests/e2e_wasm_runtime.test.mjs` (in `sdks/web`)
+- `git diff --check`
+
+## Slice 347 - Web mob wrapper now normalizes bridge-session aliases on raw member projections
+
+Goal: stop leaving the lightweight WASM/web Mob facade behind the richer SDK
+clients now that bridge-session binding is the canonical identity-first story.
+
+What landed:
+- `sdks/web/src/mob.ts`
+  - `spawn(...)` now fills `member_ref.bridge_session_id` from
+    `member_ref.session_id` when the runtime only returns the compatibility
+    field
+  - `listMembers(...)` now normalizes:
+    - `member_ref.bridge_session_id` from `member_ref.session_id`
+    - `current_bridge_session_id` from `current_session_id`
+- `sdks/web/tests/e2e_wasm_runtime.test.mjs`
+  - the shipped WASM parity lane now intentionally feeds old-style spawn/list
+    payloads with only `session_id`
+  - the wrapper is required to surface the additive bridge-session aliases
+    itself rather than inheriting them from the mocked payload
+
+Why this matters:
+- it keeps the lightweight browser runtime facade aligned with the Python and
+  TypeScript clients instead of making Web the last place that still teaches
+  raw session-centric member projections
+- it proves the bridge alias is a client guarantee at the wrapper surface, not
+  just something that happens to be present when the backend is already updated
+
+Validation:
+- `npm run build && node --test --test-name-pattern "forwards canonical mob status/helper methods through the wasm binding surface" tests/e2e_wasm_runtime.test.mjs` (in `sdks/web`)
+- `git diff --check`
+
+## Slice 344 - Web SDK mob surfaces now carry additive bridge-session aliases
+
+Goal: keep the browser/WASM client aligned with the identity-first Mob regime
+ instead of leaving bridge bindings hidden behind compatibility-only
+ `session_id` reads.
+
+What landed:
+- `sdks/web/src/types.ts`
+  - additive bridge-session fields now exist on:
+    - member delivery receipts
+    - respawn receipts
+    - helper results
+    - member snapshots
+- `sdks/web/src/mob.ts`
+  - public mob helpers now fill additive bridge-session aliases from the
+    canonical wire payload, falling back to compatibility `session_id` only
+    when needed
+- `sdks/web/tests/e2e_wasm_runtime.test.mjs`
+  - wasm binding tests now assert additive bridge-session fields on mob helper,
+    send, respawn, and status paths
+- `sdks/web/tests/live_smoke.test.mjs`
+  - live smoke scenarios now check bridge-session visibility on real Mob
+    spawn/status/respawn paths
+
+Why this matters:
+- it extends the clean-cut identity-first story into the browser client
+  instead of limiting it to Rust surfaces
+- it proves that the new bridge-native payload shape survives both mocked wasm
+  bindings and live packaged-runtime usage
+
+Validation:
+- `npm test` in `sdks/web`
+- `npm run test:e2e` in `sdks/web`
+- `git diff --check`
+
+## Slice 345 - SDK mob clients now normalize bridge-session aliases consistently
+
+Goal: stop leaving Python and TypeScript mob helpers/status paths as the odd
+ compatibility pockets where bridge bindings only existed if callers manually
+ inspected raw wire payloads.
+
+What landed:
+- `sdks/python/meerkat/client.py`
+  - `spawn_mob_member(...)`, `list_mob_members(...)`,
+    `mob_member_status(...)`, `wait_mob_kickoff(...)`,
+    `spawn_mob_helper(...)`, `fork_mob_helper(...)`,
+    `append_mob_system_context(...)`, and `respawn_mob_member(...)`
+    now fill additive bridge-session aliases from compatibility fields when
+    the bridge-native key is absent
+- `sdks/python/tests/test_types.py`
+  - mob client tests now assert the additive bridge-session aliases on those
+    normalized paths
+- `sdks/typescript/src/client.ts`
+  - raw-record mob helpers `spawnMobMember(...)` and
+    `appendMobSystemContext(...)` now add `bridge_session_id` when only
+    `session_id` is present
+- `sdks/typescript/tests/types.test.js`
+  - parity tests now prove the additive bridge alias shows up on spawn,
+    append, helper, and kickoff wrapper paths
+
+Why this matters:
+- it keeps the old wire keys compatible without teaching them as the primary
+  semantic meaning in the SDKs
+- it makes the identity-first bridge-binding story consistent across Rust,
+  Python, TypeScript, and web instead of stopping at the runtime boundary
+
+Validation:
+- `python -m pytest sdks/python/tests/test_types.py -q`
+- `npm run build && node --test tests/types.test.js` in `sdks/typescript`
+- `cargo test -p meerkat-mob -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `git diff --check`
+
+## Slice 346 - Python and TypeScript mob clients now treat bridge binding as first-class
+
+Goal: stop leaving the public SDK mob helpers half in the old regime where
+ additive `bridge_session_id` support existed only on some structured helpers
+ and live smoke still mostly asserted legacy session-centric keys.
+
+What landed:
+- `sdks/python/meerkat/client.py`
+  - `spawn_mob_member(...)`, `list_mob_members(...)`,
+    `mob_member_status(...)`, `wait_mob_kickoff(...)`,
+    `spawn_mob_helper(...)`, `fork_mob_helper(...)`,
+    `append_mob_system_context(...)`, and `respawn_mob_member(...)`
+    now normalize additive bridge-session aliases from compatibility fields
+    when the canonical key is absent
+- `sdks/python/tests/test_types.py`
+  - client tests now assert the additive bridge aliases on those mob paths
+- `sdks/python/tests/test_e2e_smoke.py`
+  - live smoke now expects bridge-session fields on spawn, append, send, and
+    respawned-member observation
+- `sdks/typescript/src/client.ts`
+  - `spawnMobMember(...)` and `appendMobSystemContext(...)` now add
+    `bridge_session_id` when only `session_id` is present
+- `sdks/typescript/tests/types.test.js`
+  - parity tests now assert additive bridge aliases on spawn, append, helper,
+    and kickoff paths
+- `sdks/typescript/tests/e2e_smoke.test.mjs`
+  - live smoke now expects bridge-session aliases on spawn, append, and
+    respawned reviewer observation
+
+Why this matters:
+- it extends the identity-first cutover beyond Rust internals and into the
+  public clients people actually touch
+- it keeps the old wire keys compatible without teaching them as the primary
+  meaning at the client layer
+
+Validation:
+- `python -m pytest sdks/python/tests/test_types.py -q`
+- `python -m py_compile sdks/python/tests/test_e2e_smoke.py`
+- `npm run build && node --test tests/types.test.js` in `sdks/typescript`
+- `git diff --check`
+
+## Slice 319 - Helper results now expose canonical bridge-session identity
+
+Goal: stop treating helper/fork results as bridge-backed semantically while only
+carrying that identity through the compatibility `session_id` field.
+
+What landed:
+- `meerkat-mob/src/runtime/handle.rs`
+  - `HelperResult` now carries additive `bridge_session_id`
+  - added canonical accessors:
+    - `bridge_session_id()`
+    - `session_id()`
+- `meerkat-mob/src/runtime/mob_member_lifecycle_authority.rs`
+  - helper materialization now populates both compatibility and canonical
+    bridge-session fields from the same live bridge binding
+- `meerkat-rpc/src/handlers/mob.rs`
+  - `mob/spawn_helper` and `mob/fork_helper` now emit `bridge_session_id`
+    from the canonical accessor instead of mirroring the compatibility field
+- `meerkat-mob-mcp/src/lib.rs`
+  - restore/orphan tests now assert live member binding through
+    `current_bridge_session_id()`
+  - helper-related cleanup tests no longer overclaim bridge accessors on raw
+    `RunResult` values
+
+Why this matters:
+- helper/fork flows are one of the last places where bridge-backed runtime
+  truth was still traveling under an old session-only result shape
+- after this slice, the helper path is aligned with the rest of the
+  identity-first additive bridge-session rollout
+
+Validation:
+- `cargo test -p meerkat-mob -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 320 - Diagnostic command paths now speak bridge-session internally
+
+Goal: stop carrying bridge bindings under raw `session_id` field names in the
+Mob actor/machine diagnostic command path once the rest of the runtime has
+already moved to canonical bridge-session semantics.
+
+What landed:
+- `meerkat-mob/src/mob_machine.rs`
+  - `MobMachineCommand::DiagnosticHasLiveSession`
+  - `MobMachineCommand::DiagnosticMeerkatShadowInputs`
+  - both now carry `bridge_session_id`
+- `meerkat-mob/src/runtime/state.rs`
+  - `MobCommand::DiagnosticHasLiveSession`
+  - `MobCommand::DiagnosticMeerkatShadowInputs`
+  - both now carry `bridge_session_id`
+- `meerkat-mob/src/runtime/handle.rs`
+  - crate-private diagnostic helpers now accept `bridge_session_id`
+  - machine command dispatch forwards that canonical binding name end to end
+- `meerkat-mob/src/runtime/actor.rs`
+  - actor dispatch now queries session-service diagnostics via
+    `bridge_session_id`
+
+Why this matters:
+- the shadow/diagnostic seam was still one of the last actor-internal places
+  where identity-first bridge bindings were traveling under the old
+  `session_id` label
+- after this slice, the diagnostic command path matches the canonical bridge
+  language already used by restore-failure, pending-spawn, and respawn
+  internals
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_diagnostic_meerkat_shadow_inputs_returns_best_effort_live_member_state --quiet`
+- `cargo test -p meerkat-mob --lib test_capture_mob_shadow_suite_report_returns_empty_for_live_system --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `git diff --check`
+
+## Slice 321 - Provisioner internals now treat runtime bindings as bridge sessions
+
+Goal: stop teaching the clean-cut runtime the old `session_id` vocabulary from
+inside the Mob provisioner, where the binding is really a bridge session
+managed by the Meerkat runtime seam.
+
+What landed:
+- `meerkat-mob/src/runtime/provisioner.rs`
+  - `MobSessionRuntimeExecutor` now stores `bridge_session_id`
+  - executor `apply(...)` / `control(...)` use `bridge_session_id`
+  - `session_turn_error_to_mob_error(...)` now treats its input as a bridge
+    session binding
+  - the direct `SessionBackend::provision_member(...)` pre-registration path
+    now uses `pre_registered_bridge_session_id` /
+    `member_bridge_session_id`
+  - `abort_member_provision(...)` now uses `bridge_session_id` internally
+    through ops lookup, archive, unregister, and runtime-state cleanup
+
+Why this matters:
+- the public/session-service result shapes still keep compatibility names, but
+  the Mob runtime internals no longer need to think in those terms
+- this keeps the clean-cut / identity-first adaptation moving in the runtime
+  path instead of only at the wire and diagnostic layers
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 322 - Deeper Mob turn execution paths now name bridge bindings honestly
+
+Goal: keep the clean-cut / identity-first adaptation moving in the deeper Mob
+runtime path by removing another layer of internal `session_id` vocabulary
+where the live value is actually a bridge-session binding.
+
+What landed:
+- `meerkat-mob/src/runtime/actor_turn_executor.rs`
+  - autonomous flow dispatch now uses `bridge_session_id` locally
+  - `StreamScopeFrame::MobMember.session_id` is explicitly documented as the
+    stable event field name that carries the canonical bridge-session binding
+- `meerkat-mob/src/runtime/actor.rs`
+  - autonomous lifecycle kickoff injection now uses `bridge_session_id`
+  - autonomous dispatch locals now use `bridge_session_id`
+  - pending spawn progress recording now stores `bridge_session_id` under a
+    correctly named local binding instead of immediately reverting to
+    `session_id`
+- `meerkat-mob/src/runtime/provisioner.rs`
+  - `interaction_event_injector(...)` now speaks in terms of
+    `bridge_session_id`
+  - member-derived helpers (`is_member_active`, `comms_runtime`,
+    `active_operation_id_for_member`, `bind_member_owner_context`) now use
+    bridge-native local naming consistently
+
+Why this matters:
+- the deeper runtime execution path now matches the bridge-session semantics
+  already established in the machine surface, diagnostics, and provisioner
+  executor path
+- this reduces the remaining semantic noise where identity-first behavior was
+  already correct but the internal vocabulary still taught the old regime
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test -p meerkat-rpc --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 323 - Mob runtime rebuild/resume paths now use bridge-session vocabulary
+
+Goal: keep the identity-first cut moving through the remaining runtime glue so
+the rebuild/resume path no longer hides bridge bindings under plain
+`session_id` locals.
+
+What landed:
+- `meerkat-mob/src/runtime/builder.rs`
+  - missing-session recreation for roster-backed members now uses
+    `bridge_session_id`
+  - restore-failure diagnostics are recorded from bridge-native locals
+  - orchestrator resume notification now uses `bridge_session_id` when talking
+    to the live injector
+
+Why this matters:
+- the deeper runtime rebuild/resume path now matches the bridge-session
+  semantics already used in the actor, provisioner, diagnostics, and public
+  machine command surfaces
+- this removes another pocket where the new regime behaved correctly but was
+  still explained in the old vocabulary
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 324 - Canonical Mob member projection now names bridge bindings honestly
+
+Goal: finish the current identity-first vocabulary cleanup by making the
+canonical Mob member projection seam describe bridge bindings as bridge
+bindings, even though it still feeds compatibility `current_session_id`
+surfaces outward.
+
+What landed:
+- `meerkat-mob/src/runtime/handle.rs`
+  - `resolve_peer_connectivity(...)` now takes `bridge_session_id`
+  - canonical member materialization now carries `bridge_session_id` through
+    live session observation and connectivity projection instead of reusing a
+    plain `session_id` local
+
+Why this matters:
+- the canonical read seam is an intentional truth boundary, so it should not
+  keep teaching the old vocabulary internally
+- after this slice, the builder, actor, provisioner, turn executor, and
+  canonical member projection paths all agree on the bridge-session meaning of
+  the live binding
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 325 - Roster authority now names bridge-session setters honestly
+
+Goal: keep the identity-first cut consistent through the canonical Mob roster
+authority so bridge-binding setters stop taking plain `session_id` locals in the
+internal machine/runtime path.
+
+What landed:
+- `meerkat-mob/src/roster.rs`
+  - `set_bridge_session_id(...)` now takes `bridge_session_id`
+- `meerkat-mob/src/runtime/roster_authority.rs`
+  - `set_bridge_session_id(...)` now forwards `bridge_session_id` explicitly
+
+Why this matters:
+- the roster/authority layer is canonical internal machine state, so it should
+- use the same bridge-session vocabulary as the rest of the clean-cut runtime
+- this removes another place where the new regime still looked like the old one
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 326 - Mob operator tools now assemble bridge bindings from one canonical seam
+
+Goal: keep the clean-cut / identity-first adaptation moving through the Mob
+operator tool surface by removing another pocket of hand-built compatibility
+payload assembly. The tool layer should speak bridge-session truth internally
+even while it still emits compatibility `session_id` keys for callers.
+
+What landed:
+- `meerkat-mob/src/runtime/tools.rs`
+  - added `member_ref_result_payload(...)`
+  - added `member_list_entry_result_payload(...)`
+  - `spawn_meerkat`, `spawn_many_meerkats`, and `list_meerkats` now all build
+    their compatibility `session_id` / `current_session_id` fields from one
+    bridge-native payload seam instead of duplicating ad hoc JSON assembly
+- `meerkat-mob/src/runtime/tests.rs`
+  - added
+    `test_visible_mob_operator_tools_emit_bridge_session_fields_consistently`
+    to prove an in-scope operator dispatcher still emits stable compatibility
+    keys while sourcing them from canonical bridge bindings
+
+Why this matters:
+- the operator tool layer no longer has to hand-assemble duplicated bridge
+  binding aliases in multiple code paths
+- this keeps the internal runtime truth bridge-native while preserving the
+  outward compatibility contract for existing callers
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_visible_mob_operator_tools_emit_bridge_session_fields_consistently --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `git diff --check`
+
+## Slice 327 - Mob helper and public MCP outputs now source compatibility fields from bridge-native helpers
+
+Goal: keep the identity-first cut moving all the way to the outward helper and
+public MCP edges so those surfaces stop hand-building duplicated
+`session_id` / `bridge_session_id` payloads.
+
+What landed:
+- `meerkat-mob-mcp/src/agent_tools.rs`
+  - added `member_ref_result_payload(...)`
+  - `delegate` and `mob_spawn_member` now emit compatibility session fields
+    from a bridge-native helper instead of repeating inline JSON assembly
+  - extended
+    `test_successful_in_scope_mutation_persists_provenance_and_denied_calls_do_not`
+    to assert the compatibility field stays aligned with the canonical bridge
+    binding
+- `meerkat-mob-mcp/src/public_mcp.rs`
+  - added `insert_bridge_session_aliases(...)`
+  - added `member_ref_result_payload(...)`
+  - `meerkat_mob_spawn`, `meerkat_mob_spawn_many`,
+    `meerkat_mob_member_send`, and `meerkat_mob_append_system_context` now all
+    source compatibility session fields from one bridge-native helper path
+
+Why this matters:
+- the runtime, helper, and public MCP layers now agree on the same bridge
+  binding truth instead of each one hand-assembling compatibility aliases
+- this reduces the remaining identity-first work to deeper compatibility naming
+  cleanup instead of semantic drift
+
+Validation:
+- `cargo test -p meerkat-mob-mcp --lib test_successful_in_scope_mutation_persists_provenance_and_denied_calls_do_not --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `git diff --check`
+
+## Slice 328 - Mob definition ownership is now canonical on bridge-session indexing
+
+Goal: move the identity-first meaning down into `MobDefinition` itself so the
+definition layer stops treating `owner_session_id` as the primary concept and
+the public create wire contract explicitly rejects both reserved owner fields.
+
+What landed:
+- `meerkat-mob/src/definition.rs`
+  - added canonical bridge-owner helpers:
+    - `has_owner_bridge_session_index(...)`
+    - `is_indexed_to_owner_bridge_session(...)`
+    - `is_cleanup_scoped_to_owner_bridge_session(...)`
+    - `mark_owner_bridge_session_indexed(...)`
+    - `is_owned_by_bridge_session(...)`
+    - `is_bridge_session_scoped_to(...)`
+    - `mark_bridge_session_scoped(...)`
+  - kept the old session-centric methods as compatibility wrappers
+  - `MobDefinition::implicit(...)` now uses the bridge-native canonical helper
+  - extended the additive/back-compat test so both new and old predicates are
+    proven against legacy `owner_session_id` fallback
+- `meerkat-mob-mcp/src/agent_tools.rs`
+  - explicit mob creation now rebinds ownership through
+    `mark_owner_bridge_session_indexed(...)`
+- `meerkat-mob-mcp/src/lib.rs`
+  - implicit lookup and cleanup/scavenge logic now use the bridge-native
+    definition predicates
+- `meerkat-contracts/src/wire/mob.rs`
+  - the public `mob/create` contract comment now names both reserved owner
+    fields explicitly
+  - added
+    `mob_create_params_reject_reserved_runtime_bridge_owner_field`
+    so callers cannot sneak `owner_bridge_session_id` through the public schema
+
+Why this matters:
+- the runtime was already bridge-native, but the definition layer still told a
+  half-old story
+- now the canonical owner-binding vocabulary is bridge-native all the way down
+  to the definition/helpers layer, while older session-centric method names
+  remain as additive compatibility wrappers
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_owner_bridge_session_index_is_additive_and_back_compatible --quiet`
+- `cargo test -p meerkat-contracts --lib mob_create_params_reject_reserved_runtime_bridge_owner_field --quiet`
+- `cargo test -p meerkat-mob -p meerkat-mob-mcp -p meerkat-contracts --lib --quiet`
+- `git diff --check`
+
+## Slice 329 - Runtime bridge bindings stop using compatibility MemberRef constructors
+
+Goal: keep the full-cut identity-first story honest in production/runtime code
+instead of only at helper and wire edges by switching the real bridge-binding
+call sites to `MemberRef::from_bridge_session_id(...)`.
+
+What landed:
+- `meerkat-mob/src/runtime/actor.rs`
+  - pending-spawn abort and resume fast-path now construct member refs from
+    bridge session ids explicitly
+- `meerkat-mob/src/runtime/provisioner.rs`
+  - `MemberSpawnReceipt.member_ref` now comes from the canonical
+    bridge-session constructor
+- `meerkat-mob/src/runtime/disposal.rs`
+- `meerkat-mob/src/runtime/provision_guard.rs`
+- `meerkat-mob/src/runtime/ops_adapter.rs`
+- `meerkat-mob/src/mob_machine.rs`
+  - internal runtime/test helpers now use the same canonical constructor so
+    local runtime semantics and production semantics stop drifting
+
+Why this matters:
+- the compatibility `from_session_id(...)` alias still exists, but the runtime
+  path is no longer telling the old story by default
+- this keeps the clean-cut/identity-first regime centered on bridge bindings
+  all the way through spawn, resume, provision abort, and provision receipts
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `git diff --check`
+
+## Slice 330 - Resume semantics become bridge-native across runtime, RPC, MCP, tools, and REST
+
+Goal: finish the first honest identity-first resume pass by making bridge
+session binding the canonical resume concept everywhere the live system accepts
+resume input, while keeping additive compatibility `resume_session_id` fields
+at the outward edges.
+
+What landed:
+- `meerkat-mob/src/runtime/handle.rs`
+  - added canonical bridge-native resume helpers on `SpawnMemberSpec`:
+    `with_resume_bridge_session_id(...)` and
+    `resume_bridge_session_id()`
+  - kept `with_resume_session_id(...)` and `resume_session_id()` as
+    compatibility wrappers over the bridge-native helpers
+  - added
+    `spawn_member_spec_resume_bridge_session_accessors_stay_additive`
+- `meerkat-rpc/src/handlers/mob.rs`
+  - `MobSpawnParams` and `MobSpawnSpecParams` now accept additive
+    `resume_bridge_session_id`
+  - parsing now prefers `resume_bridge_session_id` and falls back to
+    `resume_session_id`
+- `meerkat-mob-mcp/src/public_mcp.rs`
+  - public MCP spawn inputs/specs now accept additive
+    `resume_bridge_session_id`
+  - spawn-spec construction now prefers the bridge-native field
+- `meerkat-mob/src/runtime/tools.rs`
+  - operator tool spawn args now accept additive
+    `resume_bridge_session_id`
+  - schema/docs now explicitly mark `resume_bridge_session_id` as preferred
+- `meerkat-mob-mcp/src/lib.rs`
+  - mob MCP tool schema/help now expose additive bridge-native resume input
+- `meerkat-rest/src/lib.rs`
+  - helper-route test coverage now honestly reflects that helper spawn requires
+    a comms-capable worker profile
+  - added
+    `test_mob_spawn_helper_route_returns_additive_bridge_session_id`
+
+Why this matters:
+- bridge binding is now the canonical resume identity end-to-end across the
+  live runtime and the public control surfaces
+- outward compatibility remains additive instead of forcing a flag day on RPC,
+  MCP, REST, and operator-tool callers
+- the helper-route test now matches the post-cutover truth rather than hiding
+  a real comms requirement behind a minimal definition that could never spawn
+
+Validation:
+- `cargo test -p meerkat-mob --lib spawn_member_spec_resume_bridge_session_accessors_stay_additive --quiet`
+- `cargo test -p meerkat-rest --lib test_mob_spawn_helper_route_returns_additive_bridge_session_id --quiet`
+- `cargo test -p meerkat-mob -p meerkat-mob-mcp -p meerkat-rpc -p meerkat-rest --lib --quiet`
+- `git diff --check`
+
+## Slice 331 - Deeper resume fast-paths and validation text now tell the bridge-session story
+
+Goal: finish the first bridge-native resume cleanup by making the live actor
+fast-path and outward validation text say what the runtime already means:
+resume targets bridge bindings, while `resume_session_id` remains only a
+compatibility alias.
+
+What landed:
+- `meerkat-mob/src/runtime/actor.rs`
+  - the internal resume fast-path now uses `resume_bridge_session_id`
+    terminology end-to-end
+  - the fast-path comment and failure text now explicitly describe bridge
+    session validation
+- `meerkat-rpc/src/handlers/mob.rs`
+  - invalid resume errors now name both accepted additive fields:
+    `resume_bridge_session_id/resume_session_id`
+- `meerkat-mob-mcp/src/lib.rs`
+  - mob MCP invalid-argument errors now name the same additive pair
+
+Why this matters:
+- the runtime and the validation/reporting layer now tell the same identity-first story
+- callers still get additive compatibility, but the error text no longer teaches
+  the old regime by default
+- this keeps the post-cutover adaptation honest deeper than the wire/schema edge
+
+Validation:
+- `cargo test -p meerkat-mob -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `git diff --check`
+
+## Slice 332 - Canonical bridge-binding projection is centralized for Mob member views
+
+Goal: remove one more quiet source of compatibility drift by centralizing how
+Mob member snapshots and list entries project `current_session_id` from the
+canonical `current_bridge_session_id`.
+
+What landed:
+- `meerkat-mob/src/runtime/handle.rs`
+  - added `MobMemberSnapshot::with_current_bridge_session_id(...)`
+  - added `MobMemberListEntry::with_current_bridge_session_id(...)`
+  - `project_member_list(...)` now uses the centralized helper instead of
+    hand-populating both fields
+  - additive serialization tests now build through the centralized helper
+- `meerkat-mob/src/runtime/mob_member_lifecycle_authority.rs`
+  - canonical member material now projects through the same helper
+- `meerkat-mob/src/mob_machine.rs`
+  - local projected-entry helpers now use the same centralized bridge-binding
+    projection instead of duplicating field wiring
+
+Why this matters:
+- bridge-native binding remains the only real source of truth
+- the compatibility `current_session_id` alias can no longer drift from the
+  canonical field in one projection path while staying correct in another
+- this shrinks the remaining identity-first cleanup surface from repeated field
+  wiring to deliberate outward-compatibility choices
+
+Validation:
+- `cargo test -p meerkat-mob --lib canonical_member_material_populates_compatibility_session_alias_from_bridge_binding --quiet`
+- `cargo test -p meerkat-mob --lib member_projection_types_serialize_additive_bridge_session_fields --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `git diff --check`
+
+## Slice 333 - Launch-mode resume helpers now speak bridge-session internally
+
+Goal: push the identity-first resume cleanup one level deeper by teaching
+`MemberLaunchMode` and the actor fast-path to expose bridge-native resume
+helpers instead of open-coding `Resume { session_id }` matches.
+
+What landed:
+- `meerkat-mob/src/launch.rs`
+  - added
+    `MemberLaunchMode::resume_bridge_session_id()`
+    and additive compatibility
+    `MemberLaunchMode::resume_session_id()`
+  - added
+    `resume_launch_mode_bridge_session_accessors_stay_additive`
+- `meerkat-mob/src/runtime/handle.rs`
+  - `SpawnMemberSpec::resume_bridge_session_id()` now delegates to the
+    launch-mode helper instead of pattern matching directly
+- `meerkat-mob/src/runtime/actor.rs`
+  - spawn preparation now derives the resume fast-path from the launch-mode
+    helper, keeping the actor aligned with the bridge-native launch surface
+
+Why this matters:
+- the runtime now has one canonical way to ask “is this a resume bridge
+  binding?” instead of duplicating that logic in each layer
+- compatibility `resume_session_id` remains additive, but the launch/runtime
+  seam no longer teaches the old story internally
+
+Validation:
+- `cargo test -p meerkat-mob --lib resume_launch_mode_bridge_session_accessors_stay_additive --quiet`
+- `cargo test -p meerkat-mob --lib spawn_member_spec_resume_bridge_session_accessors_stay_additive --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `git diff --check`
+
+## Slice 334 - Direct launch-mode payloads and MCP validation now accept bridge-native resume vocabulary
+
+Goal: make the serialized `launch_mode.resume` path and the public MCP resume
+path as bridge-native as the RPC/tool layers, without breaking older
+`session_id` payloads.
+
+What landed:
+- `meerkat-mob/src/launch.rs`
+  - `MemberLaunchMode::Resume { session_id }` now deserializes additive
+    `bridge_session_id` aliases
+  - added
+    `resume_launch_mode_deserializes_bridge_session_id_alias`
+- `meerkat-mob-mcp/src/public_mcp.rs`
+  - public MCP spawn validation now reports
+    `invalid resume_bridge_session_id/resume_session_id`
+    instead of the older generic session-only wording
+  - added
+    `build_spawn_spec_rejects_invalid_bridge_resume_aliases_with_bridge_native_message`
+
+Why this matters:
+- callers that serialize `launch_mode` directly can now speak the identity-first
+  bridge vocabulary without going through the higher-level RPC/MCP wrapper fields
+- the last public resume-validation surface now matches the additive bridge-native
+  contract we already teach everywhere else
+
+Validation:
+- `cargo test -p meerkat-mob --lib resume_launch_mode_deserializes_bridge_session_id_alias --quiet`
+- `cargo test -p meerkat-mob-mcp --lib build_spawn_spec_rejects_invalid_bridge_resume_aliases_with_bridge_native_message --quiet`
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `git diff --check`
+
+## Slice 335 - SDK and web-runtime mob spawn ingress now accept bridge-native resume bindings
+
+Goal: finish the identity-first resume vocabulary at the remaining caller
+ingress surfaces so bridge-native resume bindings are not only true in core
+runtime/RPC/MCP layers, but also in SDK and wasm-facing client entry points.
+
+What landed:
+- `sdks/typescript/src/types.ts`
+  - `SpawnSpec` now carries additive `resumeBridgeSessionId`
+- `sdks/typescript/src/client.ts`
+  - `spawnMobMember(...)` and `spawnMobMembers(...)` now emit
+    `resume_bridge_session_id` additively, while still preserving
+    `resume_session_id`
+- `sdks/python/meerkat/mob.py`
+  - `MobSpawnSpec` and `Mob.spawn(...)` now accept additive
+    `resume_bridge_session_id`
+- `sdks/python/meerkat/client.py`
+  - `spawn_mob_member(...)` now emits additive
+    `resume_bridge_session_id`
+- `meerkat-web-runtime/src/lib.rs`
+  - `mob_spawn(...)` now prefers `resume_bridge_session_id` over
+    `resume_session_id`
+  - bridge-native resume IDs now use
+    `SpawnMemberSpec::with_resume_bridge_session_id(...)`
+  - added
+    `spawn_spec_input_deserializes_resume_bridge_session_id_alias`
+
+Why this matters:
+- the old session-centric resume name is now consistently an additive
+  compatibility field rather than the canonical story, all the way out to the
+  user-facing SDKs and wasm runtime shim
+- client/runtime ingress now agrees with the cutover regime instead of forcing
+  callers back into old vocabulary at the edge
+
+Validation:
+- `cargo test -p meerkat-web-runtime --lib spawn_spec_input_deserializes_resume_bridge_session_id_alias --quiet`
+- `cargo check -p meerkat-web-runtime --quiet`
+- `git diff --check`
+
+## Slice 336 - Mob launch mode and web runtime member helpers now treat bridge binding as canonical
+
+Goal: keep shrinking the remaining session-centric compatibility pockets in the
+identity-first regime by making the Mob launch surface and wasm mob-member
+helpers internally bridge-native instead of storing bridge semantics under
+legacy field names.
+
+What landed:
+- `meerkat-mob/src/launch.rs`
+  - `MemberLaunchMode::Resume` now stores `bridge_session_id` canonically
+  - additive compatibility is preserved with `#[serde(alias = "session_id")]`
+- `meerkat-mob/src/runtime/handle.rs`
+  - `with_resume_bridge_session_id(...)` and `attach_existing_session(...)`
+    now construct the canonical `bridge_session_id` form
+  - compatibility `with_resume_session_id(...)` remains a wrapper
+- `meerkat-web-runtime/src/lib.rs`
+  - `resolve_mob_member_bridge_session_id(...)` now resolves bridge bindings
+    explicitly from `MemberRef::bridge_session_id()`
+  - mob member append/subscribe/cross-mob helpers now use bridge-native locals
+    internally while preserving outward additive `session_id` +
+    `bridge_session_id` JSON
+  - helper/spawn payload tests now cover additive bridge aliases honestly on the
+    host-target lane
+
+Why this matters:
+- the bridge binding is now canonical in the mob launch surface itself, not
+  just in higher-level helper accessors
+- the remaining wasm mob-member control helpers no longer quietly translate
+  through legacy `session_id()` calls internally
+- compatibility names still exist at the wire edge, but they now clearly wrap
+  bridge-native truth instead of owning it
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-web-runtime --lib --quiet`
+- `cargo test -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `git diff --check`
+
+## Slice 337 - Ops lifecycle bind seams now speak in bridge-owner terms
+
+Goal: keep shrinking the remaining session-centric compatibility pockets in the
+clean-cut, identity-first regime by making the shared ops lifecycle dispatcher
+contract explicitly bridge-owner oriented instead of silently reusing old
+`owner_session_id` locals everywhere.
+
+What landed:
+- `meerkat-core/src/ops_lifecycle.rs`
+  - `OperationSpec` now explicitly documents that `owner_session_id` is the
+    compatibility carrier for the canonical bridge binding
+  - additive accessors `owner_bridge_session_id()` and `owner_session_id()`
+    now make that meaning explicit
+- `meerkat-core/src/agent.rs`
+  - `AgentToolDispatcher::bind_ops_lifecycle(...)` docs and parameter names now
+    speak in terms of `owner_bridge_session_id`
+- `meerkat-core/src/gateway.rs`
+- `meerkat-tools/src/builtin/composite.rs`
+- `meerkat/src/service_factory.rs`
+  - the shared dispatcher/gateway/factory bind seam now consistently threads
+    `owner_bridge_session_id` instead of semantically overloaded
+    `owner_session_id` locals
+
+Why this matters:
+- the identity-first Mob runtime was already feeding bridge bindings into the
+  ops lifecycle registry; the trait and spec layer now say that truth out loud
+- this reduces one of the last low-level semantic mismatches between the new
+  bridge-session regime and the older session-centric vocabulary without
+  forcing a risky ledger-shape migration in the middle of a green cutover
+  branch
+
+Validation:
+- `cargo test -p meerkat-core -p meerkat-tools -p meerkat --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 338 - Shell job manager now treats ops owner binding as bridge-native
+
+Goal: keep pushing the identity-first regime down into the execution edge by
+making the background shell job manager speak in terms of canonical bridge
+ownership instead of quietly carrying that meaning under old `owner_session_id`
+ locals.
+
+What landed:
+- `meerkat-tools/src/builtin/shell/job_manager.rs`
+  - internal owner binding is now `owner_bridge_session_id`
+  - `bind_canonical_async_ops(...)` now accepts `owner_bridge_session_id`
+  - background shell job registration now records that bridge-native owner
+    binding into the shared ops lifecycle ledger
+  - `with_owner_session_id(...)` remains only as a compatibility wrapper
+  - in-file coverage now exercises the bridge-native helper directly
+
+Why this matters:
+- the shell job manager is one of the deepest live async-op producers in the
+  system, so carrying bridge-native semantics there removes another meaningful
+  place where the new regime was still being translated through old names
+- it aligns the shell detached-op path with the earlier dispatcher bind-seam
+  cleanup instead of stopping at the trait boundary
+
+Validation:
+- `cargo test -p meerkat-tools --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 339 - Implicit mob owner-index coverage now exercises bridge-session canon
+
+Goal: stop proving the Mob MCP owner-index story mainly through compatibility
+wrapper names and make the bridge-session APIs the primary exercised path.
+
+What landed:
+- `meerkat-mob-mcp/src/lib.rs`
+  - implicit-mob tests now call:
+    - `find_implicit_mob_for_bridge_session(...)`
+    - `get_or_create_implicit_mob_for_bridge_session(...)`
+    - `destroy_bridge_session_mobs(...)`
+  - bridge-scoped destroy warnings now log `bridge_session_id`, not
+    `session_id`
+  - compatibility wrappers remain, but the canonical bridge-session API is now
+    the path that in-crate coverage primarily exercises
+
+Why this matters:
+- it makes the owner-indexed implicit-mob lifecycle read honestly as
+  bridge-session-scoped in the crate that owns that behavior
+- it reduces the chance that future changes accidentally keep the compatibility
+  wrappers alive as the de facto primary API
+
+Validation:
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 340 - MemberRef is now bridge-native at the event wire boundary
+
+Goal: stop teaching the old session-centric meaning at the canonical Mob event
+boundary by making `MemberRef` serialize the bridge binding additively and
+prefer `bridge_session_id` on read.
+
+What landed:
+- `meerkat-mob/src/event.rs`
+  - `MemberRef` now serializes additive `bridge_session_id` alongside
+    compatibility `session_id`
+  - deserialization now accepts canonical payloads that provide either
+    `bridge_session_id` or `session_id`
+  - backend-peer member refs now carry the same additive bridge-session shape
+  - focused event coverage now proves deterministic additive serialization,
+    bridge-session-only deserialization, and backend-peer roundtrip stability
+
+Why this matters:
+- it moves the identity-first truth into the canonical Mob event/store boundary
+  instead of only patching it back in at outward helper layers
+- it gives the runtime one less place where bridge binding is silently
+  represented under old vocabulary at the source of replay truth
+
+Validation:
+- `cargo test -p meerkat-mob --lib test_member_ref_ --quiet`
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test -p meerkat-mob-mcp -p meerkat-rpc --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 341 - Mob provisioner and restore paths now narrate bridge binding honestly
+
+Goal: carry the identity-first bridge-session vocabulary through the live
+provisioner and restore paths instead of only at the wire/helpers edge.
+
+What landed:
+- `meerkat-mob/src/runtime/provisioner.rs`
+  - session-backend and external-backend provisioning now bind
+    `created.session_id` into explicit `created_bridge_session_id` locals
+  - runtime-registration reconciliation, registry binding, lifecycle logging,
+    and `MemberSpawnReceipt` construction now speak in terms of bridge
+    sessions
+  - external bridge-backed members still keep compatibility `session_id` in
+    the `MemberRef::BackendPeer` payload, but the runtime path now treats that
+    field explicitly as bridge-session binding
+- `meerkat-mob/src/runtime/builder.rs`
+  - restore/rebuild paths now set roster bridge bindings through explicit
+    `created_bridge_session_id` locals instead of smuggling the same meaning
+    through unnamed compatibility vocabulary
+
+Why this matters:
+- it aligns the deepest live runtime provisioning path with the new
+  bridge-native `MemberRef` wire semantics
+- it reduces one of the last meaningful places where the clean-cut regime was
+  still internally narrating bridge binding as generic session identity
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo check --workspace --all-targets --quiet`
+- `git diff --check`
+
+## Slice 342 - Mob MCP scavenging and cleanup now exercise the bridge-session canon
+
+Goal: stop letting internal Mob MCP cleanup/scavenge coverage teach the old
+session-scoped vocabulary when the runtime already owns this seam as
+bridge-session-scoped cleanup.
+
+What landed:
+- `meerkat-mob-mcp/src/lib.rs`
+  - internal cleanup/scavenge doc strings now point at
+    `destroy_bridge_session_mobs(...)`
+  - the canonical bridge-session scavenger path is what the in-crate tests now
+    exercise directly
+  - test names and assertions now say `bridge-session-scoped` instead of
+    `session-scoped` where that is the real meaning
+
+Why this matters:
+- it makes the cleanup/scavenge coverage read like the runtime we actually
+  have, instead of like a compatibility alias that accidentally became the
+  primary story
+- it reduces the chance that future bridge-owner cleanup changes get wired to
+  the old wrapper names first
+
+Validation:
+- `cargo test -p meerkat-mob-mcp --lib --quiet`
+- `cargo test --workspace --tests --quiet`
+- `git diff --check`
+
+## Slice 343 - Respawn receipts are now bridge-native inside the runtime
+
+Goal: stop building replacement lifecycle receipts through compatibility
+`old_session_id` / `new_session_id` naming inside the Mob actor/handle seam.
+
+What landed:
+- `meerkat-mob/src/runtime/handle.rs`
+  - `MemberRespawnReceipt::from_bridge_session_ids(...)` is now the canonical
+    constructor
+  - bridge-native setter helpers keep the compatibility fields mirrored at the
+    edge without making them the internal authoring surface
+- `meerkat-mob/src/runtime/actor.rs`
+  - respawn success and topology-restore-failure paths now construct receipts
+    with bridge-session-native helpers instead of hand-filling both the old
+    and canonical fields
+- focused receipt coverage now uses the bridge-native constructor too
+
+Why this matters:
+- respawn/replacement is exactly where identity-first mobs should read most
+  clearly as bridge-binding continuity plus semantic replacement
+- it removes another deep runtime path where the clean-cut regime still taught
+  the compatibility fields as the primary lifecycle truth
+
+Validation:
+- `cargo test -p meerkat-mob --lib --quiet`
+- `cargo test --workspace --tests --quiet`
 - `git diff --check`

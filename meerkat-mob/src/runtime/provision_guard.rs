@@ -144,7 +144,7 @@ mod tests {
             _req: ProvisionMemberRequest,
         ) -> Result<MemberSpawnReceipt, MobError> {
             Ok(MemberSpawnReceipt {
-                member_ref: MemberRef::from_session_id(SessionId::new()),
+                member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 operation_id: meerkat_core::ops::OperationId::new(),
             })
         }
@@ -216,7 +216,7 @@ mod tests {
         async fn bind_member_owner_context(
             &self,
             _member_ref: &MemberRef,
-            _owner_session_id: SessionId,
+            _owner_bridge_session_id: SessionId,
             _ops_registry: Arc<dyn OpsLifecycleRegistry>,
         ) -> Result<(), MobError> {
             Ok(())
@@ -227,7 +227,7 @@ mod tests {
     async fn commit_returns_member_ref() {
         let provisioner = Arc::new(MockProvisioner::new());
         let session_id = SessionId::new();
-        let member_ref = MemberRef::from_session_id(session_id.clone());
+        let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
         let meerkat_id = MeerkatId::from("test-member");
 
         let guard = PendingProvision::new(member_ref.clone(), meerkat_id, provisioner.clone());
@@ -239,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_retires_member() {
         let provisioner = Arc::new(MockProvisioner::new());
-        let member_ref = MemberRef::from_session_id(SessionId::new());
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let meerkat_id = MeerkatId::from("test-member");
 
         let guard = PendingProvision::new(member_ref, meerkat_id, provisioner.clone());
@@ -250,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn member_ref_accessor_returns_ref() {
         let provisioner = Arc::new(MockProvisioner::new());
-        let member_ref = MemberRef::from_session_id(SessionId::new());
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let meerkat_id = MeerkatId::from("test-member");
 
         let guard = PendingProvision::new(member_ref.clone(), meerkat_id, provisioner);
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_id_accessor() {
         let provisioner = Arc::new(MockProvisioner::new());
-        let member_ref = MemberRef::from_session_id(SessionId::new());
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let meerkat_id = MeerkatId::from("test-member");
 
         let guard = PendingProvision::new(member_ref, meerkat_id.clone(), provisioner);
@@ -274,7 +274,7 @@ mod tests {
     #[should_panic(expected = "PendingProvision dropped without commit or rollback")]
     async fn drop_without_consume_panics_in_debug() {
         let provisioner = Arc::new(MockProvisioner::new());
-        let member_ref = MemberRef::from_session_id(SessionId::new());
+        let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
         let meerkat_id = MeerkatId::from("test-member");
 
         let _guard = PendingProvision::new(member_ref, meerkat_id, provisioner);

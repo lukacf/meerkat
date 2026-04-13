@@ -177,9 +177,9 @@ impl PendingSpawnLineage {
                 .progress
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let has_session_id = progress.session_id.is_some();
+            let has_bridge_session_id = progress.bridge_session_id.is_some();
             let has_operation_id = progress.operation_id.is_some();
-            match (has_session_id, has_operation_id) {
+            match (has_bridge_session_id, has_operation_id) {
                 (true, true) => {
                     provision_bound_ticket_ids.insert(*ticket);
                 }

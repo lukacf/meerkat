@@ -5,6 +5,7 @@ import type {
   SpawnSpec,
   SpawnResult,
   MobMember,
+  MobMemberRef,
   MobPeerTarget,
   MobStatus,
   MobLifecycleAction,
@@ -17,6 +18,7 @@ import type {
   RenderMetadata,
   ContentBlock,
   MemberDeliveryReceipt,
+  MemberRespawnReceipt,
   MobRespawnResult,
   MobMemberSnapshot,
   MobHelperResult,
@@ -56,6 +58,45 @@ interface MobWasmBindings {
   close_subscription: (handle: number) => void;
 }
 
+function normalizeMemberRefBridgeAliases(
+  memberRef: MobMemberRef | null | undefined,
+): MobMemberRef | null | undefined {
+  if (!memberRef || typeof memberRef !== 'object') {
+    return memberRef;
+  }
+  const normalized = { ...memberRef };
+  if (
+    (typeof normalized.bridge_session_id !== 'string' || normalized.bridge_session_id.length === 0)
+    && typeof normalized.session_id === 'string'
+    && normalized.session_id.length > 0
+  ) {
+    normalized.bridge_session_id = normalized.session_id;
+  }
+  return normalized;
+}
+
+function normalizeSpawnResultBridgeAliases(result: SpawnResult): SpawnResult {
+  return {
+    ...result,
+    member_ref: normalizeMemberRefBridgeAliases(result.member_ref),
+  };
+}
+
+function normalizeMobMemberBridgeAliases(member: MobMember): MobMember {
+  const currentSessionId = typeof member.current_session_id === 'string'
+    ? member.current_session_id
+    : undefined;
+  const currentBridgeSessionId = typeof member.current_bridge_session_id === 'string'
+    ? member.current_bridge_session_id
+    : currentSessionId;
+  return {
+    ...member,
+    member_ref: normalizeMemberRefBridgeAliases(member.member_ref) ?? {},
+    current_session_id: currentSessionId,
+    current_bridge_session_id: currentBridgeSessionId,
+  };
+}
+
 /** Capability-bearing handle for one mob member. */
 export class Member {
   private mobId: string;
@@ -92,6 +133,10 @@ export class Member {
           ? receipt.member_id
           : this.meerkatId,
       session_id: receipt.session_id,
+      bridge_session_id:
+        typeof receipt.bridge_session_id === 'string' && receipt.bridge_session_id.length > 0
+          ? receipt.bridge_session_id
+          : receipt.session_id,
       handling_mode: receipt.handling_mode ?? handlingMode,
     };
   }
@@ -125,7 +170,7 @@ export class Mob {
       this.mobId,
       JSON.stringify(specs),
     );
-    return JSON.parse(json) as SpawnResult[];
+    return (JSON.parse(json) as SpawnResult[]).map(normalizeSpawnResultBridgeAliases);
   }
 
   /** Retire an agent from the mob. */
@@ -162,7 +207,7 @@ export class Mob {
   /** List all members in the mob. */
   async listMembers(): Promise<MobMember[]> {
     const json = await this.bindings.mob_list_members(this.mobId);
-    return JSON.parse(json) as MobMember[];
+    return (JSON.parse(json) as MobMember[]).map(normalizeMobMemberBridgeAliases);
   }
 
   /** Stage runtime system context for a specific member session. */
@@ -179,7 +224,20 @@ export class Mob {
         idempotency_key: options.idempotencyKey,
       }),
     );
-    return JSON.parse(json) as MobAppendSystemContextResult;
+    const result = JSON.parse(json) as Partial<MobAppendSystemContextResult>;
+    if (typeof result.session_id !== 'string' || result.session_id.length === 0) {
+      throw new Error('Invalid mob append system context response: missing session_id');
+    }
+    return {
+      mob_id: typeof result.mob_id === 'string' ? result.mob_id : this.mobId,
+      meerkat_id: typeof result.meerkat_id === 'string' ? result.meerkat_id : meerkatId,
+      session_id: result.session_id,
+      bridge_session_id:
+        typeof result.bridge_session_id === 'string' && result.bridge_session_id.length > 0
+          ? result.bridge_session_id
+          : result.session_id,
+      status: result.status === 'duplicate' ? 'duplicate' : 'staged',
+    };
   }
 
   /** Get a capability-bearing handle for one member. */
@@ -200,7 +258,42 @@ export class Mob {
           : JSON.stringify(initialMessage)
         : undefined;
     const json = await this.bindings.mob_respawn(this.mobId, meerkatId, payload);
-    return JSON.parse(json) as MobRespawnResult;
+    const result = JSON.parse(json) as Partial<MobRespawnResult> & {
+      receipt?: Partial<MemberRespawnReceipt>;
+      failed_peer_ids?: unknown;
+    };
+    if (!result.receipt || typeof result.receipt !== 'object') {
+      throw new Error('Invalid mob respawn response: missing receipt');
+    }
+    const receipt = result.receipt;
+    return {
+      status: result.status === 'topology_restore_failed' ? 'topology_restore_failed' : 'completed',
+      receipt: {
+        member_id:
+          typeof receipt.member_id === 'string' && receipt.member_id.length > 0
+            ? receipt.member_id
+            : meerkatId,
+        old_session_id:
+          typeof receipt.old_session_id === 'string' ? receipt.old_session_id : undefined,
+        old_bridge_session_id:
+          typeof receipt.old_bridge_session_id === 'string'
+            ? receipt.old_bridge_session_id
+            : typeof receipt.old_session_id === 'string'
+              ? receipt.old_session_id
+              : undefined,
+        new_session_id:
+          typeof receipt.new_session_id === 'string' ? receipt.new_session_id : undefined,
+        new_bridge_session_id:
+          typeof receipt.new_bridge_session_id === 'string'
+            ? receipt.new_bridge_session_id
+            : typeof receipt.new_session_id === 'string'
+              ? receipt.new_session_id
+              : undefined,
+      },
+      failed_peer_ids: Array.isArray(result.failed_peer_ids)
+        ? result.failed_peer_ids.map((peerId) => String(peerId))
+        : undefined,
+    };
   }
 
   /** Force-cancel an active member turn. */
@@ -211,7 +304,24 @@ export class Mob {
   /** Read the current execution snapshot for a member. */
   async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
     const json = await this.bindings.mob_member_status(this.mobId, meerkatId);
-    return JSON.parse(json) as MobMemberSnapshot;
+    const snapshot = JSON.parse(json) as Partial<MobMemberSnapshot>;
+    return {
+      status: typeof snapshot.status === 'string' ? snapshot.status : 'unknown',
+      output_preview:
+        typeof snapshot.output_preview === 'string' ? snapshot.output_preview : undefined,
+      error: typeof snapshot.error === 'string' ? snapshot.error : undefined,
+      tokens_used: typeof snapshot.tokens_used === 'number' ? snapshot.tokens_used : 0,
+      is_final: Boolean(snapshot.is_final),
+      current_session_id:
+        typeof snapshot.current_session_id === 'string' ? snapshot.current_session_id : undefined,
+      current_bridge_session_id:
+        typeof snapshot.current_bridge_session_id === 'string'
+          ? snapshot.current_bridge_session_id
+          : typeof snapshot.current_session_id === 'string'
+            ? snapshot.current_session_id
+            : undefined,
+      peer_connectivity: snapshot.peer_connectivity,
+    };
   }
 
   /** Spawn a short-lived helper and return its terminal result. */
@@ -229,7 +339,18 @@ export class Mob {
         backend: options?.backend,
       }),
     );
-    return JSON.parse(json) as MobHelperResult;
+    const result = JSON.parse(json) as Partial<MobHelperResult>;
+    return {
+      output: typeof result.output === 'string' ? result.output : undefined,
+      tokens_used: typeof result.tokens_used === 'number' ? result.tokens_used : 0,
+      session_id: typeof result.session_id === 'string' ? result.session_id : undefined,
+      bridge_session_id:
+        typeof result.bridge_session_id === 'string'
+          ? result.bridge_session_id
+          : typeof result.session_id === 'string'
+            ? result.session_id
+            : undefined,
+    };
   }
 
   /** Fork a helper from an existing member and return its terminal result. */
@@ -256,7 +377,18 @@ export class Mob {
         backend: options?.backend,
       }),
     );
-    return JSON.parse(json) as MobHelperResult;
+    const result = JSON.parse(json) as Partial<MobHelperResult>;
+    return {
+      output: typeof result.output === 'string' ? result.output : undefined,
+      tokens_used: typeof result.tokens_used === 'number' ? result.tokens_used : 0,
+      session_id: typeof result.session_id === 'string' ? result.session_id : undefined,
+      bridge_session_id:
+        typeof result.bridge_session_id === 'string'
+          ? result.bridge_session_id
+          : typeof result.session_id === 'string'
+            ? result.session_id
+            : undefined,
+    };
   }
 
   /** Get mob status. */

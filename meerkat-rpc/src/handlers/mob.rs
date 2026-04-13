@@ -14,7 +14,7 @@ use meerkat_contracts::{MobCreateParams, MobCreateResult};
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::{
-    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
+    FlowId, MeerkatId, MemberRef, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
     MobRuntimeMode, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
@@ -32,6 +32,35 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
         return Err(invalid_params(id, "mob_id must not be empty"));
     }
     Ok(MobId::from(raw))
+}
+
+fn insert_bridge_session_aliases(payload: &mut Value, bridge_session_id: Option<&SessionId>) {
+    let payload = payload
+        .as_object_mut()
+        .expect("bridge session aliases require object payload");
+    let bridge_session_id = bridge_session_id.map(std::string::ToString::to_string);
+    payload.insert(
+        "session_id".to_string(),
+        serde_json::json!(bridge_session_id),
+    );
+    payload.insert(
+        "bridge_session_id".to_string(),
+        serde_json::json!(bridge_session_id),
+    );
+}
+
+fn member_ref_result_payload(
+    mob_id: &MobId,
+    meerkat_id: &str,
+    member_ref: &MemberRef,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "mob_id": mob_id,
+        "meerkat_id": meerkat_id,
+        "member_ref": member_ref,
+    });
+    insert_bridge_session_aliases(&mut payload, member_ref.bridge_session_id());
+    payload
 }
 
 pub async fn handle_create(
@@ -138,6 +167,8 @@ pub struct MobSpawnParams {
     #[serde(default)]
     pub backend: Option<MobBackendKind>,
     #[serde(default)]
+    pub resume_bridge_session_id: Option<String>,
+    #[serde(default)]
     pub resume_session_id: Option<String>,
     #[serde(default)]
     pub labels: Option<BTreeMap<String, String>>,
@@ -166,24 +197,24 @@ pub async fn handle_spawn(
     spec.backend = params.backend;
     spec.context = params.context;
     spec.labels = params.labels;
-    if let Some(session_id) = params.resume_session_id {
+    if let Some(session_id) = params.resume_bridge_session_id.or(params.resume_session_id) {
         match SessionId::parse(&session_id) {
             Ok(sid) => {
-                spec = spec.with_resume_session_id(sid);
+                spec = spec.with_resume_bridge_session_id(sid);
             }
-            Err(err) => return invalid_params(id, format!("Invalid resume_session_id: {err}")),
+            Err(err) => {
+                return invalid_params(
+                    id,
+                    format!("Invalid resume_bridge_session_id/resume_session_id: {err}"),
+                );
+            }
         }
     }
     spec.additional_instructions = params.additional_instructions;
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(member_ref) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "meerkat_id": params.meerkat_id,
-                "member_ref": member_ref,
-                "session_id": member_ref.session_id(),
-            }),
+            member_ref_result_payload(&mob_id, &params.meerkat_id, &member_ref),
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -211,6 +242,8 @@ pub struct MobSpawnSpecParams {
     #[serde(default)]
     pub backend: Option<MobBackendKind>,
     #[serde(default)]
+    pub resume_bridge_session_id: Option<String>,
+    #[serde(default)]
     pub resume_session_id: Option<String>,
     #[serde(default)]
     pub labels: Option<BTreeMap<String, String>>,
@@ -227,6 +260,8 @@ struct SpawnManyResultEntry {
     member_ref: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bridge_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -254,15 +289,22 @@ pub async fn handle_spawn_many(
         spec.backend = s.backend;
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
-        if let Some(raw) = &s.resume_session_id {
+        if let Some(raw) = s
+            .resume_bridge_session_id
+            .as_ref()
+            .or(s.resume_session_id.as_ref())
+        {
             match SessionId::parse(raw) {
                 Ok(sid) => {
-                    spec = spec.with_resume_session_id(sid);
+                    spec = spec.with_resume_bridge_session_id(sid);
                 }
                 Err(err) => {
                     return invalid_params(
                         id,
-                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
+                        format!(
+                            "Invalid resume_bridge_session_id/resume_session_id for {}: {err}",
+                            s.meerkat_id
+                        ),
                     );
                 }
             }
@@ -279,7 +321,10 @@ pub async fn handle_spawn_many(
                     Ok(member_ref) => SpawnManyResultEntry {
                         ok: true,
                         session_id: member_ref
-                            .session_id()
+                            .bridge_session_id()
+                            .map(std::string::ToString::to_string),
+                        bridge_session_id: member_ref
+                            .bridge_session_id()
                             .map(std::string::ToString::to_string),
                         member_ref: serde_json::to_value(&member_ref).ok(),
                         error: None,
@@ -288,6 +333,7 @@ pub async fn handle_spawn_many(
                         ok: false,
                         member_ref: None,
                         session_id: None,
+                        bridge_session_id: None,
                         error: Some(err.to_string()),
                     },
                 })
@@ -533,7 +579,8 @@ pub async fn handle_member_send(
             MobMemberSendResult {
                 mob_id: mob_id.to_string(),
                 member_id: receipt.member_id.to_string(),
-                session_id: receipt.session_id,
+                session_id: receipt.session_id.clone(),
+                bridge_session_id: receipt.bridge_session_id().clone(),
                 handling_mode: receipt.handling_mode.into(),
             },
         ),
@@ -568,15 +615,15 @@ pub async fn handle_append_system_context(
         )
         .await
     {
-        Ok((session_id, result)) => RpcResponse::success(
-            id,
-            serde_json::json!({
+        Ok((bridge_session_id, result)) => {
+            let mut payload = serde_json::json!({
                 "mob_id": mob_id,
                 "meerkat_id": meerkat_id,
-                "session_id": session_id,
                 "status": result.status,
-            }),
-        ),
+            });
+            insert_bridge_session_aliases(&mut payload, Some(&bridge_session_id));
+            RpcResponse::success(id, payload)
+        }
         Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
 }
@@ -785,7 +832,8 @@ pub async fn handle_spawn_helper(
             serde_json::json!({
                 "output": result.output,
                 "tokens_used": result.tokens_used,
-                "session_id": result.session_id,
+                "session_id": result.bridge_session_id().cloned(),
+                "bridge_session_id": result.bridge_session_id().cloned(),
             }),
         ),
         Err(err) => invalid_params(id, err.to_string()),
@@ -857,7 +905,8 @@ pub async fn handle_fork_helper(
             serde_json::json!({
                 "output": result.output,
                 "tokens_used": result.tokens_used,
-                "session_id": result.session_id,
+                "session_id": result.bridge_session_id().cloned(),
+                "bridge_session_id": result.bridge_session_id().cloned(),
             }),
         ),
         Err(err) => invalid_params(id, err.to_string()),

@@ -37,7 +37,7 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) error: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
-    pub(super) current_session_id: Option<SessionId>,
+    pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
@@ -58,17 +58,20 @@ impl CanonicalMemberSnapshotMaterial {
             error: self.error.clone(),
             tokens_used: self.tokens_used,
             is_final,
-            current_session_id: self.current_session_id.clone(),
+            current_session_id: None,
+            current_bridge_session_id: None,
             peer_connectivity: self.peer_connectivity.clone(),
             kickoff: self.kickoff.clone(),
         }
+        .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }
 
     pub(super) fn to_helper_result(&self) -> HelperResult {
         HelperResult {
             output: self.output_preview.clone(),
             tokens_used: self.tokens_used,
-            session_id: self.current_session_id.clone(),
+            session_id: self.current_bridge_session_id.clone(),
+            bridge_session_id: self.current_bridge_session_id.clone(),
         }
     }
 }
@@ -81,7 +84,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) restore_failure: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
-    pub(super) current_session_id: Option<SessionId>,
+    pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
 }
@@ -102,7 +105,7 @@ impl MobMemberLifecycleAuthority {
                 error: Some(reason),
                 output_preview: None,
                 tokens_used: 0,
-                current_session_id: input.current_session_id,
+                current_bridge_session_id: input.current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff: input.kickoff,
             };
@@ -129,7 +132,7 @@ impl MobMemberLifecycleAuthority {
             error: None,
             output_preview: input.output_preview,
             tokens_used: input.tokens_used,
-            current_session_id: input.current_session_id,
+            current_bridge_session_id: input.current_bridge_session_id,
             peer_connectivity: input.peer_connectivity,
             kickoff: input.kickoff,
         }
@@ -176,7 +179,7 @@ mod tests {
             restore_failure: Some("restore mismatch".into()),
             output_preview: Some("ignored".into()),
             tokens_used: 12,
-            current_session_id: None,
+            current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
         });
@@ -193,7 +196,7 @@ mod tests {
             restore_failure: None,
             output_preview: None,
             tokens_used: 0,
-            current_session_id: None,
+            current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
         });
@@ -210,7 +213,7 @@ mod tests {
             restore_failure: None,
             output_preview: None,
             tokens_used: 0,
-            current_session_id: None,
+            current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
         });

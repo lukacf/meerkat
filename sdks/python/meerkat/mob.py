@@ -26,6 +26,7 @@ MemberDeliveryReceipt = TypedDict(
     {
         "member_id": str,
         "session_id": str,
+        "bridge_session_id": NotRequired[str],
         "handling_mode": Literal["queue", "steer"],
     },
 )
@@ -35,7 +36,32 @@ MemberRespawnReceipt = TypedDict(
     {
         "member_id": str,
         "old_session_id": NotRequired[str | None],
+        "old_bridge_session_id": NotRequired[str | None],
         "new_session_id": NotRequired[str | None],
+        "new_bridge_session_id": NotRequired[str | None],
+    },
+)
+
+MobMemberRef = TypedDict(
+    "MobMemberRef",
+    {
+        "kind": NotRequired[str],
+        "session_id": NotRequired[str],
+        "bridge_session_id": NotRequired[str],
+        "peer_id": NotRequired[str],
+        "address": NotRequired[str],
+    },
+)
+
+MobSpawnResult = TypedDict(
+    "MobSpawnResult",
+    {
+        "status": NotRequired[str],
+        "meerkat_id": NotRequired[str],
+        "session_id": NotRequired[str],
+        "bridge_session_id": NotRequired[str],
+        "member_ref": NotRequired[MobMemberRef | None],
+        "error": NotRequired[str],
     },
 )
 
@@ -74,6 +100,7 @@ MobMemberSnapshot = TypedDict(
         "tokens_used": int,
         "is_final": bool,
         "current_session_id": NotRequired[str],
+        "current_bridge_session_id": NotRequired[str],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
     },
 )
@@ -88,6 +115,7 @@ MobKickoffMemberSnapshot = TypedDict(
         "tokens_used": int,
         "is_final": bool,
         "current_session_id": NotRequired[str],
+        "current_bridge_session_id": NotRequired[str],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
     },
 )
@@ -98,8 +126,30 @@ MobHelperResult = TypedDict(
         "output": NotRequired[str],
         "tokens_used": int,
         "session_id": NotRequired[str],
+        "bridge_session_id": NotRequired[str],
     },
 )
+
+MobMember = TypedDict(
+    "MobMember",
+    {
+        "meerkat_id": str,
+        "profile": str,
+        "member_ref": MobMemberRef,
+        "peer_id": NotRequired[str],
+        "external_peer_specs": NotRequired[dict[str, dict[str, Any]]],
+        "runtime_mode": NotRequired[str],
+        "state": NotRequired[str],
+        "wired_to": NotRequired[list[str]],
+        "labels": NotRequired[dict[str, str]],
+        "status": NotRequired[str],
+        "error": NotRequired[str],
+        "is_final": NotRequired[bool],
+        "current_session_id": NotRequired[str],
+        "current_bridge_session_id": NotRequired[str],
+    },
+)
+
 MobSpawnSpec = TypedDict(
     "MobSpawnSpec",
     {
@@ -108,6 +158,7 @@ MobSpawnSpec = TypedDict(
         "initial_message": NotRequired[str | list[dict[str, Any]] | None],
         "runtime_mode": NotRequired[str | None],
         "backend": NotRequired[str | None],
+        "resume_bridge_session_id": NotRequired[str | None],
         "resume_session_id": NotRequired[str | None],
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
@@ -154,7 +205,7 @@ class Mob:
     async def status(self) -> dict[str, Any]:
         return await self._client.mob_status(self.id)
 
-    async def members(self) -> list[dict[str, Any]]:
+    async def members(self) -> list[MobMember]:
         return await self._client.list_mob_members(self.id)
 
     async def spawn(
@@ -165,11 +216,12 @@ class Mob:
         initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
+        resume_bridge_session_id: str | None = None,
         resume_session_id: str | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobSpawnResult:
         return await self._client.spawn_mob_member(
             self.id,
             profile=profile,
@@ -177,6 +229,7 @@ class Mob:
             initial_message=initial_message,
             runtime_mode=runtime_mode,
             backend=backend,
+            resume_bridge_session_id=resume_bridge_session_id,
             resume_session_id=resume_session_id,
             labels=labels,
             context=context,
@@ -185,7 +238,7 @@ class Mob:
     async def spawn_many(
         self,
         specs: list[MobSpawnSpec],
-    ) -> list[dict[str, Any]]:
+    ) -> list[MobSpawnResult]:
         return await self._client.spawn_mob_members(self.id, specs)
 
     async def read_events(

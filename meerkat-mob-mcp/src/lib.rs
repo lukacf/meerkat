@@ -354,7 +354,9 @@ impl MobMcpState {
                 }
             }
 
-            let _ = self.scavenge_orphaned_session_scoped_mobs_inner().await;
+            let _ = self
+                .scavenge_orphaned_bridge_session_scoped_mobs_inner()
+                .await;
             Ok(())
         }
     }
@@ -469,7 +471,8 @@ impl MobMcpState {
     }
 
     /// Destroy a mob. Rejects implicit delegation mobs — use
-    /// [`destroy_session_mobs`](Self::destroy_session_mobs) for session cleanup.
+    /// [`destroy_bridge_session_mobs`](Self::destroy_bridge_session_mobs) for
+    /// bridge-session cleanup.
     pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
         if self.is_implicit_mob(mob_id).await {
             return Err(MobError::Internal(
@@ -557,9 +560,9 @@ impl MobMcpState {
             .await
     }
 
-    pub async fn retire_member_by_session_id(
+    pub async fn retire_member_by_bridge_session_id(
         &self,
-        session_id: &SessionId,
+        bridge_session_id: &SessionId,
     ) -> Result<(), MobError> {
         self.ensure_restored().await?;
         // Derive membership from authoritative live mob roster state rather than
@@ -572,34 +575,44 @@ impl MobMcpState {
             if let Some(member) = members.into_iter().find(|member| {
                 member
                     .member_ref
-                    .session_id()
-                    .is_some_and(|candidate| candidate == session_id)
+                    .bridge_session_id()
+                    .is_some_and(|candidate| candidate == bridge_session_id)
             }) {
                 resolved = Some((mob_id, member.meerkat_id));
                 break;
             }
         }
         let Some((mob_id, meerkat_id)) = resolved else {
-            if self.owns_persisted_session(session_id).await {
+            if self.owns_persisted_bridge_session(bridge_session_id).await {
                 return self
                     .session_service()
-                    .archive(session_id)
+                    .archive(bridge_session_id)
                     .await
                     .map_err(|error| {
                         MobError::Internal(format!(
-                            "failed to archive persisted mob-owned session '{session_id}': {error}"
+                            "failed to archive persisted mob-owned bridge session '{bridge_session_id}': {error}"
                         ))
                     });
             }
             return Err(MobError::Internal(format!(
-                "session not found in any live mob authority: {session_id}"
+                "bridge session not found in any live mob authority: {bridge_session_id}"
             )));
         };
         self.mob_retire(&mob_id, meerkat_id).await
     }
 
-    pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
-        if !self.ensure_restored_best_effort("owns_live_session").await {
+    pub async fn retire_member_by_session_id(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        self.retire_member_by_bridge_session_id(session_id).await
+    }
+
+    pub async fn owns_live_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
+        if !self
+            .ensure_restored_best_effort("owns_live_bridge_session")
+            .await
+        {
             return false;
         }
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
@@ -609,8 +622,8 @@ impl MobMcpState {
                 if members.into_iter().any(|member| {
                     member
                         .member_ref
-                        .session_id()
-                        .is_some_and(|candidate| candidate == session_id)
+                        .bridge_session_id()
+                        .is_some_and(|candidate| candidate == bridge_session_id)
                 }) {
                     return true;
                 }
@@ -619,10 +632,14 @@ impl MobMcpState {
         false
     }
 
-    pub async fn owns_persisted_session(&self, session_id: &SessionId) -> bool {
+    pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
+        self.owns_live_bridge_session(session_id).await
+    }
+
+    pub async fn owns_persisted_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         let Some(session) = self
             .session_service()
-            .load_persisted_session(session_id)
+            .load_persisted_session(bridge_session_id)
             .await
             .ok()
             .flatten()
@@ -637,15 +654,19 @@ impl MobMcpState {
             Ok(handle) => handle.list_all_members().await.into_iter().any(|member| {
                 member
                     .member_ref
-                    .session_id()
-                    .is_some_and(|candidate| candidate == session_id)
+                    .bridge_session_id()
+                    .is_some_and(|candidate| candidate == bridge_session_id)
             }),
             Err(_) => {
                 self.session_service()
-                    .session_belongs_to_mob(session_id, &mob_id)
+                    .session_belongs_to_mob(bridge_session_id, &mob_id)
                     .await
             }
         }
+    }
+
+    pub async fn owns_persisted_session(&self, session_id: &SessionId) -> bool {
+        self.owns_persisted_bridge_session(session_id).await
     }
 
     pub async fn mob_wire(
@@ -689,18 +710,18 @@ impl MobMcpState {
             .map_err(|error| SessionControlError::InvalidRequest {
                 message: error.to_string(),
             })?;
-        let session_id = members
+        let bridge_session_id = members
             .into_iter()
             .find(|member| member.meerkat_id == *meerkat_id)
-            .and_then(|member| member.member_ref.session_id().cloned())
+            .and_then(|member| member.member_ref.bridge_session_id().cloned())
             .ok_or_else(|| SessionControlError::InvalidRequest {
                 message: format!("member has no session: {meerkat_id}"),
             })?;
         let result = self
             .session_service()
-            .append_system_context(&session_id, req)
+            .append_system_context(&bridge_session_id, req)
             .await?;
-        Ok((session_id, result))
+        Ok((bridge_session_id, result))
     }
 
     pub async fn mob_member_send(
@@ -865,7 +886,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
     ) -> Result<meerkat_mob::MobEventRouterHandle, MobError> {
-        Ok(self.handle_for(mob_id).await?.subscribe_mob_events())
+        Ok(self.handle_for(mob_id).await?.subscribe_mob_events().await)
     }
 
     /// Subscribe to agent-level events for a specific member.
@@ -880,22 +901,38 @@ impl MobMcpState {
             .await
     }
 
-    /// Find the implicit delegation mob for the given session, if one exists.
+    /// Find the implicit delegation mob for the given bridge session, if one exists.
     ///
     /// Scans the in-memory mob registry for a mob whose definition has
-    /// `is_implicit == true` and `owner_session_id` matching the given session ID.
+    /// `is_implicit == true` and an owner bridge-session index matching the
+    /// given bridge session ID. Older definitions may still satisfy that index
+    /// via the compatibility `owner_session_id` field.
     /// Does NOT match explicit mobs that merely share the same owner.
-    pub async fn find_implicit_mob(&self, session_id: &str) -> Option<MobId> {
-        if !self.ensure_restored_best_effort("find_implicit_mob").await {
+    pub async fn find_implicit_mob_for_bridge_session(
+        &self,
+        bridge_session_id: &str,
+    ) -> Option<MobId> {
+        if !self
+            .ensure_restored_best_effort("find_implicit_mob_for_bridge_session")
+            .await
+        {
             return None;
         }
         let mobs = self.mobs.read().await;
         mobs.iter()
             .find(|(_, m)| {
                 let def = m.handle.definition();
-                def.is_implicit && def.is_owned_by_session(session_id)
+                def.is_implicit && def.has_owner_bridge_session_index(bridge_session_id)
             })
             .map(|(id, _)| id.clone())
+    }
+
+    /// Compatibility wrapper for callers that still speak in generic
+    /// session-centric terms. Internally this resolves against the owner
+    /// bridge-session index.
+    pub async fn find_implicit_mob(&self, bridge_session_id: &str) -> Option<MobId> {
+        self.find_implicit_mob_for_bridge_session(bridge_session_id)
+            .await
     }
 
     /// Check whether the given mob is an implicit delegation mob.
@@ -911,10 +948,11 @@ impl MobMcpState {
             .unwrap_or(false)
     }
 
-    /// Find all mobs indexed to the given session (both implicit and explicit).
-    pub async fn find_mobs_for_session(&self, session_id: &str) -> Vec<MobId> {
+    /// Find all mobs indexed to the given owner bridge session
+    /// (both implicit and explicit).
+    pub async fn find_mobs_for_bridge_session(&self, bridge_session_id: &str) -> Vec<MobId> {
         if !self
-            .ensure_restored_best_effort("find_mobs_for_session")
+            .ensure_restored_best_effort("find_mobs_for_bridge_session")
             .await
         {
             return Vec::new();
@@ -922,7 +960,10 @@ impl MobMcpState {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
-                if m.handle.definition().is_owned_by_session(session_id) {
+                if m.handle
+                    .definition()
+                    .has_owner_bridge_session_index(bridge_session_id)
+                {
                     Some(id.clone())
                 } else {
                     None
@@ -931,9 +972,14 @@ impl MobMcpState {
             .collect()
     }
 
-    async fn find_session_scoped_mobs(&self, session_id: &str) -> Vec<MobId> {
+    /// Compatibility wrapper for callers that still use session-centric naming.
+    pub async fn find_mobs_for_session(&self, bridge_session_id: &str) -> Vec<MobId> {
+        self.find_mobs_for_bridge_session(bridge_session_id).await
+    }
+
+    async fn find_bridge_session_scoped_mobs(&self, bridge_session_id: &str) -> Vec<MobId> {
         if !self
-            .ensure_restored_best_effort("find_session_scoped_mobs")
+            .ensure_restored_best_effort("find_bridge_session_scoped_mobs")
             .await
         {
             return Vec::new();
@@ -941,7 +987,10 @@ impl MobMcpState {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
-                if m.handle.definition().is_session_scoped_to(session_id) {
+                if m.handle
+                    .definition()
+                    .is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
+                {
                     Some(id.clone())
                 } else {
                     None
@@ -953,7 +1002,7 @@ impl MobMcpState {
     async fn implicit_mob_matches_session_model(
         &self,
         mob_id: &MobId,
-        session_id: &str,
+        bridge_session_id: &str,
         model: &str,
     ) -> bool {
         let delegate_profile = ProfileName::from("delegate");
@@ -961,7 +1010,7 @@ impl MobMcpState {
         mobs.get(mob_id).is_some_and(|managed| {
             let definition = managed.handle.definition();
             definition.is_implicit
-                && definition.is_owned_by_session(session_id)
+                && definition.has_owner_bridge_session_index(bridge_session_id)
                 && definition
                     .resolve_inline_profile(&delegate_profile)
                     .is_some_and(|profile| profile.model == model)
@@ -969,38 +1018,41 @@ impl MobMcpState {
     }
 
     /// Ensure the canonical implicit delegation mob exists for the given
-    /// session/model pair.
+    /// owner bridge session/model pair.
     ///
     /// This is the sole owner of implicit-mob model reconciliation. Tool
     /// surfaces may provide a cached mob-id hint for the fast path, but they
     /// must not destroy or recreate mobs themselves.
     pub async fn ensure_implicit_mob_for_model(
         &self,
-        session_id: &str,
+        bridge_session_id: &str,
         model: &str,
         cached_mob_id: Option<&MobId>,
     ) -> Result<(MobId, bool), MobError> {
         if let Some(cached_mob_id) = cached_mob_id
             && self
-                .implicit_mob_matches_session_model(cached_mob_id, session_id, model)
+                .implicit_mob_matches_session_model(cached_mob_id, bridge_session_id, model)
                 .await
         {
             return Ok((cached_mob_id.clone(), false));
         }
 
-        // Get or create a per-session lock
+        // Get or create a per-owner-bridge-session lock
         let session_lock = {
             let mut locks = self.implicit_mob_locks.lock().await;
             locks
-                .entry(session_id.to_string())
+                .entry(bridge_session_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
         let _guard = session_lock.lock().await;
 
-        if let Some(mob_id) = self.find_implicit_mob(session_id).await {
+        if let Some(mob_id) = self
+            .find_implicit_mob_for_bridge_session(bridge_session_id)
+            .await
+        {
             if self
-                .implicit_mob_matches_session_model(&mob_id, session_id, model)
+                .implicit_mob_matches_session_model(&mob_id, bridge_session_id, model)
                 .await
             {
                 return Ok((mob_id, false));
@@ -1009,33 +1061,50 @@ impl MobMcpState {
         }
 
         let mob_id = self
-            .mob_create_definition(MobDefinition::implicit(session_id, model))
+            .mob_create_definition(MobDefinition::implicit(bridge_session_id, model))
             .await?;
         Ok((mob_id, true))
     }
 
-    /// Get or create the implicit delegation mob for the given session.
+    /// Get or create the implicit delegation mob for the given owner bridge
+    /// session.
     ///
-    /// Uses a per-session mutex to ensure single-flight creation: the first
+    /// Uses a per-bridge-session mutex to ensure single-flight creation: the first
     /// caller creates the mob, concurrent callers block and receive the same
-    /// mob ID. The mob is indexed to the owning session and marked session-scoped.
-    pub async fn get_or_create_implicit_mob(
+    /// mob ID. The mob is indexed to the owning bridge session and marked
+    /// bridge-session-scoped.
+    pub async fn get_or_create_implicit_mob_for_bridge_session(
         &self,
-        session_id: &str,
+        bridge_session_id: &str,
         model: &str,
     ) -> Result<MobId, MobError> {
-        self.ensure_implicit_mob_for_model(session_id, model, None)
+        self.ensure_implicit_mob_for_model(bridge_session_id, model, None)
             .await
             .map(|(mob_id, _created)| mob_id)
     }
 
-    /// Destroy all session-scoped mobs for the given session.
+    /// Compatibility wrapper for callers that still use session-centric naming.
+    pub async fn get_or_create_implicit_mob(
+        &self,
+        bridge_session_id: &str,
+        model: &str,
+    ) -> Result<MobId, MobError> {
+        self.get_or_create_implicit_mob_for_bridge_session(bridge_session_id, model)
+            .await
+    }
+
+    /// Destroy all bridge-session-scoped mobs for the given owner bridge session.
     ///
     /// Called during session archive to clean up mobs whose cleanup truth is
-    /// `DestroyOnOwnerArchive`. `owner_session_id` alone is not sufficient.
-    pub async fn destroy_session_mobs(&self, session_id: &str) -> Result<(), MobError> {
+    /// `DestroyOnOwnerArchive`. Owner indexing alone is not sufficient.
+    pub async fn destroy_bridge_session_mobs(
+        &self,
+        bridge_session_id: &str,
+    ) -> Result<(), MobError> {
         self.ensure_restored().await?;
-        let mob_ids = self.find_session_scoped_mobs(session_id).await;
+        let mob_ids = self
+            .find_bridge_session_scoped_mobs(bridge_session_id)
+            .await;
         if mob_ids.is_empty() {
             return Ok(());
         }
@@ -1043,35 +1112,48 @@ impl MobMcpState {
             if let Err(error) = self.mob_destroy_unchecked(mob_id).await {
                 tracing::warn!(
                     mob_id = %mob_id,
-                    session_id = %session_id,
+                    bridge_session_id = %bridge_session_id,
                     error = %error,
-                    "failed to destroy session-scoped mob during cleanup"
+                    "failed to destroy bridge-session-scoped mob during cleanup"
                 );
             }
         }
-        // Prune the per-session lock to avoid unbounded growth in long-lived processes.
+        // Prune the per-bridge-session lock to avoid unbounded growth in long-lived processes.
         let mut locks = self.implicit_mob_locks.lock().await;
-        locks.remove(session_id);
+        locks.remove(bridge_session_id);
         Ok(())
     }
 
-    /// Scavenge orphaned session-scoped mobs whose owning sessions no longer exist.
+    /// Compatibility wrapper for callers that still use session-centric naming.
+    pub async fn destroy_session_mobs(&self, bridge_session_id: &str) -> Result<(), MobError> {
+        self.destroy_bridge_session_mobs(bridge_session_id).await
+    }
+
+    /// Scavenge orphaned bridge-session-scoped mobs whose owning sessions no
+    /// longer exist.
     ///
     /// Called during hydration at startup. For each mob marked
-    /// `DestroyOnOwnerArchive`, checks whether the indexed owning session still
-    /// exists. If not, destroys the mob. Returns the list of scavenged mob IDs.
-    pub async fn scavenge_orphaned_session_scoped_mobs(&self) -> Vec<MobId> {
+    /// `DestroyOnOwnerArchive`, checks whether the indexed owning bridge session
+    /// still exists. If not, destroys the mob. Returns the list of scavenged
+    /// mob IDs.
+    pub async fn scavenge_orphaned_bridge_session_scoped_mobs(&self) -> Vec<MobId> {
         if !self
-            .ensure_restored_best_effort("scavenge_orphaned_session_scoped_mobs")
+            .ensure_restored_best_effort("scavenge_orphaned_bridge_session_scoped_mobs")
             .await
         {
             return Vec::new();
         }
-        self.scavenge_orphaned_session_scoped_mobs_inner().await
+        self.scavenge_orphaned_bridge_session_scoped_mobs_inner()
+            .await
     }
 
-    async fn scavenge_orphaned_session_scoped_mobs_inner(&self) -> Vec<MobId> {
-        // Collect session-scoped cleanup candidates under a read lock.
+    /// Compatibility wrapper for callers that still use session-centric naming.
+    pub async fn scavenge_orphaned_session_scoped_mobs(&self) -> Vec<MobId> {
+        self.scavenge_orphaned_bridge_session_scoped_mobs().await
+    }
+
+    async fn scavenge_orphaned_bridge_session_scoped_mobs_inner(&self) -> Vec<MobId> {
+        // Collect bridge-session-scoped cleanup candidates under a read lock.
         let candidates: Vec<(MobId, String)> = {
             let mobs = self.mobs.read().await;
             mobs.iter()
@@ -1081,9 +1163,8 @@ impl MobMcpState {
                         == meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive
                     {
                         definition
-                            .owner_session_id
-                            .as_ref()
-                            .map(|sid| (id.clone(), sid.clone()))
+                            .owner_bridge_session_index()
+                            .map(|sid| (id.clone(), sid.to_string()))
                     } else {
                         None
                     }
@@ -1092,12 +1173,12 @@ impl MobMcpState {
         };
 
         let mut scavenged = Vec::new();
-        for (mob_id, session_id) in candidates {
-            let session_id = match SessionId::parse(&session_id) {
+        for (mob_id, bridge_session_id) in candidates {
+            let bridge_session_id = match SessionId::parse(&bridge_session_id) {
                 Ok(id) => id,
                 Err(_) => continue,
             };
-            let is_orphan = match self.session_service.read(&session_id).await {
+            let is_orphan = match self.session_service.read(&bridge_session_id).await {
                 Ok(_) => false,
                 Err(SessionError::NotFound { .. }) => true,
                 Err(_) => false, // Unknown error — don't scavenge
@@ -1106,20 +1187,20 @@ impl MobMcpState {
                 if let Err(error) = self.mob_destroy_unchecked_loaded(&mob_id).await {
                     tracing::warn!(
                         mob_id = %mob_id,
-                        session_id = %session_id,
+                        bridge_session_id = %bridge_session_id,
                         error = %error,
-                        "failed to scavenge orphaned session-scoped mob"
+                        "failed to scavenge orphaned bridge-session-scoped mob"
                     );
                 } else {
                     tracing::info!(
                         mob_id = %mob_id,
-                        session_id = %session_id,
-                        "scavenged orphaned session-scoped mob"
+                        bridge_session_id = %bridge_session_id,
+                        "scavenged orphaned bridge-session-scoped mob"
                     );
                     scavenged.push(mob_id);
-                    // Prune per-session lock to avoid unbounded growth.
+                    // Prune per-bridge-session lock to avoid unbounded growth.
                     let mut locks = self.implicit_mob_locks.lock().await;
-                    locks.remove(&session_id.to_string());
+                    locks.remove(&bridge_session_id.to_string());
                 }
             }
         }
@@ -1727,7 +1808,7 @@ impl MobMcpDispatcher {
                 "meerkat_spawn",
                 &format!("Spawn one or more meerkats. Required: mob_id, specs[].profile, specs[].meerkat_id. \
                      Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
-                     initial_message, resume_session_id, labels (key-value map), context (opaque JSON). {COMMON}"),
+                     initial_message, resume_bridge_session_id, resume_session_id, labels (key-value map), context (opaque JSON). {COMMON}"),
                 json!({
                     "type":"object",
                     "properties":{
@@ -1742,6 +1823,7 @@ impl MobMcpDispatcher {
                                     "initial_message": content_input_schema(),
                                     "backend":{"type":"string","enum":["session","external"]},
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
+                                    "resume_bridge_session_id":{"type":"string"},
                                     "resume_session_id":{"type":"string"},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
                                     "context":{"type":"object"}
@@ -1893,6 +1975,8 @@ struct MobSpawnMeerkatArgs {
     binding: Option<meerkat_mob::RuntimeBinding>,
     #[serde(default)]
     runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    resume_bridge_session_id: Option<String>,
     #[serde(default)]
     resume_session_id: Option<String>,
     #[serde(default)]
@@ -2159,14 +2243,18 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         s.binding = spec.binding;
                         s.context = spec.context;
                         s.labels = spec.labels;
-                        if let Some(sid_str) = spec.resume_session_id {
+                        if let Some(sid_str) =
+                            spec.resume_bridge_session_id.or(spec.resume_session_id)
+                        {
                             let sid = SessionId::parse(&sid_str).map_err(|e| {
                                 ToolError::invalid_arguments(
                                     call.name,
-                                    format!("invalid resume_session_id: {e}"),
+                                    format!(
+                                        "invalid resume_bridge_session_id/resume_session_id: {e}"
+                                    ),
                                 )
                             })?;
-                            s = s.with_resume_session_id(sid);
+                            s = s.with_resume_bridge_session_id(sid);
                         }
                         s.additional_instructions = spec.additional_instructions;
                         Ok(s)
@@ -2185,7 +2273,12 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map_err(|e| map_mob_err(call, e))?;
                     encode(
                         call,
-                        json!({"ok": true, "member_ref": member_ref, "session_id": member_ref.session_id()}),
+                        json!({
+                            "ok": true,
+                            "member_ref": member_ref,
+                            "session_id": member_ref.bridge_session_id(),
+                            "bridge_session_id": member_ref.bridge_session_id(),
+                        }),
                     )
                 } else {
                     let results = self
@@ -2199,7 +2292,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                             Ok(member_ref) => json!({
                                 "ok": true,
                                 "member_ref": member_ref,
-                                "session_id": member_ref.session_id(),
+                                "session_id": member_ref.bridge_session_id(),
+                                "bridge_session_id": member_ref.bridge_session_id(),
                             }),
                             Err(error) => json!({
                                 "ok": false,
@@ -3261,13 +3355,13 @@ mod tests {
         svc.insert_persisted_session(spoofed).await;
 
         assert!(
-            !state.owns_persisted_session(&spoofed_id).await,
+            !state.owns_persisted_bridge_session(&spoofed_id).await,
             "persisted session routing must verify real mob membership instead of trusting comms_name shape"
         );
     }
 
     #[tokio::test]
-    async fn test_owns_persisted_session_accepts_mob_marked_session_without_live_handle() {
+    async fn test_owns_persisted_bridge_session_accepts_mob_marked_session_without_live_handle() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
         let state = Arc::new(MobMcpState::new(session_service));
@@ -3301,13 +3395,13 @@ mod tests {
         svc.insert_persisted_session(persisted).await;
 
         assert!(
-            state.owns_persisted_session(&persisted_id).await,
+            state.owns_persisted_bridge_session(&persisted_id).await,
             "persisted mob members must still route through mob ownership after restart even before a live handle is rehydrated"
         );
     }
 
     #[tokio::test]
-    async fn test_retire_member_by_session_id_falls_back_to_archiving_persisted_member() {
+    async fn test_retire_member_by_bridge_session_id_falls_back_to_archiving_persisted_member() {
         let svc = Arc::new(MockSessionSvc::new());
         let session_service: Arc<dyn meerkat_mob::MobSessionService> = svc.clone();
         let state = Arc::new(MobMcpState::new(session_service));
@@ -3341,7 +3435,7 @@ mod tests {
         svc.insert_persisted_session(persisted).await;
 
         state
-            .retire_member_by_session_id(&persisted_id)
+            .retire_member_by_bridge_session_id(&persisted_id)
             .await
             .expect("persisted mob sessions should archive cleanly even without a live handle");
         assert!(
@@ -4019,7 +4113,12 @@ mod tests {
     #[tokio::test]
     async fn test_find_implicit_mob_returns_none_when_no_implicit_mob() {
         let state = MobMcpState::new_in_memory();
-        assert!(state.find_implicit_mob("nonexistent").await.is_none());
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session("nonexistent")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -4029,16 +4128,16 @@ mod tests {
         let sid = session_id.to_string();
 
         let mob_id_1 = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
         let mob_id_2 = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
         assert_eq!(mob_id_1, mob_id_2, "second call must return same mob_id");
 
-        let found = state.find_implicit_mob(&sid).await;
+        let found = state.find_implicit_mob_for_bridge_session(&sid).await;
         assert_eq!(found, Some(mob_id_1));
     }
 
@@ -4049,11 +4148,11 @@ mod tests {
         let sid_b = SessionId::new().to_string();
 
         let mob_a = state
-            .get_or_create_implicit_mob(&sid_a, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid_a, "claude-sonnet-4-5")
             .await
             .unwrap();
         let mob_b = state
-            .get_or_create_implicit_mob(&sid_b, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid_b, "claude-sonnet-4-5")
             .await
             .unwrap();
         assert_ne!(mob_a, mob_b, "different sessions must get different mobs");
@@ -4065,7 +4164,7 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let old_mob_id = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .expect("create initial implicit mob");
         let old_handle = state
@@ -4091,7 +4190,7 @@ mod tests {
 
         assert!(created, "model mismatch should force a fresh implicit mob");
         assert_eq!(
-            state.find_implicit_mob(&sid).await,
+            state.find_implicit_mob_for_bridge_session(&sid).await,
             Some(new_mob_id.clone()),
             "session should now point at the reconciled implicit mob"
         );
@@ -4123,7 +4222,7 @@ mod tests {
         // Create an implicit mob
         let sid = SessionId::new().to_string();
         let implicit_id = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
 
@@ -4173,6 +4272,7 @@ mod tests {
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            owner_bridge_session_id: None,
             session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
         }
@@ -4227,8 +4327,8 @@ mod tests {
             .expect("restore member status");
         assert_eq!(status.status, meerkat_mob::MobMemberStatus::Active);
         assert!(
-            status.current_session_id.is_some(),
-            "restored member should still have a live session binding"
+            status.current_bridge_session_id().is_some(),
+            "restored member should still have a live bridge-session binding"
         );
 
         let mobs = restored.mob_list().await;
@@ -4316,56 +4416,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_destroy_session_mobs_cleans_up() {
+    async fn test_destroy_bridge_session_mobs_cleans_up() {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
         let _mob_id = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
-        assert!(state.find_implicit_mob(&sid).await.is_some());
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&sid)
+                .await
+                .is_some()
+        );
 
-        state.destroy_session_mobs(&sid).await.unwrap();
-        assert!(state.find_implicit_mob(&sid).await.is_none());
+        state.destroy_bridge_session_mobs(&sid).await.unwrap();
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&sid)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
-    async fn test_destroy_session_mobs_uses_cleanup_policy_not_owner_index() {
+    async fn test_destroy_bridge_session_mobs_uses_cleanup_policy_not_owner_index() {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
         let mut manual = explicit_definition("manual-owner-index");
         manual.owner_session_id = Some(sid.clone());
+        manual.owner_bridge_session_id = Some(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
             .expect("create manual owner-indexed mob");
 
-        let mut session_scoped = explicit_definition("session-scoped-owner");
-        session_scoped.mark_session_scoped(&sid);
-        let session_scoped_id = state
-            .mob_create_definition(session_scoped)
+        let mut bridge_session_scoped = explicit_definition("bridge-session-scoped-owner");
+        bridge_session_scoped.mark_owner_bridge_session_indexed(&sid);
+        let bridge_session_scoped_id = state
+            .mob_create_definition(bridge_session_scoped)
             .await
-            .expect("create session-scoped mob");
+            .expect("create bridge-session-scoped mob");
 
-        state.destroy_session_mobs(&sid).await.unwrap();
+        state.destroy_bridge_session_mobs(&sid).await.unwrap();
 
         assert!(
             state.handle_for(&manual_id).await.is_ok(),
             "owner_session_id alone must not make a mob eligible for cleanup"
         );
         assert!(
-            state.handle_for(&session_scoped_id).await.is_err(),
+            state.handle_for(&bridge_session_scoped_id).await.is_err(),
             "DestroyOnOwnerArchive must remain the cleanup truth"
         );
     }
 
     #[tokio::test]
-    async fn test_destroy_session_mobs_noop_when_none() {
+    async fn test_destroy_bridge_session_mobs_noop_when_none() {
         let state = MobMcpState::new_in_memory();
         // Should succeed even when no implicit mob exists
-        state.destroy_session_mobs("nonexistent").await.unwrap();
+        state
+            .destroy_bridge_session_mobs("nonexistent")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -4379,7 +4493,7 @@ mod tests {
             let s = state.clone();
             let sid = sid.clone();
             handles.push(tokio::spawn(async move {
-                s.get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+                s.get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
                     .await
                     .unwrap()
             }));
@@ -4403,7 +4517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scavenge_orphaned_session_scoped_mobs() {
+    async fn test_scavenge_orphaned_bridge_session_scoped_mobs() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc.clone()));
 
@@ -4426,35 +4540,88 @@ mod tests {
             .unwrap();
         let sid = result.session_id.to_string();
         let mob_id = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
 
         // Also create a manual owner-indexed explicit mob that should survive scavenging.
         let mut manual = explicit_definition("manual-owner-index");
         manual.owner_session_id = Some(sid.clone());
+        manual.owner_bridge_session_id = Some(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
             .expect("create manual owner-indexed mob");
 
         // Session exists — scavenge should find nothing.
-        let scavenged = state.scavenge_orphaned_session_scoped_mobs().await;
+        let scavenged = state.scavenge_orphaned_bridge_session_scoped_mobs().await;
         assert!(scavenged.is_empty(), "no orphans while session exists");
 
         // Archive the session — now the mob is orphaned
         svc.archive(&result.session_id).await.unwrap();
 
-        // Scavenge should find and destroy the session-scoped orphan, but not
+        // Scavenge should find and destroy the bridge-session-scoped orphan, but not
         // the manual owner-indexed mob.
-        let scavenged = state.scavenge_orphaned_session_scoped_mobs().await;
+        let scavenged = state.scavenge_orphaned_bridge_session_scoped_mobs().await;
         assert_eq!(scavenged, vec![mob_id.clone()]);
 
         // Mob should be gone
-        assert!(state.find_implicit_mob(&sid).await.is_none());
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&sid)
+                .await
+                .is_none()
+        );
         assert!(
             state.handle_for(&manual_id).await.is_ok(),
             "manual owner-indexed mob must survive orphan scavenging"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scavenge_orphaned_bridge_session_scoped_mobs_honors_bridge_owner_index() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc.clone()));
+
+        let result = svc
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: ContentInput::from("test"),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .unwrap();
+        let sid = result.session_id.to_string();
+
+        let mut bridge_owned = explicit_definition("bridge-owned-orphan");
+        bridge_owned.mark_owner_bridge_session_indexed(&sid);
+        bridge_owned.owner_session_id = None;
+        let bridge_owned_id = state
+            .mob_create_definition(bridge_owned)
+            .await
+            .expect("create bridge-owned bridge-session-scoped mob");
+
+        let scavenged = state.scavenge_orphaned_bridge_session_scoped_mobs().await;
+        assert!(
+            scavenged.is_empty(),
+            "session exists, so bridge-owned mob must not scavenge"
+        );
+
+        svc.archive(&result.session_id).await.unwrap();
+
+        let scavenged = state.scavenge_orphaned_bridge_session_scoped_mobs().await;
+        assert_eq!(scavenged, vec![bridge_owned_id.clone()]);
+        assert!(
+            state.handle_for(&bridge_owned_id).await.is_err(),
+            "bridge-owned bridge-session-scoped mob must be scavenged once the bridge session disappears"
         );
     }
 
@@ -4464,7 +4631,7 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mob_id = state
-            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .get_or_create_implicit_mob_for_bridge_session(&sid, "claude-sonnet-4-5")
             .await
             .unwrap();
         let handle = state.handle_for(&mob_id).await.unwrap();
@@ -4476,6 +4643,11 @@ mod tests {
             handle.definition().owner_session_id.as_deref(),
             Some(sid.as_str()),
             "implicit mob must have correct owner_session_id"
+        );
+        assert_eq!(
+            handle.definition().owner_bridge_session_id.as_deref(),
+            Some(sid.as_str()),
+            "implicit mob must have correct owner_bridge_session_id"
         );
     }
 

@@ -765,20 +765,50 @@ impl MeerkatMachine {
     async fn execute_meerkat_machine_drain_command(
         self: &Arc<Self>,
         command: MeerkatMachineDrainCommand,
-    ) -> MeerkatMachineDrainCommandResult {
+    ) -> Result<MeerkatMachineDrainCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineDrainCommand::SetPeerIngressContext {
                 session_id,
                 keep_alive,
                 comms_runtime,
-            } => MeerkatMachineDrainCommandResult::Spawned(
-                self.update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
-                    .await,
-            ),
+            } => {
+                // Guard: session must exist.
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                // Guard: DrainBindingInvariant — no drain mutation on destroyed
+                // sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                Ok(MeerkatMachineDrainCommandResult::Spawned(
+                    self.update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
+                        .await,
+                ))
+            }
             MeerkatMachineDrainCommand::NotifyDrainExited { session_id, reason } => {
+                // Guard: session must exist.
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                // Guard: DrainBindingInvariant — no drain mutation on destroyed
+                // sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
                 self.notify_comms_drain_exited_inner(&session_id, reason)
                     .await;
-                MeerkatMachineDrainCommandResult::Notified
+                Ok(MeerkatMachineDrainCommandResult::Notified)
             }
         }
     }
@@ -786,21 +816,35 @@ impl MeerkatMachine {
     async fn execute_meerkat_machine_drain_local_command(
         &self,
         command: MeerkatMachineDrainLocalCommand,
-    ) {
+    ) -> Result<(), RuntimeDriverError> {
         match command {
             MeerkatMachineDrainLocalCommand::AbortAll => {
                 let mut slots = self.comms_drain_slots.write().await;
                 for (_, slot) in slots.iter_mut() {
                     abort_slot(slot);
                 }
+                Ok(())
             }
             MeerkatMachineDrainLocalCommand::Abort { session_id } => {
+                // Guard: session must be registered.
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
                 let mut slots = self.comms_drain_slots.write().await;
                 if let Some(slot) = slots.get_mut(&session_id) {
                     abort_slot(slot);
                 }
+                Ok(())
             }
             MeerkatMachineDrainLocalCommand::Wait { session_id } => {
+                // Guard: session must be registered.
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
                 let handle = {
                     let mut slots = self.comms_drain_slots.write().await;
                     slots
@@ -834,6 +878,7 @@ impl MeerkatMachine {
                         }
                     }
                 }
+                Ok(())
             }
         }
     }
@@ -2432,8 +2477,8 @@ impl MeerkatMachine {
             )
             .await
         {
-            MeerkatMachineDrainCommandResult::Spawned(spawned) => spawned,
-            MeerkatMachineDrainCommandResult::Notified => false,
+            Ok(MeerkatMachineDrainCommandResult::Spawned(spawned)) => spawned,
+            _ => false,
         }
     }
 
@@ -2460,8 +2505,8 @@ impl MeerkatMachine {
             )
             .await
         {
-            MeerkatMachineDrainCommandResult::Spawned(spawned) => spawned,
-            MeerkatMachineDrainCommandResult::Notified => false,
+            Ok(MeerkatMachineDrainCommandResult::Spawned(spawned)) => spawned,
+            _ => false,
         }
     }
 
@@ -2473,12 +2518,13 @@ impl MeerkatMachine {
     ) -> bool {
         if !keep_alive {
             // Explicit disable: stop any running drain for this session.
-            self.execute_meerkat_machine_drain_local_command(
-                MeerkatMachineDrainLocalCommand::Abort {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await;
+            let _ = self
+                .execute_meerkat_machine_drain_local_command(
+                    MeerkatMachineDrainLocalCommand::Abort {
+                        session_id: session_id.clone(),
+                    },
+                )
+                .await;
             return false;
         }
 
@@ -2593,16 +2639,18 @@ impl MeerkatMachine {
 
     /// Abort all active comms drain tasks.
     pub async fn abort_comms_drains(&self) {
-        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::AbortAll)
+        let _ = self
+            .execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::AbortAll)
             .await;
     }
 
     /// Abort the comms drain task for a specific session.
     pub async fn abort_comms_drain(&self, session_id: &SessionId) {
-        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Abort {
-            session_id: session_id.clone(),
-        })
-        .await;
+        let _ = self
+            .execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Abort {
+                session_id: session_id.clone(),
+            })
+            .await;
     }
 
     /// Wait for a session's comms drain task to finish.
@@ -2612,10 +2660,11 @@ impl MeerkatMachine {
     /// for authority state. If the task panicked without notifying, this submits
     /// `TaskExited { Failed }` as a safety net.
     pub async fn wait_comms_drain(&self, session_id: &SessionId) {
-        self.execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Wait {
-            session_id: session_id.clone(),
-        })
-        .await;
+        let _ = self
+            .execute_meerkat_machine_drain_local_command(MeerkatMachineDrainLocalCommand::Wait {
+                session_id: session_id.clone(),
+            })
+            .await;
     }
 }
 
@@ -12779,5 +12828,92 @@ mod tests {
             matches!(err, RuntimeDriverError::Destroyed),
             "expected Destroyed, got {err:?}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // A2: Drain command guards (TLA+ DrainBindingInvariant,
+    //     DrainModeInvariant)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_peer_ingress_context_rejects_unknown_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        let spawned = adapter
+            .update_peer_ingress_context(&session_id, true, None)
+            .await;
+        assert!(
+            !spawned,
+            "update_peer_ingress_context should not spawn for unknown session"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_peer_ingress_context_rejects_destroyed_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let spawned = adapter
+            .update_peer_ingress_context(&session_id, true, None)
+            .await;
+        assert!(
+            !spawned,
+            "update_peer_ingress_context should not spawn for destroyed session"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_drain_exited_rejects_unknown_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        // Should not panic — the guard silently rejects.
+        adapter
+            .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn notify_drain_exited_rejects_destroyed_session() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        // Should not panic — the guard silently rejects.
+        adapter
+            .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn abort_comms_drain_tolerates_unknown_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        // Guard rejects unknown session but caller swallows the error.
+        adapter.abort_comms_drain(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn wait_comms_drain_tolerates_unknown_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        // Guard rejects unknown session but caller swallows the error.
+        adapter.wait_comms_drain(&session_id).await;
     }
 }

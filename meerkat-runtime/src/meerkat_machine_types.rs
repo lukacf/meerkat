@@ -91,7 +91,7 @@ pub(crate) enum MeerkatMachineSessionCommand {
     /// path and be gated on session existence and non-Destroyed state.
     PublishCommittedVisibleSet {
         session_id: SessionId,
-        visibility_state: meerkat_core::SessionToolVisibilityState,
+        visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
     },
 }
 
@@ -460,13 +460,12 @@ impl MeerkatMachineSpineSnapshot {
                 .admission_order
                 .iter()
                 .find(|a| &a.input_id == cid)
+                && snap.lifecycle != Some(InputLifecycleState::Staged)
             {
-                if snap.lifecycle != Some(InputLifecycleState::Staged) {
-                    violations.push(format!(
-                        "ContributorLifecycleInvariant: contributor {cid} has lifecycle {:?}",
-                        snap.lifecycle
-                    ));
-                }
+                violations.push(format!(
+                    "ContributorLifecycleInvariant: contributor {cid} has lifecycle {:?}",
+                    snap.lifecycle
+                ));
             }
         }
 
@@ -496,13 +495,12 @@ impl MeerkatMachineSpineSnapshot {
         }
 
         // RunIdsAlignedInvariant: ~HasActiveRun \/ RunIdsAligned
-        if self.control.current_run_id.is_some() {
-            if self.control.current_run_id != self.inputs.current_run_id {
-                violations.push(
-                    "RunIdsAlignedInvariant: control.current_run_id != inputs.current_run_id"
-                        .into(),
-                );
-            }
+        if self.control.current_run_id.is_some()
+            && self.control.current_run_id != self.inputs.current_run_id
+        {
+            violations.push(
+                "RunIdsAlignedInvariant: control.current_run_id != inputs.current_run_id".into(),
+            );
         }
 
         // --- Ops invariants ---
@@ -533,11 +531,11 @@ impl MeerkatMachineSpineSnapshot {
         }
 
         // DrainModeInvariant: drain.phase != Inactive => mode is set and not Disabled
-        if let Some(phase) = self.drain.phase {
-            if phase != CommsDrainPhase::Inactive && self.drain.mode.is_none() {
-                violations
-                    .push("DrainModeInvariant: drain.phase is active but mode is None".into());
-            }
+        if let Some(phase) = self.drain.phase
+            && phase != CommsDrainPhase::Inactive
+            && self.drain.mode.is_none()
+        {
+            violations.push("DrainModeInvariant: drain.phase is active but mode is None".into());
         }
 
         if violations.is_empty() {

@@ -78,7 +78,6 @@ pub(crate) enum DriverEntry {
 }
 
 impl DriverEntry {
-    #[allow(dead_code)]
     pub(crate) fn runtime_id(&self) -> &LogicalRuntimeId {
         match self {
             DriverEntry::Ephemeral(d) => d.runtime_id(),
@@ -194,7 +193,6 @@ impl DriverEntry {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn control(&self) -> &crate::runtime_control_authority::RuntimeControlAuthority {
         match self {
             DriverEntry::Ephemeral(d) => d.control(),
@@ -810,7 +808,7 @@ impl MeerkatMachine {
                 }
 
                 Ok(MeerkatMachineSessionCommandResult::VisibilityPublished(
-                    visibility_state,
+                    *visibility_state,
                 ))
             }
         }
@@ -2091,7 +2089,7 @@ impl MeerkatMachine {
             .execute_meerkat_machine_session_command(
                 MeerkatMachineSessionCommand::PublishCommittedVisibleSet {
                     session_id: session_id.clone(),
-                    visibility_state,
+                    visibility_state: Box::new(visibility_state),
                 },
             )
             .await?
@@ -2410,7 +2408,6 @@ impl MeerkatMachine {
     ///
     /// This is an internal scaffolding aid for the MeerkatMachine refactor. It
     /// intentionally reflects current runtime truth without changing behavior.
-    #[allow(dead_code)]
     #[doc(hidden)]
     pub async fn meerkat_machine_spine_snapshot(
         &self,

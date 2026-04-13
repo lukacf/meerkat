@@ -322,7 +322,7 @@ pub struct PreparedSurfaceSession {
 }
 
 pub async fn prepare_surface_session(
-    runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
 ) -> Result<PreparedSurfaceSession, String> {
     let session = Session::new();
     let session_id = session.id().clone();

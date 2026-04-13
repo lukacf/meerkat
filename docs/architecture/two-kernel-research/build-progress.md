@@ -17872,6 +17872,47 @@ Validation:
 - `cargo test --workspace --tests --quiet`
 - `git diff --check`
 
+## Slice 344 - Meerkat authority rename is complete and the full cut is green
+
+Goal: finish the accepted v1 authority rename so the runtime control plane is
+implemented in `meerkat_machine.rs` rather than still living behind the old
+`session_adapter.rs` filename, while keeping compatibility imports stable
+during the cut.
+
+What landed:
+- `meerkat-runtime/src/meerkat_machine.rs`
+  - now holds the real `MeerkatMachine` authority implementation
+- `meerkat-runtime/src/session_adapter.rs`
+  - reduced to a thin compatibility re-export shim
+- `meerkat-runtime/src/lib.rs`
+  - exports `meerkat_machine` directly as the canonical runtime authority
+    module
+- `xtask/src/ownership_ledger.rs`
+- `xtask/src/rmat_policy.rs`
+- `meerkat-machine-schema/src/catalog/coverage.rs`
+  - updated code-facing path metadata so ownership/rmat/schema checks now point
+    at the renamed authoritative file
+- `meerkat-mob/src/mob_machine.rs`
+- `meerkat-mob/src/runtime/state.rs`
+- `meerkat-mob/src/runtime/actor.rs`
+- `meerkat-mob/src/runtime/handle.rs`
+  - test-only orchestrator snapshot command path is now explicitly `#[cfg(test)]`
+    so the clean-cut regime no longer leaves dead library-code warnings behind
+
+Why this matters:
+- it closes the last obvious naming mismatch between what Meerkat is called
+  architecturally and where the runtime authority actually lives
+- it leaves `session_adapter` as compatibility only, instead of a half-renamed
+  primary implementation surface
+- it proves the cut is not just locally green: the full rebased workspace test
+  lane still passes with the renamed authority file in place
+
+Validation:
+- `cargo check --workspace --all-targets --quiet`
+- `cargo test --workspace --lib --quiet`
+- `cargo nextest run --workspace`
+- `git diff --check`
+
 ## Slice 351 - In-repo callers now use bridge-session Mob MCP helpers directly
 
 Goal: stop teaching the compatibility `*_session_*` Mob MCP wrappers as the

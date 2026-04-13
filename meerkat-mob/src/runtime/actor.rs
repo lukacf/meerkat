@@ -1478,6 +1478,7 @@ impl MobActor {
                     let tokens = snapshot.cancel_token_ids.len();
                     let _ = reply_tx.send((tasks, tokens));
                 }
+                #[cfg(test)]
                 MobCommand::OrchestratorSnapshot { reply_tx } => {
                     let _ = reply_tx.send(self.orchestrator.as_ref().map_or_else(
                         MobOrchestratorSnapshot::default,
@@ -1828,47 +1829,6 @@ impl MobActor {
                         .await
                         .map(|_| ())
                         .map_err(MobError::from);
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::DiagnosticRuntimeAdapter { reply_tx } => {
-                    let _ = reply_tx.send(self.runtime_adapter.clone());
-                }
-                MobCommand::DiagnosticHasLiveSession {
-                    bridge_session_id,
-                    reply_tx,
-                } => {
-                    let has_live = self
-                        .session_service
-                        .has_live_session(&bridge_session_id)
-                        .await
-                        .unwrap_or(false);
-                    let _ = reply_tx.send(has_live);
-                }
-                MobCommand::DiagnosticMeerkatShadowInputs {
-                    bridge_session_id,
-                    reply_tx,
-                } => {
-                    let result = async {
-                        Ok(super::handle::MeerkatShadowInputsSnapshot {
-                            execution: self
-                                .session_service
-                                .execution_snapshot(&bridge_session_id)
-                                .await?,
-                            tool_scope: self
-                                .session_service
-                                .tool_scope_snapshot(&bridge_session_id)
-                                .await?,
-                            tool_surface: self
-                                .session_service
-                                .external_tool_surface_snapshot(&bridge_session_id)
-                                .await?,
-                            peer_ingress: self
-                                .session_service
-                                .peer_ingress_runtime_snapshot(&bridge_session_id)
-                                .await?,
-                        })
-                    }
-                    .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ForceCancel {

@@ -38,7 +38,8 @@ pub mod input_lifecycle_authority;
 pub mod input_scope;
 pub mod input_state;
 pub mod lifecycle_ops;
-pub(crate) mod meerkat_machine;
+pub mod meerkat_machine;
+pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
 pub mod ops_lifecycle;
 pub(crate) mod ops_lifecycle_authority;
@@ -86,8 +87,9 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
+pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError, RuntimeSessionAdapter};
 #[doc(hidden)]
-pub use meerkat_machine::{
+pub use meerkat_machine_types::{
     MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,
     MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
     MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineSpineSnapshot,
@@ -115,7 +117,6 @@ pub use runtime_ingress_authority::{
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
-pub use session_adapter::{RuntimeBindingsError, RuntimeSessionAdapter};
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,

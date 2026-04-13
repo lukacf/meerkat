@@ -8,7 +8,7 @@ use meerkat_core::BlobStore;
 use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 
 #[cfg(feature = "session-store")]
-use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore, RuntimeStoreError};
+use meerkat_runtime::{MeerkatMachine, RuntimeStore, RuntimeStoreError};
 #[cfg(all(
     feature = "session-store",
     feature = "jsonl-store",
@@ -47,7 +47,7 @@ pub struct PersistenceBundle {
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
     #[cfg(feature = "session-store")]
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
 }
 
 impl PersistenceBundle {
@@ -73,11 +73,11 @@ impl PersistenceBundle {
         schedule_store: Arc<dyn ScheduleStore>,
     ) -> Self {
         let runtime_adapter = match &runtime_store {
-            Some(store) => Arc::new(RuntimeSessionAdapter::persistent(
+            Some(store) => Arc::new(MeerkatMachine::persistent(
                 store.clone(),
                 blob_store.clone(),
             )),
-            None => Arc::new(RuntimeSessionAdapter::ephemeral()),
+            None => Arc::new(MeerkatMachine::ephemeral()),
         };
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -158,7 +158,7 @@ impl PersistenceBundle {
     }
 
     #[cfg(feature = "session-store")]
-    pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
+    pub fn runtime_adapter(&self) -> Arc<MeerkatMachine> {
         self.runtime_adapter.clone()
     }
 

@@ -5,7 +5,7 @@
 //! # Architecture
 //!
 //! All production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path:
-//! `SessionService` (substrate) + `RuntimeSessionAdapter` (control plane).
+//! `SessionService` (substrate) + `MeerkatMachine` (control plane).
 //! The runtime owns keep-alive, Queue/Steer routing, comms drain, and ingress.
 //!
 //! `build_ephemeral_service` is available for **testing and embedded use** where
@@ -188,10 +188,6 @@ pub use persistence::PersistenceError;
 pub use persistence::open_realm_persistence_in;
 
 mod meerkat_machine;
-pub use meerkat_machine::{
-    TwoKernelShadowScenarioSample as MeerkatShadowScenarioSample,
-    export_meerkat_shadow_scenario_sample_from_diagnostic_snapshot,
-};
 
 // Factory-backed SessionService wiring (substrate — testing/embedded use).
 // Production surfaces use runtime-backed paths (see meerkat-rpc, meerkat-rest).
@@ -213,7 +209,7 @@ pub use meerkat_core::{
 pub use meerkat_session::DefaultCompactor;
 // PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).
 // EphemeralSessionService: in-memory substrate for testing/embedded use only.
-// Both implement SessionService. Production paths add RuntimeSessionAdapter on top.
+// Both implement SessionService. Production paths add MeerkatMachine on top.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::PersistentSessionService;
 pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};

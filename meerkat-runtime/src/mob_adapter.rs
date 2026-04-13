@@ -11,7 +11,7 @@ use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::ContentInput;
 use meerkat_core::types::SessionId;
 
-use crate::RuntimeSessionAdapter;
+use crate::MeerkatMachine;
 use crate::input::{
     FlowStepInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
 };
@@ -55,18 +55,18 @@ pub fn create_flow_step_input(
 }
 
 /// Register a mob member's session with the runtime adapter.
-pub async fn register_mob_member(adapter: &RuntimeSessionAdapter, session_id: SessionId) {
+pub async fn register_mob_member(adapter: &MeerkatMachine, session_id: SessionId) {
     adapter.register_session(session_id).await;
 }
 
 /// Unregister a mob member's session from the runtime adapter.
-pub async fn unregister_mob_member(adapter: &RuntimeSessionAdapter, session_id: &SessionId) {
+pub async fn unregister_mob_member(adapter: &MeerkatMachine, session_id: &SessionId) {
     adapter.unregister_session(session_id).await;
 }
 
 /// Deliver a flow step to a mob member through the runtime path.
 pub async fn deliver_flow_step(
-    adapter: &RuntimeSessionAdapter,
+    adapter: &MeerkatMachine,
     session_id: &SessionId,
     step_id: &str,
     instructions: impl Into<ContentInput>,
@@ -83,7 +83,7 @@ pub async fn deliver_flow_step(
 /// pending for drain. For plain registered sessions without a loop, retirement
 /// abandons queued work because nothing can execute the drain path.
 pub async fn retire_mob_member(
-    adapter: &RuntimeSessionAdapter,
+    adapter: &MeerkatMachine,
     session_id: &SessionId,
 ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
     adapter.retire_runtime(session_id).await
@@ -97,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_creates_runtime_driver_session() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let sid = SessionId::new();
 
         register_mob_member(&adapter, sid.clone()).await;
@@ -109,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn flow_step_delivered_as_input() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn retire_without_runtime_loop_abandons_pending_inputs() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -173,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_removes_driver() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -189,7 +189,7 @@ mod tests {
         // When a mob member spawns and registers, the driver is created.
         // The topology event would be emitted by the RuntimeControlPlane
         // (not yet implemented). For now, verify the driver exists.
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 

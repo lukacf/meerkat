@@ -437,7 +437,7 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
         ) => {
             vec![
                 "meerkat-runtime/src/runtime_loop.rs",
-                "meerkat-runtime/src/session_adapter.rs",
+                "meerkat-runtime/src/meerkat_machine.rs",
             ]
         }
         ("OpsLifecycleMachine", "PeerCommsMachine") => {

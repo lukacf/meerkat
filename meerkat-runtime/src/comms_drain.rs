@@ -1,7 +1,7 @@
 //! Comms inbox drain task.
 //!
 //! Standalone tokio task that drains `CommsRuntime` inbox and feeds typed
-//! `Input` values into `RuntimeSessionAdapter`. Replaces the old
+//! `Input` values into `MeerkatMachine`. Replaces the old
 //! `RuntimeCommsBridge` (comms_sink.rs) which implemented the now-removed
 //! `RuntimeInputSink` trait on `meerkat-core`.
 
@@ -20,7 +20,7 @@ use crate::comms_bridge::peer_input_candidate_to_runtime_input;
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::service_ext::SessionServiceRuntimeExt as _;
-use crate::session_adapter::RuntimeSessionAdapter;
+use crate::session_adapter::MeerkatMachine;
 use crate::tokio::sync::mpsc;
 
 /// Default idle timeout for session-backed comms drains.
@@ -32,7 +32,7 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// The task runs until the comms runtime signals DISMISS or the returned
 /// `JoinHandle` is aborted by the drain lifecycle authority.
 pub fn spawn_comms_drain(
-    adapter: Arc<RuntimeSessionAdapter>,
+    adapter: Arc<MeerkatMachine>,
     session_id: SessionId,
     comms_runtime: Arc<dyn CommsRuntime>,
     idle_timeout: Option<Duration>,

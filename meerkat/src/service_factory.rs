@@ -485,7 +485,7 @@ pub fn build_persistent_service_with_runtime_adapter(
     persistence: PersistenceBundle,
 ) -> (
     meerkat_session::PersistentSessionService<FactoryAgentBuilder>,
-    Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    Arc<meerkat_runtime::MeerkatMachine>,
 ) {
     let runtime_adapter = persistence.runtime_adapter();
     let mut builder = FactoryAgentBuilder::new(factory, config);
@@ -530,7 +530,7 @@ mod tests {
     use meerkat_core::{
         Provider, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult,
     };
-    use meerkat_runtime::RuntimeSessionAdapter;
+    use meerkat_runtime::MeerkatMachine;
     use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
     use meerkat_session::ephemeral::SessionAgent;
     use std::pin::Pin;
@@ -675,7 +675,7 @@ mod tests {
         let probe_dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = probe.clone();
         builder.default_tool_dispatcher = Some(probe_dispatcher);
 
-        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let runtime_adapter = MeerkatMachine::ephemeral();
         let session = Session::new();
         let session_id = session.id().clone();
         runtime_adapter.register_session(session_id.clone()).await;
@@ -853,7 +853,7 @@ mod tests {
                 Arc::new(MemoryScheduleStore::default()),
             ))));
 
-        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let runtime_adapter = MeerkatMachine::ephemeral();
         let session = Session::new();
         let session_id = session.id().clone();
         runtime_adapter.register_session(session_id.clone()).await;

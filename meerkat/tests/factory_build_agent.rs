@@ -14,6 +14,7 @@ use futures::stream;
 use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
 use meerkat_client::{LlmClient, TestClient};
+#[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
@@ -535,6 +536,7 @@ async fn build_agent_without_scheduler_keeps_injected_scheduler_tools_hidden() {
     );
 }
 
+#[cfg(feature = "comms")]
 #[tokio::test]
 async fn build_agent_composes_scheduler_alongside_comms_and_mob() {
     let temp = tempfile::tempdir().unwrap();

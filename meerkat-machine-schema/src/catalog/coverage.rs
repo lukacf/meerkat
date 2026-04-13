@@ -128,7 +128,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 anchor(
                     "runtime_session_adapter",
-                    "meerkat-runtime/src/session_adapter.rs",
+                    "meerkat-runtime/src/meerkat_machine.rs",
                     "surface-facing lifecycle and completion owner precursor",
                 ),
             ],
@@ -871,7 +871,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 anchor(
                     "session_adapter_drain",
-                    "meerkat-runtime/src/session_adapter.rs",
+                    "meerkat-runtime/src/meerkat_machine.rs",
                     "session adapter comms drain slot wiring and effect execution",
                 ),
                 anchor(
@@ -1031,7 +1031,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             &[
                 anchor(
                     "keep_alive_runtime_adapter",
-                    "meerkat-runtime/src/session_adapter.rs",
+                    "meerkat-runtime/src/meerkat_machine.rs",
                     "runtime-owned peer ingress reconciliation (update_peer_ingress_context)",
                 ),
                 anchor(

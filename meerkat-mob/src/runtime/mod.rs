@@ -106,7 +106,6 @@ pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_kernel::{FlowFrameKernel, FlowFrameMutator};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
-pub(crate) use handle::MeerkatShadowInputsSnapshot;
 pub(crate) use handle::RestoreFailureDiagnostic;
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{

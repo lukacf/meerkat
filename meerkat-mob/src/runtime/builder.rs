@@ -13,7 +13,7 @@ pub struct MobBuilder {
     mode: BuilderMode,
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
-    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -113,10 +113,7 @@ impl MobBuilder {
     /// When set, this override is used consistently by both provisioning and
     /// autonomous-host comms-drain ingress instead of re-deriving an adapter
     /// from the session service at runtime.
-    pub fn with_runtime_adapter(
-        mut self,
-        adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
-    ) -> Self {
+    pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = Some(adapter);
         self
     }
@@ -472,7 +469,7 @@ impl MobBuilder {
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -845,7 +842,7 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -903,7 +900,7 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,

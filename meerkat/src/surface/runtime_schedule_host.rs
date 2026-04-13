@@ -22,12 +22,12 @@ use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuil
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::{
     CorrelationId, IdempotencyKey, Input, InputDurability, InputHeader, InputOrigin,
-    InputVisibility, PromptInput, RuntimeSessionAdapter,
+    InputVisibility, MeerkatMachine, PromptInput,
 };
 
 pub fn spawn_runtime_backed_schedule_host(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     config: Config,
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
@@ -53,7 +53,7 @@ pub fn spawn_runtime_backed_schedule_host(
 
 struct RuntimeBackedScheduleSessionHost {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     config: Config,
     build_template: SessionBuildOptions,
 }
@@ -61,7 +61,7 @@ struct RuntimeBackedScheduleSessionHost {
 impl RuntimeBackedScheduleSessionHost {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        runtime_adapter: Arc<RuntimeSessionAdapter>,
+        runtime_adapter: Arc<MeerkatMachine>,
         config: Config,
         build_template: SessionBuildOptions,
     ) -> Self {

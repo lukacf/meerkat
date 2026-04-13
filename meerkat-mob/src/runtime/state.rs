@@ -1,4 +1,5 @@
 use super::MobKernelDiagnosticSnapshot;
+#[cfg(test)]
 use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
@@ -139,6 +140,7 @@ pub(super) enum MobCommand {
     FlowTrackerCounts {
         reply_tx: oneshot::Sender<(usize, usize)>,
     },
+    #[cfg(test)]
     OrchestratorSnapshot {
         reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
     },
@@ -201,19 +203,6 @@ pub(super) enum MobCommand {
         tool_name: String,
         authority_context: meerkat_core::service::MobToolAuthorityContext,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    DiagnosticRuntimeAdapter {
-        reply_tx: oneshot::Sender<Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>>,
-    },
-    DiagnosticHasLiveSession {
-        bridge_session_id: SessionId,
-        reply_tx: oneshot::Sender<bool>,
-    },
-    DiagnosticMeerkatShadowInputs {
-        bridge_session_id: SessionId,
-        reply_tx: oneshot::Sender<
-            Result<super::handle::MeerkatShadowInputsSnapshot, meerkat_core::service::SessionError>,
-        >,
     },
     ForceCancel {
         meerkat_id: MeerkatId,

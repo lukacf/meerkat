@@ -368,24 +368,6 @@ impl HelperResult {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MeerkatShadowInputsSnapshot {
-    /// Best-effort live execution snapshot from the underlying session service.
-    ///
-    /// This is present only when the service owns a canonical live agent-task
-    /// diagnostic path. Runtime-adapter-backed mock services may legitimately
-    /// return `None`.
-    pub execution: Option<meerkat_core::AgentExecutionSnapshot>,
-    /// Best-effort live tool-scope snapshot from the underlying session service.
-    pub tool_scope: Option<meerkat_core::ToolScopeSnapshot>,
-    /// Best-effort live external tool-surface snapshot from the underlying
-    /// session service.
-    pub tool_surface: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
-    /// Best-effort live peer-ingress runtime snapshot from the underlying
-    /// session service or comms runtime.
-    pub peer_ingress: Option<meerkat_core::PeerIngressRuntimeSnapshot>,
-}
-
 /// Target for a wire operation from a local mob member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1011,34 +993,6 @@ impl MobHandle {
                     diagnostics,
                 ))
             }
-            MobMachineCommand::DiagnosticRuntimeAdapter => {
-                let adapter = self
-                    .send_actor_command(|reply_tx| MobCommand::DiagnosticRuntimeAdapter {
-                        reply_tx,
-                    })
-                    .await?;
-                Ok(MobMachineCommandResult::DiagnosticRuntimeAdapter(adapter))
-            }
-            MobMachineCommand::DiagnosticHasLiveSession { bridge_session_id } => {
-                let has_live = self
-                    .send_actor_command(|reply_tx| MobCommand::DiagnosticHasLiveSession {
-                        bridge_session_id,
-                        reply_tx,
-                    })
-                    .await?;
-                Ok(MobMachineCommandResult::DiagnosticHasLiveSession(has_live))
-            }
-            MobMachineCommand::DiagnosticMeerkatShadowInputs { bridge_session_id } => {
-                let inputs = self
-                    .send_actor_command(|reply_tx| MobCommand::DiagnosticMeerkatShadowInputs {
-                        bridge_session_id,
-                        reply_tx,
-                    })
-                    .await?;
-                Ok(MobMachineCommandResult::DiagnosticMeerkatShadowInputs(
-                    inputs,
-                ))
-            }
             MobMachineCommand::GetMember { meerkat_id } => {
                 let member = self.roster.read().await.entry(&meerkat_id);
                 Ok(MobMachineCommandResult::GetMember(member))
@@ -1050,6 +1004,7 @@ impl MobHandle {
                     .await?;
                 Ok(MobMachineCommandResult::FlowTrackerCounts(counts))
             }
+            #[cfg(test)]
             MobMachineCommand::OrchestratorSnapshot => {
                 let snapshot = self
                     .send_actor_command(|reply_tx| MobCommand::OrchestratorSnapshot { reply_tx })
@@ -2138,6 +2093,7 @@ impl MobHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn debug_orchestrator_snapshot(
         &self,
     ) -> Result<super::MobOrchestratorSnapshot, MobError> {
@@ -2172,54 +2128,6 @@ impl MobHandle {
             Ok(MobMachineCommandResult::RestoreFailuresSnapshot(diagnostics)) => diagnostics,
             Ok(_) => unreachable!("diagnostic_restore_failures_snapshot returned wrong result"),
             Err(_) => BTreeMap::new(),
-        }
-    }
-
-    pub(crate) async fn diagnostic_runtime_adapter(
-        &self,
-    ) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        match self
-            .execute_machine_command(MobMachineCommand::DiagnosticRuntimeAdapter)
-            .await
-        {
-            Ok(MobMachineCommandResult::DiagnosticRuntimeAdapter(runtime_adapter)) => {
-                runtime_adapter
-            }
-            Ok(_) => unreachable!("diagnostic_runtime_adapter returned wrong result"),
-            Err(_) => None,
-        }
-    }
-
-    pub(crate) async fn diagnostic_has_live_session(&self, bridge_session_id: &SessionId) -> bool {
-        match self
-            .execute_machine_command(MobMachineCommand::DiagnosticHasLiveSession {
-                bridge_session_id: bridge_session_id.clone(),
-            })
-            .await
-        {
-            Ok(MobMachineCommandResult::DiagnosticHasLiveSession(live)) => live,
-            Ok(_) => unreachable!("diagnostic_has_live_session returned wrong result"),
-            Err(_) => false,
-        }
-    }
-
-    pub(crate) async fn diagnostic_meerkat_shadow_inputs(
-        &self,
-        bridge_session_id: &SessionId,
-    ) -> Result<MeerkatShadowInputsSnapshot, SessionError> {
-        match self
-            .execute_machine_command(MobMachineCommand::DiagnosticMeerkatShadowInputs {
-                bridge_session_id: bridge_session_id.clone(),
-            })
-            .await
-        {
-            Ok(MobMachineCommandResult::DiagnosticMeerkatShadowInputs(inputs)) => inputs,
-            Ok(_) => unreachable!("diagnostic_meerkat_shadow_inputs returned wrong result"),
-            Err(err) => Err(SessionError::Agent(
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "diagnostic_meerkat_shadow_inputs machine command failed: {err}"
-                )),
-            )),
         }
     }
 

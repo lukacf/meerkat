@@ -76,25 +76,25 @@ fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool 
 }
 
 fn ephemeral_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
+-> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn persistent_runtime_adapter_cache()
--> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>> =
+-> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn cached_runtime_adapter(
-    cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::RuntimeSessionAdapter>>>,
+    cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
     key: usize,
-    init: impl FnOnce() -> Arc<meerkat_runtime::RuntimeSessionAdapter>,
-) -> Arc<meerkat_runtime::RuntimeSessionAdapter> {
+    init: impl FnOnce() -> Arc<meerkat_runtime::MeerkatMachine>,
+) -> Arc<meerkat_runtime::MeerkatMachine> {
     let mut cache = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -134,7 +134,7 @@ pub trait MobSessionService:
         false
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         None
     }
 
@@ -221,12 +221,12 @@ where
         false
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         let key = std::ptr::from_ref(self) as usize;
         Some(cached_runtime_adapter(
             ephemeral_runtime_adapter_cache(),
             key,
-            || Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            || Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
         ))
     }
 
@@ -325,7 +325,7 @@ where
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         #[cfg(target_arch = "wasm32")]
         {
             None
@@ -335,7 +335,7 @@ where
             let key = std::ptr::from_ref(self) as usize;
             self.runtime_store().map(|store| {
                 cached_runtime_adapter(persistent_runtime_adapter_cache(), key, || {
-                    Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+                    Arc::new(meerkat_runtime::MeerkatMachine::persistent(
                         store,
                         self.blob_store(),
                     ))

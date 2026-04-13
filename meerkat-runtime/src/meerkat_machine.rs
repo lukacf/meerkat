@@ -586,10 +586,24 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineSessionCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineSessionCommand::RegisterSession { session_id } => {
+                // Guard: DestroyedShapeInvariant — a destroyed binding must
+                // never be resurrected.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
                 self.register_session_inner(session_id).await;
                 Ok(MeerkatMachineSessionCommandResult::Unit)
             }
             MeerkatMachineSessionCommand::UnregisterSession { session_id } => {
+                // Guard: session must exist before it can be unregistered.
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
                 self.unregister_session_inner(&session_id).await;
                 Ok(MeerkatMachineSessionCommandResult::Unit)
             }
@@ -621,21 +635,45 @@ impl MeerkatMachine {
                     .await;
                 Ok(MeerkatMachineSessionCommandResult::Unit)
             }
-            MeerkatMachineSessionCommand::InterruptCurrentRun { session_id } => self
-                .interrupt_current_run_inner(&session_id)
-                .await
-                .map(|()| MeerkatMachineSessionCommandResult::Unit),
-            MeerkatMachineSessionCommand::CancelAfterBoundary { session_id } => self
-                .cancel_after_boundary_inner(&session_id)
-                .await
-                .map(|()| MeerkatMachineSessionCommandResult::Unit),
+            MeerkatMachineSessionCommand::InterruptCurrentRun { session_id } => {
+                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                self.interrupt_current_run_inner(&session_id)
+                    .await
+                    .map(|()| MeerkatMachineSessionCommandResult::Unit)
+            }
+            MeerkatMachineSessionCommand::CancelAfterBoundary { session_id } => {
+                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                self.cancel_after_boundary_inner(&session_id)
+                    .await
+                    .map(|()| MeerkatMachineSessionCommandResult::Unit)
+            }
             MeerkatMachineSessionCommand::StopRuntimeExecutor {
                 session_id,
                 command,
-            } => self
-                .stop_runtime_executor_inner(&session_id, command)
-                .await
-                .map(|()| MeerkatMachineSessionCommandResult::Unit),
+            } => {
+                // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                self.stop_runtime_executor_inner(&session_id, command)
+                    .await
+                    .map(|()| MeerkatMachineSessionCommandResult::Unit)
+            }
             MeerkatMachineSessionCommand::ContainsSession { session_id } => {
                 Ok(MeerkatMachineSessionCommandResult::Bool(
                     self.sessions.read().await.contains_key(&session_id),
@@ -12616,5 +12654,130 @@ mod tests {
         assert_eq!(snapshot.drain.phase, Some(CommsDrainPhase::Stopped));
         assert_eq!(snapshot.drain.mode, Some(CommsDrainMode::PersistentHost));
         assert!(!snapshot.drain.handle_present);
+    }
+
+    // ---------------------------------------------------------------
+    // A1: Session command guards (TLA+ DestroyedShapeInvariant,
+    //     RunningHasActiveRunInvariant)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn register_session_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        // Transition to Destroyed via the control-plane destroy path.
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        // Second register must be rejected — DestroyedShapeInvariant forbids
+        // resurrecting a destroyed binding.
+        let err = adapter
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::RegisterSession {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .expect_err("register should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unregister_session_rejects_unknown_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        // Unregister on a session that was never registered must return an error.
+        let err = adapter
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::UnregisterSession {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .expect_err("unregister should reject an unknown session");
+        assert!(
+            matches!(err, RuntimeDriverError::NotReady { .. }),
+            "expected NotReady, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_current_run_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let err = adapter
+            .interrupt_current_run(&session_id)
+            .await
+            .expect_err("interrupt should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_after_boundary_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let err = adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect_err("cancel_after_boundary should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_runtime_executor_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let err = adapter
+            .stop_runtime_executor(
+                &session_id,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .expect_err("stop_runtime_executor should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
     }
 }

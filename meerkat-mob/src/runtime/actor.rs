@@ -2982,9 +2982,14 @@ impl MobActor {
 
         {
             let mut roster = self.roster.write().await;
+            let identity = crate::ids::AgentIdentity::from(meerkat_id.as_str());
             let inserted = roster.add_member(crate::roster::RosterAddEntry {
+                agent_identity: identity.clone(),
+                generation: crate::ids::Generation::INITIAL,
+                fence_token: crate::ids::FenceToken::new(0),
+                agent_runtime_id: crate::ids::AgentRuntimeId::initial(identity),
                 meerkat_id: meerkat_id.clone(),
-                profile: profile_name.clone(),
+                role: profile_name.clone(),
                 runtime_mode,
                 member_ref: member_ref.clone(),
                 peer_id,
@@ -3266,7 +3271,7 @@ impl MobActor {
             .retire_event_exists(meerkat_id, &entry.member_ref)
             .await?;
         if !retire_event_already_present {
-            self.append_retire_event(meerkat_id, &entry.profile, &entry.member_ref)
+            self.append_retire_event(meerkat_id, &entry.role, &entry.member_ref)
                 .await?;
         }
 
@@ -3362,7 +3367,7 @@ impl MobActor {
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
             RespawnSnapshot {
-                profile_name: entry.profile.clone(),
+                profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
                 old_bridge_session_id,
@@ -3370,8 +3375,11 @@ impl MobActor {
                     local_peers: entry
                         .wired_to
                         .iter()
-                        .filter(|peer_id| roster.get(peer_id).is_some())
-                        .cloned()
+                        .filter_map(|peer_id| {
+                            roster
+                                .get_by_identity(peer_id)
+                                .map(|e| e.meerkat_id.clone())
+                        })
                         .collect(),
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
@@ -3689,24 +3697,31 @@ impl MobActor {
             return Ok(());
         };
         let mut first_error: Option<MobError> = None;
-        for peer_id in &ctx.entry.wired_to {
-            // Skip absent peers (already retired).
-            let peer_present = {
+        for peer_identity in &ctx.entry.wired_to {
+            // Resolve identity to bridge MeerkatId; skip absent peers (already retired).
+            let peer_meerkat_id = {
                 let roster = self.roster.read().await;
-                roster.get(peer_id).is_some()
+                roster
+                    .get_by_identity(peer_identity)
+                    .map(|e| e.meerkat_id.clone())
             };
-            if !peer_present {
+            let Some(peer_meerkat_id) = peer_meerkat_id else {
                 tracing::debug!(
                     mob_id = %self.definition.id,
                     meerkat_id = %ctx.meerkat_id,
-                    peer_id = %peer_id,
+                    peer_id = %peer_identity,
                     "dispose_notify_peers: skipping absent peer"
                 );
                 continue;
-            }
+            };
 
             if let Err(error) = self
-                .notify_peer_retired(peer_id, &ctx.meerkat_id, &ctx.entry, retiring_comms)
+                .notify_peer_retired(
+                    &peer_meerkat_id,
+                    &ctx.meerkat_id,
+                    &ctx.entry,
+                    retiring_comms,
+                )
                 .await
                 && first_error.is_none()
             {
@@ -3728,16 +3743,18 @@ impl MobActor {
             return Ok(());
         };
         let mut first_error: Option<MobError> = None;
-        for peer_id in &ctx.entry.wired_to {
+        for peer_identity in &ctx.entry.wired_to {
             let peer_member_ref = {
                 let roster = self.roster.read().await;
-                roster.get(peer_id).map(|e| e.member_ref.clone())
+                roster
+                    .get_by_identity(peer_identity)
+                    .map(|e| e.member_ref.clone())
             };
             let Some(peer_member_ref) = peer_member_ref else {
                 tracing::debug!(
                     mob_id = %self.definition.id,
                     meerkat_id = %ctx.meerkat_id,
-                    peer_id = %peer_id,
+                    peer_id = %peer_identity,
                     "dispose_remove_trust_edges: skipping absent peer"
                 );
                 continue;
@@ -3841,7 +3858,8 @@ impl MobActor {
                 .get(local)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
-            let already_wired = entry.wired_to.contains(&external_name);
+            let external_identity = AgentIdentity::from(external_name.as_str());
+            let already_wired = entry.wired_to.contains(&external_identity);
             let collides_with_local_member = roster.get(&external_name).is_some();
             let stored_spec = entry.external_peer_specs.get(&external_name).cloned();
             (
@@ -3960,8 +3978,9 @@ impl MobActor {
                         .get(&local)
                         .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
                     let peer_exists = roster.get(&peer).is_some();
+                    let peer_identity = AgentIdentity::from(peer.as_str());
                     let looks_external = !peer_exists
-                        && (local_entry.wired_to.contains(&peer)
+                        && (local_entry.wired_to.contains(&peer_identity)
                             || local_entry.external_peer_specs.contains_key(&peer));
                     (peer_exists, looks_external)
                 };
@@ -4160,7 +4179,8 @@ impl MobActor {
                 .get(local)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
-            let already_wired = entry.wired_to.contains(peer_name);
+            let peer_identity = AgentIdentity::from(peer_name.as_str());
+            let already_wired = entry.wired_to.contains(&peer_identity);
             let stored_spec = entry.external_peer_specs.get(peer_name).cloned();
             let collides_with_local_member = roster.get(peer_name).is_some();
             (
@@ -4650,7 +4670,7 @@ impl MobActor {
         // Check external_addressable
         let profile = self
             .definition
-            .resolve_profile(&entry.profile, self.realm_profile_store.as_ref())
+            .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
             .await?;
 
         if !profile.external_addressable {
@@ -5322,18 +5342,25 @@ impl MobActor {
         // Reuse disposal pipeline methods for session archive + roster removal.
         let rollback_ctx = DisposalContext {
             meerkat_id: meerkat_id.clone(),
-            entry: spawned_entry.clone().unwrap_or_else(|| RosterEntry {
-                meerkat_id: meerkat_id.clone(),
-                profile: profile_name.clone(),
-                member_ref: member_ref.clone(),
-                runtime_mode: crate::MobRuntimeMode::TurnDriven,
-                peer_id: spawned_comms.as_ref().and_then(|c| c.public_key()),
-                state: crate::roster::MemberState::Active,
-                wired_to: std::collections::BTreeSet::new(),
-                external_peer_specs: std::collections::BTreeMap::new(),
-                labels: std::collections::BTreeMap::new(),
-                kickoff: None,
-                effective_profile_override: None,
+            entry: spawned_entry.clone().unwrap_or_else(|| {
+                let identity = AgentIdentity::from(meerkat_id.as_str());
+                RosterEntry {
+                    agent_identity: identity.clone(),
+                    generation: crate::ids::Generation::INITIAL,
+                    fence_token: crate::ids::FenceToken::new(0),
+                    agent_runtime_id: crate::ids::AgentRuntimeId::initial(identity),
+                    meerkat_id: meerkat_id.clone(),
+                    role: profile_name.clone(),
+                    member_ref: member_ref.clone(),
+                    runtime_mode: crate::MobRuntimeMode::TurnDriven,
+                    peer_id: spawned_comms.as_ref().and_then(|c| c.public_key()),
+                    state: crate::roster::MemberState::Active,
+                    wired_to: std::collections::BTreeSet::new(),
+                    external_peer_specs: std::collections::BTreeMap::new(),
+                    labels: std::collections::BTreeMap::new(),
+                    kickoff: None,
+                    effective_profile_override: None,
+                }
             }),
             retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
@@ -5414,8 +5441,10 @@ impl MobActor {
                 .get(b)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
-            let a_has_b_edge = ea.wired_to.contains(b);
-            let b_has_a_edge = eb.wired_to.contains(a);
+            let identity_b = AgentIdentity::from(b.as_str());
+            let identity_a = AgentIdentity::from(a.as_str());
+            let a_has_b_edge = ea.wired_to.contains(&identity_b);
+            let b_has_a_edge = eb.wired_to.contains(&identity_a);
             (ea, eb, a_has_b_edge, b_has_a_edge)
         };
         match MobWiringAuthority::plan_local_wire(
@@ -5622,12 +5651,14 @@ impl MobActor {
         #[cfg(debug_assertions)]
         {
             let roster = self.roster.read().await;
+            let identity_b = AgentIdentity::from(b.as_str());
+            let identity_a = AgentIdentity::from(a.as_str());
             let a_has_b = roster
                 .get(a)
-                .is_some_and(|entry| entry.wired_to.contains(b));
+                .is_some_and(|entry| entry.wired_to.contains(&identity_b));
             let b_has_a = roster
                 .get(b)
-                .is_some_and(|entry| entry.wired_to.contains(a));
+                .is_some_and(|entry| entry.wired_to.contains(&identity_a));
             debug_assert_eq!(
                 a_has_b, b_has_a,
                 "roster wiring symmetry violated ({context}) for '{a}' <-> '{b}'"
@@ -5642,10 +5673,7 @@ impl MobActor {
 
     /// Generate the comms name for a roster entry.
     fn comms_name_for(&self, entry: &RosterEntry) -> String {
-        format!(
-            "{}/{}/{}",
-            self.definition.id, entry.profile, entry.meerkat_id
-        )
+        format!("{}/{}/{}", self.definition.id, entry.role, entry.meerkat_id)
     }
 
     /// Notify a peer that a new peer was added.
@@ -5664,7 +5692,7 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let peer_description = self
             .definition
-            .resolve_profile(&new_peer_entry.profile, self.realm_profile_store.as_ref())
+            .resolve_profile(&new_peer_entry.role, self.realm_profile_store.as_ref())
             .await
             .map(|p| p.peer_description)
             .unwrap_or_default();
@@ -5680,7 +5708,7 @@ impl MobActor {
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({
                 "peer": new_peer_id.as_str(),
-                "role": new_peer_entry.profile.as_str(),
+                "role": new_peer_entry.role.as_str(),
                 "description": peer_description,
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -5722,7 +5750,7 @@ impl MobActor {
             intent: intent.to_string(),
             params: serde_json::json!({
                 "peer": other_peer_id.as_str(),
-                "role": other_peer_entry.profile.as_str(),
+                "role": other_peer_entry.role.as_str(),
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: meerkat_core::comms::InputStreamMode::None,
@@ -5742,7 +5770,11 @@ impl MobActor {
             let Some(entry) = roster.get(meerkat_id).cloned() else {
                 return Ok(());
             };
-            let wired_peers = entry.wired_to.iter().cloned().collect::<Vec<_>>();
+            let wired_peers: Vec<MeerkatId> = entry
+                .wired_to
+                .iter()
+                .filter_map(|id| roster.get_by_identity(id).map(|e| e.meerkat_id.clone()))
+                .collect();
             (entry, wired_peers)
         };
         let sender_comms = self.provisioner_comms(&entry.member_ref).await;

@@ -552,7 +552,7 @@ impl MobBuilder {
                     p.clone()
                 } else {
                     definition
-                        .resolve_profile(&entry.profile, realm_profile_store.as_ref())
+                        .resolve_profile(&entry.role, realm_profile_store.as_ref())
                         .await?
                 };
                 let profile = &profile;
@@ -561,7 +561,7 @@ impl MobBuilder {
                     build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
                         base: build::BuildAgentConfigParams {
                             mob_id: &definition.id,
-                            profile_name: &entry.profile,
+                            profile_name: &entry.role,
                             meerkat_id: &entry.meerkat_id,
                             profile,
                             definition,
@@ -598,7 +598,7 @@ impl MobBuilder {
                 resumed_config.llm_client_override = Some(reconcile_client);
                 let prompt = format!(
                     "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                    entry.meerkat_id, entry.profile, definition.id
+                    entry.meerkat_id, entry.role, definition.id
                 );
                 let req = build::to_create_session_request(&resumed_config, prompt.into());
                 match session_service.create_session(req).await {
@@ -623,12 +623,12 @@ impl MobBuilder {
                 // Ephemeral services can still fall back to fresh-create.
             }
             let profile = definition
-                .resolve_profile(&entry.profile, realm_profile_store.as_ref())
+                .resolve_profile(&entry.role, realm_profile_store.as_ref())
                 .await?;
             let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
-                profile_name: &entry.profile,
+                profile_name: &entry.role,
                 meerkat_id: &entry.meerkat_id,
                 profile: &profile,
                 definition,
@@ -658,7 +658,7 @@ impl MobBuilder {
             config.llm_client_override = Some(reconcile_client);
             let prompt = format!(
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                entry.meerkat_id, entry.profile, definition.id
+                entry.meerkat_id, entry.role, definition.id
             );
             let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
@@ -705,18 +705,19 @@ impl MobBuilder {
             let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
             let mut desired_specs = Vec::new();
 
-            for peer_id in &entry.wired_to {
-                if let Some(spec) = entry.external_peer_specs.get(peer_id) {
+            for peer_identity in &entry.wired_to {
+                let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+                if let Some(spec) = entry.external_peer_specs.get(&peer_meerkat_id) {
                     desired_specs.push(spec.clone());
                     continue;
                 }
-                let peer_entry = roster.get(peer_id).cloned().ok_or_else(|| {
+                let peer_entry = roster.get(&peer_meerkat_id).cloned().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume wiring target '{}' missing for '{}'",
-                        peer_id, entry.meerkat_id
+                        peer_identity, entry.meerkat_id
                     ))
                 })?;
-                if broken_members.contains(peer_id) {
+                if broken_members.contains(&peer_meerkat_id) {
                     continue;
                 }
                 let comms_b = provisioner
@@ -725,18 +726,18 @@ impl MobBuilder {
                     .ok_or_else(|| {
                         MobError::WiringError(format!(
                             "resume requires comms runtime for '{}' -> '{}'",
-                            entry.meerkat_id, peer_id
+                            entry.meerkat_id, peer_identity
                         ))
                     })?;
                 let key_b = comms_b.public_key().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume requires public key for '{}' -> '{}'",
-                        entry.meerkat_id, peer_id
+                        entry.meerkat_id, peer_identity
                     ))
                 })?;
                 let name_b = format!(
                     "{}/{}/{}",
-                    definition.id, peer_entry.profile, peer_entry.meerkat_id
+                    definition.id, peer_entry.role, peer_entry.meerkat_id
                 );
                 desired_specs.push(
                     provisioner

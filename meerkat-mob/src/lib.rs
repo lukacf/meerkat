@@ -69,8 +69,7 @@ pub use ids::{
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{
-    MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, Roster, RosterAddEntry,
-    RosterEntry,
+    MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, Roster, RosterEntry,
 };
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,

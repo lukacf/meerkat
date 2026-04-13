@@ -209,7 +209,7 @@ impl ErrorPolicy for AbortOnError {
 mod tests {
     use super::*;
     use crate::event::MemberRef;
-    use crate::ids::ProfileName;
+    use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
     use crate::roster::MemberState;
     use meerkat_core::types::SessionId;
     use std::collections::BTreeSet;
@@ -218,8 +218,12 @@ mod tests {
         DisposalContext {
             meerkat_id: MeerkatId::from("test-member"),
             entry: RosterEntry {
+                agent_identity: AgentIdentity::from("test-member"),
+                generation: Generation::INITIAL,
+                fence_token: FenceToken::new(0),
+                agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test-member")),
                 meerkat_id: MeerkatId::from("test-member"),
-                profile: ProfileName::from("worker"),
+                role: ProfileName::from("worker"),
                 member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,

@@ -1095,10 +1095,7 @@ impl MobHandle {
     }
 
     fn derived_comms_name(&self, entry: &RosterEntry) -> String {
-        format!(
-            "{}/{}/{}",
-            self.definition.id, entry.profile, entry.meerkat_id
-        )
+        format!("{}/{}/{}", self.definition.id, entry.role, entry.meerkat_id)
     }
 
     async fn resolve_peer_connectivity(
@@ -1126,13 +1123,14 @@ impl MobHandle {
         let mut unreachable_peers = Vec::new();
 
         for wired_peer in &entry.wired_to {
-            let matched = if let Some(spec) = entry.external_peer_specs.get(wired_peer) {
+            let wired_peer_meerkat = MeerkatId::from(wired_peer.as_str());
+            let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
                 peers_by_id
                     .get(spec.peer_id.as_str())
                     .copied()
                     .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
             } else {
-                let local_entry = roster_snapshot.get(wired_peer);
+                let local_entry = roster_snapshot.get(&wired_peer_meerkat);
                 let live_peer_id = match local_entry
                     .and_then(|peer_entry| peer_entry.member_ref.bridge_session_id())
                 {
@@ -1229,12 +1227,16 @@ impl MobHandle {
             projected.push(
                 MobMemberListEntry {
                     meerkat_id: entry.meerkat_id,
-                    profile: entry.profile,
+                    profile: entry.role,
                     member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
                     state: entry.state,
-                    wired_to: entry.wired_to,
+                    wired_to: entry
+                        .wired_to
+                        .iter()
+                        .map(|id| MeerkatId::from(id.as_str()))
+                        .collect(),
                     external_peer_specs: entry.external_peer_specs,
                     labels: entry.labels,
                     status: snapshot.status,

@@ -1,4 +1,4 @@
-use crate::ids::{MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
@@ -65,6 +65,10 @@ impl RosterAuthority {
 
     pub(crate) fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
         self.roster.get(meerkat_id)
+    }
+
+    pub(crate) fn get_by_identity(&self, identity: &AgentIdentity) -> Option<&RosterEntry> {
+        self.roster.get_by_identity(identity)
     }
 
     pub(crate) fn list(&self) -> impl Iterator<Item = &RosterEntry> {

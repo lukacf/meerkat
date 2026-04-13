@@ -124,9 +124,9 @@ pub struct MobMemberListEntry {
     pub(crate) peer_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub(crate) current_bridge_session_id: Option<SessionId>,
 }
 
@@ -167,7 +167,7 @@ impl MobMemberListEntry {
     /// Prefer [`agent_identity`](Self::agent_identity) for the canonical
     /// identity-first API. This accessor exists for WASM and bridge-layer
     /// consumers that still need the transport handle.
-    pub fn meerkat_id(&self) -> &MeerkatId {
+    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
         &self.meerkat_id
     }
 }
@@ -212,55 +212,27 @@ pub enum MobMemberStatus {
 pub struct MemberRespawnReceipt {
     /// The member identity that was respawned.
     pub identity: AgentIdentity,
-    /// Bridge-internal old session ID — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) old_session_id: Option<SessionId>,
-    /// Bridge-internal old session ID — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) old_bridge_session_id: Option<SessionId>,
-    /// Bridge-internal new session ID — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) new_session_id: Option<SessionId>,
-    /// Bridge-internal new session ID — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) new_bridge_session_id: Option<SessionId>,
+    /// Runtime id for the current incarnation after respawn completes.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the superseded incarnation.
+    pub previous_fence_token: FenceToken,
+    /// Fence token for the current incarnation.
+    pub fence_token: FenceToken,
 }
 
 impl MemberRespawnReceipt {
     pub fn new(
         identity: AgentIdentity,
-        old_bridge_session_id: Option<SessionId>,
-        new_bridge_session_id: Option<SessionId>,
+        agent_runtime_id: AgentRuntimeId,
+        previous_fence_token: FenceToken,
+        fence_token: FenceToken,
     ) -> Self {
         Self {
             identity,
-            old_session_id: old_bridge_session_id.clone(),
-            old_bridge_session_id,
-            new_session_id: new_bridge_session_id.clone(),
-            new_bridge_session_id,
+            agent_runtime_id,
+            previous_fence_token,
+            fence_token,
         }
-    }
-
-    pub fn set_old_bridge_session_id(&mut self, bridge_session_id: Option<SessionId>) {
-        self.old_session_id = bridge_session_id.clone();
-        self.old_bridge_session_id = bridge_session_id;
-    }
-
-    pub fn set_new_bridge_session_id(&mut self, bridge_session_id: Option<SessionId>) {
-        self.new_session_id = bridge_session_id.clone();
-        self.new_bridge_session_id = bridge_session_id;
-    }
-
-    pub fn old_bridge_session_id(&self) -> Option<&SessionId> {
-        self.old_bridge_session_id
-            .as_ref()
-            .or(self.old_session_id.as_ref())
-    }
-
-    pub fn new_bridge_session_id(&self) -> Option<&SessionId> {
-        self.new_bridge_session_id
-            .as_ref()
-            .or(self.new_session_id.as_ref())
     }
 }
 
@@ -343,20 +315,12 @@ pub enum MobRespawnError {
 pub struct MemberDeliveryReceipt {
     /// The member identity.
     pub identity: AgentIdentity,
-    /// Bridge-internal session binding — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) session_id: SessionId,
-    /// Bridge-internal session binding — not part of the public identity contract.
-    #[serde(skip)]
-    pub(crate) bridge_session_id: SessionId,
+    /// Runtime id for the incarnation that accepted the work.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the incarnation that accepted the work.
+    pub fence_token: FenceToken,
     /// How the message was handled.
     pub handling_mode: HandlingMode,
-}
-
-impl MemberDeliveryReceipt {
-    pub(crate) fn bridge_session_id(&self) -> &SessionId {
-        &self.bridge_session_id
-    }
 }
 
 /// Receipt confirming that a unit of work was accepted by the work lane.
@@ -372,7 +336,7 @@ pub struct WorkDeliveryReceipt {
 /// Reference to a member's current session bridge.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
-pub struct MemberSessionRef {
+pub(crate) struct MemberSessionRef {
     /// The member identity.
     pub identity: AgentIdentity,
     /// Compatibility alias for the current bridge session ID.
@@ -409,20 +373,12 @@ pub struct HelperResult {
     pub output: Option<String>,
     /// Total tokens used by the helper.
     pub tokens_used: u64,
-    /// Compatibility alias for the bridge session ID that was used.
-    pub session_id: Option<meerkat_core::types::SessionId>,
-    /// Canonical bridge session ID that backed the helper run.
-    pub bridge_session_id: Option<meerkat_core::types::SessionId>,
-}
-
-impl HelperResult {
-    pub fn bridge_session_id(&self) -> Option<&meerkat_core::types::SessionId> {
-        self.bridge_session_id.as_ref().or(self.session_id.as_ref())
-    }
-
-    pub fn session_id(&self) -> Option<&meerkat_core::types::SessionId> {
-        self.session_id.as_ref().or(self.bridge_session_id.as_ref())
-    }
+    /// Stable member identity for the helper run.
+    pub agent_identity: AgentIdentity,
+    /// Runtime id for the helper incarnation.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token for the helper incarnation.
+    pub fence_token: FenceToken,
 }
 
 /// Target for a wire operation from a local mob member.
@@ -2074,10 +2030,6 @@ impl MobHandle {
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
         let meerkat_id = MeerkatId::from(identity.as_str());
-        let old_session_id_before = self
-            .canonical_member_list_material(&meerkat_id)
-            .await
-            .current_bridge_session_id;
         let reply = match self
             .execute_machine_command(MobMachineCommand::Respawn {
                 meerkat_id,
@@ -2092,40 +2044,10 @@ impl MobHandle {
                 )));
             }
         };
-        let mut receipt = match reply {
-            Ok(receipt) => receipt,
-            Err(MobRespawnError::TopologyRestoreFailed {
-                mut receipt,
-                failed_peer_ids,
-            }) => {
-                if receipt.old_bridge_session_id().is_none() {
-                    receipt.set_old_bridge_session_id(old_session_id_before);
-                }
-                let receipt_meerkat_id = MeerkatId::from(receipt.identity.as_str());
-                let post_material = self
-                    .canonical_member_list_material(&receipt_meerkat_id)
-                    .await;
-                if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
-                    receipt.set_new_bridge_session_id(post_material.current_bridge_session_id);
-                }
-                return Err(MobRespawnError::TopologyRestoreFailed {
-                    receipt,
-                    failed_peer_ids,
-                });
-            }
-            Err(err) => return Err(err),
-        };
-        if receipt.old_bridge_session_id().is_none() {
-            receipt.set_old_bridge_session_id(old_session_id_before);
+        match reply {
+            Ok(receipt) => Ok(receipt),
+            Err(err) => Err(err),
         }
-        let receipt_meerkat_id = MeerkatId::from(receipt.identity.as_str());
-        let post_material = self
-            .canonical_member_list_material(&receipt_meerkat_id)
-            .await;
-        if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
-            receipt.set_new_bridge_session_id(post_material.current_bridge_session_id);
-        }
-        Ok(receipt)
     }
 
     /// Retire all roster members concurrently in a single actor command.
@@ -2189,13 +2111,13 @@ impl MobHandle {
         message: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
         let meerkat_id = MeerkatId::from(identity.as_str());
-        let session_id = self
-            .internal_turn_for_member(meerkat_id.clone(), message.into())
+        self.internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
+        let material = self.canonical_member_list_material(&meerkat_id).await;
         Ok(MemberDeliveryReceipt {
             identity,
-            session_id: session_id.clone(),
-            bridge_session_id: session_id,
+            agent_runtime_id: material.agent_runtime_id,
+            fence_token: material.fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }
@@ -2892,8 +2814,7 @@ impl MemberHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        let session_id = self
-            .mob
+        self.mob
             .external_turn_for_member(
                 self.meerkat_id.clone(),
                 content.into(),
@@ -2901,10 +2822,14 @@ impl MemberHandle {
                 render_metadata,
             )
             .await?;
+        let material = self
+            .mob
+            .canonical_member_list_material(&self.meerkat_id)
+            .await;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            session_id: session_id.clone(),
-            bridge_session_id: session_id,
+            agent_runtime_id: material.agent_runtime_id,
+            fence_token: material.fence_token,
             handling_mode,
         })
     }
@@ -2914,31 +2839,34 @@ impl MemberHandle {
         &self,
         content: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        let session_id = self
-            .mob
+        self.mob
             .internal_turn_for_member(self.meerkat_id.clone(), content.into())
             .await?;
+        let material = self
+            .mob
+            .canonical_member_list_material(&self.meerkat_id)
+            .await;
         Ok(MemberDeliveryReceipt {
             identity: self.identity(),
-            session_id: session_id.clone(),
-            bridge_session_id: session_id,
+            agent_runtime_id: material.agent_runtime_id,
+            fence_token: material.fence_token,
             handling_mode: HandlingMode::Queue,
         })
     }
 
     /// Current bridge session ID for this member, if a session bridge exists.
-    pub async fn current_bridge_session_id(&self) -> Result<Option<SessionId>, MobError> {
+    pub(crate) async fn current_bridge_session_id(&self) -> Result<Option<SessionId>, MobError> {
         let status = self.status().await?;
         Ok(status.current_bridge_session_id().cloned())
     }
 
     /// Current session ID for this member, if a session bridge exists.
-    pub async fn current_session_id(&self) -> Result<Option<SessionId>, MobError> {
+    pub(crate) async fn current_session_id(&self) -> Result<Option<SessionId>, MobError> {
         self.current_bridge_session_id().await
     }
 
     /// Session reference for this member, if a session bridge exists.
-    pub async fn session_ref(&self) -> Result<Option<MemberSessionRef>, MobError> {
+    pub(crate) async fn session_ref(&self) -> Result<Option<MemberSessionRef>, MobError> {
         Ok(self
             .current_bridge_session_id()
             .await?
@@ -3019,35 +2947,31 @@ mod tests {
 
     #[test]
     fn member_receipt_types_omit_bridge_session_fields_in_serialized_output() {
-        let old_sid = SessionId::new();
+        let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(1));
         let new_sid = SessionId::new();
         let receipt = MemberRespawnReceipt::new(
             AgentIdentity::from("worker"),
-            Some(old_sid.clone()),
-            Some(new_sid.clone()),
+            runtime_id.clone(),
+            FenceToken::new(7),
+            FenceToken::new(8),
         );
         let receipt_value =
             serde_json::to_value(&receipt).expect("respawn receipt should serialize to json");
-        // 0.6 clean break: session fields are #[serde(skip)]
-        assert!(receipt_value.get("old_session_id").is_none());
-        assert!(receipt_value.get("old_bridge_session_id").is_none());
-        assert!(receipt_value.get("new_session_id").is_none());
-        assert!(receipt_value.get("new_bridge_session_id").is_none());
-        // Identity field must be present
         assert_eq!(receipt_value["identity"], "worker");
+        assert_eq!(receipt_value["agent_runtime_id"], runtime_id.to_string());
+        assert_eq!(receipt_value["previous_fence_token"], 7);
+        assert_eq!(receipt_value["fence_token"], 8);
 
         let delivery = MemberDeliveryReceipt {
             identity: AgentIdentity::from("worker"),
-            session_id: new_sid.clone(),
-            bridge_session_id: new_sid.clone(),
+            agent_runtime_id: runtime_id,
+            fence_token: FenceToken::new(8),
             handling_mode: HandlingMode::Queue,
         };
         let delivery_value =
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
-        // 0.6 clean break: session fields are #[serde(skip)]
-        assert!(delivery_value.get("session_id").is_none());
-        assert!(delivery_value.get("bridge_session_id").is_none());
         assert_eq!(delivery_value["identity"], "worker");
+        assert_eq!(delivery_value["fence_token"], 8);
 
         let session_ref = MemberSessionRef {
             identity: AgentIdentity::from("worker"),
@@ -3061,26 +2985,22 @@ mod tests {
     }
 
     #[test]
-    fn helper_result_prefers_bridge_session_identity_but_keeps_session_compatibility() {
-        let sid = SessionId::new();
+    fn helper_result_serializes_identity_native_runtime_fields() {
+        let runtime_id = AgentRuntimeId::new(AgentIdentity::from("worker"), Generation::new(2));
         let result = HelperResult {
             output: Some("done".to_string()),
             tokens_used: 7,
-            session_id: Some(sid.clone()),
-            bridge_session_id: Some(sid.clone()),
+            agent_identity: AgentIdentity::from("worker"),
+            agent_runtime_id: runtime_id.clone(),
+            fence_token: FenceToken::new(9),
         };
 
-        assert_eq!(result.session_id(), Some(&sid));
-        assert_eq!(result.bridge_session_id(), Some(&sid));
-
-        let bridge_only = HelperResult {
-            output: None,
-            tokens_used: 0,
-            session_id: None,
-            bridge_session_id: Some(sid.clone()),
-        };
-        assert_eq!(bridge_only.session_id(), Some(&sid));
-        assert_eq!(bridge_only.bridge_session_id(), Some(&sid));
+        let value = serde_json::to_value(&result).expect("helper result should serialize to json");
+        assert_eq!(value["agent_identity"], "worker");
+        assert_eq!(value["agent_runtime_id"], runtime_id.to_string());
+        assert_eq!(value["fence_token"], 9);
+        assert!(value.get("session_id").is_none());
+        assert!(value.get("bridge_session_id").is_none());
     }
 
     #[test]

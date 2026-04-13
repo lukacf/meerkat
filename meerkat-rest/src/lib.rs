@@ -1485,8 +1485,9 @@ async fn mob_spawn_helper(
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id(),
-        "bridge_session_id": result.bridge_session_id(),
+        "agent_identity": result.agent_identity.as_str(),
+        "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
+        "fence_token": result.fence_token.get(),
     })))
 }
 
@@ -1577,8 +1578,9 @@ async fn mob_fork_helper(
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
-        "session_id": result.session_id(),
-        "bridge_session_id": result.bridge_session_id(),
+        "agent_identity": result.agent_identity.as_str(),
+        "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
+        "fence_token": result.fence_token.get(),
     })))
 }
 

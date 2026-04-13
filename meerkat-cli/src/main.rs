@@ -6090,7 +6090,8 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     serde_json::to_string_pretty(&serde_json::json!({
                         "output": result.output,
                         "tokens_used": result.tokens_used,
-                        "session_id": result.session_id(),
+                        "agent_identity": result.agent_identity.as_str(),
+                        "fence_token": result.fence_token.get(),
                     }))?
                 );
             } else if let Some(output) = &result.output {
@@ -6148,7 +6149,8 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                     serde_json::to_string_pretty(&serde_json::json!({
                         "output": result.output,
                         "tokens_used": result.tokens_used,
-                        "session_id": result.session_id(),
+                        "agent_identity": result.agent_identity.as_str(),
+                        "fence_token": result.fence_token.get(),
                     }))?
                 );
             } else if let Some(output) = &result.output {

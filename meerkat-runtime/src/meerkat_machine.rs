@@ -1183,11 +1183,18 @@ impl MeerkatMachine {
                     )
                 };
 
+                // Guard: WaitingInputsInvariant — no input admission on
+                // Retired, Stopped, or Destroyed sessions.
+                let state = Self::driver_runtime_state(&driver).await;
                 if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
+                    state,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
                 ) {
-                    return Err(RuntimeDriverError::Destroyed);
+                    return Err(if state == RuntimeState::Destroyed {
+                        RuntimeDriverError::Destroyed
+                    } else {
+                        RuntimeDriverError::NotReady { state }
+                    });
                 }
 
                 let (outcome, signal, handle) = {
@@ -1270,11 +1277,18 @@ impl MeerkatMachine {
                     entry.driver.clone()
                 };
 
+                // Guard: WaitingInputsInvariant — no input admission on
+                // Retired, Stopped, or Destroyed sessions.
+                let state = Self::driver_runtime_state(&driver).await;
                 if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
+                    state,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
                 ) {
-                    return Err(RuntimeDriverError::Destroyed);
+                    return Err(if state == RuntimeState::Destroyed {
+                        RuntimeDriverError::Destroyed
+                    } else {
+                        RuntimeDriverError::NotReady { state }
+                    });
                 }
 
                 let outcome = {
@@ -13023,5 +13037,57 @@ mod tests {
             ),
             "expected InvalidState(Stopped), got {err:?}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // A4: Ingress command guards (TLA+ WaitingInputsInvariant)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_input_with_completion_rejects_retired_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+            .await
+            .expect("retire should succeed");
+
+        let input = make_prompt("should be rejected");
+        let result = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await;
+        match result {
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Retired,
+            }) => {}
+            Err(other) => panic!("expected NotReady(Retired), got {other:?}"),
+            Ok(_) => panic!("accept_input_with_completion should reject retired session"),
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_input_with_completion_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let input = make_prompt("should be rejected");
+        let result = adapter
+            .accept_input_with_completion(&session_id, input)
+            .await;
+        match result {
+            Err(RuntimeDriverError::Destroyed) => {}
+            Err(other) => panic!("expected Destroyed, got {other:?}"),
+            Ok(_) => panic!("accept_input_with_completion should reject destroyed session"),
+        }
     }
 }

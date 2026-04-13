@@ -869,6 +869,12 @@ impl StepRunStatus {
             ))),
         }
     }
+
+    /// A step is terminal when it can no longer receive work dispatch or
+    /// completion events. Only `Dispatched` is non-terminal.
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Dispatched)
+    }
 }
 
 /// Flow-level failure log entry.

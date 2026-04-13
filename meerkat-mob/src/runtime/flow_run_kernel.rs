@@ -634,6 +634,9 @@ impl FlowRunKernel {
                 )
                 .await?;
             if transitioned {
+                // TLA+ TerminalRunStepInvariant: after terminalization, all
+                // steps must be in a terminal status.
+                self.verify_terminal_run_steps(&run_id).await?;
                 return self
                     .terminalization
                     .record_persisted_terminalization(run_id, flow_id, target)
@@ -682,6 +685,43 @@ impl FlowRunKernel {
             .get_run(run_id)
             .await?
             .ok_or_else(|| MobError::RunNotFound(run_id.clone()))
+    }
+
+    /// Guard: reject step dispatch when the run has already reached a terminal
+    /// status. The generated kernel refuses invalid transitions at the step
+    /// level, but this provides defense-in-depth at the run level before we
+    /// attempt the CAS loop — matching TLA+ `WorkStepStateInvariant` (live work
+    /// requires a non-terminal run).
+    async fn require_run_active(&self, run_id: &RunId, operation: &str) -> Result<(), MobError> {
+        let run = self.require_run(run_id).await?;
+        if run.status.is_terminal() {
+            return Err(MobError::Internal(format!(
+                "{operation}: run '{run_id}' is already terminal ({:?}), cannot mutate step state",
+                run.status,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Post-condition: after terminalization, verify that every tracked step has
+    /// reached a terminal status. Matches TLA+ `TerminalRunStepInvariant`
+    /// (terminal run ⇒ all steps terminal).
+    async fn verify_terminal_run_steps(&self, run_id: &RunId) -> Result<(), MobError> {
+        let steps = self.ordered_steps(run_id).await?;
+        for step_id in &steps {
+            if let Some(status) = self.step_status(run_id, step_id).await? {
+                if !status.is_terminal() {
+                    return Err(MobError::Internal(format!(
+                        "TerminalRunStepInvariant violated: run '{run_id}' is terminal but \
+                         step '{step_id}' has non-terminal status {status:?}"
+                    )));
+                }
+            }
+            // None means the step was never dispatched — that's implicitly terminal
+            // (the TLA+ model treats absent step status as not-yet-started, which is
+            // vacuously satisfied for terminal runs since there's no live work).
+        }
+        Ok(())
     }
 
     fn transition_outcome(
@@ -768,6 +808,7 @@ impl FlowRunMutator for FlowRunKernel {
     }
 
     async fn dispatch_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
+        self.require_run_active(run_id, "dispatch_step").await?;
         self.apply_step_input(run_id, "DispatchStep", step_id).await
     }
 
@@ -776,6 +817,8 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
+        self.require_run_active(run_id, "dispatch_step_effects")
+            .await?;
         self.apply_step_input_with_effects(run_id, "DispatchStep", step_id)
             .await
     }
@@ -2290,6 +2333,146 @@ mod tests {
             &canceled_effects,
             FlowRunEffectKind::ProjectTargetCanceled
         ));
+    }
+
+    #[tokio::test]
+    async fn flow_run_kernel_rejects_dispatch_on_terminal_run() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel = FlowRunKernel::new(
+            MobId::from("mob-terminal-dispatch"),
+            run_store.clone(),
+            events,
+        );
+        let config = FlowRunConfig {
+            flow_id: FlowId::from("demo"),
+            flow_spec: crate::definition::FlowSpec {
+                description: None,
+                steps: indexmap::IndexMap::from([(
+                    crate::ids::StepId::from("step-1"),
+                    crate::definition::FlowStepSpec {
+                        role: crate::ids::ProfileName::from("worker"),
+                        message: meerkat_core::types::ContentInput::from("do it"),
+                        depends_on: Vec::new(),
+                        dispatch_mode: crate::definition::DispatchMode::FanOut,
+                        collection_policy: crate::definition::CollectionPolicy::All,
+                        condition: None,
+                        timeout_ms: None,
+                        expected_schema_ref: None,
+                        branch: None,
+                        depends_on_mode: crate::definition::DependencyMode::All,
+                        allowed_tools: None,
+                        blocked_tools: None,
+                        output_format: crate::definition::StepOutputFormat::Json,
+                    },
+                )]),
+                root: None,
+            },
+            topology: None,
+            supervisor: None,
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let run_id = kernel
+            .create_pending_run(&config, serde_json::json!({}))
+            .await
+            .expect("create pending run");
+        kernel.start_run(&run_id).await.expect("start run");
+        let step_id = crate::ids::StepId::from("step-1");
+
+        // Dispatch and complete the step, then terminalize.
+        kernel
+            .dispatch_step(&run_id, &step_id)
+            .await
+            .expect("dispatch step");
+        kernel
+            .complete_step(&run_id, &step_id)
+            .await
+            .expect("complete step");
+        kernel
+            .terminalize_completed(run_id.clone(), FlowId::from("demo"))
+            .await
+            .expect("terminalize");
+
+        // Now try to dispatch again on the terminal run — should be rejected.
+        let error = kernel
+            .dispatch_step(&run_id, &step_id)
+            .await
+            .expect_err("dispatch on terminal run should fail");
+        assert!(
+            error.to_string().contains("already terminal"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn flow_run_kernel_terminal_run_step_invariant_holds_after_terminalize() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel =
+            FlowRunKernel::new(MobId::from("mob-step-invariant"), run_store.clone(), events);
+        let config = FlowRunConfig {
+            flow_id: FlowId::from("demo"),
+            flow_spec: crate::definition::FlowSpec {
+                description: None,
+                steps: indexmap::IndexMap::from([(
+                    crate::ids::StepId::from("step-1"),
+                    crate::definition::FlowStepSpec {
+                        role: crate::ids::ProfileName::from("worker"),
+                        message: meerkat_core::types::ContentInput::from("do it"),
+                        depends_on: Vec::new(),
+                        dispatch_mode: crate::definition::DispatchMode::FanOut,
+                        collection_policy: crate::definition::CollectionPolicy::All,
+                        condition: None,
+                        timeout_ms: None,
+                        expected_schema_ref: None,
+                        branch: None,
+                        depends_on_mode: crate::definition::DependencyMode::All,
+                        allowed_tools: None,
+                        blocked_tools: None,
+                        output_format: crate::definition::StepOutputFormat::Json,
+                    },
+                )]),
+                root: None,
+            },
+            topology: None,
+            supervisor: None,
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let run_id = kernel
+            .create_pending_run(&config, serde_json::json!({}))
+            .await
+            .expect("create pending run");
+        kernel.start_run(&run_id).await.expect("start run");
+        let step_id = crate::ids::StepId::from("step-1");
+
+        // Complete the step normally.
+        kernel
+            .dispatch_step(&run_id, &step_id)
+            .await
+            .expect("dispatch");
+        kernel
+            .complete_step(&run_id, &step_id)
+            .await
+            .expect("complete");
+
+        // Terminalize — the post-condition check inside verify_terminal_run_steps
+        // should pass because step-1 is Completed (terminal).
+        kernel
+            .terminalize_completed(run_id.clone(), FlowId::from("demo"))
+            .await
+            .expect("terminalize should succeed with all steps terminal");
+
+        // Verify the run is actually terminal.
+        let run = run_store
+            .get_run(&run_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert!(run.status.is_terminal());
     }
 
     #[tokio::test]

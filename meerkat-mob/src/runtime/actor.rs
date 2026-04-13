@@ -18,6 +18,7 @@ use super::mob_wiring_authority::{
 use super::provision_guard::PendingProvision;
 use super::transaction::LifecycleRollback;
 use super::*;
+use crate::ids::{AgentIdentity, Generation};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use futures::FutureExt;
@@ -200,6 +201,8 @@ struct RespawnSnapshot {
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
     old_bridge_session_id: meerkat_core::types::SessionId,
+    /// Generation of the member being respawned (preserved across respawn).
+    generation: crate::ids::Generation,
     restore_wiring: RestoreWiringPlan,
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
@@ -245,6 +248,10 @@ pub(super) struct MobActor {
     pub(super) autonomous_initial_turns:
         Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, InitialTurnHandle>>>,
     pub(super) next_spawn_ticket: u64,
+    /// Monotonically increasing fence token counter.
+    /// Each spawn/respawn/reset issues a strictly newer token.
+    /// Uses `AtomicU64` so `&self` methods (batch finalization) can issue tokens.
+    pub(super) next_fence_token: std::sync::atomic::AtomicU64,
     pub(super) pending_spawns: PendingSpawnLineage,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
@@ -260,6 +267,14 @@ pub(super) struct MobActor {
 }
 
 impl MobActor {
+    /// Issue a strictly increasing fence token.
+    fn issue_fence_token(&self) -> crate::ids::FenceToken {
+        let val = self
+            .next_fence_token
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::ids::FenceToken::new(val)
+    }
+
     async fn restore_failure_for(
         &self,
         meerkat_id: &MeerkatId,
@@ -2082,7 +2097,7 @@ impl MobActor {
     ) {
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
-            meerkat_id,
+            identity,
             initial_message,
             runtime_mode,
             backend,
@@ -2098,6 +2113,7 @@ impl MobActor {
             inherited_tool_filter,
             override_profile,
         } = spec;
+        let meerkat_id = MeerkatId::from(identity.as_str());
         // Normalize launch-mode resume/fork details for the provisioning path.
         let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
         let fork_spec = match launch_mode {
@@ -2482,10 +2498,13 @@ impl MobActor {
             let provision =
                 PendingProvision::new(member_ref, meerkat_id.clone(), self.provisioner.clone());
             // Go straight to finalization — no async provisioning task needed.
+            let fence = self.issue_fence_token();
             let result = self
                 .finalize_spawn_from_pending(
                     &profile_name,
                     &meerkat_id,
+                    crate::ids::Generation::INITIAL,
+                    fence,
                     selected_runtime_mode,
                     prompt,
                     resolved_labels,
@@ -2704,9 +2723,12 @@ impl MobActor {
                                 Err(error)
                             }
                         } else {
+                            let fence = actor.issue_fence_token();
                             actor.finalize_spawn_from_pending(
                                 &profile_name,
                                 &meerkat_id,
+                                crate::ids::Generation::INITIAL,
+                                fence,
                                 runtime_mode,
                                 prompt,
                                 labels,
@@ -2892,9 +2914,12 @@ impl MobActor {
                 }
                 return Err(error);
             }
+            let fence = self.issue_fence_token();
             self.finalize_spawn_from_pending(
                 &profile_name,
                 meerkat_id,
+                crate::ids::Generation::INITIAL,
+                fence,
                 runtime_mode,
                 prompt,
                 labels,
@@ -2938,6 +2963,8 @@ impl MobActor {
         &self,
         profile_name: &ProfileName,
         meerkat_id: &MeerkatId,
+        generation: crate::ids::Generation,
+        fence_token: crate::ids::FenceToken,
         runtime_mode: crate::MobRuntimeMode,
         prompt: ContentInput,
         labels: std::collections::BTreeMap<String, String>,
@@ -2948,17 +2975,22 @@ impl MobActor {
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
+        let identity = crate::ids::AgentIdentity::from(meerkat_id.as_str());
+        let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         if let Err(append_error) = self
             .events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::MeerkatSpawned {
-                    meerkat_id: meerkat_id.clone(),
+                kind: MobEventKind::MemberSpawned {
+                    agent_identity: identity.clone(),
+                    generation,
+                    fence_token,
+                    agent_runtime_id: agent_runtime_id.clone(),
                     role: profile_name.clone(),
                     runtime_mode,
-                    member_ref: provision.member_ref().clone(),
                     labels: labels.clone(),
+                    bridge_member_ref: Some(provision.member_ref().clone()),
                 },
             })
             .await
@@ -2982,12 +3014,11 @@ impl MobActor {
 
         {
             let mut roster = self.roster.write().await;
-            let identity = crate::ids::AgentIdentity::from(meerkat_id.as_str());
             let inserted = roster.add_member(crate::roster::RosterAddEntry {
                 agent_identity: identity.clone(),
-                generation: crate::ids::Generation::INITIAL,
-                fence_token: crate::ids::FenceToken::new(0),
-                agent_runtime_id: crate::ids::AgentRuntimeId::initial(identity),
+                generation,
+                fence_token,
+                agent_runtime_id,
                 meerkat_id: meerkat_id.clone(),
                 role: profile_name.clone(),
                 runtime_mode,
@@ -3355,7 +3386,7 @@ impl MobActor {
                     .bridge_session_id()
                     .cloned()
                     .ok_or_else(|| MobRespawnError::NoSessionBridge {
-                        member_id: meerkat_id.clone(),
+                        identity: AgentIdentity::from(meerkat_id.as_str()),
                     })?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
@@ -3371,6 +3402,7 @@ impl MobActor {
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
                 old_bridge_session_id,
+                generation: entry.generation,
                 restore_wiring: RestoreWiringPlan {
                     local_peers: entry
                         .wired_to
@@ -3440,7 +3472,7 @@ impl MobActor {
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
         self.stage_orchestrator_spawn()
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                member_id: meerkat_id.clone(),
+                identity: AgentIdentity::from(meerkat_id.as_str()),
                 reason: format!("failed to stage respawn replacement spawn: {error}"),
             })?;
         let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
@@ -3475,7 +3507,7 @@ impl MobActor {
             )
             .await;
             return Err(MobRespawnError::SpawnAfterRetire {
-                member_id: meerkat_id.clone(),
+                identity: AgentIdentity::from(meerkat_id.as_str()),
                 reason: error.to_string(),
             });
         }
@@ -3488,7 +3520,7 @@ impl MobActor {
                 .provision_member(provision_request)
                 .await
                 .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                    member_id: meerkat_id.clone(),
+                    identity: AgentIdentity::from(meerkat_id.as_str()),
                     reason: error.to_string(),
                 })?;
             if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
@@ -3506,14 +3538,14 @@ impl MobActor {
                     .await
                 {
                     return Err(MobRespawnError::SpawnAfterRetire {
-                        member_id: meerkat_id.clone(),
+                        identity: AgentIdentity::from(meerkat_id.as_str()),
                         reason: format!(
                             "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
                         ),
                     });
                 }
                 return Err(MobRespawnError::SpawnAfterRetire {
-                    member_id: meerkat_id.clone(),
+                    identity: AgentIdentity::from(meerkat_id.as_str()),
                     reason: capability_error.to_string(),
                 });
             }
@@ -3526,14 +3558,14 @@ impl MobActor {
             if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
-                        member_id: meerkat_id.clone(),
+                        identity: AgentIdentity::from(meerkat_id.as_str()),
                         reason: format!(
                             "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
                         ),
                     });
                 }
                 return Err(MobRespawnError::SpawnAfterRetire {
-                    member_id: meerkat_id.clone(),
+                    identity: AgentIdentity::from(meerkat_id.as_str()),
                     reason: error.to_string(),
                 });
             }
@@ -3549,10 +3581,13 @@ impl MobActor {
                 );
             }
 
+            let respawn_fence = self.issue_fence_token();
             let finalized = self
                 .finalize_spawn_from_pending(
                 &snapshot.profile_name,
                 &meerkat_id,
+                snapshot.generation,
+                respawn_fence,
                 snapshot.runtime_mode,
                 prompt,
                 snapshot.labels.clone(),
@@ -3567,7 +3602,7 @@ impl MobActor {
             )
             .await
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                member_id: meerkat_id.clone(),
+                identity: AgentIdentity::from(meerkat_id.as_str()),
                 reason: error.to_string(),
             })?;
 
@@ -3575,12 +3610,12 @@ impl MobActor {
                 Ok(finalized.receipt)
             } else {
                 Err(MobRespawnError::TopologyRestoreFailed {
-                    receipt: super::handle::MemberRespawnReceipt::from_bridge_session_ids(
-                        meerkat_id.clone(),
+                    receipt: super::handle::MemberRespawnReceipt::new(
+                        AgentIdentity::from(meerkat_id.as_str()),
                         Some(snapshot.old_bridge_session_id.clone()),
                         finalized.receipt.member_ref.bridge_session_id().cloned(),
                     ),
-                    failed_peer_ids: finalized.failed_restore_peer_ids,
+                    failed_peer_ids: finalized.failed_restore_peer_ids.into_iter().map(|mid| AgentIdentity::from(mid.as_str())).collect(),
                 })
             }
         }
@@ -3593,14 +3628,14 @@ impl MobActor {
         }
         self.ensure_pending_spawn_alignment("handle_respawn completion")
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                member_id: meerkat_id.clone(),
+                identity: AgentIdentity::from(meerkat_id.as_str()),
                 reason: error.to_string(),
             })?;
         let replacement = replacement_result?;
 
         // 5. Build the receipt from the committed replacement member reference.
-        Ok(MemberRespawnReceipt::from_bridge_session_ids(
-            meerkat_id,
+        Ok(MemberRespawnReceipt::new(
+            AgentIdentity::from(meerkat_id.as_str()),
             Some(snapshot.old_bridge_session_id),
             replacement.member_ref.bridge_session_id().cloned(),
         ))
@@ -4594,12 +4629,13 @@ impl MobActor {
         &self,
         task_id: TaskId,
         status: TaskStatus,
-        owner: Option<MeerkatId>,
+        owner: Option<AgentIdentity>,
     ) -> Result<(), MobError> {
         // TLA+ TaskBindingInvariant: owner must be a known identity (roster member).
         if let Some(ref owner_id) = owner {
             let roster = self.roster.read().await;
-            if roster.get(owner_id).is_none() {
+            let meerkat_id = MeerkatId::from(owner_id.as_str());
+            if roster.get(&meerkat_id).is_none() {
                 return Err(MobError::Internal(format!(
                     "TaskBindingInvariant violated: task owner '{owner_id}' is not in the roster",
                 )));
@@ -5408,14 +5444,25 @@ impl MobActor {
         profile_name: &ProfileName,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
+        // Look up identity-native fields from the roster for the 0.6 event model.
+        let (agent_identity, generation) = {
+            let roster = self.roster.read().await;
+            match roster.get(meerkat_id) {
+                Some(entry) => (entry.agent_identity.clone(), entry.generation),
+                None => (
+                    AgentIdentity::from(meerkat_id.as_str()),
+                    Generation::INITIAL,
+                ),
+            }
+        };
         self.events
             .append(NewMobEvent {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
-                kind: MobEventKind::MeerkatRetired {
-                    meerkat_id: meerkat_id.clone(),
+                kind: MobEventKind::MemberRetired {
+                    agent_identity,
+                    generation,
                     role: profile_name.clone(),
-                    member_ref: member_ref.clone(),
                 },
             })
             .await?;

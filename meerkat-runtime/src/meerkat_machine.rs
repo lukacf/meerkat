@@ -1995,7 +1995,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
-            Ok(_) => unreachable!("contains_session returned wrong result"),
+            Ok(_) => {
+                tracing::error!("contains_session: unexpected command result variant");
+                false
+            }
             Err(_) => false,
         }
     }
@@ -2013,7 +2016,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
-            Ok(_) => unreachable!("session_has_executor returned wrong result"),
+            Ok(_) => {
+                tracing::error!("session_has_executor: unexpected command result variant");
+                false
+            }
             Err(_) => false,
         }
     }
@@ -2033,7 +2039,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineSessionCommandResult::Bool(present)) => present,
-            Ok(_) => unreachable!("session_has_comms returned wrong result"),
+            Ok(_) => {
+                tracing::error!("session_has_comms: unexpected command result variant");
+                false
+            }
             Err(_) => false,
         }
     }
@@ -2359,7 +2368,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineSessionCommandResult::OpsLifecycleRegistry(registry)) => registry,
-            Ok(_) => unreachable!("ops_lifecycle_registry returned wrong result"),
+            Ok(_) => {
+                tracing::error!("ops_lifecycle_registry: unexpected command result variant");
+                None
+            }
             Err(_) => None,
         }
     }
@@ -2386,7 +2398,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineSessionCommandResult::Bindings(bindings)) => Ok(bindings),
-            Ok(_) => unreachable!("prepare_bindings returned wrong result"),
+            Ok(_) => {
+                tracing::error!("prepare_bindings: unexpected command result variant");
+                Err(RuntimeBindingsError::SessionNotFound(session_id))
+            }
             Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
         }
     }

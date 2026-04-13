@@ -162,7 +162,11 @@ impl MobMemberListEntry {
         self.bridge_session_id()
     }
 
-    /// Bridge-internal meerkat ID.
+    /// Bridge-internal meerkat ID for transport/routing.
+    ///
+    /// Prefer [`agent_identity`](Self::agent_identity) for the canonical
+    /// identity-first API. This accessor exists for WASM and bridge-layer
+    /// consumers that still need the transport handle.
     pub fn meerkat_id(&self) -> &MeerkatId {
         &self.meerkat_id
     }

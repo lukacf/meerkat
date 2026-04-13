@@ -4,15 +4,24 @@
 //! command/result surface plus the durable diagnostic snapshot shapes that
 //! remain useful for inspection and follow-up work.
 
+#[cfg(test)]
 use crate::definition::DependencyMode;
 use crate::ids::{
-    AgentRuntimeId, BranchId, FenceToken, FlowId, MeerkatId, RunId, StepId, WorkRef, WorkSpec,
+    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, MeerkatId, RunId, WorkRef, WorkSpec,
 };
+#[cfg(test)]
+use crate::ids::{BranchId, StepId};
 use crate::roster::{Roster, RosterEntry};
-use crate::run::{MobRun, MobRunStatus, RunCollectionPolicyKind, StepRunStatus};
+use crate::run::MobRun;
+#[cfg(test)]
+use crate::run::{MobRunStatus, RunCollectionPolicyKind, StepRunStatus};
+#[cfg(test)]
+use crate::runtime::MobHandle;
 #[cfg(test)]
 use crate::runtime::MobOrchestratorSnapshot;
-use crate::runtime::{MobHandle, MobKernelDiagnosticSnapshot, MobMemberListEntry, MobState};
+#[cfg(test)]
+use crate::runtime::MobState;
+use crate::runtime::{MobKernelDiagnosticSnapshot, MobMemberListEntry};
 use crate::tasks::MobTask;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -21,7 +30,7 @@ use std::sync::Arc;
 
 /// Joined diagnostic view over the current mob lifecycle state plus the live
 /// roster and member-status projection.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct MobMachineSnapshot {
     pub phase: MobState,
@@ -105,7 +114,7 @@ pub(crate) enum MobMachineCommand {
     TaskUpdate {
         task_id: crate::ids::TaskId,
         status: crate::tasks::TaskStatus,
-        owner: Option<MeerkatId>,
+        owner: Option<AgentIdentity>,
     },
     TaskList,
     TaskGet {
@@ -190,7 +199,7 @@ pub(crate) enum MobMachineCommandResult {
     KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RestoreFailureSnapshot {
     pub session_id: meerkat_core::types::SessionId,
@@ -198,7 +207,7 @@ pub(crate) struct RestoreFailureSnapshot {
     pub reason: String,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrackedRunStoreSnapshot {
     pub flow_id: FlowId,
@@ -222,7 +231,7 @@ pub(crate) struct TrackedRunStoreSnapshot {
     pub escalation_threshold: u32,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrackedRunMalformedSnapshot {
     pub flow_id: FlowId,
@@ -231,7 +240,7 @@ pub(crate) struct TrackedRunMalformedSnapshot {
     pub reason: String,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum TrackedRunSnapshot {
@@ -240,7 +249,7 @@ pub(crate) enum TrackedRunSnapshot {
     Malformed(TrackedRunMalformedSnapshot),
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn tracked_run_snapshot_from_run(run: &MobRun) -> Result<TrackedRunStoreSnapshot, crate::MobError> {
     Ok(TrackedRunStoreSnapshot {
         flow_id: run.flow_id.clone(),
@@ -267,7 +276,7 @@ fn tracked_run_snapshot_from_run(run: &MobRun) -> Result<TrackedRunStoreSnapshot
 
 /// Capture the currently joined MobMachine snapshot from the real handle read
 /// paths.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) async fn capture_mob_machine_snapshot(handle: &MobHandle) -> MobMachineSnapshot {
     let phase = handle.status();
     let kernel = match handle.diagnostic_kernel_snapshot().await {

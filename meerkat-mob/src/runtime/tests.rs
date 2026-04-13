@@ -3783,10 +3783,11 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
     assert!(handle.list_members().await.is_empty());
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatSpawned { .. })),
-        "failed spawn should not emit MeerkatSpawned"
+        !events.iter().any(|e| matches!(
+            e.kind,
+            MobEventKind::MeerkatSpawned { .. } | MobEventKind::MemberSpawned { .. }
+        )),
+        "failed spawn should not emit any spawn event"
     );
 }
 
@@ -4004,7 +4005,7 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
 #[tokio::test]
 async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let helper_id = MeerkatId::from("helper-spawn");
+    let helper_id = AgentIdentity::from("helper-spawn");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         handle.spawn_helper(
@@ -4038,11 +4039,12 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
 #[tokio::test]
 async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let source_id = MeerkatId::from("fork-source");
+    let source_id = AgentIdentity::from("fork-source");
+    let source_meerkat_id = MeerkatId::from("fork-source");
     let source_ref = handle
         .spawn_with_options(
             ProfileName::from("worker"),
-            source_id.clone(),
+            source_meerkat_id,
             Some("source context".into()),
             Some(crate::MobRuntimeMode::TurnDriven),
             None,
@@ -4050,7 +4052,7 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
         .await
         .expect("spawn source member");
 
-    let helper_id = MeerkatId::from("fork-helper");
+    let helper_id = AgentIdentity::from("fork-helper");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         handle.fork_helper(
@@ -4098,7 +4100,7 @@ async fn test_spawn_helper_defaults_to_turn_driven_even_when_profile_is_autonomo
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         handle.spawn_helper(
-            MeerkatId::from("helper-default"),
+            AgentIdentity::from("helper-default"),
             "summarize this",
             HelperOptions {
                 role_name: Some(ProfileName::from("worker")),
@@ -4144,9 +4146,12 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         .await
         .expect("respawn succeeds");
 
-    assert_eq!(receipt.member_id, member_id);
-    assert_eq!(receipt.old_session_id, Some(old_session_id.clone()));
-    let new_session_id = receipt.new_session_id.clone().expect("new session id");
+    assert_eq!(receipt.identity, AgentIdentity::from(member_id.as_str()));
+    assert_eq!(receipt.old_bridge_session_id, Some(old_session_id.clone()));
+    let new_session_id = receipt
+        .new_bridge_session_id
+        .clone()
+        .expect("new session id");
     assert_ne!(new_session_id, old_session_id);
     assert!(
         service.read(&old_session_id).await.is_err(),
@@ -4154,7 +4159,7 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
     );
 
     let snapshot = handle
-        .member_status(&AgentIdentity::from(receipt.member_id.as_str()))
+        .member_status(&receipt.identity)
         .await
         .expect("member snapshot");
     assert_eq!(snapshot.current_session_id, Some(new_session_id.clone()));
@@ -4212,7 +4217,7 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
         .await
         .expect("respawn succeeds");
 
-    assert_eq!(receipt.old_session_id, Some(old_session_id.clone()));
+    assert_eq!(receipt.old_bridge_session_id, Some(old_session_id.clone()));
     assert!(
         service.read(&old_session_id).await.is_err(),
         "respawn must archive the retired session before returning"
@@ -4240,7 +4245,7 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
     );
     assert_eq!(
         left_entry.member_ref.session_id().cloned(),
-        receipt.new_session_id,
+        receipt.new_bridge_session_id,
         "respawn receipt must align with the replacement member's canonical session binding"
     );
 }
@@ -5678,7 +5683,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         .await
         .expect("respawn should repair broken member");
     let new_sid = receipt
-        .new_session_id
+        .new_bridge_session_id
         .clone()
         .expect("respawned member should have a new session");
     assert_ne!(
@@ -6583,7 +6588,7 @@ async fn test_spawn_creates_session() {
     let meerkats = handle.list_members().await;
     assert_eq!(meerkats.len(), 1);
     assert_eq!(meerkats[0].meerkat_id.as_str(), "w-1");
-    assert_eq!(meerkats[0].profile.as_str(), "worker");
+    assert_eq!(meerkats[0].role.as_str(), "worker");
     assert_eq!(meerkats[0].session_id(), Some(&session_id));
 }
 
@@ -6634,7 +6639,7 @@ async fn test_spawn_emits_meerkat_spawned_event() {
         .clone();
 
     let events = handle.events().replay_all().await.expect("replay");
-    // Should have MobCreated + MeerkatSpawned
+    // Should have MobCreated + MemberSpawned
     assert!(
         events.len() >= 2,
         "expected at least 2 events, got {}",
@@ -6642,18 +6647,25 @@ async fn test_spawn_emits_meerkat_spawned_event() {
     );
     let spawned = events
         .iter()
-        .find(|e| matches!(e.kind, MobEventKind::MeerkatSpawned { .. }));
-    assert!(spawned.is_some(), "should have MeerkatSpawned event");
-    if let MobEventKind::MeerkatSpawned {
-        meerkat_id,
+        .find(|e| matches!(e.kind, MobEventKind::MemberSpawned { .. }));
+    assert!(spawned.is_some(), "should have MemberSpawned event");
+    if let MobEventKind::MemberSpawned {
+        agent_identity,
         role,
-        member_ref,
+        generation,
+        fence_token,
+        bridge_member_ref,
         ..
     } = &spawned.unwrap().kind
     {
-        assert_eq!(meerkat_id.as_str(), "w-1");
+        assert_eq!(agent_identity.as_str(), "w-1");
         assert_eq!(role.as_str(), "worker");
-        assert_eq!(member_ref.session_id(), Some(&session_id));
+        assert_eq!(*generation, crate::ids::Generation::INITIAL);
+        assert!(fence_token.get() > 0, "fence token should be non-zero");
+        assert_eq!(
+            bridge_member_ref.as_ref().and_then(|r| r.session_id()),
+            Some(&session_id),
+        );
     }
 }
 
@@ -6838,7 +6850,7 @@ async fn test_spawn_fails_when_profile_comms_disabled() {
 #[tokio::test]
 async fn test_spawn_append_failure_rolls_back_runtime_state() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
-    events.fail_appends_for("MeerkatSpawned").await;
+    events.fail_appends_for("MemberSpawned").await;
     let (handle, service) = create_test_mob_with_events(sample_definition(), events).await;
 
     let result = handle
@@ -6865,8 +6877,8 @@ async fn test_spawn_append_failure_rolls_back_runtime_state() {
     assert!(
         !recorded
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MeerkatSpawned { .. })),
-        "failed spawn append must not persist MeerkatSpawned"
+            .any(|e| matches!(e.kind, MobEventKind::MemberSpawned { .. })),
+        "failed spawn append must not persist MemberSpawned"
     );
 }
 
@@ -7392,7 +7404,7 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         .await
         .expect("respawn");
     let new_sid = receipt
-        .new_session_id
+        .new_bridge_session_id
         .expect("respawn should produce replacement session");
     assert_ne!(new_sid, old_sid, "respawn should replace the session");
 
@@ -10275,11 +10287,11 @@ async fn test_concurrent_spawns_parallelize_provisioning() {
     let events = handle.events().replay_all().await.expect("replay");
     let spawned_count = events
         .iter()
-        .filter(|event| matches!(event.kind, MobEventKind::MeerkatSpawned { .. }))
+        .filter(|event| matches!(event.kind, MobEventKind::MemberSpawned { .. }))
         .count();
     assert_eq!(
         spawned_count, 10,
-        "parallel spawn path should emit exactly one MeerkatSpawned per request"
+        "parallel spawn path should emit exactly one MemberSpawned per request"
     );
     assert!(
         service.max_concurrent_create_session_calls() > 1,
@@ -11387,7 +11399,7 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
     let events = handle.events().replay_all().await.expect("replay events");
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-        MobEventKind::MeerkatSpawned { meerkat_id, .. } if meerkat_id.as_str() == "w-1"
+        MobEventKind::MemberSpawned { agent_identity, .. } if agent_identity.as_str() == "w-1"
     )));
 }
 
@@ -14444,7 +14456,12 @@ async fn test_disposal_report_ordering_is_deterministic() {
     let events = handle.events().replay_all().await.expect("replay");
     let retire_events: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. }))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
+            )
+        })
         .collect();
     assert_eq!(
         retire_events.len(),
@@ -14683,7 +14700,9 @@ async fn test_member_handle_session_helpers_round_trip_through_machine_projectio
 
     let session_ref = member.session_ref().await.expect("session ref");
     assert_eq!(
-        session_ref.as_ref().map(|session| &session.session_id),
+        session_ref
+            .as_ref()
+            .map(|session| &session.bridge_session_id),
         Some(receipt.session_id().expect("session-backed")),
         "member handle session_ref should follow the same machine-routed binding"
     );
@@ -14719,7 +14738,7 @@ async fn test_mob_events_view_round_trips_through_machine_command_surface() {
     assert!(
         replay
             .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MeerkatSpawned { .. })),
+            .any(|event| matches!(event.kind, MobEventKind::MemberSpawned { .. })),
         "replayed event view should include spawn events through the machine command surface"
     );
 

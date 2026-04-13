@@ -12,7 +12,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | runtime | 7 | 21 | 5 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
-| mob | 6 | 49 | 3 | 0 | 0 | 0 |
+| mob | 6 | 43 | 3 | 0 | 0 | 0 |
 
 ## Boundary Manifest
 
@@ -22,7 +22,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine` | `register_session`, `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session`, `interrupt_current_run`, `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion`, `update_peer_ingress_context`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
 | mcp-router | public-inherent | `meerkat-mcp/src/router.rs` | `McpRouter` | `set_removal_timeout`, `add_server`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `take_lifecycle_actions`, `take_external_updates`, `progress_removals`, `call_tool`, `shutdown` |
 | mcp-router-adapter | public-inherent | `meerkat-mcp/src/adapter.rs` | `McpRouterAdapter` | `refresh_tools`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `poll_lifecycle_actions`, `progress_removals`, `wait_until_ready`, `shutdown` |
-| mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn`, `spawn_with_backend`, `spawn_with_options`, `attach_existing_session`, `attach_existing_session_as_orchestrator`, `attach_existing_session_as_member`, `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `task_create`, `task_update`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
+| mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `task_create`, `task_update`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
 | mob-command-dispatch | enum-dispatch | `meerkat-mob/src/runtime/actor.rs` | `MobActor` / `MobCommand` | `enqueue_spawn`, `handle_force_cancel`, `handle_retire`, `handle_respawn`, `handle_wire`, `handle_unwire`, `handle_external_turn`, `handle_internal_turn`, `retire_all_members`, `handle_task_create`, `handle_task_update`, `handle_run_flow`, `handle_cancel_flow`, `handle_flow_cleanup`, `handle_complete`, `handle_destroy`, `handle_reset` |
 | manual-callback | manual-callback | `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine` | `notify_comms_drain_exited` |
 | manual-callback | manual-callback | `meerkat-mcp/src/router.rs` | `McpRouter` | `process_pending_result` |
@@ -144,12 +144,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Path | Symbol | Boundary | Status | Anchor |
 | --- | --- | --- | --- | --- |
-| `meerkat-mob/src/runtime/handle.rs` | `spawn` | `public-inherent` | `closed` | `PendingSpawnLineage + RosterAuthority` |
-| `meerkat-mob/src/runtime/handle.rs` | `spawn_with_backend` | `public-inherent` | `closed` | `PendingSpawnLineage + RosterAuthority` |
-| `meerkat-mob/src/runtime/handle.rs` | `spawn_with_options` | `public-inherent` | `closed` | `PendingSpawnLineage + RosterAuthority` |
-| `meerkat-mob/src/runtime/handle.rs` | `attach_existing_session` | `public-inherent` | `closed` | `PendingSpawnLineage + SessionBackend runtime bridge` |
-| `meerkat-mob/src/runtime/handle.rs` | `attach_existing_session_as_orchestrator` | `public-inherent` | `closed` | `PendingSpawnLineage + SessionBackend runtime bridge` |
-| `meerkat-mob/src/runtime/handle.rs` | `attach_existing_session_as_member` | `public-inherent` | `closed` | `PendingSpawnLineage + SessionBackend runtime bridge` |
 | `meerkat-mob/src/runtime/handle.rs` | `spawn_spec` | `public-inherent` | `closed` | `PendingSpawnLineage + RosterAuthority` |
 | `meerkat-mob/src/runtime/handle.rs` | `spawn_many` | `public-inherent` | `closed` | `PendingSpawnLineage + RosterAuthority` |
 | `meerkat-mob/src/runtime/handle.rs` | `retire` | `public-inherent` | `closed` | `RosterAuthority + disposal pipeline` |

@@ -1,7 +1,7 @@
-//! Roster tracking for active meerkats in a mob.
+//! Roster tracking for active mob members.
 //!
-//! The `Roster` is a projection built from `MeerkatSpawned`, `MeerkatRetired`,
-//! `PeersWired`, and `PeersUnwired` events.
+//! The `Roster` is a projection built from `MemberSpawned`, `MemberRetired`,
+//! `MembersWired`, and `MembersUnwired` events.
 //!
 //! Projection contract:
 //! - `Roster` is not canonical transport/comms trust truth.
@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Lifecycle state for a roster member.
 ///
 /// `Retiring` is runtime-only — event projection never produces it
-/// (`MeerkatSpawned` creates `Active`; `MeerkatRetired` removes entirely).
+/// (`MemberSpawned` creates `Active`; `MemberRetired` removes entirely).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemberState {
     #[default]
@@ -169,59 +169,24 @@ impl Roster {
     /// Apply a single event to update roster state.
     pub fn apply(&mut self, event: &MobEvent) {
         match &event.kind {
-            MobEventKind::MeerkatSpawned {
-                meerkat_id,
-                role,
-                runtime_mode,
-                member_ref,
-                labels,
-            } => {
-                // Legacy event: derive identity from meerkat_id.
-                let identity = AgentIdentity::from(meerkat_id.as_str());
-                self.add(RosterAddEntry {
-                    agent_identity: identity.clone(),
-                    generation: Generation::INITIAL,
-                    fence_token: FenceToken::new(0),
-                    agent_runtime_id: AgentRuntimeId::initial(identity),
-                    meerkat_id: meerkat_id.clone(),
-                    role: role.clone(),
-                    runtime_mode: *runtime_mode,
-                    member_ref: member_ref.clone(),
-                    peer_id: None,
-                    labels: labels.clone(),
-                    effective_profile_override: None,
-                });
-            }
-            MobEventKind::MemberSpawned {
-                agent_identity,
-                generation,
-                fence_token,
-                agent_runtime_id,
-                role,
-                runtime_mode,
-                labels,
-                bridge_member_ref,
-            } => {
-                let meerkat_id = MeerkatId::from(agent_identity.as_str());
-                let member_ref = bridge_member_ref.clone().unwrap_or_else(|| {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                let meerkat_id = MeerkatId::from(member_spawned.agent_identity.as_str());
+                let member_ref = member_spawned.bridge_member_ref.clone().unwrap_or_else(|| {
                     MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()))
                 });
                 self.add(RosterAddEntry {
-                    agent_identity: agent_identity.clone(),
-                    generation: *generation,
-                    fence_token: *fence_token,
-                    agent_runtime_id: agent_runtime_id.clone(),
+                    agent_identity: member_spawned.agent_identity.clone(),
+                    generation: member_spawned.generation,
+                    fence_token: member_spawned.fence_token,
+                    agent_runtime_id: member_spawned.agent_runtime_id.clone(),
                     meerkat_id,
-                    role: role.clone(),
-                    runtime_mode: *runtime_mode,
+                    role: member_spawned.role.clone(),
+                    runtime_mode: member_spawned.runtime_mode,
                     member_ref,
                     peer_id: None,
-                    labels: labels.clone(),
+                    labels: member_spawned.labels.clone(),
                     effective_profile_override: None,
                 });
-            }
-            MobEventKind::MeerkatRetired { meerkat_id, .. } => {
-                self.remove_by_meerkat_id(meerkat_id);
             }
             MobEventKind::MemberRetired { agent_identity, .. } => {
                 self.remove_by_identity(agent_identity);
@@ -239,24 +204,24 @@ impl Roster {
                     entry.agent_runtime_id = agent_runtime_id.clone();
                 }
             }
-            MobEventKind::PeersWired { a, b } => {
-                self.wire(a, b);
+            MobEventKind::MembersWired { a, b } => {
+                self.wire_identities(a, b);
             }
             MobEventKind::ExternalPeerWired { local, spec } => {
-                let peer_name = MeerkatId::from(spec.name.clone());
-                self.wire_external(local, &peer_name, spec.clone());
+                self.wire_external_identity(
+                    local,
+                    &MeerkatId::from(spec.name.clone()),
+                    spec.clone(),
+                );
             }
             MobEventKind::ExternalPeerUnwired { local, peer_name } => {
-                self.unwire_external(local, peer_name);
+                self.unwire_external_identity(local, &MeerkatId::from(peer_name.as_str()));
             }
-            MobEventKind::PeersUnwired { a, b } => {
-                self.unwire(a, b);
+            MobEventKind::MembersUnwired { a, b } => {
+                self.unwire_identities(a, b);
             }
-            MobEventKind::MeerkatKickoffUpdated {
-                meerkat_id,
-                kickoff,
-            } => {
-                self.set_kickoff(meerkat_id, Some(kickoff.clone()));
+            MobEventKind::MemberKickoffUpdated { member, kickoff } => {
+                self.set_kickoff_by_identity(member, Some(kickoff.clone()));
             }
             MobEventKind::MobReset => {
                 self.entries.clear();
@@ -352,6 +317,16 @@ impl Roster {
         }
     }
 
+    /// Wire two members in the roster projection (identity-native path).
+    pub fn wire_identities(&mut self, a: &AgentIdentity, b: &AgentIdentity) {
+        if let Some(entry_a) = self.entries.get_mut(a) {
+            entry_a.wired_to.insert(b.clone());
+        }
+        if let Some(entry_b) = self.entries.get_mut(b) {
+            entry_b.wired_to.insert(a.clone());
+        }
+    }
+
     /// Wire a local member to an external peer name.
     pub fn wire_external(
         &mut self,
@@ -369,6 +344,34 @@ impl Roster {
         }
     }
 
+    /// Wire a local member identity to an external peer name.
+    pub fn wire_external_identity(
+        &mut self,
+        local: &AgentIdentity,
+        peer_name: &MeerkatId,
+        spec: TrustedPeerSpec,
+    ) {
+        if let Some(entry) = self.entries.get_mut(local) {
+            entry
+                .wired_to
+                .insert(AgentIdentity::from(peer_name.as_str()));
+            entry.external_peer_specs.insert(peer_name.clone(), spec);
+        }
+    }
+
+    pub fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
+        self.wire(a, b);
+    }
+
+    pub fn wire_external_peer(
+        &mut self,
+        local: &MeerkatId,
+        peer_name: &MeerkatId,
+        spec: TrustedPeerSpec,
+    ) {
+        self.wire_external(local, peer_name, spec);
+    }
+
     /// Unwire two members in the roster projection (bidirectional set update).
     pub fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         let id_a = self.meerkat_index.get(a).cloned();
@@ -383,6 +386,16 @@ impl Roster {
         }
     }
 
+    /// Remove the projection edge between two identities.
+    pub fn unwire_identities(&mut self, a: &AgentIdentity, b: &AgentIdentity) {
+        if let Some(entry_a) = self.entries.get_mut(a) {
+            entry_a.wired_to.remove(b);
+        }
+        if let Some(entry_b) = self.entries.get_mut(b) {
+            entry_b.wired_to.remove(a);
+        }
+    }
+
     /// Unwire a local member from an external peer.
     pub fn unwire_external(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
         let local_id = self.meerkat_index.get(local).cloned();
@@ -393,6 +406,24 @@ impl Roster {
                 entry.external_peer_specs.remove(peer_name);
             }
         }
+    }
+
+    /// Remove the projected external peer edge from an identity.
+    pub fn unwire_external_identity(&mut self, local: &AgentIdentity, peer_name: &MeerkatId) {
+        if let Some(entry) = self.entries.get_mut(local) {
+            entry
+                .wired_to
+                .remove(&AgentIdentity::from(peer_name.as_str()));
+            entry.external_peer_specs.remove(peer_name);
+        }
+    }
+
+    pub fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
+        self.unwire(a, b);
+    }
+
+    pub fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
+        self.unwire_external(local, peer_name);
     }
 
     /// Returns true if both members currently have reciprocal projected edges.
@@ -521,6 +552,19 @@ impl Roster {
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool {
         if let Some(entry) = self.get_mut(meerkat_id) {
+            entry.kickoff = kickoff;
+            return true;
+        }
+        false
+    }
+
+    /// Update the projected kickoff state for an existing member by identity.
+    pub fn set_kickoff_by_identity(
+        &mut self,
+        identity: &AgentIdentity,
+        kickoff: Option<MobMemberKickoffSnapshot>,
+    ) -> bool {
+        if let Some(entry) = self.get_by_identity_mut(identity) {
             entry.kickoff = kickoff;
             return true;
         }
@@ -718,6 +762,42 @@ mod tests {
         }
     }
 
+    fn spawned_kind(
+        meerkat_id: &str,
+        role: &str,
+        runtime_mode: MobRuntimeMode,
+        member_ref: MemberRef,
+        labels: BTreeMap<String, String>,
+    ) -> MobEventKind {
+        let agent_identity = AgentIdentity::from(meerkat_id);
+        let mut event = crate::event::MemberSpawnedEvent::new(
+            agent_identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(0),
+            AgentRuntimeId::initial(agent_identity),
+            ProfileName::from(role),
+        )
+        .with_bridge_member_ref(Some(member_ref));
+        event.runtime_mode = runtime_mode;
+        event.labels = labels;
+        MobEventKind::MemberSpawned(event)
+    }
+
+    fn retired_kind(meerkat_id: &str, role: &str) -> MobEventKind {
+        MobEventKind::MemberRetired {
+            agent_identity: AgentIdentity::from(meerkat_id),
+            generation: Generation::INITIAL,
+            role: ProfileName::from(role),
+        }
+    }
+
+    fn wired_kind(a: &str, b: &str) -> MobEventKind {
+        MobEventKind::MembersWired {
+            a: AgentIdentity::from(a),
+            b: AgentIdentity::from(b),
+        }
+    }
+
     #[test]
     fn test_roster_add_and_get() {
         let mut roster = Roster::new();
@@ -727,12 +807,12 @@ mod tests {
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(sid.clone()),
+            MemberRef::from_bridge_session_id(sid.clone()),
         );
         assert_eq!(roster.len(), 1);
         let entry = roster.get(&MeerkatId::from("agent-1")).unwrap();
         assert_eq!(entry.role.as_str(), "worker");
-        assert_eq!(entry.session_id(), Some(&sid));
+        assert_eq!(entry.bridge_session_id(), Some(&sid));
         assert!(entry.wired_to.is_empty());
     }
 
@@ -744,14 +824,14 @@ mod tests {
             MeerkatId::from("agent-1"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("agent-2"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.wire(&MeerkatId::from("agent-1"), &MeerkatId::from("agent-2"));
         roster.remove(&MeerkatId::from("agent-1"));
@@ -813,14 +893,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
 
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
@@ -846,14 +926,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
 
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
@@ -871,7 +951,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
 
         roster.wire_external(
@@ -908,21 +988,21 @@ mod tests {
             MeerkatId::from("w1"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("w2"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("lead"),
             ProfileName::from("orchestrator"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
 
         let workers: Vec<_> = roster.by_profile(&ProfileName::from("worker")).collect();
@@ -942,14 +1022,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("lead"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
 
         let all: Vec<_> = roster.list().collect();
@@ -963,31 +1043,25 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("a"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(sid1),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "a",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(sid1),
+                    BTreeMap::new(),
+                ),
             ),
             make_event(
                 2,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("b"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(sid2),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "b",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(sid2),
+                    BTreeMap::new(),
+                ),
             ),
-            make_event(
-                3,
-                MobEventKind::PeersWired {
-                    a: MeerkatId::from("a"),
-                    b: MeerkatId::from("b"),
-                },
-            ),
+            make_event(3, wired_kind("a", "b")),
         ];
         let roster = Roster::project(&events);
         assert_eq!(roster.len(), 2);
@@ -1002,39 +1076,26 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("a"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(sid1.clone()),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "a",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(sid1.clone()),
+                    BTreeMap::new(),
+                ),
             ),
             make_event(
                 2,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("b"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(sid2.clone()),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "b",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(sid2.clone()),
+                    BTreeMap::new(),
+                ),
             ),
-            make_event(
-                3,
-                MobEventKind::PeersWired {
-                    a: MeerkatId::from("a"),
-                    b: MeerkatId::from("b"),
-                },
-            ),
-            make_event(
-                4,
-                MobEventKind::MeerkatRetired {
-                    meerkat_id: MeerkatId::from("a"),
-                    role: ProfileName::from("worker"),
-                    member_ref: MemberRef::from_session_id(sid1),
-                },
-            ),
+            make_event(3, wired_kind("a", "b")),
+            make_event(4, retired_kind("a", "worker")),
         ];
         let roster = Roster::project(&events);
         assert_eq!(roster.len(), 1);
@@ -1048,13 +1109,13 @@ mod tests {
         let sid = session_id();
         let events = vec![make_event(
             1,
-            MobEventKind::MeerkatSpawned {
-                meerkat_id: MeerkatId::from("a"),
-                role: ProfileName::from("worker"),
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                member_ref: MemberRef::from_session_id(sid),
-                labels: BTreeMap::new(),
-            },
+            spawned_kind(
+                "a",
+                "worker",
+                MobRuntimeMode::AutonomousHost,
+                MemberRef::from_bridge_session_id(sid),
+                BTreeMap::new(),
+            ),
         )];
         let roster1 = Roster::project(&events);
         let roster2 = Roster::project(&events);
@@ -1074,7 +1135,7 @@ mod tests {
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
             meerkat_id: MeerkatId::from("test"),
             role: ProfileName::from("worker"),
-            member_ref: MemberRef::from_session_id(session_id()),
+            member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             peer_id: None,
             state: MemberState::default(),
@@ -1102,7 +1163,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         assert!(roster.mark_retiring(&MeerkatId::from("a")));
         // Second call returns false (already Retiring)
@@ -1119,14 +1180,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.mark_retiring(&MeerkatId::from("a"));
 
@@ -1143,14 +1204,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.mark_retiring(&MeerkatId::from("a"));
 
@@ -1166,14 +1227,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.mark_retiring(&MeerkatId::from("a"));
 
@@ -1193,7 +1254,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         assert_eq!(roster.len(), 1);
         assert!(!roster.is_empty());
@@ -1211,14 +1272,14 @@ mod tests {
             MeerkatId::from("w1"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("w2"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.mark_retiring(&MeerkatId::from("w1"));
 
@@ -1235,7 +1296,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         roster.mark_retiring(&MeerkatId::from("a"));
 
@@ -1253,7 +1314,7 @@ mod tests {
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
             meerkat_id: MeerkatId::from("test"),
             role: ProfileName::from("worker"),
-            member_ref: MemberRef::from_session_id(session_id()),
+            member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             peer_id: None,
             state: MemberState::Active,
@@ -1277,7 +1338,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(sid.clone()),
+            MemberRef::from_bridge_session_id(sid.clone()),
         );
         assert_eq!(roster.bridge_session_id(&MeerkatId::from("a")), Some(&sid));
         assert_eq!(roster.session_id(&MeerkatId::from("a")), Some(&sid));
@@ -1341,13 +1402,13 @@ mod tests {
         let sid = session_id();
         let events = vec![make_event(
             1,
-            MobEventKind::MeerkatSpawned {
-                meerkat_id: MeerkatId::from("a"),
-                role: ProfileName::from("worker"),
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                member_ref: MemberRef::from_session_id(sid),
-                labels: BTreeMap::new(),
-            },
+            spawned_kind(
+                "a",
+                "worker",
+                MobRuntimeMode::AutonomousHost,
+                MemberRef::from_bridge_session_id(sid),
+                BTreeMap::new(),
+            ),
         )];
         let roster = Roster::project(&events);
         let entry = roster.get(&MeerkatId::from("a")).unwrap();
@@ -1362,13 +1423,13 @@ mod tests {
         labels.insert("tier".to_string(), "1".to_string());
         let events = vec![make_event(
             1,
-            MobEventKind::MeerkatSpawned {
-                meerkat_id: MeerkatId::from("a"),
-                role: ProfileName::from("worker"),
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                member_ref: MemberRef::from_session_id(sid),
-                labels: labels.clone(),
-            },
+            spawned_kind(
+                "a",
+                "worker",
+                MobRuntimeMode::AutonomousHost,
+                MemberRef::from_bridge_session_id(sid),
+                labels.clone(),
+            ),
         )];
         let roster = Roster::project(&events);
         let entry = roster.get(&MeerkatId::from("a")).unwrap();
@@ -1382,7 +1443,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "north".to_string());
@@ -1393,7 +1454,7 @@ mod tests {
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "south".to_string());
@@ -1412,7 +1473,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "1".to_string());
@@ -1423,7 +1484,7 @@ mod tests {
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "1".to_string());
@@ -1434,7 +1495,7 @@ mod tests {
             MeerkatId::from("c"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "2".to_string());
@@ -1452,7 +1513,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
             {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "north".to_string());
@@ -1472,7 +1533,7 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         let entry = roster.get(&MeerkatId::from("a")).unwrap();
         let json = serde_json::to_string(entry).unwrap();
@@ -1493,14 +1554,14 @@ mod tests {
             MeerkatId::from("a"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         add_member(
             &mut roster,
             MeerkatId::from("b"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         assert!(roster.is_index_coherent());
 
@@ -1515,23 +1576,23 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("x"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(session_id()),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "x",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
             ),
             make_event(
                 2,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("y"),
-                    role: ProfileName::from("lead"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(session_id()),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "y",
+                    "lead",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
             ),
         ];
         let roster = Roster::project(&events);
@@ -1549,16 +1610,13 @@ mod tests {
         let identity = AgentIdentity::from("researcher");
         let events = vec![make_event(
             1,
-            MobEventKind::MemberSpawned {
-                agent_identity: identity.clone(),
-                generation: Generation::INITIAL,
-                fence_token: FenceToken::new(1),
-                agent_runtime_id: AgentRuntimeId::initial(identity.clone()),
-                role: ProfileName::from("research"),
-                runtime_mode: MobRuntimeMode::AutonomousHost,
-                labels: BTreeMap::new(),
-                bridge_member_ref: None,
-            },
+            MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::INITIAL,
+                FenceToken::new(1),
+                AgentRuntimeId::initial(identity.clone()),
+                ProfileName::from("research"),
+            )),
         )];
         let roster = Roster::project(&events);
         assert!(roster.is_index_coherent());
@@ -1575,16 +1633,13 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MemberSpawned {
-                    agent_identity: identity.clone(),
-                    generation: Generation::INITIAL,
-                    fence_token: FenceToken::new(1),
-                    agent_runtime_id: AgentRuntimeId::initial(identity.clone()),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    labels: BTreeMap::new(),
-                    bridge_member_ref: None,
-                },
+                MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity.clone()),
+                    ProfileName::from("worker"),
+                )),
             ),
             make_event(
                 2,
@@ -1612,7 +1667,7 @@ mod tests {
             MeerkatId::from("mid-1"),
             ProfileName::from("worker"),
             MobRuntimeMode::AutonomousHost,
-            MemberRef::from_session_id(session_id()),
+            MemberRef::from_bridge_session_id(session_id()),
         );
         assert_eq!(
             roster.resolve_identity(&MeerkatId::from("mid-1")),
@@ -1629,13 +1684,13 @@ mod tests {
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MeerkatSpawned {
-                    meerkat_id: MeerkatId::from("a"),
-                    role: ProfileName::from("worker"),
-                    runtime_mode: MobRuntimeMode::AutonomousHost,
-                    member_ref: MemberRef::from_session_id(session_id()),
-                    labels: BTreeMap::new(),
-                },
+                spawned_kind(
+                    "a",
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
             ),
             make_event(2, MobEventKind::MobReset),
         ];

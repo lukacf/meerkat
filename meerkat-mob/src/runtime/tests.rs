@@ -1416,16 +1416,14 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MobCreated { .. } => "MobCreated",
             MobEventKind::MobCompleted => "MobCompleted",
             MobEventKind::MobReset => "MobReset",
-            MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
-            MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
-            MobEventKind::MemberSpawned { .. } => "MemberSpawned",
+            MobEventKind::MemberSpawned(..) => "MemberSpawned",
             MobEventKind::MemberRetired { .. } => "MemberRetired",
             MobEventKind::MemberReset { .. } => "MemberReset",
-            MobEventKind::MeerkatKickoffUpdated { .. } => "MeerkatKickoffUpdated",
-            MobEventKind::PeersWired { .. } => "PeersWired",
+            MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
+            MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
-            MobEventKind::PeersUnwired { .. } => "PeersUnwired",
+            MobEventKind::MembersUnwired { .. } => "MembersUnwired",
             MobEventKind::TaskCreated { .. } => "TaskCreated",
             MobEventKind::TaskUpdated { .. } => "TaskUpdated",
             MobEventKind::FlowStarted { .. } => "FlowStarted",
@@ -3734,7 +3732,7 @@ async fn test_register_tool_bundle_is_wired_into_spawn() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -3783,10 +3781,9 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
     assert!(handle.list_members().await.is_empty());
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        !events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatSpawned { .. } | MobEventKind::MemberSpawned { .. }
-        )),
+        !events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberSpawned(..))),
         "failed spawn should not emit any spawn event"
     );
 }
@@ -3798,7 +3795,7 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4008,7 +4005,7 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
 
 #[tokio::test]
 async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let (handle, _service) = create_test_mob(sample_definition()).await;
     let helper_id = AgentIdentity::from("helper-spawn");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -4026,23 +4023,16 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
     .expect("spawn_helper must not wait on helper terminality")
     .expect("spawn_helper succeeds");
 
-    let session_id = result.session_id.expect("helper session id");
+    assert_eq!(result.agent_identity, helper_id);
     assert!(
-        service.read(&session_id).await.is_err(),
-        "spawn_helper must retire the helper session once it returns"
-    );
-    assert!(
-        handle
-            .get_member(&AgentIdentity::from(helper_id.as_str()))
-            .await
-            .is_none(),
+        handle.get_member(&result.agent_identity).await.is_none(),
         "spawn_helper must remove the helper from the active roster once it returns"
     );
 }
 
 #[tokio::test]
 async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
-    let (handle, service) = create_test_mob(sample_definition()).await;
+    let (handle, _service) = create_test_mob(sample_definition()).await;
     let source_id = AgentIdentity::from("fork-source");
     let source_meerkat_id = MeerkatId::from("fork-source");
     let source_ref = handle
@@ -4075,24 +4065,17 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
     .expect("fork_helper must not wait on helper terminality")
     .expect("fork_helper succeeds");
 
-    let helper_session_id = result.session_id.expect("fork helper session id");
+    assert_eq!(result.agent_identity, helper_id);
     assert!(
-        service.read(&helper_session_id).await.is_err(),
-        "fork_helper must retire the helper session once it returns"
-    );
-    assert!(
-        handle
-            .get_member(&AgentIdentity::from(helper_id.as_str()))
-            .await
-            .is_none(),
+        handle.get_member(&result.agent_identity).await.is_none(),
         "fork_helper must remove the helper from the active roster once it returns"
     );
     assert_eq!(
-        source_ref.session_id().cloned(),
+        source_ref.bridge_session_id().cloned(),
         handle
             .get_member(&AgentIdentity::from(source_id.as_str()))
             .await
-            .and_then(|entry| entry.member_ref.session_id().cloned()),
+            .and_then(|entry| entry.member_ref.bridge_session_id().cloned()),
         "fork_helper must not perturb the source member's canonical session binding"
     );
 }
@@ -4138,9 +4121,13 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         .await
         .expect("spawn original member");
     let old_session_id = original_ref
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("original session id");
+    let original_snapshot = handle
+        .member_status(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("original member snapshot");
 
     let receipt = handle
         .respawn(
@@ -4151,30 +4138,43 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
         .expect("respawn succeeds");
 
     assert_eq!(receipt.identity, AgentIdentity::from(member_id.as_str()));
-    assert_eq!(receipt.old_bridge_session_id, Some(old_session_id.clone()));
-    let new_session_id = receipt
-        .new_bridge_session_id
+    assert_eq!(receipt.previous_fence_token, original_snapshot.fence_token);
+    assert_eq!(
+        receipt.agent_runtime_id.identity,
+        AgentIdentity::from(member_id.as_str())
+    );
+    assert_eq!(
+        receipt.agent_runtime_id.generation,
+        original_snapshot.agent_runtime_id.generation
+    );
+    let snapshot = handle
+        .member_status(&receipt.identity)
+        .await
+        .expect("member snapshot");
+    let new_bridge_session_id = snapshot
+        .current_bridge_session_id
         .clone()
         .expect("new session id");
-    assert_ne!(new_session_id, old_session_id);
+    assert_ne!(new_bridge_session_id, old_session_id);
     assert!(
         service.read(&old_session_id).await.is_err(),
         "respawn must archive the retired session before returning"
     );
 
-    let snapshot = handle
-        .member_status(&receipt.identity)
-        .await
-        .expect("member snapshot");
-    assert_eq!(snapshot.current_session_id, Some(new_session_id.clone()));
+    assert_eq!(snapshot.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(snapshot.fence_token, receipt.fence_token);
+    assert_eq!(
+        snapshot.current_session_id,
+        Some(new_bridge_session_id.clone())
+    );
     assert_eq!(
         service
-            .read(&new_session_id)
+            .read(&new_bridge_session_id)
             .await
             .expect("new session readable")
             .state
             .session_id,
-        new_session_id,
+        new_bridge_session_id,
         "respawn receipt must align with the canonical replacement session"
     );
 }
@@ -4208,9 +4208,13 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
         .wire(AgentIdentity::from(left.as_str()), right.clone())
         .await
         .expect("wire peers before respawn");
+    let original_left_snapshot = handle
+        .member_status(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left snapshot before respawn");
 
     let old_session_id = original_left
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("left session id");
     let receipt = handle
@@ -4221,7 +4225,14 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
         .await
         .expect("respawn succeeds");
 
-    assert_eq!(receipt.old_bridge_session_id, Some(old_session_id.clone()));
+    assert_eq!(
+        receipt.previous_fence_token,
+        original_left_snapshot.fence_token
+    );
+    assert_eq!(
+        receipt.agent_runtime_id.generation,
+        original_left_snapshot.agent_runtime_id.generation
+    );
     assert!(
         service.read(&old_session_id).await.is_err(),
         "respawn must archive the retired session before returning"
@@ -4247,9 +4258,10 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
             .contains(&AgentIdentity::from(left.as_str())),
         "respawn replacement must preserve the peer's canonical wiring projection"
     );
+    assert_eq!(left_entry.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(left_entry.fence_token, receipt.fence_token);
     assert_eq!(
-        left_entry.member_ref.session_id().cloned(),
-        receipt.new_bridge_session_id,
+        left_entry.agent_runtime_id, receipt.agent_runtime_id,
         "respawn receipt must align with the replacement member's canonical session binding"
     );
 }
@@ -4284,7 +4296,7 @@ async fn test_wait_one_observes_retiring_member_as_non_terminal_until_archive() 
         .spawn(ProfileName::from("worker"), member_id.clone(), None)
         .await
         .expect("spawn retiring member")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed member")
         .clone();
 
@@ -4525,7 +4537,7 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
         .get_member(&AgentIdentity::from(broken.as_str()))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -4574,7 +4586,7 @@ async fn test_mob_flow_tools_hidden_without_operator_context() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4627,7 +4639,7 @@ async fn test_mob_flow_status_tool_is_hidden_without_operator_context_even_for_b
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4670,7 +4682,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
         )
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4805,7 +4817,7 @@ async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4839,7 +4851,7 @@ async fn test_mob_task_tools_hidden_without_operator_context() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -4879,7 +4891,7 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -5066,7 +5078,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let mut persisted = service
@@ -5093,7 +5105,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("restored entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     assert_eq!(
@@ -5147,7 +5159,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5166,7 +5178,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("restored entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     assert_eq!(
@@ -5210,7 +5222,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5278,14 +5290,14 @@ async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -5348,7 +5360,7 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle.stop().await.expect("stop");
@@ -5398,7 +5410,7 @@ async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_re
         .get_member(&AgentIdentity::from("lead-1"))
         .await
         .expect("orchestrator entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5453,7 +5465,7 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5530,7 +5542,7 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5599,7 +5611,7 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5657,7 +5669,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     service
@@ -5686,8 +5698,12 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         .respawn(AgentIdentity::from("w-1"), None)
         .await
         .expect("respawn should repair broken member");
-    let new_sid = receipt
-        .new_bridge_session_id
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status after repair");
+    let new_sid = snapshot
+        .current_bridge_session_id
         .clone()
         .expect("respawned member should have a new session");
     assert_ne!(
@@ -5695,14 +5711,12 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         "respawn should rotate the session identity"
     );
 
-    let snapshot = resumed
-        .member_status(&AgentIdentity::from("w-1"))
-        .await
-        .expect("member status after repair");
     assert_eq!(
         snapshot.status,
         crate::runtime::handle::MobMemberStatus::Active
     );
+    assert_eq!(snapshot.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(snapshot.fence_token, receipt.fence_token);
     assert_eq!(snapshot.current_session_id, Some(new_sid.clone()));
     assert!(
         snapshot.error.is_none(),
@@ -5743,7 +5757,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let mut persisted = service
@@ -5790,7 +5804,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("restored entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let restored = service
@@ -5843,7 +5857,7 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let mut persisted = service
@@ -6063,7 +6077,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
         .expect("attach should restore persisted session");
 
     assert_eq!(
-        member_ref.session_id(),
+        member_ref.bridge_session_id(),
         Some(&session_id),
         "explicit member resume should preserve the requested session id"
     );
@@ -6167,7 +6181,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-sub"), None)
         .await
         .expect("spawn session-backed member")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -6271,14 +6285,14 @@ async fn test_resume_reestablishes_missing_trust() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -6299,14 +6313,14 @@ async fn test_resume_reestablishes_missing_trust() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("w-1")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let resumed_sid_2 = resumed
         .get_member(&AgentIdentity::from("w-2"))
         .await
         .expect("w-2")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let trusted_1 = service.trusted_peer_names(&resumed_sid_1).await;
@@ -6336,7 +6350,7 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let _sid_2 = handle
@@ -6364,7 +6378,7 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("w-1")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let trusted = service.trusted_peer_names(&resumed_sid_1).await;
@@ -6413,7 +6427,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .get_member(&AgentIdentity::from("l-1"))
         .await
         .expect("resumed member")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
     let trusted = service.trusted_peer_names(&resumed_sid).await;
@@ -6584,7 +6598,7 @@ async fn test_spawn_creates_session() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn should succeed")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -6593,7 +6607,7 @@ async fn test_spawn_creates_session() {
     assert_eq!(meerkats.len(), 1);
     assert_eq!(meerkats[0].meerkat_id.as_str(), "w-1");
     assert_eq!(meerkats[0].role.as_str(), "worker");
-    assert_eq!(meerkats[0].session_id(), Some(&session_id));
+    assert_eq!(meerkats[0].bridge_session_id(), Some(&session_id));
 }
 
 #[tokio::test]
@@ -6638,7 +6652,7 @@ async fn test_spawn_emits_meerkat_spawned_event() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -6651,23 +6665,20 @@ async fn test_spawn_emits_meerkat_spawned_event() {
     );
     let spawned = events
         .iter()
-        .find(|e| matches!(e.kind, MobEventKind::MemberSpawned { .. }));
+        .find(|e| matches!(e.kind, MobEventKind::MemberSpawned(..)));
     assert!(spawned.is_some(), "should have MemberSpawned event");
-    if let MobEventKind::MemberSpawned {
-        agent_identity,
-        role,
-        generation,
-        fence_token,
-        bridge_member_ref,
-        ..
-    } = &spawned.unwrap().kind
-    {
-        assert_eq!(agent_identity.as_str(), "w-1");
-        assert_eq!(role.as_str(), "worker");
-        assert_eq!(*generation, crate::ids::Generation::INITIAL);
-        assert!(fence_token.get() > 0, "fence token should be non-zero");
+    if let MobEventKind::MemberSpawned(member_spawned) = &spawned.unwrap().kind {
+        assert_eq!(member_spawned.agent_identity.as_str(), "w-1");
+        assert_eq!(member_spawned.role.as_str(), "worker");
+        assert_eq!(member_spawned.generation, crate::ids::Generation::INITIAL);
+        assert!(
+            member_spawned.fence_token.get() > 0,
+            "fence token should be non-zero"
+        );
         assert_eq!(
-            bridge_member_ref.as_ref().and_then(|r| r.session_id()),
+            member_spawned
+                .bridge_member_ref()
+                .and_then(|member_ref| member_ref.bridge_session_id()),
             Some(&session_id),
         );
     }
@@ -6777,11 +6788,11 @@ async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
         .await
         .expect("spawn external w-b");
     let sid_a = member_a
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("external member bridge session id");
     let sid_b = member_b
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("external member bridge session id");
 
@@ -6881,7 +6892,7 @@ async fn test_spawn_append_failure_rolls_back_runtime_state() {
     assert!(
         !recorded
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::MemberSpawned { .. })),
+            .any(|e| matches!(e.kind, MobEventKind::MemberSpawned(..))),
         "failed spawn append must not persist MemberSpawned"
     );
 }
@@ -6941,12 +6952,9 @@ async fn test_retire_emits_event() {
         .expect("retire");
 
     let events = handle.events().replay_all().await.expect("replay");
-    let retired = events.iter().find(|e| {
-        matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )
-    });
+    let retired = events
+        .iter()
+        .find(|e| matches!(e.kind, MobEventKind::MemberRetired { .. }));
     assert!(retired.is_some(), "should have retire event");
 }
 
@@ -7002,7 +7010,7 @@ async fn test_retire_archive_failure_is_not_silent() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_archive_failure(&session_id).await;
@@ -7024,10 +7032,9 @@ async fn test_retire_archive_failure_is_not_silent() {
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
         "retire event should be persisted before archive so cleanup remains retryable"
     );
 }
@@ -7075,10 +7082,9 @@ async fn test_retire_trust_removal_failure_is_not_silent() {
     );
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
         "retire event should persist even when trust-removal cleanup fails"
     );
 }
@@ -7132,10 +7138,9 @@ async fn test_retire_fails_when_peer_retired_notification_fails_without_side_eff
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
         "retire event should persist even when notification cleanup fails"
     );
 }
@@ -7187,11 +7192,10 @@ async fn test_retire_append_failure_is_retryable_without_side_effects() {
 
     let recorded = handle.events().replay_all().await.expect("replay");
     assert!(
-        !recorded.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
-        "failed retire append must not persist MeerkatRetired"
+        !recorded
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
+        "failed retire append must not persist MemberRetired"
     );
 }
 
@@ -7254,7 +7258,7 @@ async fn test_member_status_projects_unreachable_peer_connectivity() {
         .spawn(ProfileName::from("lead"), left_id.clone(), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -7311,7 +7315,7 @@ async fn test_member_status_omits_peer_connectivity_without_live_comms_runtime()
         .spawn(ProfileName::from("lead"), left_id.clone(), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -7341,7 +7345,7 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7391,7 +7395,7 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7414,8 +7418,14 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         .respawn(AgentIdentity::from("l-1"), Some("resume".into()))
         .await
         .expect("respawn");
-    let new_sid = receipt
-        .new_bridge_session_id
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("member should exist");
+    let new_sid = entry
+        .member_ref
+        .bridge_session_id()
+        .cloned()
         .expect("respawn should produce replacement session");
     assert_ne!(new_sid, old_sid, "respawn should replace the session");
 
@@ -7425,10 +7435,6 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
         "respawn should restore external trusted peers from the stored roster spec"
     );
 
-    let entry = handle
-        .get_member(&AgentIdentity::from("l-1"))
-        .await
-        .expect("member should exist");
     assert_eq!(
         entry
             .external_peer_specs
@@ -7436,6 +7442,8 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
             .cloned(),
         Some(external)
     );
+    assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(entry.fence_token, receipt.fence_token);
 }
 
 #[tokio::test]
@@ -7445,7 +7453,7 @@ async fn test_unwire_external_removes_trust_and_projection() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let external = TrustedPeerSpec::new(
@@ -7526,8 +7534,8 @@ async fn test_unwire_external_emits_external_peer_unwired_event() {
         matches!(
             &event.kind,
             MobEventKind::ExternalPeerUnwired { local, peer_name }
-                if local == &MeerkatId::from("l-1")
-                    && peer_name == &MeerkatId::from(external.name.clone())
+                if local == &AgentIdentity::from("l-1")
+                    && peer_name == &external.name
         )
     }));
 }
@@ -7581,7 +7589,7 @@ async fn test_unwire_external_is_idempotent_and_emits_single_event() {
             matches!(
                 &event.kind,
                 MobEventKind::ExternalPeerUnwired { local, peer_name }
-                    if local == &MeerkatId::from("l-1") && peer_name == &external_name
+                    if local == &AgentIdentity::from("l-1") && peer_name == external_name.as_str()
             )
         })
         .count();
@@ -7608,8 +7616,8 @@ async fn test_wire_emits_peers_wired_event() {
     let events = handle.events().replay_all().await.expect("replay");
     let wired = events
         .iter()
-        .find(|e| matches!(e.kind, MobEventKind::PeersWired { .. }));
-    assert!(wired.is_some(), "should have PeersWired event");
+        .find(|e| matches!(e.kind, MobEventKind::MembersWired { .. }));
+    assert!(wired.is_some(), "should have MembersWired event");
 }
 
 #[tokio::test]
@@ -7619,14 +7627,14 @@ async fn test_wire_is_idempotent_and_emits_single_pair_event() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7683,15 +7691,15 @@ async fn test_wire_is_idempotent_and_emits_single_pair_event() {
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::PeersWired { a, b }
-                    if (a == &MeerkatId::from("l-1") && b == &MeerkatId::from("w-1"))
-                        || (a == &MeerkatId::from("w-1") && b == &MeerkatId::from("l-1"))
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-1") && b == &AgentIdentity::from("w-1"))
+                        || (a == &AgentIdentity::from("w-1") && b == &AgentIdentity::from("l-1"))
             )
         })
         .count();
     assert_eq!(
         pair_wired_events, 1,
-        "idempotent wire must emit one logical PeersWired event for one canonical edge"
+        "idempotent wire must emit one logical MembersWired event for one canonical edge"
     );
 }
 
@@ -7716,14 +7724,14 @@ async fn test_wire_fails_when_comms_runtime_missing_without_side_effects() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_missing_comms_runtime(&sid_w).await;
@@ -7754,8 +7762,8 @@ async fn test_wire_fails_when_comms_runtime_missing_without_side_effects() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersWired { .. })),
-        "failed wire must not emit PeersWired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersWired { .. })),
+        "failed wire must not emit MembersWired"
     );
 }
 
@@ -7807,8 +7815,8 @@ async fn test_wire_fails_when_public_key_missing_without_side_effects() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersWired { .. })),
-        "failed wire must not emit PeersWired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersWired { .. })),
+        "failed wire must not emit MembersWired"
     );
 }
 
@@ -7829,14 +7837,14 @@ async fn test_wire_fails_when_peer_added_notification_fails_without_side_effects
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7880,8 +7888,8 @@ async fn test_wire_fails_when_peer_added_notification_fails_without_side_effects
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersWired { .. })),
-        "failed wire must not emit PeersWired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersWired { .. })),
+        "failed wire must not emit MembersWired"
     );
 }
 
@@ -7892,14 +7900,14 @@ async fn test_wire_establishes_comms_trust() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7936,21 +7944,21 @@ async fn test_wire_establishes_comms_trust() {
 #[tokio::test]
 async fn test_wire_append_failure_rolls_back_runtime_state() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
-    events.fail_appends_for("PeersWired").await;
+    events.fail_appends_for("MembersWired").await;
     let (handle, service) = create_test_mob_with_events(sample_definition(), events).await;
 
     let sid_l = handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -7994,8 +8002,8 @@ async fn test_wire_append_failure_rolls_back_runtime_state() {
     assert!(
         !recorded
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersWired { .. })),
-        "failed wire append must not persist PeersWired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersWired { .. })),
+        "failed wire append must not persist MembersWired"
     );
 }
 
@@ -8062,8 +8070,8 @@ async fn test_unwire_emits_peers_unwired_event() {
     let events = handle.events().replay_all().await.expect("replay");
     let unwired = events
         .iter()
-        .find(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. }));
-    assert!(unwired.is_some(), "should have PeersUnwired event");
+        .find(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. }));
+    assert!(unwired.is_some(), "should have MembersUnwired event");
 }
 
 #[tokio::test]
@@ -8110,15 +8118,15 @@ async fn test_unwire_is_idempotent_and_emits_single_pair_event() {
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::PeersUnwired { a, b }
-                    if (a == &MeerkatId::from("l-1") && b == &MeerkatId::from("w-1"))
-                        || (a == &MeerkatId::from("w-1") && b == &MeerkatId::from("l-1"))
+                MobEventKind::MembersUnwired { a, b }
+                    if (a == &AgentIdentity::from("l-1") && b == &AgentIdentity::from("w-1"))
+                        || (a == &AgentIdentity::from("w-1") && b == &AgentIdentity::from("l-1"))
             )
         })
         .count();
     assert_eq!(
         pair_unwired_events, 1,
-        "idempotent unwire must emit one logical PeersUnwired event for one canonical edge removal"
+        "idempotent unwire must emit one logical MembersUnwired event for one canonical edge removal"
     );
 }
 
@@ -8133,7 +8141,7 @@ async fn test_unwire_fails_when_comms_runtime_missing_without_side_effects() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8168,8 +8176,8 @@ async fn test_unwire_fails_when_comms_runtime_missing_without_side_effects() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire must not emit PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire must not emit MembersUnwired"
     );
 }
 
@@ -8184,7 +8192,7 @@ async fn test_unwire_fails_when_public_key_missing_without_side_effects() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8219,8 +8227,8 @@ async fn test_unwire_fails_when_public_key_missing_without_side_effects() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire must not emit PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire must not emit MembersUnwired"
     );
 }
 
@@ -8241,14 +8249,14 @@ async fn test_unwire_second_trust_removal_failure_restores_first_side() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8348,8 +8356,8 @@ async fn test_unwire_fails_when_peer_unwired_notification_fails_without_side_eff
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire must not emit PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire must not emit MembersUnwired"
     );
 }
 
@@ -8370,14 +8378,14 @@ async fn test_unwire_second_notification_failure_compensates_and_preserves_state
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8446,8 +8454,8 @@ async fn test_unwire_second_notification_failure_compensates_and_preserves_state
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire must not emit PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire must not emit MembersUnwired"
     );
 }
 
@@ -8468,14 +8476,14 @@ async fn test_unwire_first_trust_removal_failure_compensates_and_preserves_state
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8545,29 +8553,29 @@ async fn test_unwire_first_trust_removal_failure_compensates_and_preserves_state
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire must not emit PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire must not emit MembersUnwired"
     );
 }
 
 #[tokio::test]
 async fn test_unwire_append_failure_restores_runtime_state() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
-    events.fail_appends_for("PeersUnwired").await;
+    events.fail_appends_for("MembersUnwired").await;
     let (handle, service) = create_test_mob_with_events(sample_definition(), events).await;
 
     let sid_l = handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -8615,8 +8623,8 @@ async fn test_unwire_append_failure_restores_runtime_state() {
     assert!(
         !recorded
             .iter()
-            .any(|e| matches!(e.kind, MobEventKind::PeersUnwired { .. })),
-        "failed unwire append must not persist PeersUnwired"
+            .any(|e| matches!(e.kind, MobEventKind::MembersUnwired { .. })),
+        "failed unwire append must not persist MembersUnwired"
     );
 }
 
@@ -8670,14 +8678,14 @@ async fn test_auto_wire_orchestrator_updates_real_comms_peers() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -8730,7 +8738,7 @@ async fn test_auto_wire_orchestrator_real_comms_does_not_surface_self_peer() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -8753,14 +8761,14 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w1 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn first worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -8778,7 +8786,7 @@ async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
         .expect("spawn second worker from worker owner context");
     let sid_w2 = receipt
         .member_ref
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -8853,7 +8861,7 @@ async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle.stop().await.expect("stop");
@@ -8886,7 +8894,7 @@ async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker should ignore broken orchestrator")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let worker = resumed
@@ -8965,7 +8973,7 @@ async fn test_auto_wire_failure_after_partial_wire_cleans_peer_trust_via_spawn_r
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -9017,7 +9025,7 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_missing_comms_runtime(&sid_l).await;
@@ -9047,14 +9055,14 @@ async fn test_spawn_rollback_ignores_missing_comms_for_non_wired_planned_targets
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service
@@ -9129,11 +9137,10 @@ async fn test_spawn_rollback_archive_failure_keeps_spawned_entry_and_persists_re
 
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
-        "rollback must persist MeerkatRetired before side-effect cleanup so retries stay replay-safe"
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
+        "rollback must persist MemberRetired before side-effect cleanup so retries stay replay-safe"
     );
 }
 
@@ -9154,7 +9161,7 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let spawn_err = spawn_handle
@@ -9185,21 +9192,21 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
 
     // Unwire rollback invariants.
     let unwire_events = Arc::new(FaultInjectedMobEventStore::new());
-    unwire_events.fail_appends_for("PeersUnwired").await;
+    unwire_events.fail_appends_for("MembersUnwired").await;
     let (unwire_handle, unwire_service) =
         create_test_mob_with_events(sample_definition(), unwire_events).await;
     let sid_u1 = unwire_handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("u-1"), None)
         .await
         .expect("spawn u-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_u2 = unwire_handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("u-2"), None)
         .await
         .expect("spawn u-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     unwire_handle
@@ -9246,7 +9253,7 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .spawn(ProfileName::from("worker"), MeerkatId::from("r-1"), None)
         .await
         .expect("spawn r-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let _sid_r2 = retire_handle
@@ -9360,7 +9367,7 @@ async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle.stop().await.expect("stop");
@@ -9396,7 +9403,7 @@ async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn should ignore broken role peers")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let worker = resumed
@@ -9464,15 +9471,15 @@ async fn test_role_wiring_cross_role_fans_out_to_three_existing_targets() {
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::PeersWired { a, b }
-                    if (a == &MeerkatId::from("l-1")
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-1")
                         && ["w-1", "w-2", "w-3"]
                             .iter()
-                            .any(|w| b == &MeerkatId::from(*w)))
-                        || (b == &MeerkatId::from("l-1")
+                            .any(|w| b == &AgentIdentity::from(*w)))
+                        || (b == &AgentIdentity::from("l-1")
                             && ["w-1", "w-2", "w-3"]
                                 .iter()
-                                .any(|w| a == &MeerkatId::from(*w)))
+                                .any(|w| a == &AgentIdentity::from(*w)))
             )
         })
         .count();
@@ -9513,15 +9520,15 @@ async fn test_spawn_wiring_deduplicates_overlapping_orchestrator_and_role_edges(
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::PeersWired { a, b }
-                    if (a == &MeerkatId::from("l-1") && b == &MeerkatId::from("w-1"))
-                        || (a == &MeerkatId::from("w-1") && b == &MeerkatId::from("l-1"))
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-1") && b == &AgentIdentity::from("w-1"))
+                        || (a == &AgentIdentity::from("w-1") && b == &AgentIdentity::from("l-1"))
             )
         })
         .count();
     assert_eq!(
         wires_for_pair, 1,
-        "wiring overlap should emit a single PeersWired event for one logical edge"
+        "wiring overlap should emit a single MembersWired event for one logical edge"
     );
 }
 
@@ -9868,7 +9875,7 @@ async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain(
         )
         .await
         .expect("spawn autonomous lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -10021,7 +10028,7 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .await
         .expect("spawn target");
     let session_id = member_ref
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed target");
     let baseline_interrupts = service.interrupt_call_count();
@@ -10041,7 +10048,7 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
         .await
         .expect("member remains");
     assert_eq!(
-        entry.member_ref.session_id().cloned(),
+        entry.member_ref.bridge_session_id().cloned(),
         Some(session_id.clone()),
         "force-cancel must not rewrite the member's canonical session binding"
     );
@@ -10299,7 +10306,7 @@ async fn test_concurrent_spawns_parallelize_provisioning() {
     let events = handle.events().replay_all().await.expect("replay");
     let spawned_count = events
         .iter()
-        .filter(|event| matches!(event.kind, MobEventKind::MemberSpawned { .. }))
+        .filter(|event| matches!(event.kind, MobEventKind::MemberSpawned(..)))
         .count();
     assert_eq!(
         spawned_count, 10,
@@ -10356,7 +10363,7 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
     let events = handle.events().replay_all().await.expect("replay");
     let mut pair_wire_events = 0usize;
     for event in events {
-        if let MobEventKind::PeersWired { a, b } = event.kind {
+        if let MobEventKind::MembersWired { a, b } = event.kind {
             let a_id = a.as_str();
             let b_id = b.as_str();
             if (a_id == "w-a" && b_id == "w-b") || (a_id == "w-b" && b_id == "w-a") {
@@ -10367,7 +10374,7 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
 
     assert_eq!(
         pair_wire_events, 1,
-        "parallel spawn finalization must emit exactly one PeersWired event for w-a<->w-b"
+        "parallel spawn finalization must emit exactly one MembersWired event for w-a<->w-b"
     );
 
     let a = handle
@@ -10417,9 +10424,9 @@ async fn test_spawn_many_parallel_finalize_tolerates_overlapping_role_wiring_tar
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::PeersWired { a, b }
-                    if (a == &MeerkatId::from("l-a") && b == &MeerkatId::from("w-a"))
-                        || (a == &MeerkatId::from("w-a") && b == &MeerkatId::from("l-a"))
+                MobEventKind::MembersWired { a, b }
+                    if (a == &AgentIdentity::from("l-a") && b == &AgentIdentity::from("w-a"))
+                        || (a == &AgentIdentity::from("w-a") && b == &AgentIdentity::from("l-a"))
             )
         })
         .count();
@@ -10460,7 +10467,7 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -11118,7 +11125,7 @@ async fn test_max_step_retries_controls_dispatch_attempts() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_flow_turn_fail_for_session(&sid_w1, true).await;
@@ -11136,8 +11143,10 @@ async fn test_max_step_retries_controls_dispatch_attempts() {
         .filter(|event| {
             matches!(
                 &event.kind,
-                MobEventKind::StepDispatched { run_id: id, step_id, meerkat_id }
-                    if id == &run_id && step_id.as_str() == "start" && meerkat_id.as_str() == "w-1"
+                MobEventKind::StepDispatched { run_id: id, step_id, target }
+                    if id == &run_id
+                        && step_id.as_str() == "start"
+                        && target.identity.as_str() == "w-1"
             )
         })
         .count();
@@ -11192,7 +11201,7 @@ async fn test_branch_winner_is_selected_only_after_success_allowing_fallback() {
         )
         .await
         .expect("spawn failing worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -11410,7 +11419,8 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
     let events = handle.events().replay_all().await.expect("replay events");
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-        MobEventKind::MemberSpawned { agent_identity, .. } if agent_identity.as_str() == "w-1"
+        MobEventKind::MemberSpawned(member_spawned)
+            if member_spawned.agent_identity.as_str() == "w-1"
     )));
 }
 
@@ -12295,14 +12305,14 @@ async fn test_collection_policy_any_succeeds_with_single_target_success() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let _sid_w2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_flow_turn_fail_for_session(&sid_w1, true).await;
@@ -12325,14 +12335,14 @@ async fn test_collection_policy_quorum_requires_threshold_successes() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let _sid_w2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_flow_turn_fail_for_session(&sid_w1, true).await;
@@ -13131,7 +13141,7 @@ async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn autonomous lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle.stop().await.expect("stop");
@@ -13734,14 +13744,14 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -13830,7 +13840,7 @@ async fn test_runtime_backed_turn_driven_send_preserves_render_metadata() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("lead-rt"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -13891,7 +13901,7 @@ async fn test_mob_session_service_exposes_event_injector_for_session() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -13909,7 +13919,7 @@ async fn test_mob_session_service_subscribe_session_events_available() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -13950,14 +13960,14 @@ async fn test_wire_enables_peer_request_delivery() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
 
@@ -14059,14 +14069,14 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -14109,14 +14119,14 @@ async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent(
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -14175,7 +14185,7 @@ async fn test_unwire_external_prunes_stale_trust_when_projection_is_already_abse
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let spec = TrustedPeerSpec::new(
@@ -14229,14 +14239,14 @@ async fn test_retire_updates_peers_and_sends_retired_notifications() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_b = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -14286,14 +14296,14 @@ async fn test_unwire_sends_required_peer_unwired_notifications() {
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn worker")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -14329,14 +14339,14 @@ async fn test_retire_sends_required_peer_retired_notifications() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     let sid_w2 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
         .await
         .expect("spawn w-2")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     handle
@@ -14401,7 +14411,7 @@ async fn test_dispose_member_removes_roster_even_when_steps_fail() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .unwrap()
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .unwrap();
     service.set_archive_failure(&sid_w1).await;
@@ -14467,12 +14477,7 @@ async fn test_disposal_report_ordering_is_deterministic() {
     let events = handle.events().replay_all().await.expect("replay");
     let retire_events: Vec<_> = events
         .iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-            )
-        })
+        .filter(|e| matches!(e.kind, MobEventKind::MemberRetired { .. }))
         .collect();
     assert_eq!(
         retire_events.len(),
@@ -14681,7 +14686,7 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
     assert_eq!(snapshot.status, crate::runtime::MobMemberStatus::Active);
     assert_eq!(
         snapshot.current_session_id.as_ref(),
-        Some(receipt.session_id().expect("session-backed")),
+        Some(receipt.bridge_session_id().expect("session-backed")),
         "machine-routed member_status should preserve the active session binding"
     );
 }
@@ -14705,7 +14710,7 @@ async fn test_member_handle_session_helpers_round_trip_through_machine_projectio
         .expect("current session id");
     assert_eq!(
         current_session_id.as_ref(),
-        Some(receipt.session_id().expect("session-backed")),
+        Some(receipt.bridge_session_id().expect("session-backed")),
         "member handle should expose the machine-routed current session binding"
     );
 
@@ -14714,7 +14719,7 @@ async fn test_member_handle_session_helpers_round_trip_through_machine_projectio
         session_ref
             .as_ref()
             .map(|session| &session.bridge_session_id),
-        Some(receipt.session_id().expect("session-backed")),
+        Some(receipt.bridge_session_id().expect("session-backed")),
         "member handle session_ref should follow the same machine-routed binding"
     );
 }
@@ -14749,7 +14754,7 @@ async fn test_mob_events_view_round_trips_through_machine_command_surface() {
     assert!(
         replay
             .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MemberSpawned { .. })),
+            .any(|event| matches!(event.kind, MobEventKind::MemberSpawned(..))),
         "replayed event view should include spawn events through the machine command surface"
     );
 
@@ -14937,7 +14942,7 @@ async fn test_retire_returns_err_when_archive_fails() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
         .expect("spawn w-1")
-        .session_id()
+        .bridge_session_id()
         .expect("session-backed")
         .clone();
     service.set_archive_failure(&session_id).await;
@@ -14961,10 +14966,9 @@ async fn test_retire_returns_err_when_archive_fails() {
     // Retire event was persisted before disposal (event-first).
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
-        events.iter().any(|e| matches!(
-            e.kind,
-            MobEventKind::MeerkatRetired { .. } | MobEventKind::MemberRetired { .. }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MemberRetired { .. })),
         "retire event must persist regardless of archive outcome"
     );
 }
@@ -15224,7 +15228,10 @@ async fn test_trusted_peer_spec_uses_bridge_not_real_identity() {
         .expect("wire lead to external member");
 
     // Check what trust was added to the lead's comms runtime.
-    let lead_sid = lead_ref.session_id().cloned().expect("lead session id");
+    let lead_sid = lead_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("lead session id");
     let trusted_addresses = service.trusted_peer_addresses(&lead_sid).await;
 
     // The trust spec should use inproc:// bridge transport, not the real
@@ -15320,7 +15327,10 @@ async fn test_external_tools_name_collision_profile_wins() {
         .await
         .expect("spawn should succeed despite name collision");
 
-    let session_id = member_ref.session_id().expect("session-backed").clone();
+    let session_id = member_ref
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
     let tool_names = service.external_tool_names(&session_id).await;
 
     // Without operator context there is no mob-owned spawn_meerkat, so the callback
@@ -15431,7 +15441,7 @@ async fn test_external_tools_late_registration() {
         "spawn after registration should have external tools"
     );
 
-    let session_id = ref2.session_id().expect("session-backed").clone();
+    let session_id = ref2.bridge_session_id().expect("session-backed").clone();
     let tool_names = service.external_tool_names(&session_id).await;
     assert!(
         tool_names.contains(&"late_tool_a".to_string()),
@@ -15471,7 +15481,7 @@ async fn test_restored_member_gets_external_tools() {
         .get_member(&AgentIdentity::from("w-1"))
         .await
         .expect("roster entry")
-        .session_id()
+        .bridge_session_id()
         .cloned()
         .expect("session-backed member");
 

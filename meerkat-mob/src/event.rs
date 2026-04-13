@@ -5,8 +5,8 @@
 
 use crate::definition::MobDefinition;
 use crate::ids::{
-    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, Generation, MeerkatId, MobId, ProfileName,
-    RunId, StepId, TaskId,
+    AgentIdentity, AgentRuntimeId, FenceToken, FlowId, Generation, MobId, ProfileName, RunId,
+    StepId, TaskId,
 };
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
@@ -17,7 +17,9 @@ use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 
 /// A mob event with metadata assigned by the event store.
 #[derive(Debug, Clone, Serialize)]
@@ -72,7 +74,7 @@ pub struct NewMobEvent {
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberRef {
+pub(crate) enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.
@@ -96,19 +98,11 @@ impl MemberRef {
         Self::Session { session_id }
     }
 
-    pub fn from_session_id(session_id: SessionId) -> Self {
-        Self::from_bridge_session_id(session_id)
-    }
-
     pub fn bridge_session_id(&self) -> Option<&SessionId> {
         match self {
             Self::Session { session_id } => Some(session_id),
             Self::BackendPeer { session_id, .. } => session_id.as_ref(),
         }
-    }
-
-    pub fn session_id(&self) -> Option<&SessionId> {
-        self.bridge_session_id()
     }
 }
 
@@ -149,8 +143,6 @@ impl Serialize for MemberRef {
 #[serde(untagged)]
 enum MemberRefWire {
     Canonical(MemberRefCanonical),
-    LegacySessionOnly { session_id: SessionId },
-    LegacySessionId(SessionId),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,8 +171,6 @@ impl<'de> Deserialize<'de> for MemberRef {
     {
         let wire = MemberRefWire::deserialize(deserializer)?;
         Ok(match wire {
-            MemberRefWire::LegacySessionOnly { session_id }
-            | MemberRefWire::LegacySessionId(session_id) => Self::Session { session_id },
             MemberRefWire::Canonical(MemberRefCanonical::Session {
                 session_id,
                 bridge_session_id,
@@ -205,6 +195,12 @@ impl<'de> Deserialize<'de> for MemberRef {
     }
 }
 
+const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 6;
+
+fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Error {
+    serde_json::Error::io(IoError::new(IoErrorKind::InvalidData, message.into()))
+}
+
 /// Structural event kinds covering all mob state transitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -218,31 +214,6 @@ pub enum MobEventKind {
     MobCompleted,
     /// Mob was reset to initial running state (all members retired, events cleared).
     MobReset,
-    /// A meerkat was spawned from a profile.
-    MeerkatSpawned {
-        /// Unique meerkat identifier.
-        meerkat_id: MeerkatId,
-        /// Profile name used to spawn.
-        role: ProfileName,
-        /// Runtime mode for this spawned member.
-        #[serde(default)]
-        runtime_mode: MobRuntimeMode,
-        /// Backend-neutral member identity created for this meerkat.
-        member_ref: MemberRef,
-        /// Application-defined labels for this member.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        labels: BTreeMap<String, String>,
-    },
-    /// A meerkat was retired and its session archived.
-    MeerkatRetired {
-        /// Meerkat that was retired.
-        meerkat_id: MeerkatId,
-        /// Profile name of the retired meerkat.
-        role: ProfileName,
-        /// Backend-neutral member identity that was retired.
-        member_ref: MemberRef,
-    },
-
     // ---------------------------------------------------------------
     // Identity-native lifecycle events (0.6)
     // ---------------------------------------------------------------
@@ -251,28 +222,7 @@ pub enum MobEventKind {
     /// Replaces `MeerkatSpawned` in the public contract. Carries
     /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
     /// [`AgentRuntimeId`] instead of [`MeerkatId`] / [`MemberRef`].
-    MemberSpawned {
-        /// Stable member identity.
-        agent_identity: AgentIdentity,
-        /// Generation counter (0 for initial spawn).
-        generation: Generation,
-        /// Fence token for stale-command rejection.
-        fence_token: FenceToken,
-        /// Composite runtime id.
-        agent_runtime_id: AgentRuntimeId,
-        /// Profile name used to spawn.
-        role: ProfileName,
-        /// Runtime mode for this spawned member.
-        #[serde(default)]
-        runtime_mode: MobRuntimeMode,
-        /// Application-defined labels for this member.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        labels: BTreeMap<String, String>,
-        /// Bridge-internal member reference needed for event replay.
-        /// Not part of the public identity-native contract.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        bridge_member_ref: Option<MemberRef>,
-    },
+    MemberSpawned(MemberSpawnedEvent),
     /// A member was retired.
     ///
     /// Identity-native replacement for `MeerkatRetired`.
@@ -301,40 +251,40 @@ pub enum MobEventKind {
         agent_runtime_id: AgentRuntimeId,
     },
 
-    /// Kickoff state for an existing meerkat changed.
-    MeerkatKickoffUpdated {
-        /// Meerkat whose kickoff state changed.
-        meerkat_id: MeerkatId,
+    /// Kickoff state for an existing member changed.
+    MemberKickoffUpdated {
+        /// Member whose kickoff state changed.
+        member: AgentIdentity,
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
     },
-    /// Bidirectional trust was established between two meerkats.
-    PeersWired {
-        /// First meerkat.
-        a: MeerkatId,
-        /// Second meerkat.
-        b: MeerkatId,
+    /// Bidirectional trust was established between two members.
+    MembersWired {
+        /// First member.
+        a: AgentIdentity,
+        /// Second member.
+        b: AgentIdentity,
     },
     /// Trust was established from a local member to an external peer.
     ExternalPeerWired {
-        /// Local meerkat that trusts the external peer.
-        local: MeerkatId,
+        /// Local member that trusts the external peer.
+        local: AgentIdentity,
         /// Full trusted-peer specification for replay/respawn restore.
         spec: TrustedPeerSpec,
     },
     /// Trust was removed from a local member to an external peer.
     ExternalPeerUnwired {
-        /// Local meerkat removing trust.
-        local: MeerkatId,
+        /// Local member removing trust.
+        local: AgentIdentity,
         /// External peer name that was removed from the local projection.
-        peer_name: MeerkatId,
+        peer_name: String,
     },
-    /// Bidirectional trust was removed between two meerkats.
-    PeersUnwired {
-        /// First meerkat.
-        a: MeerkatId,
-        /// Second meerkat.
-        b: MeerkatId,
+    /// Bidirectional trust was removed between two members.
+    MembersUnwired {
+        /// First member.
+        a: AgentIdentity,
+        /// Second member.
+        b: AgentIdentity,
     },
     /// A task was created on the shared task board.
     TaskCreated {
@@ -376,19 +326,19 @@ pub enum MobEventKind {
     StepDispatched {
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        target: AgentRuntimeId,
     },
     /// Per-target successful completion event.
     StepTargetCompleted {
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        target: AgentRuntimeId,
     },
     /// Per-target failure event.
     StepTargetFailed {
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        target: AgentRuntimeId,
         reason: String,
     },
     /// Aggregate step completion event.
@@ -414,7 +364,7 @@ pub enum MobEventKind {
     SupervisorEscalation {
         run_id: RunId,
         step_id: StepId,
-        escalated_to: MeerkatId,
+        escalated_to: AgentIdentity,
     },
     /// Dispatcher-owned projection of a successful operator mutation/control action.
     ///
@@ -445,6 +395,139 @@ pub struct AttributedEvent {
     pub role: ProfileName,
     /// The original enveloped agent event from the session stream.
     pub envelope: EventEnvelope<AgentEvent>,
+}
+
+/// Public identity-native member spawn payload.
+///
+/// The bridge/session carrier is kept as crate-internal replay metadata only;
+/// it is intentionally not serialized on the public event surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemberSpawnedEvent {
+    /// Stable member identity.
+    pub agent_identity: AgentIdentity,
+    /// Generation counter (0 for initial spawn).
+    pub generation: Generation,
+    /// Fence token for stale-command rejection.
+    pub fence_token: FenceToken,
+    /// Composite runtime id.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Profile name used to spawn.
+    pub role: ProfileName,
+    /// Runtime mode for this spawned member.
+    #[serde(default)]
+    pub runtime_mode: MobRuntimeMode,
+    /// Application-defined labels for this member.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Bridge-internal member reference needed for event replay.
+    /// Not part of the public identity-native contract.
+    #[serde(skip, default)]
+    pub(crate) bridge_member_ref: Option<MemberRef>,
+}
+
+impl MemberSpawnedEvent {
+    pub fn new(
+        agent_identity: AgentIdentity,
+        generation: Generation,
+        fence_token: FenceToken,
+        agent_runtime_id: AgentRuntimeId,
+        role: ProfileName,
+    ) -> Self {
+        Self {
+            agent_identity,
+            generation,
+            fence_token,
+            agent_runtime_id,
+            role,
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            labels: BTreeMap::new(),
+            bridge_member_ref: None,
+        }
+    }
+
+    pub(crate) fn with_bridge_member_ref(mut self, bridge_member_ref: Option<MemberRef>) -> Self {
+        self.bridge_member_ref = bridge_member_ref;
+        self
+    }
+
+    pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
+        self.bridge_member_ref.as_ref()
+    }
+}
+
+impl MobEventKind {
+    pub(crate) fn member_spawned(&self) -> Option<&MemberSpawnedEvent> {
+        match self {
+            Self::MemberSpawned(event) => Some(event),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn member_spawned_mut(&mut self) -> Option<&mut MemberSpawnedEvent> {
+        match self {
+            Self::MemberSpawned(event) => Some(event),
+            _ => None,
+        }
+    }
+}
+
+/// Encode a stored mob event, preserving internal replay-only fields that are
+/// intentionally omitted from the public event contract.
+pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde_json::Error> {
+    let mut value = serde_json::to_value(event)?;
+    if let Some(member_spawned) = event.kind.member_spawned() {
+        if let Some(bridge_member_ref) = member_spawned.bridge_member_ref() {
+            if let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut) {
+                kind.insert(
+                    "bridge_member_ref".to_string(),
+                    serde_json::to_value(bridge_member_ref)?,
+                );
+            }
+        }
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
+        "event": value,
+    }))
+}
+
+/// Decode a stored mob event, restoring internal replay-only fields that are
+/// not part of the public event contract.
+pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_json::Error> {
+    let mut encoded: Value = serde_json::from_slice(bytes)?;
+    let encoded_object = encoded.as_object_mut().ok_or_else(|| {
+        stored_mob_event_format_error("stored mob event envelope must be an object")
+    })?;
+    let schema_version = encoded_object
+        .remove("schema_version")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| {
+            stored_mob_event_format_error(
+                "stored mob event missing schema_version; pre-0.6 mob event history is unsupported",
+            )
+        })?;
+    if schema_version != CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION as u64 {
+        return Err(stored_mob_event_format_error(format!(
+            "unsupported stored mob event schema_version={schema_version}; expected {}",
+            CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION
+        )));
+    }
+    let mut value = encoded_object
+        .remove("event")
+        .ok_or_else(|| stored_mob_event_format_error("stored mob event missing event payload"))?;
+    let bridge_member_ref = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| kind.remove("bridge_member_ref"))
+        .map(serde_json::from_value)
+        .transpose()?;
+    let mut event: MobEvent = serde_json::from_value(value)?;
+    if let Some(bridge_member_ref) = bridge_member_ref {
+        if let Some(member_spawned) = event.kind.member_spawned_mut() {
+            member_spawned.bridge_member_ref = Some(bridge_member_ref);
+        }
+    }
+    Ok(event)
 }
 
 #[cfg(test)]
@@ -522,100 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn test_meerkat_spawned_roundtrip() {
-        roundtrip(&MobEventKind::MeerkatSpawned {
-            meerkat_id: MeerkatId::from("agent-1"),
-            role: ProfileName::from("worker"),
-            runtime_mode: MobRuntimeMode::AutonomousHost,
-            member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
-            labels: BTreeMap::new(),
-        });
-    }
-
-    #[test]
-    fn test_meerkat_spawned_defaults_runtime_mode() {
-        let event: MobEvent = serde_json::from_value(json!({
-            "cursor": 1,
-            "timestamp": "2026-02-19T00:00:00Z",
-            "mob_id": "test-mob",
-            "kind": {
-                "type": "meerkat_spawned",
-                "meerkat_id": "a",
-                "role": "worker",
-                "member_ref": {
-                    "kind": "session",
-                    "session_id": SessionId::from_uuid(Uuid::nil()),
-                },
-            },
-        }))
-        .expect("event without runtime_mode should parse");
-        match event.kind {
-            MobEventKind::MeerkatSpawned { runtime_mode, .. } => {
-                assert_eq!(runtime_mode, MobRuntimeMode::AutonomousHost);
-            }
-            other => panic!("expected MeerkatSpawned, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_meerkat_retired_roundtrip() {
-        roundtrip(&MobEventKind::MeerkatRetired {
-            meerkat_id: MeerkatId::from("agent-1"),
-            role: ProfileName::from("worker"),
-            member_ref: MemberRef::from_session_id(SessionId::from_uuid(Uuid::nil())),
-        });
-    }
-
-    #[test]
-    fn test_meerkat_kickoff_updated_roundtrip() {
-        roundtrip(&MobEventKind::MeerkatKickoffUpdated {
-            meerkat_id: MeerkatId::from("agent-1"),
-            kickoff: crate::roster::MobMemberKickoffSnapshot {
-                phase: crate::roster::MobMemberKickoffPhase::Failed,
-                error: Some("provider overloaded".to_string()),
-                updated_at: std::time::SystemTime::UNIX_EPOCH,
-            },
-        });
-    }
-
-    #[test]
-    fn test_peers_wired_roundtrip() {
-        roundtrip(&MobEventKind::PeersWired {
-            a: MeerkatId::from("agent-1"),
-            b: MeerkatId::from("agent-2"),
-        });
-    }
-
-    #[test]
-    fn test_external_peer_wired_roundtrip() {
-        roundtrip(&MobEventKind::ExternalPeerWired {
-            local: MeerkatId::from("agent-1"),
-            spec: TrustedPeerSpec::new(
-                "remote-mob/worker/agent-2",
-                "ed25519:remote-agent-2",
-                "inproc://remote-mob/worker/agent-2",
-            )
-            .expect("valid trusted peer spec"),
-        });
-    }
-
-    #[test]
-    fn test_peers_unwired_roundtrip() {
-        roundtrip(&MobEventKind::PeersUnwired {
-            a: MeerkatId::from("agent-1"),
-            b: MeerkatId::from("agent-2"),
-        });
-    }
-
-    #[test]
-    fn test_external_peer_unwired_roundtrip() {
-        roundtrip(&MobEventKind::ExternalPeerUnwired {
-            local: MeerkatId::from("agent-1"),
-            peer_name: MeerkatId::from("remote-mob/worker/agent-2"),
-        });
-    }
-
-    #[test]
     fn test_task_created_roundtrip() {
         roundtrip(&MobEventKind::TaskCreated {
             task_id: TaskId::from("task-001"),
@@ -639,7 +628,8 @@ mod tests {
         let run_id = RunId::new();
         let flow_id = FlowId::from("flow-a");
         let step_id = StepId::from("step-a");
-        let meerkat_id = MeerkatId::from("worker-1");
+        let runtime_id = AgentRuntimeId::initial(AgentIdentity::from("worker-1"));
+        let escalated_identity = AgentIdentity::from("worker-1");
 
         roundtrip(&MobEventKind::FlowStarted {
             run_id: run_id.clone(),
@@ -662,17 +652,17 @@ mod tests {
         roundtrip(&MobEventKind::StepDispatched {
             run_id: run_id.clone(),
             step_id: step_id.clone(),
-            meerkat_id: meerkat_id.clone(),
+            target: runtime_id.clone(),
         });
         roundtrip(&MobEventKind::StepTargetCompleted {
             run_id: run_id.clone(),
             step_id: step_id.clone(),
-            meerkat_id: meerkat_id.clone(),
+            target: runtime_id.clone(),
         });
         roundtrip(&MobEventKind::StepTargetFailed {
             run_id: run_id.clone(),
             step_id: step_id.clone(),
-            meerkat_id: meerkat_id.clone(),
+            target: runtime_id.clone(),
             reason: "fail".to_string(),
         });
         roundtrip(&MobEventKind::StepCompleted {
@@ -696,7 +686,7 @@ mod tests {
         roundtrip(&MobEventKind::SupervisorEscalation {
             run_id,
             step_id,
-            escalated_to: meerkat_id,
+            escalated_to: escalated_identity,
         });
     }
 
@@ -730,20 +720,19 @@ mod tests {
     }
 
     #[test]
-    fn test_member_ref_legacy_session_only_deserializes_to_compat_representation() {
+    fn test_member_ref_rejects_legacy_session_only_payload() {
         let sid = SessionId::from_uuid(Uuid::nil());
-        let parsed: MemberRef = serde_json::from_value(json!({
+        let parsed = serde_json::from_value::<MemberRef>(json!({
             "session_id": sid,
-        }))
-        .unwrap();
+        }));
 
-        assert_eq!(parsed, MemberRef::from_session_id(sid));
+        assert!(parsed.is_err());
     }
 
     #[test]
     fn test_member_ref_serializes_deterministically() {
         let sid = SessionId::from_uuid(Uuid::nil());
-        let member_ref = MemberRef::from_session_id(sid);
+        let member_ref = MemberRef::from_bridge_session_id(sid);
 
         let first = serde_json::to_string(&member_ref).unwrap();
         let second = serde_json::to_string(&member_ref).unwrap();
@@ -784,21 +773,97 @@ mod tests {
         assert_eq!(parsed, member_ref);
     }
 
+    #[test]
+    fn test_stored_mob_event_roundtrip_preserves_bridge_member_ref() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("researcher");
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone()))),
+            ),
+        };
+
+        let encoded = encode_stored_mob_event(&event).unwrap();
+        let decoded = decode_stored_mob_event(&encoded).unwrap();
+
+        match decoded.kind {
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(
+                    member_spawned
+                        .bridge_member_ref()
+                        .and_then(MemberRef::bridge_session_id),
+                    Some(&sid)
+                );
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_stored_mob_event_rejects_unversioned_payload() {
+        let raw = serde_json::to_vec(&MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MobCompleted,
+        })
+        .unwrap();
+
+        let error =
+            decode_stored_mob_event(&raw).expect_err("unversioned payload must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("pre-0.6 mob event history is unsupported")
+        );
+    }
+
+    #[test]
+    fn test_decode_stored_mob_event_rejects_unsupported_schema_version() {
+        let raw = serde_json::to_vec(&json!({
+            "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION + 1,
+            "event": {
+                "cursor": 1,
+                "timestamp": "2026-02-19T00:00:00Z",
+                "mob_id": "test-mob",
+                "kind": {
+                    "type": "mob_completed"
+                }
+            }
+        }))
+        .unwrap();
+
+        let error =
+            decode_stored_mob_event(&raw).expect_err("unsupported schema version must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported stored mob event schema_version")
+        );
+    }
+
     // --- Identity-native event variant tests ---
 
     #[test]
     fn test_member_spawned_roundtrip() {
         let identity = AgentIdentity::from("researcher");
-        roundtrip(&MobEventKind::MemberSpawned {
-            agent_identity: identity.clone(),
-            generation: Generation::INITIAL,
-            fence_token: FenceToken::new(1),
-            agent_runtime_id: AgentRuntimeId::initial(identity),
-            role: ProfileName::from("worker"),
-            runtime_mode: MobRuntimeMode::AutonomousHost,
-            labels: BTreeMap::new(),
-            bridge_member_ref: None,
-        });
+        roundtrip(&MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(1),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("worker"),
+        )));
     }
 
     #[test]
@@ -806,16 +871,16 @@ mod tests {
         let identity = AgentIdentity::from("coder");
         let mut labels = BTreeMap::new();
         labels.insert("team".to_string(), "backend".to_string());
-        roundtrip(&MobEventKind::MemberSpawned {
-            agent_identity: identity.clone(),
-            generation: Generation::INITIAL,
-            fence_token: FenceToken::new(42),
-            agent_runtime_id: AgentRuntimeId::initial(identity),
-            role: ProfileName::from("coder"),
-            runtime_mode: MobRuntimeMode::TurnDriven,
-            labels,
-            bridge_member_ref: None,
-        });
+        let mut event = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(42),
+            AgentRuntimeId::initial(identity),
+            ProfileName::from("coder"),
+        );
+        event.runtime_mode = MobRuntimeMode::TurnDriven;
+        event.labels = labels;
+        roundtrip(&MobEventKind::MemberSpawned(event));
     }
 
     #[test]
@@ -838,8 +903,8 @@ mod tests {
         }))
         .expect("member_spawned without runtime_mode should parse");
         match event.kind {
-            MobEventKind::MemberSpawned { runtime_mode, .. } => {
-                assert_eq!(runtime_mode, MobRuntimeMode::AutonomousHost);
+            MobEventKind::MemberSpawned(member_spawned) => {
+                assert_eq!(member_spawned.runtime_mode, MobRuntimeMode::AutonomousHost);
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }

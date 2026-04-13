@@ -1669,7 +1669,19 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    // No shell guard — lifecycle_authority rejects invalid transitions.
+                    // Shell guard: reject early if lifecycle authority would not accept
+                    // Destroy. This prevents fail_all_pending_spawns from running as a
+                    // side-effect when the transition is invalid (e.g. already Destroyed).
+                    if !self
+                        .lifecycle_authority
+                        .can_accept(MobLifecycleInput::Destroy)
+                    {
+                        let _ = reply_tx.send(Err(MobError::InvalidTransition {
+                            from: self.state(),
+                            to: MobState::Destroyed,
+                        }));
+                        continue;
+                    }
                     self.fail_all_pending_spawns("mob is destroying").await;
                     let result = self.handle_destroy().await;
                     let destroy_succeeded = result.is_ok();
@@ -1684,7 +1696,16 @@ impl MobActor {
                     }
                 }
                 MobCommand::Reset { reply_tx } => {
-                    // No shell guard — lifecycle_authority rejects invalid transitions.
+                    // Shell guard: reject early if lifecycle phase doesn't support Reset.
+                    // This prevents fail_all_pending_spawns from running as a side-effect
+                    // when the transition is invalid (e.g. Creating or Destroyed).
+                    if let Err(error) = self.lifecycle_authority.require_phase(
+                        &[MobState::Running, MobState::Stopped, MobState::Completed],
+                        MobState::Running,
+                    ) {
+                        let _ = reply_tx.send(Err(error));
+                        continue;
+                    }
                     self.fail_all_pending_spawns("mob is resetting").await;
                     let result = self.handle_reset().await;
                     let _ = reply_tx.send(result);

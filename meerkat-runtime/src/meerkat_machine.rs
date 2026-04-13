@@ -1324,6 +1324,20 @@ impl MeerkatMachine {
                         .clone()
                 };
 
+                // Guard: RunningHasActiveRunInvariant — reject Destroyed,
+                // Retired, and Stopped before attempting to start a new run.
+                let state = Self::driver_runtime_state(&driver).await;
+                if matches!(
+                    state,
+                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
+                ) {
+                    return Err(if state == RuntimeState::Destroyed {
+                        RuntimeDriverError::Destroyed
+                    } else {
+                        RuntimeDriverError::NotReady { state }
+                    });
+                }
+
                 let prepared = {
                     let mut driver = driver.lock().await;
                     if !driver.is_idle_or_attached() {
@@ -13089,5 +13103,64 @@ mod tests {
             Err(other) => panic!("expected Destroyed, got {other:?}"),
             Ok(_) => panic!("accept_input_with_completion should reject destroyed session"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // A5: Legacy run command guards (TLA+ RunningHasActiveRunInvariant)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn legacy_run_prepare_rejects_retired_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+            .await
+            .expect("retire should succeed");
+
+        let input = make_prompt("should be rejected");
+        let err = adapter
+            .accept_input_and_run::<(), _, _>(&session_id, input, |_run_id, _prim| async {
+                panic!("executor should not be called on retired session");
+            })
+            .await
+            .expect_err("legacy run should reject a retired session");
+        assert!(
+            matches!(
+                err,
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Retired
+                }
+            ),
+            "expected NotReady(Retired), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_run_prepare_rejects_destroyed_session() {
+        let adapter = MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+
+        adapter.register_session(session_id.clone()).await;
+
+        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+            .await
+            .expect("destroy should succeed");
+
+        let input = make_prompt("should be rejected");
+        let err = adapter
+            .accept_input_and_run::<(), _, _>(&session_id, input, |_run_id, _prim| async {
+                panic!("executor should not be called on destroyed session");
+            })
+            .await
+            .expect_err("legacy run should reject a destroyed session");
+        assert!(
+            matches!(err, RuntimeDriverError::Destroyed),
+            "expected Destroyed, got {err:?}"
+        );
     }
 }

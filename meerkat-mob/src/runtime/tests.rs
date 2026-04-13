@@ -3966,13 +3966,17 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
         .expect("spawn_meerkat should dispatch");
     let spawn_payload: serde_json::Value =
         serde_json::from_str(&spawn_result.result.text_content()).expect("spawn payload");
-    assert_eq!(
-        spawn_payload["session_id"], spawn_payload["bridge_session_id"],
-        "compatibility session_id must mirror the canonical bridge binding"
+    assert!(
+        spawn_payload["agent_identity"].is_string(),
+        "spawn result should surface agent_identity"
     );
     assert!(
-        spawn_payload["bridge_session_id"].is_string(),
-        "spawn result should surface the canonical bridge binding"
+        spawn_payload["agent_runtime_id"].is_object(),
+        "spawn result should surface agent_runtime_id"
+    );
+    assert!(
+        spawn_payload["fence_token"].is_number(),
+        "spawn result should surface fence_token"
     );
 
     let list_args = RawValue::from_string("{}".to_string()).expect("list args");

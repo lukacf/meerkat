@@ -10323,10 +10323,9 @@ async fn test_spawn_many_member_refs_returns_results_in_input_order() {
     assert_eq!(results.len(), 3);
     for (idx, result) in results.into_iter().enumerate() {
         let member = result.expect("spawn_many result");
-        let session_id = member.session_id().expect("session-backed member");
         assert!(
-            !session_id.to_string().is_empty(),
-            "spawn_many result {idx} should include session id"
+            !member.agent_identity.as_str().is_empty(),
+            "spawn_many result {idx} should include agent identity"
         );
     }
     assert!(
@@ -15122,9 +15121,17 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
         address: "tcp://192.168.0.180:4800".to_string(),
     });
 
-    let member_ref = handle.spawn_spec(spec).await.expect("spawn with binding");
-
-    match member_ref {
+    let spawn_result = handle.spawn_spec(spec).await.expect("spawn with binding");
+    // Verify identity was created
+    assert!(!spawn_result.agent_identity.as_str().is_empty());
+    // Verify backend binding through roster
+    let entry = handle
+        .roster()
+        .await
+        .get_by_identity(&spawn_result.agent_identity)
+        .cloned()
+        .expect("roster entry");
+    match &entry.member_ref {
         MemberRef::BackendPeer {
             peer_id,
             address,

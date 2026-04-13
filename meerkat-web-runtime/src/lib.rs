@@ -2736,11 +2736,7 @@ mod tests {
         let identity = meerkat_mob::AgentIdentity::from("test-member");
         let runtime_id = meerkat_mob::AgentRuntimeId::initial(identity.clone());
         let fence = meerkat_mob::FenceToken::new(1);
-        let result = meerkat_mob::SpawnResult {
-            agent_identity: identity.clone(),
-            agent_runtime_id: runtime_id,
-            fence_token: fence,
-        };
+        let result = meerkat_mob::SpawnResult::new(identity.clone(), runtime_id, fence);
 
         let payload = spawn_result_payload(&result);
         assert_eq!(payload["agent_identity"], "test-member");

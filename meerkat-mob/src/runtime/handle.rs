@@ -286,6 +286,21 @@ pub struct SpawnResult {
     pub fence_token: FenceToken,
 }
 
+impl SpawnResult {
+    /// Create a new spawn result from identity-native fields.
+    pub fn new(
+        agent_identity: AgentIdentity,
+        agent_runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+    ) -> Self {
+        Self {
+            agent_identity,
+            agent_runtime_id,
+            fence_token,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CanonicalOpsOwnerContext {
     pub(crate) owner_bridge_session_id: SessionId,

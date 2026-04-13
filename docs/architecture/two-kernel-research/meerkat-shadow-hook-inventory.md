@@ -16,8 +16,8 @@ It is the implementation companion to:
 
 Primary hook:
 
-- `RuntimeSessionAdapter::meerkat_machine_spine_snapshot(...)`
-  in `meerkat-runtime/src/session_adapter.rs`
+- `MeerkatMachine::meerkat_machine_spine_snapshot(...)`
+  in `meerkat-runtime/src/meerkat_machine.rs`
 
 Best for:
 
@@ -86,9 +86,9 @@ Best for:
 
 Primary hooks:
 
-- `RuntimeSessionAdapter::maybe_spawn_comms_drain(...)`
-- `RuntimeSessionAdapter::notify_comms_drain_exited(...)`
-- `RuntimeSessionAdapter::abort_comms_drain(...)`
+- `MeerkatMachine::maybe_spawn_comms_drain(...)`
+- `MeerkatMachine::notify_comms_drain_exited(...)`
+- `MeerkatMachine::abort_comms_drain(...)`
 - joined Meerkat drain snapshot in `meerkat/src/meerkat_machine.rs`
 
 Best for:

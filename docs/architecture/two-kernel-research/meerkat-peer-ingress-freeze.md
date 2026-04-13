@@ -69,7 +69,7 @@ Exact current live behavior:
 - canonical runtime trust mutation uses named register/unregister seams
 - the older helper shape is explicitly non-canonical
 - the public surface-facing seam for peer ingress and keep-alive remains
-  `RuntimeSessionAdapter::update_peer_ingress_context(...)`
+  `MeerkatMachine::update_peer_ingress_context(...)`
 
 ### 5. Recovery is exact-current live re-observation, not durable replay
 

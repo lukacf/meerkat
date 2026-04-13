@@ -21,8 +21,8 @@ use meerkat_core::ops_lifecycle::{
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_runtime::detached_wake::DetachedWakeState;
 use meerkat_runtime::{
-    ContinuationInput, InputDurability, InputOrigin, InputVisibility, RuntimeOpsLifecycleRegistry,
-    RuntimeSessionAdapter,
+    ContinuationInput, InputDurability, InputOrigin, InputVisibility, MeerkatMachine,
+    RuntimeOpsLifecycleRegistry,
 };
 
 fn background_spec(name: &str) -> OperationSpec {
@@ -143,7 +143,7 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
     }
 
     let apply_count = Arc::new(AtomicUsize::new(0));
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -188,7 +188,7 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
 
 #[tokio::test]
 async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Register session with executor so runtime loop is running
@@ -261,7 +261,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
 
 #[tokio::test]
 async fn choke_004_five_completions_produce_one_coalesced_wake() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -378,7 +378,7 @@ async fn choke_004_completion_during_running_defers_wake() {
     }
 
     let apply_count = Arc::new(AtomicUsize::new(0));
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -510,7 +510,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
     }
 
     let apply_count = Arc::new(AtomicUsize::new(0));
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter

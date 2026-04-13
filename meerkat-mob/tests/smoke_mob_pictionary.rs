@@ -216,10 +216,10 @@ async fn setup_mob()
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
 
-    // Use an explicit RuntimeSessionAdapter override so this e2e exercises the
+    // Use an explicit MeerkatMachine override so this e2e exercises the
     // canonical mob-runtime adapter path. AutonomousHost drains and runtime-backed
     // turns must both use this same adapter instance.
-    let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
 
     let handle = MobBuilder::new(pictionary_definition(), MobStorage::in_memory())
         .with_session_service(mob_service.clone())

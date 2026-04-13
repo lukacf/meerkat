@@ -29,7 +29,7 @@ struct MockSessionService {
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
     start_turn_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
 impl Default for MockSessionService {
@@ -39,7 +39,7 @@ impl Default for MockSessionService {
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             start_turn_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
-            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
         }
     }
 }
@@ -257,7 +257,7 @@ impl MobSessionService for MockSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         Some(self.runtime_adapter.clone())
     }
 

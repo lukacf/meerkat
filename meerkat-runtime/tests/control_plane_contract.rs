@@ -2,7 +2,7 @@
 //! Phase 0 external-boundary contract tests for runtime control-plane seams.
 //!
 //! These stay out of the fast suite on purpose. They exercise the live
-//! `RuntimeSessionAdapter` surface and its out-of-band control channel rather
+//! `MeerkatMachine` surface and its out-of-band control channel rather
 //! than only in-crate helpers.
 
 use std::sync::{
@@ -23,8 +23,8 @@ use meerkat_runtime::input::{
     ResponseProgressPhase,
 };
 use meerkat_runtime::{
-    InputAbandonReason, InputLifecycleState, InputTerminalOutcome, RuntimeSessionAdapter,
-    RuntimeState, SessionServiceRuntimeExt,
+    InputAbandonReason, InputLifecycleState, InputTerminalOutcome, MeerkatMachine, RuntimeState,
+    SessionServiceRuntimeExt,
 };
 
 fn make_progress_input(label: &str) -> Input {
@@ -105,7 +105,7 @@ impl CoreExecutor for RecordingExecutor {
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_reset_terminates_waited_progress_work_without_running_it() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
@@ -173,7 +173,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_work() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
@@ -249,7 +249,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_drains_waited_progress_work_to_completion() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
@@ -316,7 +316,7 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let sid = SessionId::new();
 

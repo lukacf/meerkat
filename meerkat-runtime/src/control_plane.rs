@@ -8,8 +8,8 @@
 
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 
+use crate::meerkat_machine::{SharedCompletionRegistry, SharedDriver};
 use crate::runtime_state::RuntimeState;
-use crate::session_adapter::{SharedCompletionRegistry, SharedDriver};
 use crate::tokio::sync::mpsc;
 use crate::traits::{RuntimeControlCommand, RuntimeDriverError};
 

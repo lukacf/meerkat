@@ -1988,7 +1988,7 @@ mod tests {
     struct RealCommsSessionSvc {
         sessions: tokio::sync::RwLock<HashMap<SessionId, Arc<TestCommsRuntime>>>,
         counter: AtomicU64,
-        runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+        runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
         registry: Arc<TestCommsRegistry>,
         injector: Arc<TestInjector>,
     }
@@ -1998,7 +1998,7 @@ mod tests {
             Self {
                 sessions: tokio::sync::RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
-                runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+                runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
                 registry: Arc::new(TestCommsRegistry::default()),
                 injector: Arc::new(TestInjector),
             }
@@ -2172,7 +2172,7 @@ mod tests {
             true
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
             Some(self.runtime_adapter.clone())
         }
 

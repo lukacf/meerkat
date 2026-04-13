@@ -453,8 +453,6 @@ pub struct MeerkatMachine {
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
 }
 
-pub type RuntimeSessionAdapter = MeerkatMachine;
-
 impl MeerkatMachine {
     /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
     pub fn ephemeral() -> Self {
@@ -2581,7 +2579,7 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
                 runtime_id,
             })
             .await
-            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+            .map_err(MeerkatMachine::driver_error_from_control_plane_error)?
         {
             MeerkatMachineControlCommandResult::RuntimeState(state) => Ok(state),
             other => Err(RuntimeDriverError::Internal(format!(
@@ -2594,13 +2592,13 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<RetireReport, RuntimeDriverError> {
-        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
         match self
             .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Retire {
                 runtime_id,
             })
             .await
-            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+            .map_err(MeerkatMachine::driver_error_from_control_plane_error)?
         {
             MeerkatMachineControlCommandResult::RetireReport(report) => Ok(report),
             other => Err(RuntimeDriverError::Internal(format!(
@@ -2613,13 +2611,13 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<ResetReport, RuntimeDriverError> {
-        let runtime_id = RuntimeSessionAdapter::logical_runtime_id(session_id);
+        let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
         match self
             .execute_meerkat_machine_control_command(MeerkatMachineControlCommand::Reset {
                 runtime_id,
             })
             .await
-            .map_err(RuntimeSessionAdapter::driver_error_from_control_plane_error)?
+            .map_err(MeerkatMachine::driver_error_from_control_plane_error)?
         {
             MeerkatMachineControlCommandResult::ResetReport(report) => Ok(report),
             other => Err(RuntimeDriverError::Internal(format!(
@@ -3023,7 +3021,7 @@ mod tests {
     }
 
     async fn spawn_test_comms_drain(
-        adapter: &Arc<RuntimeSessionAdapter>,
+        adapter: &Arc<MeerkatMachine>,
         session_id: &SessionId,
         mode: CommsDrainMode,
         comms_runtime: Arc<dyn CommsRuntime>,
@@ -3059,14 +3057,14 @@ mod tests {
     }
 
     async fn current_phase(
-        adapter: &Arc<RuntimeSessionAdapter>,
+        adapter: &Arc<MeerkatMachine>,
         session_id: &SessionId,
     ) -> Option<CommsDrainPhase> {
         let slots = adapter.comms_drain_slots.read().await;
         slots.get(session_id).map(|slot| slot.authority.phase())
     }
 
-    async fn handle_present(adapter: &Arc<RuntimeSessionAdapter>, session_id: &SessionId) -> bool {
+    async fn handle_present(adapter: &Arc<MeerkatMachine>, session_id: &SessionId) -> bool {
         let slots = adapter.comms_drain_slots.read().await;
         slots
             .get(session_id)
@@ -3075,7 +3073,7 @@ mod tests {
     }
 
     async fn wait_for_phase(
-        adapter: &Arc<RuntimeSessionAdapter>,
+        adapter: &Arc<MeerkatMachine>,
         session_id: &SessionId,
         expected: CommsDrainPhase,
     ) {
@@ -3093,7 +3091,7 @@ mod tests {
 
     #[tokio::test]
     async fn dismiss_exit_updates_authority_before_join() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::dismissing());
 
@@ -3121,7 +3119,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_timeout_updates_authority_before_join() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
@@ -3149,7 +3147,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_session_aborts_and_removes_drain_slot() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
@@ -3180,19 +3178,17 @@ mod tests {
 
     #[tokio::test]
     async fn session_service_runtime_ext_write_side_follows_machine_control_surface() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
 
-        let state = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::runtime_state(
-            &adapter,
-            &session_id,
-        )
-        .await
-        .expect("runtime state should route through the machine seam");
+        let state =
+            <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+                .await
+                .expect("runtime state should route through the machine seam");
         assert_eq!(state, RuntimeState::Idle);
 
-        let outcome = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::accept_input(
+        let outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
             &adapter,
             &session_id,
             make_prompt("service-ext-write-side"),
@@ -3204,14 +3200,12 @@ mod tests {
             "prompt should still be admitted through the SessionServiceRuntimeExt seam"
         );
 
-        let active = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::list_active_inputs(
-            &adapter,
-            &session_id,
-        )
-        .await
-        .expect("active inputs should still be readable");
+        let active =
+            <MeerkatMachine as SessionServiceRuntimeExt>::list_active_inputs(&adapter, &session_id)
+                .await
+                .expect("active inputs should still be readable");
         assert_eq!(active.len(), 1, "accepted input should remain active");
-        let active_state = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::input_state(
+        let active_state = <MeerkatMachine as SessionServiceRuntimeExt>::input_state(
             &adapter,
             &session_id,
             &active[0],
@@ -3224,24 +3218,20 @@ mod tests {
             "accepted prompt should still be visible through machine-routed input_state"
         );
 
-        let retire_report = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::retire_runtime(
-            &adapter,
-            &session_id,
-        )
-        .await
-        .expect("retire should route through the machine seam");
+        let retire_report =
+            <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
+                .await
+                .expect("retire should route through the machine seam");
         assert_eq!(
             retire_report.inputs_abandoned, 1,
             "retire should still abandon queued work when no runtime loop is attached"
         );
         assert_eq!(retire_report.inputs_pending_drain, 0);
 
-        let reset_report = <RuntimeSessionAdapter as SessionServiceRuntimeExt>::reset_runtime(
-            &adapter,
-            &session_id,
-        )
-        .await
-        .expect("reset should route through the machine seam");
+        let reset_report =
+            <MeerkatMachine as SessionServiceRuntimeExt>::reset_runtime(&adapter, &session_id)
+                .await
+                .expect("reset should route through the machine seam");
         assert_eq!(
             reset_report.inputs_abandoned, 0,
             "reset after retire should not find residual queued work"
@@ -3250,7 +3240,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3288,7 +3278,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3352,7 +3342,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_deduplicated_completion_waiters() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3415,7 +3405,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_steered_prompt_input() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3464,7 +3454,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3511,7 +3501,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recycle() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3574,7 +3564,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_waiters() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3667,7 +3657,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recover() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3730,7 +3720,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_waiters() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3823,7 +3813,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3890,7 +3880,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -3924,7 +3914,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "destroy steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -4090,7 +4080,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -4240,7 +4230,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -4408,7 +4398,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -4441,7 +4431,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "attached steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -4658,7 +4648,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -4693,7 +4683,7 @@ mod tests {
                 kind: OperationKind::MobMemberChild,
                 owner_session_id: session_id.clone(),
                 display_name: "attached steered wait-first child".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: true,
             })
@@ -4919,7 +4909,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -4952,7 +4942,7 @@ mod tests {
                 kind: OperationKind::MobMemberChild,
                 owner_session_id: session_id.clone(),
                 display_name: "attached steered destroy wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: true,
             })
@@ -5110,7 +5100,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -5175,7 +5165,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let cancel_calls = Arc::new(AtomicUsize::new(0));
@@ -5396,7 +5386,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let interrupt_calls = Arc::new(AtomicUsize::new(0));
@@ -5636,7 +5626,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -5671,7 +5661,7 @@ mod tests {
                 kind: OperationKind::MobMemberChild,
                 owner_session_id: session_id.clone(),
                 display_name: "attached steered deferred stop wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: true,
             })
@@ -5970,7 +5960,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -6067,7 +6057,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_runtime_executor()
     {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -6173,7 +6163,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -6280,7 +6270,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_without_runtime_loop()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -6376,7 +6366,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let apply_started = Arc::new(Notify::new());
@@ -6520,7 +6510,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -6706,7 +6696,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -6840,7 +6830,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -6876,7 +6866,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -6892,7 +6882,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "background test op".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -6942,7 +6932,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -6958,7 +6948,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7011,7 +7001,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7027,7 +7017,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recover wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7128,7 +7118,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7153,7 +7143,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recover split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7288,7 +7278,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait_all() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7321,7 +7311,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recover steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7458,7 +7448,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait_all() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7491,7 +7481,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recycle steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7628,7 +7618,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7644,7 +7634,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recycle wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7737,7 +7727,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -7762,7 +7752,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recycle split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -7933,7 +7923,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -7975,7 +7965,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recover wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -8208,7 +8198,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -8251,7 +8241,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recover split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -8492,7 +8482,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -8534,7 +8524,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recycle wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -8736,7 +8726,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -8779,7 +8769,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "recycle split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -8977,7 +8967,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -8993,7 +8983,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "reset wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9085,7 +9075,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_but_preserves_wait_all()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -9119,7 +9109,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "reset steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9248,7 +9238,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -9274,7 +9264,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "reset split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9447,7 +9437,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -9480,7 +9470,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "reset wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9657,7 +9647,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -9694,7 +9684,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "reset split-lifetime wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9827,7 +9817,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -9843,7 +9833,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "destroy wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -9946,7 +9936,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -9972,7 +9962,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "destroy split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -10130,7 +10120,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -10166,7 +10156,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "destroy wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -10320,7 +10310,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -10368,7 +10358,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "destroy split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -10491,7 +10481,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_executor() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -10507,7 +10497,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "stop wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -10624,7 +10614,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_waiter_and_queue_but_preserves_wait_all()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -10658,7 +10648,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "stop steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -10793,7 +10783,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -10819,7 +10809,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "stop split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11000,7 +10990,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -11033,7 +11023,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "stop wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11196,7 +11186,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -11244,7 +11234,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "stop split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11396,7 +11386,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -11412,7 +11402,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "retire wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11508,7 +11498,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -11534,7 +11524,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "retire split wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11657,7 +11647,7 @@ mod tests {
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_steer_queue_visible()
      {
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
 
         adapter.register_session(session_id.clone()).await;
@@ -11691,7 +11681,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "retire steered wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -11861,7 +11851,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let apply_started = Arc::new(Notify::new());
@@ -11899,7 +11889,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "retire wait target with loop".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -12117,7 +12107,7 @@ mod tests {
             }
         }
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
+        let adapter = MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         let apply_calls = Arc::new(AtomicUsize::new(0));
         let control_calls = Arc::new(AtomicUsize::new(0));
@@ -12160,7 +12150,7 @@ mod tests {
                 kind: OperationKind::BackgroundToolOp,
                 owner_session_id: session_id.clone(),
                 display_name: "retire split-lifetime wait target".into(),
-                source_label: "session_adapter_test".into(),
+                source_label: "meerkat_machine_test".into(),
                 child_session_id: None,
                 expect_peer_channel: false,
             })
@@ -12352,7 +12342,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_comms_drain_state() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
@@ -12378,7 +12368,7 @@ mod tests {
 
     #[tokio::test]
     async fn meerkat_machine_spine_snapshot_tracks_stopped_comms_drain_state() {
-        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 

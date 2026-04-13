@@ -329,7 +329,7 @@ struct MockSessionService {
     persisted_sessions: RwLock<HashMap<SessionId, Session>>,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
-    runtime_adapter: Mutex<Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>>,
+    runtime_adapter: Mutex<Option<Arc<meerkat_runtime::MeerkatMachine>>>,
     session_counter: AtomicU64,
     /// Records (session_id, prompt) for each create_session call.
     prompts: RwLock<Vec<(SessionId, String)>>,
@@ -442,12 +442,12 @@ impl MockSessionService {
         self.persisted_sessions.write().await.remove(session_id);
     }
 
-    fn enable_runtime_adapter(&self) -> Arc<meerkat_runtime::RuntimeSessionAdapter> {
+    fn enable_runtime_adapter(&self) -> Arc<meerkat_runtime::MeerkatMachine> {
         let mut guard = self.runtime_adapter.lock().expect("runtime_adapter mutex");
         if let Some(adapter) = guard.as_ref() {
             return adapter.clone();
         }
-        let adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
         *guard = Some(adapter.clone());
         adapter
     }
@@ -1330,7 +1330,7 @@ impl MobSessionService for MockSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         self.runtime_adapter
             .lock()
             .expect("runtime_adapter mutex")
@@ -2724,7 +2724,7 @@ impl MobSessionService for PersistedListingSessionService {
         self.inner.supports_persistent_sessions()
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         self.inner.runtime_adapter()
     }
 
@@ -2898,7 +2898,7 @@ impl MobSessionService for InactiveReadSessionService {
         self.inner.supports_persistent_sessions()
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         self.inner.runtime_adapter()
     }
 
@@ -9611,7 +9611,7 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
 async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
     let service = Arc::new(MockSessionService::new());
     let service_adapter = service.enable_runtime_adapter();
-    let builder_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let builder_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
         .with_session_service(service)
         .with_runtime_adapter(builder_adapter.clone())
@@ -13151,7 +13151,7 @@ async fn create_test_mob_with_real_comms(
 
 /// Real comms + runtime-backed session service for autonomous idle-delivery regressions.
 ///
-/// Uses real inproc comms delivery, a real RuntimeSessionAdapter, and records
+/// Uses real inproc comms delivery, a real MeerkatMachine, and records
 /// runtime-applied prompts so tests can prove peer inbox traffic still reaches
 /// `apply_runtime_turn()` after the initial autonomous kickoff turn has exited.
 struct RuntimeBackedRealCommsSessionService {
@@ -13159,7 +13159,7 @@ struct RuntimeBackedRealCommsSessionService {
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
     applied_runtime_render_metadata:
@@ -13173,7 +13173,7 @@ impl RuntimeBackedRealCommsSessionService {
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
-            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
@@ -13391,7 +13391,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         Some(Arc::clone(&self.runtime_adapter))
     }
 

@@ -12,8 +12,8 @@ use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputState, InputVisibility,
-    LogicalRuntimeId, PromptInput, RuntimeDriverError, RuntimeSessionAdapter, RuntimeState,
-    RuntimeStore, RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
+    LogicalRuntimeId, MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore,
+    RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -232,7 +232,7 @@ impl RuntimeStore for HarnessRuntimeStore {
 
 #[tokio::test]
 async fn ephemeral_adapter_accept_and_query() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -249,7 +249,7 @@ async fn ephemeral_adapter_accept_and_query() {
 
 #[tokio::test]
 async fn accept_input_without_wake_keeps_idle_runtime_idle() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -276,7 +276,7 @@ async fn accept_input_without_wake_keeps_idle_runtime_idle() {
 #[tokio::test]
 async fn persistent_adapter_accept() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -287,7 +287,7 @@ async fn persistent_adapter_accept() {
 
 #[tokio::test]
 async fn unregistered_session_errors() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let result = adapter.accept_input(&sid, make_prompt("hi")).await;
     assert!(result.is_err());
@@ -295,7 +295,7 @@ async fn unregistered_session_errors() {
 
 #[tokio::test]
 async fn unregister_removes_driver() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
     adapter.unregister_session(&sid).await;
@@ -306,7 +306,7 @@ async fn unregister_removes_driver() {
 
 #[tokio::test]
 async fn recycle_preserves_ephemeral_queued_work() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -349,7 +349,7 @@ async fn recycle_preserves_ephemeral_queued_work() {
 #[tokio::test]
 async fn recycle_preserves_persistent_queued_work() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -425,7 +425,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -525,7 +525,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
         })
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     adapter
@@ -573,7 +573,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
 #[tokio::test]
 async fn unregister_session_terminates_pending_completion_waiters() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -645,7 +645,7 @@ async fn accept_with_executor_triggers_loop() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let executor = Box::new(TestExecutor {
         called: apply_called_clone,
@@ -705,7 +705,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
@@ -766,7 +766,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     }
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(
@@ -855,7 +855,7 @@ async fn failed_executor_continues_processing_backlog() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     adapter
@@ -946,7 +946,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     }
 
     let apply_called = Arc::new(AtomicBool::new(false));
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1031,10 +1031,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::from_millis(
         75,
     )));
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(
-        store,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     let apply_called = Arc::new(AtomicBool::new(false));
 
@@ -1145,7 +1142,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(PanicOnCancelExecutor))
@@ -1252,7 +1249,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
         }
     }
 
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let stop_entered = Arc::new(Notify::new());
     let release_stop = Arc::new(Notify::new());
@@ -1322,7 +1319,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
     use meerkat_runtime::input_state::InputLifecycleState;
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1409,7 +1406,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter
@@ -1448,7 +1445,7 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
     struct SuccessExecutor {
-        adapter: Arc<RuntimeSessionAdapter>,
+        adapter: Arc<MeerkatMachine>,
         session_id: SessionId,
         stop_called: Arc<AtomicBool>,
     }
@@ -1485,10 +1482,7 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(
-        store,
-        memory_blob_store(),
-    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter
@@ -1535,7 +1529,7 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1645,7 +1639,7 @@ async fn dedup_terminal_input_returns_none_handle() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
@@ -1749,7 +1743,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
@@ -1805,7 +1799,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
 async fn accept_input_and_run_rejects_deduplicated_admission() {
     use meerkat_runtime::identifiers::IdempotencyKey;
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1880,7 +1874,7 @@ async fn completion_handle_resolves_without_result() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
@@ -1907,7 +1901,7 @@ async fn completion_handle_resolves_without_result() {
 #[tokio::test]
 async fn reset_runtime_resolves_pending_waiters() {
     // Register without executor so inputs queue but don't process
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1937,7 +1931,7 @@ async fn reset_runtime_resolves_pending_waiters() {
 #[tokio::test]
 async fn retire_without_loop_resolves_waiters() {
     // Register without executor (no RuntimeLoop)
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -2001,7 +1995,7 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
         }
     }
 
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -2062,7 +2056,7 @@ async fn idle_non_host_sessions_do_not_spawn_background_comms_drains() {
         }
     }
 
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -2150,7 +2144,7 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
         }
     }
 
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoopExecutor))
@@ -2210,7 +2204,7 @@ async fn successful_execution_fires_boundary_applied() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
@@ -2239,7 +2233,7 @@ async fn successful_execution_fires_boundary_applied() {
 
 #[tokio::test]
 async fn registered_session_is_not_executor_ready() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
 
@@ -2290,7 +2284,7 @@ async fn executor_attached_session_is_executor_ready() {
         }
     }
 
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let sid = SessionId::new();
     let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
 
@@ -2311,7 +2305,7 @@ async fn executor_attached_session_is_executor_ready() {
 
 #[tokio::test]
 async fn session_has_executor_false_for_unknown() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let unknown = SessionId::new();
     assert!(
         !adapter.session_has_executor(&unknown).await,

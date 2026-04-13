@@ -1,6 +1,6 @@
 //! RuntimeLoop — per-session tokio task that processes queued inputs.
 //!
-//! When `RuntimeSessionAdapter::accept_input()` queues an input and sets
+//! When `MeerkatMachine::accept_input()` queues an input and sets
 //! the wake flag, it sends a signal on the wake channel. The RuntimeLoop
 //! picks it up, dequeues the input, converts it to a `RunPrimitive`,
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
@@ -308,13 +308,13 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
 /// Spawn the per-session runtime loop with optional completion registry.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
-    driver: crate::session_adapter::SharedDriver,
+    driver: crate::meerkat_machine::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     mut wake_rx: tokio::sync::mpsc::Receiver<()>,
     mut control_rx: tokio::sync::mpsc::Receiver<
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
-    completions: Option<crate::session_adapter::SharedCompletionRegistry>,
+    completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
     detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
@@ -522,7 +522,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 /// Returns `true` if a continuation was injected (caller should process_queue).
 /// Supports both feed-based (new) and DetachedWakeState (legacy) paths.
 async fn maybe_inject_feed_wake(
-    driver: &crate::session_adapter::SharedDriver,
+    driver: &crate::meerkat_machine::SharedDriver,
     feed: Option<&dyn meerkat_core::completion_feed::CompletionFeed>,
     wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     observed_seq: &mut meerkat_core::completion_feed::CompletionSeq,
@@ -614,12 +614,12 @@ fn clear_legacy_detached_wake_signal(state: &crate::detached_wake::DetachedWakeS
 
 /// Process all queued inputs until the queue is empty.
 async fn process_queue(
-    driver: &crate::session_adapter::SharedDriver,
+    driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     control_rx: &mut tokio::sync::mpsc::Receiver<
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
-    completions: Option<&crate::session_adapter::SharedCompletionRegistry>,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) -> bool {
     loop {
         if crate::control_plane::drain_ready_executor_controls(
@@ -867,9 +867,9 @@ mod tests {
         }
     }
 
-    fn make_shared_ephemeral_driver(runtime_id: &str) -> crate::session_adapter::SharedDriver {
+    fn make_shared_ephemeral_driver(runtime_id: &str) -> crate::meerkat_machine::SharedDriver {
         Arc::new(crate::tokio::sync::Mutex::new(
-            crate::session_adapter::DriverEntry::Ephemeral(
+            crate::meerkat_machine::DriverEntry::Ephemeral(
                 crate::driver::ephemeral::EphemeralRuntimeDriver::new(
                     crate::identifiers::LogicalRuntimeId::new(runtime_id),
                 ),

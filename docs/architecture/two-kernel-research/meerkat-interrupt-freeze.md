@@ -12,7 +12,7 @@ still target-state only.
 
 This freeze covers:
 
-- `RuntimeSessionAdapter::interrupt_current_run`
+- `MeerkatMachine::interrupt_current_run`
 - runtime-adapter delivery of `RunControlCommand::InterruptYielding`
 
 This freeze does **not** claim that every authority verb already has a live

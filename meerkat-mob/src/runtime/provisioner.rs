@@ -19,8 +19,7 @@ use meerkat_core::types::SessionId;
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
-    RuntimeSessionAdapter,
+    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
 use std::collections::HashMap;
 use tokio::sync::{Mutex, RwLock};
@@ -97,18 +96,18 @@ pub trait MobProvisioner: Send + Sync {
 
 pub struct SessionBackend {
     session_service: Arc<dyn MobSessionService>,
-    runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
+    runtime_adapter: Option<Arc<MeerkatMachine>>,
     ops_adapter: Arc<super::ops_adapter::MobOpsAdapter>,
     // Capability index for runtime bridge sidecars keyed by registered runtime
     // session identity. This map is never lifecycle truth; canonical
-    // registration/attachment truth stays in RuntimeSessionAdapter.
+    // registration/attachment truth stays in MeerkatMachine.
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
 }
 
 impl SessionBackend {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<MeerkatMachine>>,
     ) -> Self {
         Self {
             session_service,
@@ -462,7 +461,7 @@ mod tests {
 
 struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     bridge_session_id: SessionId,
     state: Arc<RuntimeSessionState>,
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
@@ -471,7 +470,7 @@ struct MobSessionRuntimeExecutor {
 impl MobSessionRuntimeExecutor {
     fn new(
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Arc<RuntimeSessionAdapter>,
+        runtime_adapter: Arc<MeerkatMachine>,
         bridge_session_id: SessionId,
         state: Arc<RuntimeSessionState>,
         runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
@@ -784,7 +783,7 @@ impl MobProvisioner for SessionBackend {
                             self.remove_runtime_session_state(&session_id).await;
                         }
                         Err(MobError::Internal(format!(
-                            "runtime-backed interrupt must resolve through RuntimeSessionAdapter for '{session_id}': {error}"
+                            "runtime-backed interrupt must resolve through MeerkatMachine for '{session_id}': {error}"
                         )))
                     }
                 };
@@ -1012,7 +1011,7 @@ pub struct MultiBackendProvisioner {
 impl MultiBackendProvisioner {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<MeerkatMachine>>,
         external: Option<ExternalBackendConfig>,
     ) -> Self {
         let session = SessionBackend::new(session_service.clone(), runtime_adapter);

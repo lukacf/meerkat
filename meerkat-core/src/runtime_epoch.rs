@@ -134,7 +134,7 @@ pub struct EpochCursorSnapshot {
 
 /// Bundle of epoch-local runtime facts.
 ///
-/// Created by the runtime epoch owner ([`RuntimeSessionAdapter::prepare_bindings`]),
+/// Created by the runtime epoch owner ([`MeerkatMachine::prepare_bindings`]),
 /// consumed by the factory. The factory never creates competing registries
 /// when it receives this bundle.
 ///

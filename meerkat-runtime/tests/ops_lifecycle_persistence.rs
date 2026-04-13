@@ -336,7 +336,7 @@ impl CoreExecutor for NoopExecutor {
 /// Uses ephemeral adapter (no store) to verify the code path works.
 #[tokio::test]
 async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
-    let adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Go straight to register_session_with_executor — no prior register_session.
@@ -397,10 +397,9 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
         .unwrap();
 
     // Phase 2: Cold persistent adapter — register_session path.
-    let adapter = meerkat_runtime::RuntimeSessionAdapter::persistent_without_blobs(Arc::clone(
-        &store,
-    )
-        as Arc<dyn RuntimeStore>);
+    let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    );
     adapter.register_session(session_id.clone()).await;
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
@@ -447,11 +446,9 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
         .unwrap();
 
     // Cold attach-first — no prior register_session
-    let adapter = Arc::new(
-        meerkat_runtime::RuntimeSessionAdapter::persistent_without_blobs(
-            Arc::clone(&store) as Arc<dyn RuntimeStore>
-        ),
-    );
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+    ));
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
         .await;

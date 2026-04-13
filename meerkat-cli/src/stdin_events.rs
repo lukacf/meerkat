@@ -64,7 +64,7 @@ fn make_stdin_external_event_input(
 ///
 /// The task exits cleanly on EOF or when the runtime stops accepting input.
 pub fn spawn_stdin_reader(
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     session_id: SessionId,
     format: StdinLineFormat,
 ) -> JoinHandle<()> {

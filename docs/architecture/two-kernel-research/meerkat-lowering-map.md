@@ -14,18 +14,18 @@ top-level boundary. The goal is to make the actual live lowerings explicit.
 
 | Machine input/effect | Current lowering |
 | --- | --- |
-| `PrepareBindings` | `RuntimeSessionAdapter::prepare_bindings(...)` |
-| `RegisterSession` | `RuntimeSessionAdapter::register_session(...)` |
-| `RegisterSessionWithExecutor` | `RuntimeSessionAdapter::register_session_with_executor(...)` |
-| `InterruptCurrentRun` | `RuntimeSessionAdapter::interrupt_current_run(...)` |
-| `ExecutorControl(CancelCurrentRun)` | attached runtime `control_tx.send(RunControlCommand::CancelCurrentRun { .. })` in `session_adapter.rs` |
-| `ExecutorControl(InterruptYielding)` | runtime adapter control path in `session_adapter.rs`; no separate current session-layer lowering is discovered |
-| `ExecutorControl(StopRuntimeExecutor)` | `RuntimeSessionAdapter::stop_runtime_executor(...)` and attached control queue |
-| `RetireRuntime` | `RuntimeSessionAdapter::retire_runtime(...)` / trait lowering in `session_adapter.rs` |
-| `ResetRuntime` | `RuntimeSessionAdapter::reset_runtime(...)` / trait lowering in `session_adapter.rs` |
-| `RecoverRuntime` | `RuntimeSessionAdapter::recover(...)` |
-| `RecycleRuntime` | `RuntimeSessionAdapter::recycle(...)` |
-| `DestroyRuntime` | `RuntimeSessionAdapter::destroy(...)` |
+| `PrepareBindings` | `MeerkatMachine::prepare_bindings(...)` |
+| `RegisterSession` | `MeerkatMachine::register_session(...)` |
+| `RegisterSessionWithExecutor` | `MeerkatMachine::register_session_with_executor(...)` |
+| `InterruptCurrentRun` | `MeerkatMachine::interrupt_current_run(...)` |
+| `ExecutorControl(CancelCurrentRun)` | attached runtime `control_tx.send(RunControlCommand::CancelCurrentRun { .. })` in `meerkat_machine.rs` |
+| `ExecutorControl(InterruptYielding)` | runtime adapter control path in `meerkat_machine.rs`; no separate current session-layer lowering is discovered |
+| `ExecutorControl(StopRuntimeExecutor)` | `MeerkatMachine::stop_runtime_executor(...)` and attached control queue |
+| `RetireRuntime` | `MeerkatMachine::retire_runtime(...)` / trait lowering in `meerkat_machine.rs` |
+| `ResetRuntime` | `MeerkatMachine::reset_runtime(...)` / trait lowering in `meerkat_machine.rs` |
+| `RecoverRuntime` | `MeerkatMachine::recover(...)` |
+| `RecycleRuntime` | `MeerkatMachine::recycle(...)` |
+| `DestroyRuntime` | `MeerkatMachine::destroy(...)` |
 
 ## Admission / ingress lowering
 
@@ -33,9 +33,9 @@ top-level boundary. The goal is to make the actual live lowerings explicit.
 | --- | --- |
 | `AdmitQueuedInput` | runtime-backed session start-turn / request execution path; visible in Meerkat spine tests as `inputs.queue` |
 | `AdmitSteeredInput` | runtime-backed session start-turn / resume path; visible in spine tests as `inputs.steer_queue` with `wake_requested` and `process_requested` |
-| `WakeRuntimeLoop` | `wake_tx.try_send(())` / `wake_tx.send(())` in `session_adapter.rs` |
-| `UpdatePeerIngressContext` | `RuntimeSessionAdapter::update_peer_ingress_context(...)` |
-| `EnsureDrainRunning` | `RuntimeSessionAdapter::maybe_spawn_comms_drain(...)` |
+| `WakeRuntimeLoop` | `wake_tx.try_send(())` / `wake_tx.send(())` in `meerkat_machine.rs` |
+| `UpdatePeerIngressContext` | `MeerkatMachine::update_peer_ingress_context(...)` |
+| `EnsureDrainRunning` | `MeerkatMachine::maybe_spawn_comms_drain(...)` |
 
 ## Turn / ops / barrier lowering
 
@@ -76,8 +76,8 @@ top-level boundary. The goal is to make the actual live lowerings explicit.
 | --- | --- |
 | `EnsureDrainRunning` | `protocol_comms_drain_spawn::execute_ensure_running(...)` inside `maybe_spawn_comms_drain(...)` |
 | `TaskSpawned` | `protocol_comms_drain_spawn::submit_task_spawned(...)` inside `maybe_spawn_comms_drain(...)` |
-| `TaskExited` | `RuntimeSessionAdapter::notify_comms_drain_exited(...)` |
-| `AbortDrainTask` | `RuntimeSessionAdapter::abort_comms_drain(...)` / `abort_comms_drains(...)` |
+| `TaskExited` | `MeerkatMachine::notify_comms_drain_exited(...)` |
+| `AbortDrainTask` | `MeerkatMachine::abort_comms_drain(...)` / `abort_comms_drains(...)` |
 
 ## Explicit non-lowerings
 

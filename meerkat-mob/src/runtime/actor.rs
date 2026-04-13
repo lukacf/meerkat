@@ -249,7 +249,7 @@ pub(super) struct MobActor {
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
-    pub(super) runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
@@ -3651,7 +3651,7 @@ impl MobActor {
         if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             self.stop_autonomous_member(&ctx.meerkat_id, &ctx.entry.member_ref)
                 .await?;
-            // Full teardown: unregister from RuntimeSessionAdapter.
+            // Full teardown: unregister from MeerkatMachine.
             // stop_autonomous_member only aborts the drain; disposal also
             // needs to release the session registration.
             self.teardown_autonomous_runtime(&ctx.entry.member_ref)

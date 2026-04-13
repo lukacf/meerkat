@@ -2449,7 +2449,7 @@ async fn setup_flow_mob(
 
     let session_service = persistent_service(&paths);
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
-    let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let storage =
         MobStorage::persistent(&paths.mob_db_path).expect("create persistent mob storage");
 

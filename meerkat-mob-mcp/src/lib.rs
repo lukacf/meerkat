@@ -95,7 +95,7 @@ fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob:
 /// In-memory MCP state for multiple mobs.
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -122,7 +122,7 @@ impl MobMcpState {
 
     pub fn new_with_runtime_adapter(
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     ) -> Self {
         Self {
             session_service,
@@ -1297,7 +1297,7 @@ impl MobMcpState {
     pub fn new_in_memory() -> Arc<Self> {
         let state = Self::new_with_runtime_adapter(
             Arc::new(LocalSessionService::new()),
-            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
+            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
         );
         Arc::new(state)
     }
@@ -1704,9 +1704,9 @@ impl MobSessionService for LocalSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>> {
         Some(std::sync::Arc::new(
-            meerkat_runtime::RuntimeSessionAdapter::ephemeral(),
+            meerkat_runtime::MeerkatMachine::ephemeral(),
         ))
     }
 
@@ -2672,7 +2672,7 @@ mod tests {
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
-        runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+        runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     }
 
     impl MockSessionSvc {
@@ -2683,7 +2683,7 @@ mod tests {
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
-                runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+                runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             }
         }
 
@@ -2916,7 +2916,7 @@ mod tests {
             true
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
             Some(self.runtime_adapter.clone())
         }
 

@@ -8,7 +8,7 @@
 //! This target is a **runtime-backed surface** (same tier as CLI/RPC/REST):
 //! - Agent construction via `AgentFactory::build_agent()`
 //! - Session lifecycle via `PersistentSessionService`
-//! - Input routing via `RuntimeSessionAdapter` with `HandlingMode::Steer`
+//! - Input routing via `MeerkatMachine` with `HandlingMode::Steer`
 //! - JSON-RPC over TCP for all command/control traffic
 //!
 //! Sessions are persisted to disk. On restart the most recent session
@@ -53,7 +53,7 @@ use meerkat_core::{AgentToolDispatcher as _, Config, Session};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_runtime::{
-    CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput, RuntimeSessionAdapter,
+    CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput, MeerkatMachine,
 };
 use meerkat_runtime::input::{
     InputDurability, InputHeader, InputVisibility,
@@ -77,7 +77,7 @@ Your responses stream directly to the controller — do not use the 'send_messag
 
 struct TargetRuntimeSurface {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     jsonl_store: Arc<JsonlStore>,
     mob_state: Arc<MobMcpState>,
     _factory: Arc<AgentFactory>,
@@ -88,14 +88,14 @@ struct TargetRuntimeSurface {
 #[derive(Clone)]
 struct TargetScheduleSessionHost {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     mob_state: Arc<MobMcpState>,
 }
 
 impl TargetScheduleSessionHost {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        runtime_adapter: Arc<RuntimeSessionAdapter>,
+        runtime_adapter: Arc<MeerkatMachine>,
         mob_state: Arc<MobMcpState>,
     ) -> Self {
         Self {
@@ -878,10 +878,10 @@ async fn apply_target_control_effects(
 // ── Session lifecycle ────────────────────────────────────────────────────────
 
 /// Create a new session or resume an existing one. Registers the session
-/// with the RuntimeSessionAdapter and subscribes to its events.
+/// with the MeerkatMachine and subscribes to its events.
 async fn create_or_resume_session(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    runtime_adapter: &Arc<MeerkatMachine>,
     jsonl_store: &JsonlStore,
     model: &str,
     system_prompt: &str,
@@ -938,7 +938,7 @@ async fn create_or_resume_session(
 /// Create or resume a session and register it with the runtime adapter.
 async fn setup_session(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    runtime_adapter: &Arc<MeerkatMachine>,
     resume_id: Option<SessionId>,
     model: &str,
     system_prompt: &str,
@@ -1035,7 +1035,7 @@ async fn setup_session(
 
 // ── CoreExecutor for runtime loop ────────────────────────────────────────────
 
-/// Bridges the RuntimeSessionAdapter's runtime loop to the PersistentSessionService.
+/// Bridges the MeerkatMachine's runtime loop to the PersistentSessionService.
 /// When the runtime loop dequeues an input (via DefaultPolicyTable routing),
 /// it calls `apply()` which translates the RunPrimitive into a `start_turn()`.
 struct TargetCoreExecutor {

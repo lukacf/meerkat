@@ -34,7 +34,7 @@ The important 0.5 distinction is ownership:
 
 That ownership is expressed through the explicit runtime-binding contract:
 
-- runtime-backed surfaces obtain `SessionRuntimeBindings` from `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- runtime-backed surfaces obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)`
 - those bindings flow through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
 - standalone/testing/embedded paths opt into `RuntimeBuildMode::StandaloneEphemeral`
 
@@ -50,7 +50,7 @@ Nothing is embedded; everything is injected. The `Agent<C, T, S>` generic parame
 
 ### Sessions are first-class, persistence is optional
 
-`SessionService` defines the substrate lifecycle. Production surfaces (CLI, REST, RPC, MCP) use `PersistentSessionService` under a `RuntimeSessionAdapter` that owns `keep_alive`, Queue/Steer routing, comms drain, and ingress admission. `EphemeralSessionService` is the in-memory substrate for testing and embedded use — it supports Queue-only turns and rejects runtime-owned semantics (Steer, render_metadata). The `.rkat/sessions/` files are derived projections materialized by `SessionProjector` — delete them and replay from the event store to get identical content.
+`SessionService` defines the substrate lifecycle. Production surfaces (CLI, REST, RPC, MCP) use `PersistentSessionService` under a `MeerkatMachine` that owns `keep_alive`, Queue/Steer routing, comms drain, and ingress admission. `EphemeralSessionService` is the in-memory substrate for testing and embedded use — it supports Queue-only turns and rejects runtime-owned semantics (Steer, render_metadata). The `.rkat/sessions/` files are derived projections materialized by `SessionProjector` — delete them and replay from the event store to get identical content.
 
 ### Errors separate mechanism from policy
 

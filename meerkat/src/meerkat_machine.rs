@@ -1,9 +1,8 @@
-//! Diagnostic snapshot facade for the current Meerkat runtime surface.
+//! Diagnostic snapshot facade for the Meerkat runtime surface.
 //!
-//! The cutover removes the old shadow/taxonomy/validator regime from this
-//! facade. The real runtime authority lives in `meerkat-runtime`; this module
-//! only preserves the joined snapshot types that are still useful for
-//! diagnostics and future follow-up work.
+//! The real runtime authority now lives in `meerkat-runtime`; this module keeps
+//! only the joined snapshot types that remain useful for diagnostics and future
+//! follow-up work.
 
 use meerkat_core::{
     AgentExecutionSnapshot, ExternalToolSurfaceSnapshot, PeerIngressRuntimeSnapshot,

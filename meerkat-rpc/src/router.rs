@@ -293,7 +293,7 @@ pub struct MethodRouter {
     active_mob_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     #[cfg(feature = "mob")]
     closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
 impl MethodRouter {
@@ -387,7 +387,7 @@ impl MethodRouter {
     }
 
     /// Get a reference to the runtime adapter for session registration.
-    pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
+    pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::MeerkatMachine> {
         &self.runtime_adapter
     }
 
@@ -544,10 +544,7 @@ impl MethodRouter {
 
     /// Replace the default ephemeral runtime adapter with a custom one
     /// (e.g., persistent-backed for durable runtime semantics).
-    pub fn with_runtime_adapter(
-        mut self,
-        adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
-    ) -> Self {
+    pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = adapter;
         self
     }
@@ -2171,7 +2168,7 @@ mod tests {
 
     async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let (router, notif_rx) = test_router().await;
-        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             memory_blob_store(),
         ));

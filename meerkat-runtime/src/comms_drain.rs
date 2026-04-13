@@ -19,8 +19,8 @@ use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 use crate::comms_bridge::peer_input_candidate_to_runtime_input;
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
+use crate::meerkat_machine::MeerkatMachine;
 use crate::service_ext::SessionServiceRuntimeExt as _;
-use crate::session_adapter::MeerkatMachine;
 use crate::tokio::sync::mpsc;
 
 /// Default idle timeout for session-backed comms drains.

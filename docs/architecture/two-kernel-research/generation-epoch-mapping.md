@@ -34,13 +34,13 @@ Current runtime code already gives `RuntimeEpochId` a narrower meaning than memb
 
 - `RuntimeEpochId` is documented as a continuous async-ordering domain; the same session may span multiple epochs, and the same identity may span multiple sessions and epochs.
 - `SessionRuntimeBindings` treats `epoch_id` as an epoch-local binding fact consumed by the factory rather than as a public identity handle.
-- `RuntimeSessionAdapter::recover_or_create_ops_state()` preserves the recovered epoch when a durable ops snapshot exists, and allocates a fresh epoch when no snapshot exists or recovery fails.
-- `RuntimeSessionAdapter::prepare_bindings()` is idempotent and returns the existing entry's `epoch_id` for the same registered session.
+- `MeerkatMachine::recover_or_create_ops_state()` preserves the recovered epoch when a durable ops snapshot exists, and allocates a fresh epoch when no snapshot exists or recovery fails.
+- `MeerkatMachine::prepare_bindings()` is idempotent and returns the existing entry's `epoch_id` for the same registered session.
 
 There is also an important current-code ambiguity:
 
 - comments say the epoch rotates on reset or restart without recovery
-- the live `RuntimeSessionAdapter` reset path does not currently rewrite `RuntimeSessionEntry.epoch_id`
+- the live `MeerkatMachine` reset path does not currently rewrite `RuntimeSessionEntry.epoch_id`
 
 So the architecture should not rely on "reset rotates epoch" until that behavior is made explicit in code.
 

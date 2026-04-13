@@ -18,13 +18,13 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Family | Kind | Path | Type / Trait | Methods |
 | --- | --- | --- | --- | --- |
-| runtime-control-plane | trait-impl | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` / `RuntimeControlPlane` | `ingest`, `publish_event`, `retire`, `recycle`, `reset`, `recover`, `destroy` |
-| runtime-session-adapter | public-inherent | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` | `register_session`, `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session`, `interrupt_current_run`, `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion`, `update_peer_ingress_context`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
+| runtime-control-plane | trait-impl | `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine` / `RuntimeControlPlane` | `ingest`, `publish_event`, `retire`, `recycle`, `reset`, `recover`, `destroy` |
+| runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine` | `register_session`, `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session`, `interrupt_current_run`, `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion`, `update_peer_ingress_context`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
 | mcp-router | public-inherent | `meerkat-mcp/src/router.rs` | `McpRouter` | `set_removal_timeout`, `add_server`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `take_lifecycle_actions`, `take_external_updates`, `progress_removals`, `call_tool`, `shutdown` |
 | mcp-router-adapter | public-inherent | `meerkat-mcp/src/adapter.rs` | `McpRouterAdapter` | `refresh_tools`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `poll_lifecycle_actions`, `progress_removals`, `wait_until_ready`, `shutdown` |
 | mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn`, `spawn_with_backend`, `spawn_with_options`, `attach_existing_session`, `attach_existing_session_as_orchestrator`, `attach_existing_session_as_member`, `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `task_create`, `task_update`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
 | mob-command-dispatch | enum-dispatch | `meerkat-mob/src/runtime/actor.rs` | `MobActor` / `MobCommand` | `enqueue_spawn`, `handle_force_cancel`, `handle_retire`, `handle_respawn`, `handle_wire`, `handle_unwire`, `handle_external_turn`, `handle_internal_turn`, `retire_all_members`, `handle_task_create`, `handle_task_update`, `handle_run_flow`, `handle_cancel_flow`, `handle_flow_cleanup`, `handle_complete`, `handle_destroy`, `handle_reset` |
-| manual-callback | manual-callback | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` | `notify_comms_drain_exited` |
+| manual-callback | manual-callback | `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine` | `notify_comms_drain_exited` |
 | manual-callback | manual-callback | `meerkat-mcp/src/router.rs` | `McpRouter` | `process_pending_result` |
 | manual-callback | manual-callback | `meerkat-mob/src/runtime/actor.rs` | `MobActor` | `handle_spawn_provisioned_batch` |
 | shell-background-job-view | export-contract (app-facing) | `meerkat-tools/src/builtin/shell/types.rs` | `BackgroundJob` | `exports_raw_operation_id=false` |
@@ -36,11 +36,11 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Path | Symbol | Class | Status | Anchor | Contract |
 | --- | --- | --- | --- | --- | --- |
-| `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter.sessions` | `capability-index` | `closed` | `RuntimeSessionAdapter registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
-| `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter.comms_drain_slots` | `capability-index` | `closed` | `RuntimeSessionAdapter registered-session contract + CommsDrainLifecycleMachine` | src: `registered session keys + comms drain lifecycle slot allocation`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
-| `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `RuntimeControlMachine + RuntimeIngressMachine + InputLifecycleMachine` | - |
-| `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionEntry.phase` | `capability-handle` | `closed` | `RuntimeSessionAdapter attachment publication contract` | - |
-| `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionEntry.completions` | `capability-handle` | `closed` | `InputLifecycle terminal wait plumbing` | - |
+| `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine.sessions` | `capability-index` | `closed` | `MeerkatMachine registered-session + attachment publication contract` | src: `registered session entries with recovered driver/completion capabilities`; trigger: `register/ensure/attach/detach/unregister/destroy transitions + dead-attachment normalization`; stale: `forbidden` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `MeerkatMachine.comms_drain_slots` | `capability-index` | `closed` | `MeerkatMachine registered-session contract + CommsDrainLifecycleMachine` | src: `registered session keys + comms drain lifecycle slot allocation`; trigger: `register/unregister/destroy + drain lifecycle transitions + control installation`; stale: `forbidden` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `RuntimeSessionEntry.driver` | `capability-handle` | `closed` | `RuntimeControlMachine + RuntimeIngressMachine + InputLifecycleMachine` | - |
+| `meerkat-runtime/src/meerkat_machine.rs` | `RuntimeSessionEntry.phase` | `capability-handle` | `closed` | `MeerkatMachine attachment publication contract` | - |
+| `meerkat-runtime/src/meerkat_machine.rs` | `RuntimeSessionEntry.completions` | `capability-handle` | `closed` | `InputLifecycle terminal wait plumbing` | - |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.queue` | `derived-projection` | `closed` | `RuntimeIngressMachine queue lane` | src: `RuntimeIngressMachine.queue entries`; trigger: `any ingress queue mutation or rollback/recovery rebuild`; stale: `forbidden` |
 | `meerkat-runtime/src/driver/ephemeral.rs` | `EphemeralRuntimeDriver.steer_queue` | `derived-projection` | `closed` | `RuntimeIngressMachine steer lane` | src: `RuntimeIngressMachine.steer entries`; trigger: `any ingress steer mutation or rollback/recovery rebuild`; stale: `forbidden` |
 
@@ -48,34 +48,34 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Path | Symbol | Boundary | Status | Anchor |
 | --- | --- | --- | --- | --- |
-| `meerkat-runtime/src/session_adapter.rs` | `register_session` | `public-inherent` | `closed` | `RuntimeSessionAdapter registration + recovery publication contract` |
-| `meerkat-runtime/src/session_adapter.rs` | `set_session_silent_intents` | `public-inherent` | `closed` | `RuntimeIngressMachine + RuntimeControlMachine policy truth` |
-| `meerkat-runtime/src/session_adapter.rs` | `register_session_with_executor` | `public-inherent` | `closed` | `RuntimeSessionAdapter registration + attachment publication contract` |
-| `meerkat-runtime/src/session_adapter.rs` | `ensure_session_with_executor` | `public-inherent` | `closed` | `RuntimeSessionAdapter attachment publication contract + RuntimeControl transitions` |
-| `meerkat-runtime/src/session_adapter.rs` | `unregister_session` | `public-inherent` | `closed` | `registered-session contract + CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `interrupt_current_run` | `public-inherent` | `closed` | `RuntimeControlMachine + runtime attachment publication contract` |
-| `meerkat-runtime/src/session_adapter.rs` | `stop_runtime_executor` | `public-inherent` | `closed` | `RuntimeControlMachine + runtime attachment publication contract` |
-| `meerkat-runtime/src/session_adapter.rs` | `accept_input_and_run` | `public-inherent` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine + RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `accept_input_with_completion` | `public-inherent` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `update_peer_ingress_context` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `notify_comms_drain_exited` | `manual-callback` | `closed` | `CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `abort_comms_drains` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `abort_comms_drain` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `wait_comms_drain` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `publish_event` | `trait-impl` | `closed` | `RuntimeControlMachine + InputLifecycleMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `retire` | `trait-impl` | `closed` | `RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `recycle` | `trait-impl` | `closed` | `RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `reset` | `trait-impl` | `closed` | `RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `recover` | `trait-impl` | `closed` | `RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `destroy` | `trait-impl` | `closed` | `RuntimeControlMachine` |
-| `meerkat-runtime/src/session_adapter.rs` | `ingest` | `trait-impl` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `register_session` | `public-inherent` | `closed` | `MeerkatMachine registration + recovery publication contract` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `set_session_silent_intents` | `public-inherent` | `closed` | `RuntimeIngressMachine + RuntimeControlMachine policy truth` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `register_session_with_executor` | `public-inherent` | `closed` | `MeerkatMachine registration + attachment publication contract` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `ensure_session_with_executor` | `public-inherent` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `unregister_session` | `public-inherent` | `closed` | `registered-session contract + CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `interrupt_current_run` | `public-inherent` | `closed` | `RuntimeControlMachine + runtime attachment publication contract` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `stop_runtime_executor` | `public-inherent` | `closed` | `RuntimeControlMachine + runtime attachment publication contract` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `accept_input_and_run` | `public-inherent` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine + RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `accept_input_with_completion` | `public-inherent` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `update_peer_ingress_context` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `notify_comms_drain_exited` | `manual-callback` | `closed` | `CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `abort_comms_drains` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `abort_comms_drain` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `wait_comms_drain` | `public-inherent` | `closed` | `CommsDrainLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `publish_event` | `trait-impl` | `closed` | `RuntimeControlMachine + InputLifecycleMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `retire` | `trait-impl` | `closed` | `RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `recycle` | `trait-impl` | `closed` | `RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `reset` | `trait-impl` | `closed` | `RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `recover` | `trait-impl` | `closed` | `RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `destroy` | `trait-impl` | `closed` | `RuntimeControlMachine` |
+| `meerkat-runtime/src/meerkat_machine.rs` | `ingest` | `trait-impl` | `closed` | `RuntimeIngressMachine + InputLifecycleMachine` |
 
 ## Runtime Coupling Invariants
 
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
-| `runtime_session_drain_subset` | `RuntimeSessionAdapter.sessions`, `RuntimeSessionAdapter.comms_drain_slots` | `closed` | `registered-session contract + CommsDrainLifecycleMachine` |
-| `runtime_attachment_alignment` | `RuntimeSessionEntry.phase`, `RuntimeSessionEntry.driver` | `closed` | `RuntimeSessionAdapter attachment publication contract + RuntimeControl transitions` |
+| `runtime_session_drain_subset` | `MeerkatMachine.sessions`, `MeerkatMachine.comms_drain_slots` | `closed` | `registered-session contract + CommsDrainLifecycleMachine` |
+| `runtime_attachment_alignment` | `RuntimeSessionEntry.phase`, `RuntimeSessionEntry.driver` | `closed` | `MeerkatMachine attachment publication contract + RuntimeControl transitions` |
 | `runtime_queue_projection_alignment` | `RuntimeIngressMachine.queue`, `EphemeralRuntimeDriver.queue`, `EphemeralRuntimeDriver.steer_queue` | `closed` | `RuntimeIngressMachine` |
 | `runtime_comms_bridge_projection_alignment` | `PeerCommsMachine.classified_interactions`, `RuntimeCommsBridge.runtime_input_projection` | `closed` | `PeerCommsMachine classification + RuntimeCommsBridge projection contract` |
 | `runtime_external_event_projection_alignment` | `CLI.stdin_external_event_projection`, `PeerCommsMachine.plain_events`, `Runtime.ExternalEventInput`, `RuntimeLoop.external_event_rendering` | `closed` | `ExternalEventInput projection contract + runtime external-event render contract` |
@@ -136,7 +136,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/actor.rs` | `MobActor.roster` | `derived-projection` | `closed` | `RosterAuthority + spawn/retire/wire event projection contract` | src: `MeerkatSpawned/Retired + PeersWired/PeersUnwired event lineage + session-bridge assignment updates`; trigger: `spawn finalization, disposal retirement, wire/unwire mutation, resume replay`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/actor.rs` | `MobActor.pending_spawns` | `derived-projection` | `closed` | `PendingSpawnLineage + MobOrchestratorAuthority.pending_spawn_count` | src: `staged spawn receipts + reply obligations + provision task handles`; trigger: `enqueue_spawn, spawn completion, respawn cancellation, lifecycle drain`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/pending_spawn_lineage.rs` | `PendingSpawnLineage.tasks` | `capability-index` | `closed` | `PendingSpawnLineage metadata + MobOrchestratorAuthority.pending_spawn_count` | src: `machine-owned pending spawn set`; trigger: `spawn begin/complete/rollback transitions`; stale: `forbidden` |
-| `meerkat-mob/src/runtime/provisioner.rs` | `SessionBackend.runtime_sessions` | `capability-index` | `closed` | `RuntimeSessionAdapter registered sessions` | src: `runtime adapter registration truth + runtime bridge sidecar handles`; trigger: `runtime session ensure/reattach + retire/unregister + interrupt stale-bridge cleanup`; stale: `forbidden` |
+| `meerkat-mob/src/runtime/provisioner.rs` | `SessionBackend.runtime_sessions` | `capability-index` | `closed` | `MeerkatMachine registered sessions` | src: `runtime adapter registration truth + runtime bridge sidecar handles`; trigger: `runtime session ensure/reattach + retire/unregister + interrupt stale-bridge cleanup`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/provisioner.rs` | `RuntimeSessionState.queued_turns` | `transport-buffer` | `closed` | `InputLifecycle canonical input identity + runtime primitive contributing ids` | src: `event transport handles keyed by canonical input ids`; trigger: `accept/dedup rekey + primitive contributing-id consumption + retire/unregister clear`; stale: `forbidden` |
 | `meerkat-mob/src/runtime/ops_adapter.rs` | `MobOpsAdapter.fallback_registry` | `capability-handle` | `closed` | `RuntimeOpsLifecycleRegistry` | - |
 
@@ -199,7 +199,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | Name | Stores | Status | Anchor |
 | --- | --- | --- | --- |
 | `mob_pending_spawn_alignment` | `MobActor.pending_spawns`, `PendingSpawnLineage.tasks`, `MobOrchestratorAuthority.pending_spawn_count` | `closed` | `pending spawn lineage helpers + MobOrchestratorAuthority.pending_spawn_count` |
-| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turns`, `MobOpsAdapter.fallback_registry` | `closed` | `SessionBackend runtime session sidecar contract + RuntimeSessionAdapter registration truth + RuntimeOpsLifecycleRegistry` |
+| `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turns`, `MobOpsAdapter.fallback_registry` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
 | `mob_wiring_alignment` | `Roster.wired_to`, `trust edges`, `edge locks` | `closed` | `Roster wiring projection contract + do_wire/handle_unwire edge-lock discipline` |
 
 ## Open Findings

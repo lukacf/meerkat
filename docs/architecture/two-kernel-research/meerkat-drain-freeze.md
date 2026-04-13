@@ -11,8 +11,8 @@ keep-alive lifecycle at the session-adapter boundary.
 
 This freeze covers:
 
-- `RuntimeSessionAdapter::update_peer_ingress_context(...)`
-- `RuntimeSessionAdapter::maybe_spawn_comms_drain(...)`
+- `MeerkatMachine::update_peer_ingress_context(...)`
+- `MeerkatMachine::maybe_spawn_comms_drain(...)`
 - `CommsDrainLifecycleAuthority`
 - drain-slot / phase / mode / handle snapshot shape
 - unregister / abort / stopped-slot behavior

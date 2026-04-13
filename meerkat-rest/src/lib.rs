@@ -130,7 +130,7 @@ pub struct AppState {
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     /// Optional v9 runtime adapter for runtime/input endpoints.
-    pub runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    pub runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     pub schedule_host: Arc<schedule_host::ScheduleHostState>,
     /// Shared in-process mob lifecycle state for protocol mob operations.
     #[cfg(feature = "mob")]
@@ -157,7 +157,7 @@ struct RestRuntimeExecutorContext {
     instance_id: Option<String>,
     backend: String,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
 struct RestSessionRuntimeExecutor {
@@ -1134,7 +1134,7 @@ pub fn router(state: AppState) -> Router {
 // ---------------------------------------------------------------------------
 
 /// Helper: get the runtime adapter reference.
-fn get_runtime_adapter(state: &AppState) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
+fn get_runtime_adapter(state: &AppState) -> &Arc<meerkat_runtime::MeerkatMachine> {
     &state.runtime_adapter
 }
 

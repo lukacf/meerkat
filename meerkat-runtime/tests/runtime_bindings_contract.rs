@@ -1,12 +1,12 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-//! Contract tests for RuntimeSessionAdapter::prepare_bindings() and
+//! Contract tests for MeerkatMachine::prepare_bindings() and
 //! SessionRuntimeBindings identity semantics.
 
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
-use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_runtime::MeerkatMachine;
 use std::sync::Arc;
 
 fn test_op_spec(name: &str) -> OperationSpec {
@@ -25,7 +25,7 @@ fn test_op_spec(name: &str) -> OperationSpec {
 
 #[tokio::test]
 async fn prepare_bindings_returns_matching_session_id() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
@@ -40,7 +40,7 @@ async fn prepare_bindings_returns_matching_session_id() {
 
 #[tokio::test]
 async fn prepare_bindings_returns_stable_epoch_id() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     let first = adapter.prepare_bindings(session_id.clone()).await.unwrap();
@@ -56,7 +56,7 @@ async fn prepare_bindings_returns_stable_epoch_id() {
 
 #[tokio::test]
 async fn prepare_bindings_returns_different_epoch_for_different_sessions() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_a = SessionId::new();
     let session_b = SessionId::new();
 
@@ -73,7 +73,7 @@ async fn prepare_bindings_returns_different_epoch_for_different_sessions() {
 
 #[tokio::test]
 async fn prepare_bindings_returns_same_registry_instance() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     let first = adapter.prepare_bindings(session_id.clone()).await.unwrap();
@@ -97,7 +97,7 @@ async fn prepare_bindings_returns_same_registry_instance() {
 
 #[tokio::test]
 async fn prepare_bindings_idempotent_with_prior_registration() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Pre-register (as some surfaces do)
@@ -128,7 +128,7 @@ async fn prepare_bindings_idempotent_with_prior_registration() {
 
 #[tokio::test]
 async fn bindings_registry_shares_completion_feed_with_adapter() {
-    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();

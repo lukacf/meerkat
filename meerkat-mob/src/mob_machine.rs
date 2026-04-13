@@ -1,9 +1,8 @@
-//! Diagnostic snapshot and command facade for the current MobMachine boundary.
+//! Diagnostic snapshot and command facade for the Mob runtime surface.
 //!
-//! The cutover removes the old shadow/taxonomy/validator regime from this
-//! facade. The runtime actor owns Mob authority; this module keeps the
-//! top-level command/result surface plus the durable diagnostic snapshot shapes
-//! that remain useful for inspection and follow-up work.
+//! The runtime actor owns Mob authority; this module keeps the top-level
+//! command/result surface plus the durable diagnostic snapshot shapes that
+//! remain useful for inspection and follow-up work.
 
 use crate::definition::DependencyMode;
 use crate::ids::{BranchId, FlowId, MeerkatId, RunId, StepId};

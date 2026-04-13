@@ -2682,7 +2682,7 @@ struct CliRuntimeExecutor {
     persistent_service:
         Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
@@ -2967,7 +2967,7 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
             &self.inner,
         )
@@ -3434,7 +3434,7 @@ async fn run_agent(
         CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
     // Create ephemeral runtime adapter and prepare epoch-local bindings.
-    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
     let bindings = runtime_adapter
         .prepare_bindings(session_id.clone())
         .await
@@ -4163,7 +4163,7 @@ async fn build_cli_persistent_service(
     config: Config,
 ) -> anyhow::Result<(
     Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
-    Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    Arc<meerkat_runtime::MeerkatMachine>,
 )> {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     build_cli_persistent_service_from_bundle(scope, config, manifest, persistence)
@@ -4176,7 +4176,7 @@ fn build_cli_persistent_service_from_bundle(
     persistence: PersistenceBundle,
 ) -> anyhow::Result<(
     Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
-    Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    Arc<meerkat_runtime::MeerkatMachine>,
 )> {
     let surface =
         get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)?;
@@ -4309,14 +4309,14 @@ type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilde
 
 struct CliPersistentSurfaceState {
     service: Arc<CliPersistentService>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     _schedule_host: Option<meerkat::surface::ScheduleHostHandle>,
 }
 
 #[derive(Clone)]
 struct CliScheduleSessionHost {
     service: Arc<CliPersistentService>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
 impl CliScheduleSessionHost {
@@ -4866,7 +4866,7 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         true
     }
 
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::runtime_adapter(
             &self.inner,
         )
@@ -5749,7 +5749,7 @@ type LlmClientProvider =
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     default_llm_client_provider: Option<LlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
@@ -7387,7 +7387,7 @@ mod tests {
             }],
         )
         .expect("stream pipeline should build");
-        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
         let service: Arc<dyn meerkat_core::service::SessionService> =
             Arc::new(CapturingEventTurnService::new(session_id.clone()));
         let executor = Box::new(CliRuntimeExecutor {
@@ -7451,7 +7451,7 @@ mod tests {
             }],
         )
         .expect("stream pipeline should build");
-        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
         let service: Arc<dyn meerkat_core::service::SessionService> =
             Arc::new(CapturingEventTurnService::new(session_id.clone()));
         let executor = Box::new(CliRuntimeExecutor {
@@ -7889,8 +7889,8 @@ mod tests {
             true
         }
 
-        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()))
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
+            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()))
         }
 
         async fn session_belongs_to_mob(
@@ -8043,7 +8043,7 @@ mod tests {
     async fn test_cli_runtime_executor_forwards_stream_events_to_runtime_backed_turns() {
         let session_id = SessionId::new();
         let service = Arc::new(CapturingEventTurnService::new(session_id.clone()));
-        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
         let mut executor = CliRuntimeExecutor {
             service: service.clone(),

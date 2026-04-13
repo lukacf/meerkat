@@ -21,7 +21,7 @@ use meerkat_core::types::{HandlingMode, SessionId};
 use meerkat_core::{ConfigRuntime, EventEnvelope, PendingSystemContextAppend};
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_runtime::completion::CompletionHandle;
-use meerkat_runtime::{AcceptOutcome, Input, RuntimeSessionAdapter};
+use meerkat_runtime::{AcceptOutcome, Input, MeerkatMachine};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -34,7 +34,7 @@ pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapt
 
 pub(crate) struct McpRuntimeIngressResources {
     pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    pub runtime_adapter: Arc<RuntimeSessionAdapter>,
+    pub runtime_adapter: Arc<MeerkatMachine>,
     pub config_runtime: Arc<ConfigRuntime>,
     pub realm_id: String,
     pub instance_id: Option<String>,
@@ -46,7 +46,7 @@ pub(crate) struct McpRuntimeIngressResources {
 #[derive(Clone)]
 pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     config_runtime: Arc<ConfigRuntime>,
     realm_id: String,
     instance_id: Option<String>,

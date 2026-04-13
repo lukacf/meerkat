@@ -33,7 +33,7 @@ Where `triage` is one of:
 ### Host files
 
 - `meerkat/src/meerkat_machine.rs`
-- `meerkat-runtime/src/session_adapter.rs`
+- `meerkat-runtime/src/meerkat_machine.rs`
 - `meerkat-core/src/agent/runner.rs`
 
 ### First helpers
@@ -92,7 +92,7 @@ Where `triage` is one of:
 ### Host files
 
 - `meerkat-mob/src/runtime/actor.rs`
-- `meerkat-runtime/src/session_adapter.rs`
+- `meerkat-runtime/src/meerkat_machine.rs`
 - `meerkat/src/meerkat_machine.rs`
 - `meerkat-mob/src/mob_machine.rs`
 

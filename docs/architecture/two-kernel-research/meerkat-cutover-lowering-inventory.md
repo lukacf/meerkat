@@ -25,18 +25,18 @@ Each entry is classified as one of:
 
 | Input/effect | Current lowering | Status |
 | --- | --- | --- |
-| `PrepareBindings` | `RuntimeSessionAdapter::prepare_bindings(...)` | `canonical_ready` |
-| `RegisterSession` | `RuntimeSessionAdapter::register_session(...)` | `canonical_ready` |
-| `RegisterSessionWithExecutor` | `RuntimeSessionAdapter::register_session_with_executor(...)` | `canonical_ready` |
-| `InterruptCurrentRun` | `RuntimeSessionAdapter::interrupt_current_run(...)` | `canonical_ready` |
-| `ExecutorControl(CancelCurrentRun)` | attached runtime control queue in `session_adapter.rs` | `needs_centralization` |
-| `ExecutorControl(InterruptYielding)` | runtime adapter control path in `session_adapter.rs` | `needs_centralization` |
-| `ExecutorControl(StopRuntimeExecutor)` | `RuntimeSessionAdapter::stop_runtime_executor(...)` plus attached queue | `needs_centralization` |
-| `RetireRuntime` | `RuntimeSessionAdapter::retire_runtime(...)` and trait lowering | `needs_centralization` |
-| `ResetRuntime` | `RuntimeSessionAdapter::reset_runtime(...)` | `needs_centralization` |
-| `RecoverRuntime` | `RuntimeSessionAdapter::recover(...)` | `needs_centralization` |
-| `RecycleRuntime` | `RuntimeSessionAdapter::recycle(...)` | `needs_centralization` |
-| `DestroyRuntime` | `RuntimeSessionAdapter::destroy(...)` | `needs_centralization` |
+| `PrepareBindings` | `MeerkatMachine::prepare_bindings(...)` | `canonical_ready` |
+| `RegisterSession` | `MeerkatMachine::register_session(...)` | `canonical_ready` |
+| `RegisterSessionWithExecutor` | `MeerkatMachine::register_session_with_executor(...)` | `canonical_ready` |
+| `InterruptCurrentRun` | `MeerkatMachine::interrupt_current_run(...)` | `canonical_ready` |
+| `ExecutorControl(CancelCurrentRun)` | attached runtime control queue in `meerkat_machine.rs` | `needs_centralization` |
+| `ExecutorControl(InterruptYielding)` | runtime adapter control path in `meerkat_machine.rs` | `needs_centralization` |
+| `ExecutorControl(StopRuntimeExecutor)` | `MeerkatMachine::stop_runtime_executor(...)` plus attached queue | `needs_centralization` |
+| `RetireRuntime` | `MeerkatMachine::retire_runtime(...)` and trait lowering | `needs_centralization` |
+| `ResetRuntime` | `MeerkatMachine::reset_runtime(...)` | `needs_centralization` |
+| `RecoverRuntime` | `MeerkatMachine::recover(...)` | `needs_centralization` |
+| `RecycleRuntime` | `MeerkatMachine::recycle(...)` | `needs_centralization` |
+| `DestroyRuntime` | `MeerkatMachine::destroy(...)` | `needs_centralization` |
 | `CancelAfterBoundary` | no honest top-level lowering today | `target_only` |
 
 ## Admission / input ledger
@@ -70,7 +70,7 @@ Each entry is classified as one of:
 | `RegisterTrustedPeer` / `UnregisterTrustedPeer` / `UnregisterTrustedPubkey` | canonical comms runtime trust seam | `canonical_ready` |
 | `ReceivePeerIngress` | classified inbox + `PeerCommsAuthority` receive path | `needs_centralization` |
 | `DrainPeerIngress` | dispatcher drain forwarding into classified inbox drain | `needs_centralization` |
-| `UpdatePeerIngressContext` | `RuntimeSessionAdapter::update_peer_ingress_context(...)` | `canonical_ready` |
+| `UpdatePeerIngressContext` | `MeerkatMachine::update_peer_ingress_context(...)` | `canonical_ready` |
 
 ## Tools
 
@@ -91,7 +91,7 @@ Each entry is classified as one of:
 | --- | --- | --- |
 | `EnsureDrainRunning` | protocol spawn inside `maybe_spawn_comms_drain(...)` | `needs_centralization` |
 | `TaskSpawned` | protocol spawned submission inside `maybe_spawn_comms_drain(...)` | `needs_centralization` |
-| `TaskExited` | `RuntimeSessionAdapter::notify_comms_drain_exited(...)` | `needs_centralization` |
+| `TaskExited` | `MeerkatMachine::notify_comms_drain_exited(...)` | `needs_centralization` |
 | `AbortDrainTask` | adapter abort helpers | `needs_centralization` |
 
 ## Immediate cutover priorities

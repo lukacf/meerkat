@@ -42,7 +42,7 @@ graph TD
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
 
-    RUNTIME["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver /<br/>RuntimeSessionAdapter"]
+    RUNTIME["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver /<br/>MeerkatMachine"]
 
     SCHEMA["meerkat-machine-schema<br/>Machine definitions / Compositions /<br/>Handoff protocols"]
     CODEGEN["meerkat-machine-codegen<br/>Code generation from schemas"]
@@ -201,14 +201,14 @@ Runtime control plane for session-backed agent lifecycle:
 
 - **RuntimeControlPlane**: manages runtime-level state (attached, idle, retiring) and dispatches commands
 - **RuntimeDriver**: per-session driver that owns the `Agent` exclusively in a dedicated tokio task
-- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model and owns session runtime bindings / epoch recovery
+- **MeerkatMachine**: bridges `SessionService` into the runtime's event-driven model and owns session runtime bindings / epoch recovery
 - **Input taxonomy**: typed `Input` enum (Prompt, Peer, FlowStep, ExternalEvent, Continuation, Operation) with durability, origin, and visibility metadata
 - **InputLifecycleState**: full state machine for input processing (Accepted → Consumed | Superseded | Coalesced | Abandoned)
 
 This crate sits between surfaces and `SessionService`, providing the stateful runtime that owns
 keep-alive, ingress admission, and live routing semantics for the product surfaces.
 
-`RuntimeSessionAdapter::prepare_bindings(session_id)` is the canonical runtime-backed entry seam.
+`MeerkatMachine::prepare_bindings(session_id)` is the canonical runtime-backed entry seam.
 It returns `SessionRuntimeBindings`, which bundle the session-scoped ops lifecycle registry,
 runtime epoch identity, and shared cursor state needed for recovery-safe completion handling.
 </Accordion>

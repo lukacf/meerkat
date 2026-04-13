@@ -4,7 +4,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, Core
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::service::SessionService;
-use meerkat_runtime::session_adapter::RuntimeBindingsError;
+use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]

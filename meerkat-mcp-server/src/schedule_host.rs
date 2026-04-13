@@ -50,7 +50,7 @@ use crate::{
 #[derive(Clone)]
 struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     config_runtime: Arc<meerkat_core::ConfigRuntime>,
     realm_id: String,
     instance_id: Option<String>,

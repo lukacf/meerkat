@@ -17,12 +17,12 @@ Meerkat has one canonical semantic path:
 The runtime-backed path is:
 
 ```text
-Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()
+Surface -> MeerkatMachine -> SessionService -> AgentFactory::build_agent()
 ```
 
 The runtime-backed build contract has an explicit binding seam:
 
-- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- runtime-backed surfaces should call `MeerkatMachine::prepare_bindings(session_id)`
 - those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
 - standalone / embedded / test-only builds should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly instead of relying on silent fallback
 
@@ -36,7 +36,7 @@ The runtime-backed build contract has an explicit binding seam:
 This keeps one owner for runtime semantics:
 
 - `PersistentRuntimeDriver::recover()` owns input/runtime/control recovery
-- `RuntimeSessionAdapter` owns session entry recovery (`ops_lifecycle`, `epoch_id`, cursor state)
+- `MeerkatMachine` owns session entry recovery (`ops_lifecycle`, `epoch_id`, cursor state)
 
 Direct substrate usage is intentionally narrower:
 

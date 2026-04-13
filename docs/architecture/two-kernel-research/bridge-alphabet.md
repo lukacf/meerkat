@@ -445,12 +445,12 @@ This is not a 1:1 API mapping. It is a grounding note for the current codebase.
 
 | Target bridge command | Current rough anchor |
 | --- | --- |
-| `ProvisionIncarnation(mode = Fresh)` | `MobHandle::spawn_spec` -> `MobProvisioner::provision_member` -> `RuntimeSessionAdapter::prepare_bindings` + `create_session` |
+| `ProvisionIncarnation(mode = Fresh)` | `MobHandle::spawn_spec` -> `MobProvisioner::provision_member` -> `MeerkatMachine::prepare_bindings` + `create_session` |
 | `ProvisionIncarnation(mode = Recover)` | current respawn / attach / recovery plumbing around `MobHandle::respawn`, `attach_existing_session`, and runtime recovery paths |
-| `RetireIncarnation` | `MobHandle::retire` -> `SessionBackend::retire_member` -> `RuntimeSessionAdapter::retire_runtime` + archive |
+| `RetireIncarnation` | `MobHandle::retire` -> `SessionBackend::retire_member` -> `MeerkatMachine::retire_runtime` + archive |
 | `DestroyIncarnation` | current destroy/dispose paths plus runtime destroy/archive handling |
-| `SubmitWork` | `internal_turn` / `start_turn` / `start_flow_step` -> runtime input creation -> `RuntimeSessionAdapter::accept_input_with_completion` |
-| `CancelAllWork` | `MobHandle::force_cancel_member` -> `SessionBackend::interrupt_member` -> `RuntimeSessionAdapter::interrupt_current_run` |
+| `SubmitWork` | `internal_turn` / `start_turn` / `start_flow_step` -> runtime input creation -> `MeerkatMachine::accept_input_with_completion` |
+| `CancelAllWork` | `MobHandle::force_cancel_member` -> `SessionBackend::interrupt_member` -> `MeerkatMachine::interrupt_current_run` |
 
 The current mapping is intentionally uneven:
 

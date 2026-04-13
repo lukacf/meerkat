@@ -400,7 +400,7 @@ pub struct MeerkatMcpState {
     schedule_host: StdMutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Runtime adapter for comms drain lifecycle and runtime operations.
     #[allow(dead_code)] // Only used with `comms` feature
-    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     #[cfg(feature = "comms")]
     _realm_lease: Option<meerkat_store::RealmLeaseGuard>,
 }
@@ -688,7 +688,7 @@ impl MeerkatMcpState {
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             schedule_host: StdMutex::new(None),
-            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             #[cfg(feature = "comms")]
             _realm_lease: None,
         };

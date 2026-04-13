@@ -49,7 +49,7 @@ use meerkat_core::{
     Config, ConfigStore, ContentInput, HookRunOverrides, PendingSystemContextAppend, Session,
     SessionLlmIdentity, SessionSystemContextState,
 };
-use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
+use meerkat_runtime::{MeerkatMachine, SessionServiceRuntimeExt};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
@@ -228,7 +228,7 @@ pub struct SessionRuntime {
     instance_id: Option<String>,
     backend: Option<String>,
     config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
-    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
     /// connects (each connection has its own transport sink).
@@ -421,7 +421,7 @@ impl SessionRuntime {
         store: Arc<dyn meerkat_store::SessionStore>,
         runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
         blob_store: Arc<dyn meerkat_core::BlobStore>,
-        runtime_adapter: &Arc<meerkat_runtime::RuntimeSessionAdapter>,
+        runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     ) -> PersistentSessionService<FactoryAgentBuilder> {
         let mut service =
             PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
@@ -473,7 +473,7 @@ impl SessionRuntime {
     }
 
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
-    pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
+    pub fn runtime_adapter(&self) -> Arc<MeerkatMachine> {
         self.runtime_adapter.clone()
     }
 
@@ -1095,7 +1095,7 @@ impl SessionRuntime {
     ///
     /// Instead of calling `SessionService::start_turn()` directly, this method:
     /// 1. Creates an `Input::Prompt` from the request parameters
-    /// 2. Accepts it via `RuntimeSessionAdapter::accept_input_with_completion()`
+    /// 2. Accepts it via `MeerkatMachine::accept_input_with_completion()`
     /// 3. Awaits the completion handle
     /// 4. Returns the `RunResult` produced by the executor
     ///

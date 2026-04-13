@@ -1,9 +1,8 @@
-//! Internal diagnostic projection for the evolving MeerkatMachine boundary.
+//! Meerkat runtime command/result and snapshot support types.
 //!
-//! This module does not define the final MeerkatMachine reducer. It provides a
-//! small, explicit state projection over the current runtime spine so the
-//! architecture work can be verified against the existing codebase while the
-//! refactor proceeds in safe slices.
+//! The authority surface now lives in `meerkat_machine.rs`; this module holds
+//! the supporting command/result enums and the durable diagnostic snapshots that
+//! remain useful after cutover.
 
 #![allow(dead_code)]
 
@@ -220,9 +219,8 @@ pub struct MeerkatCompletionWaiterSnapshot {
 
 /// Snapshot of the runtime completion waiter carrier.
 ///
-/// This keeps the supporting carrier explicit while the MeerkatMachine mapping
-/// work verifies that admission and terminalization stay aligned with waiter
-/// plumbing.
+/// Completion waiters are supporting carrier state rather than primary
+/// authority, but they remain useful for diagnostics and recovery inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeerkatCompletionWaitersSnapshot {
     pub input_count: usize,

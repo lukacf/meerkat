@@ -85,7 +85,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
 ## Quick start
 
-Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where `SessionService` is substrate and `RuntimeSessionAdapter` owns keep-alive, Queue/Steer routing, and comms drain. See [`meerkat-rpc`](../rpc/overview.mdx) or [`meerkat-rest`](../rest/overview.mdx) for those entry points.
+Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where `SessionService` is substrate and `MeerkatMachine` owns keep-alive, Queue/Steer routing, and comms drain. See [`meerkat-rpc`](../rpc/overview.mdx) or [`meerkat-rest`](../rest/overview.mdx) for those entry points.
 
 For the main production embedding path, use the runtime-backed persistent flow:
 

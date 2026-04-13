@@ -1614,7 +1614,7 @@ exclude = ["mcp"]
 //
 // This is the critical post-cutover test: proves that comms admission works
 // exclusively through the runtime ingress path (comms_drain → comms_bridge →
-// RuntimeSessionAdapter → ingress authority → policy table). No direct
+// MeerkatMachine → ingress authority → policy table). No direct
 // drain_comms_inbox or session-service host loop exists anymore.
 
 #[cfg(feature = "comms")]
@@ -1628,7 +1628,7 @@ mod scenario_22_runtime_host_comms {
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
-    use meerkat_runtime::RuntimeSessionAdapter;
+    use meerkat_runtime::MeerkatMachine;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Minimal runtime executor that routes turns through the session service.
@@ -1734,7 +1734,7 @@ mod scenario_22_runtime_host_comms {
         //   comms_drain.rs → comms_bridge.rs → accept_input() → runtime ingress → executor
         //
         // Agent A: factory-built via session service with comms_name in build options.
-        //   Factory creates an Inproc CommsRuntime. RuntimeSessionAdapter + comms_drain
+        //   Factory creates an Inproc CommsRuntime. MeerkatMachine + comms_drain
         //   own inbox admission.
         // Agent B: factory-built the same way (separate session, same service).
         //   Uses the comms `send` tool to message Agent A via Inproc transport.
@@ -1745,7 +1745,7 @@ mod scenario_22_runtime_host_comms {
 
         let config = Config::default();
         let service = Arc::new(build_ephemeral_service(factory, config, 10));
-        let runtime_adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let runtime_adapter = Arc::new(MeerkatMachine::ephemeral());
 
         // --- Create Agent A session with comms ---
         let build_a = SessionBuildOptions {

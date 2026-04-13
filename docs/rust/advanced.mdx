@@ -10,7 +10,7 @@ Advanced Rust SDK usage for the cases where the runtime-backed `SessionService` 
 
 The Rust contract is explicit:
 
-- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- runtime-backed surfaces should call `MeerkatMachine::prepare_bindings(session_id)`
 - those bindings should be threaded through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
 - standalone/testing/embedded paths should use `RuntimeBuildMode::StandaloneEphemeral`
 

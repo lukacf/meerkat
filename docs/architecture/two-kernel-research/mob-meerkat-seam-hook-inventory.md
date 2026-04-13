@@ -41,8 +41,8 @@ Primary hooks:
 
 - `start_turn(...)`
 - internal turn / flow-step dispatch helpers
-- `RuntimeSessionAdapter::interrupt_current_run(...)`
-- `RuntimeSessionAdapter::update_peer_ingress_context(...)`
+- `MeerkatMachine::interrupt_current_run(...)`
+- `MeerkatMachine::update_peer_ingress_context(...)`
 
 Best for:
 

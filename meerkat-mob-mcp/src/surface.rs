@@ -9,7 +9,7 @@ use crate::{AgentMobToolSurfaceFactory, MobMcpState};
 pub fn wire_mob_tools(
     builder_mob_tools_slot: &Arc<RwLock<Option<Arc<dyn MobToolsFactory>>>>,
     session_service: Arc<dyn MobSessionService>,
-    runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
+    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     persistent_storage_root: Option<PathBuf>,
 ) -> Arc<MobMcpState> {
     let state = Arc::new(
@@ -38,7 +38,7 @@ mod tests {
         let slot: Arc<RwLock<Option<Arc<dyn MobToolsFactory>>>> = Arc::new(RwLock::new(None));
         let session_service: Arc<dyn MobSessionService> =
             Arc::new(crate::LocalSessionService::new());
-        let runtime_adapter = Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()));
+        let runtime_adapter = Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()));
 
         let state = wire_mob_tools(&slot, session_service, runtime_adapter, None);
 
@@ -64,7 +64,7 @@ mod tests {
         let state = wire_mob_tools(
             &slot,
             session_service,
-            Some(Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral())),
+            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
             Some(root.clone()),
         );
 

@@ -13,9 +13,8 @@ use meerkat_core::ops_lifecycle::{
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, OperationInput,
-    OpsLifecycleConfig, RuntimeOpsLifecycleRegistry, RuntimeSessionAdapter,
-    SessionServiceRuntimeExt,
+    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine,
+    OperationInput, OpsLifecycleConfig, RuntimeOpsLifecycleRegistry, SessionServiceRuntimeExt,
 };
 use uuid::Uuid;
 
@@ -288,7 +287,7 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let session_a = SessionId::new();
     let session_b = SessionId::new();
 
@@ -328,7 +327,7 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_background_events() {
-    let adapter = RuntimeSessionAdapter::ephemeral();
+    let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let session_id = SessionId::new();
 

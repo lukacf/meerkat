@@ -53,7 +53,6 @@ pub mod runtime_ingress_authority;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
-pub mod session_adapter;
 pub mod silent_intent;
 pub mod store;
 pub mod traits;
@@ -87,7 +86,7 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
-pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError, RuntimeSessionAdapter};
+pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
 #[doc(hidden)]
 pub use meerkat_machine_types::{
     MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,

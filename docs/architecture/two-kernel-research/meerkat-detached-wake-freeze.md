@@ -25,7 +25,7 @@ continuation behavior only.
 
 ### 1. Feed-backed detached wake is the canonical live path
 
-For registered runtimes, `RuntimeSessionAdapter::register_session_with_executor`
+For registered runtimes, `MeerkatMachine::register_session_with_executor`
 wires both:
 
 - a completion feed from `RuntimeOpsLifecycleRegistry`

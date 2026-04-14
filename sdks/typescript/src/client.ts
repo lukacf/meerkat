@@ -1004,6 +1004,20 @@ export class MeerkatClient {
     });
   }
 
+  async mobTurnStart(
+    mobId: string,
+    agentIdentity: string,
+    prompt: string,
+    overrides?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return await this.request("mob/turn_start", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      prompt,
+      ...overrides,
+    });
+  }
+
   async mobMemberStatus(
     mobId: string,
     agentIdentity: string,

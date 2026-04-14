@@ -195,8 +195,10 @@ impl<'de> Deserialize<'de> for MemberRef {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 6;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn stored_mob_event_format_error(message: impl Into<String>) -> serde_json::Error {
     serde_json::Error::io(IoError::new(IoErrorKind::InvalidData, message.into()))
 }
@@ -450,11 +452,13 @@ impl MemberSpawnedEvent {
         self
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), test))]
     pub(crate) fn bridge_member_ref(&self) -> Option<&MemberRef> {
         self.bridge_member_ref.as_ref()
     }
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 impl MobEventKind {
     pub(crate) fn member_spawned(&self) -> Option<&MemberSpawnedEvent> {
         match self {
@@ -473,6 +477,7 @@ impl MobEventKind {
 
 /// Encode a stored mob event, preserving internal replay-only fields that are
 /// intentionally omitted from the public event contract.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde_json::Error> {
     let mut value = serde_json::to_value(event)?;
     if let Some(member_spawned) = event.kind.member_spawned()
@@ -492,6 +497,7 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
 
 /// Decode a stored mob event, restoring internal replay-only fields that are
 /// not part of the public event contract.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_json::Error> {
     let mut encoded: Value = serde_json::from_slice(bytes)?;
     let encoded_object = encoded.as_object_mut().ok_or_else(|| {

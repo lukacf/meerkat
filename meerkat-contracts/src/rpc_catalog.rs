@@ -258,6 +258,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Fork a helper member and wait for completion",
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
+            RpcMethodDescriptor::basic(
+                "mob/turn_start",
+                "Start a turn on a mob member by identity",
+            ),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
             RpcMethodDescriptor::basic(
                 "mob/wait_kickoff",

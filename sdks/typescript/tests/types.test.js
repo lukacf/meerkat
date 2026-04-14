@@ -1242,6 +1242,7 @@ describe("Mob member host ingress", () => {
       agentIdentity: "reviewer-1",
       agentRuntimeId: "reviewer-1:4",
       fenceToken: 4,
+      generation: 4,
       handlingMode: "steer",
     });
     assert.deepEqual(calls, [

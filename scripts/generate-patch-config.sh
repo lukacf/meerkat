@@ -15,6 +15,7 @@ EXCLUDE="${2:-}"
 # Entries as "crate=path" pairs (bash 3.x compatible, no associative arrays).
 ENTRIES=(
   "meerkat-models=${ROOT}/meerkat-models"
+  "meerkat-machine-derive=${ROOT}/meerkat-machine-derive"
   "meerkat-machine-schema=${ROOT}/meerkat-machine-schema"
   "meerkat-machine-kernels=${ROOT}/meerkat-machine-kernels"
   "meerkat-core=${ROOT}/meerkat-core"

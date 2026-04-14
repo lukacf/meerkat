@@ -5409,6 +5409,13 @@ mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
+        // Set a dummy API key so AgentFactory doesn't reject the build.
+        // The mock LLM client overrides actual provider calls.
+        // SAFETY: single-threaded test; no concurrent env reads.
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-dummy-key-for-unit-test");
+        }
+
         let temp = TempDir::new().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await

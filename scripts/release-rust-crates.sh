@@ -4,6 +4,7 @@ set -euo pipefail
 
 cat <<'EOF'
 meerkat-models
+meerkat-machine-derive
 meerkat-machine-schema
 meerkat-machine-kernels
 meerkat-core

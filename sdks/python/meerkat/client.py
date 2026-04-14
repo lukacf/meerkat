@@ -1228,6 +1228,18 @@ class MeerkatClient:
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
 
+    async def mob_turn_start(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        prompt: str,
+        **overrides: Any,
+    ) -> dict:
+        return await self._request(
+            "mob/turn_start",
+            {"mob_id": mob_id, "agent_identity": agent_identity, "prompt": prompt, **overrides},
+        )
+
     async def mob_member_status(
         self, mob_id: str, agent_identity: str
     ) -> MobMemberSnapshot:

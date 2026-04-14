@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-machine-derive"
-publish = false
+description = "Derive macros for Meerkat machine authority command manifests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

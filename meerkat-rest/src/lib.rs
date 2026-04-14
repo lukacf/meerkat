@@ -292,23 +292,14 @@ impl AppState {
         // We set the actual factory after mob_state is constructed (circular dep break).
         #[cfg(feature = "mob")]
         let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
-        let schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
-        *schedule_tools_slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            ScheduleToolDispatcher::new(schedule_service.clone()),
-        ));
-        let runtime_adapter = persistence.runtime_adapter();
-        let (session_store, runtime_store, blob_store) = persistence.into_parts();
-        let mut session_service =
-            PersistentSessionService::new(builder, 100, session_store, runtime_store, blob_store);
-        {
-            let adapter = runtime_adapter.clone();
-            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-                let adapter = adapter.clone();
-                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-            }));
-        }
+        meerkat::surface::set_default_schedule_tools(
+            &builder,
+            Some(Arc::new(ScheduleToolDispatcher::new(
+                schedule_service.clone(),
+            ))),
+        );
+        let (session_service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();

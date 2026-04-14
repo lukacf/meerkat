@@ -606,27 +606,21 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        *builder_schedule_tools_slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            ScheduleToolDispatcher::new(schedule_service.clone()),
-        ));
-        let service = Arc::new(Self::build_persistent_service(
-            builder,
-            max_sessions,
-            store,
-            runtime_store.clone(),
-            blob_store,
-            &runtime_adapter,
-        ));
+        meerkat::surface::set_default_schedule_tools(
+            &builder,
+            Some(Arc::new(ScheduleToolDispatcher::new(
+                schedule_service.clone(),
+            ))),
+        );
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+        let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -678,8 +672,6 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
-        let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
@@ -687,19 +679,15 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        *builder_schedule_tools_slot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-            ScheduleToolDispatcher::new(schedule_service.clone()),
-        ));
-        let service = Arc::new(Self::build_persistent_service(
-            builder,
-            max_sessions,
-            store,
-            runtime_store.clone(),
-            blob_store,
-            &runtime_adapter,
-        ));
+        meerkat::surface::set_default_schedule_tools(
+            &builder,
+            Some(Arc::new(ScheduleToolDispatcher::new(
+                schedule_service.clone(),
+            ))),
+        );
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+        let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
@@ -739,27 +727,6 @@ impl SessionRuntime {
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
         }
-    }
-
-    /// Build a `PersistentSessionService` with the runtime bindings provider
-    /// wired to the runtime adapter so lazy session rebuilds use the canonical
-    /// bindings instead of an orphaned fallback.
-    fn build_persistent_service(
-        builder: FactoryAgentBuilder,
-        max_sessions: usize,
-        store: Arc<dyn meerkat_store::SessionStore>,
-        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
-        blob_store: Arc<dyn meerkat_core::BlobStore>,
-        runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
-    ) -> PersistentSessionService<FactoryAgentBuilder> {
-        let mut service =
-            PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
-        let adapter = runtime_adapter.clone();
-        service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-            let adapter = adapter.clone();
-            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-        }));
-        service
     }
 
     /// Attach realm context defaults used for session metadata.

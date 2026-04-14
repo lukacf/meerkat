@@ -1,0 +1,28 @@
+[package]
+name = "surface-build-fixtures"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "embedded_min"
+path = "src/bin/embedded_min.rs"
+
+[[bin]]
+name = "runtime_backed_min"
+path = "src/bin/runtime_backed_min.rs"
+
+[dependencies]
+meerkat = { workspace = true, features = ["session-store", "jsonl-store", "schedule"] }
+meerkat-core.workspace = true
+meerkat-runtime.workspace = true
+meerkat-store = { workspace = true, features = ["memory"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

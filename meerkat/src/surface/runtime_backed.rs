@@ -15,8 +15,6 @@ use crate::{
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
-#[cfg(all(test, feature = "jsonl-store"))]
-use meerkat_store::StoreAdapter;
 
 #[cfg(feature = "session-store")]
 pub fn build_runtime_backed_service(
@@ -306,7 +304,6 @@ mod tests {
         let persistence = build_default_persistence(temp.path().join("sessions"))
             .await
             .expect("build default persistence");
-        let runtime_adapter = persistence.runtime_adapter();
 
         let mut factory = crate::AgentFactory::new(temp.path().join("sessions"));
         #[cfg(feature = "comms")]
@@ -440,7 +437,6 @@ mod tests {
         let persistence = build_default_persistence(temp.path().join("sessions"))
             .await
             .expect("build default persistence");
-        let adapter = persistence.runtime_adapter();
         let mut builder = FactoryAgentBuilder::new(
             crate::AgentFactory::new(temp.path().join("sessions")),
             crate::Config::default(),

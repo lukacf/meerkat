@@ -15,11 +15,31 @@ const outputDir = path.join(
   "posters",
 );
 
+const THEME = {
+  bg: "#0b0d0f",
+  shell: "#0f1317",
+  plate: "#12171b",
+  panel: "#141a1f",
+  card: "#171e24",
+  border: "#2d353c",
+  grid: "rgba(234, 226, 214, 0.035)",
+  ink: "#f4efe5",
+  muted: "#b6aea0",
+  faint: "#7d7a74",
+  input: "#84bfd7",
+  signal: "#d8aa57",
+  effect: "#8cbe95",
+  routed: "#cf6f52",
+  local: "#7ab2c7",
+  external: "#b7cf7b",
+  sink: "#2b1212",
+};
+
 const MACHINE_SPECS = [
   {
     id: "meerkat_machine",
     title: "MeerkatMachine",
-    subtitle: "Runtime control plane kernel",
+    subtitle: "Lifecycle / Transition / Visibility / Effect Architecture",
     tlaPath: path.join(
       repoRoot,
       "specs",
@@ -34,12 +54,328 @@ const MACHINE_SPECS = [
       "meerkat_machine",
       "contract.md",
     ),
-    accent: "#c3513c",
+    catalogPath: path.join(
+      repoRoot,
+      "meerkat-machine-schema",
+      "src",
+      "catalog",
+      "meerkat_machine.rs",
+    ),
+    accent: "#c96d54",
+    layout: {
+      plate: { width: 1980, height: 1260 },
+      phases: {
+        Initializing: {
+          x: 825,
+          y: 54,
+          w: 300,
+          h: 84,
+          subtitle: "bootstrap / zero state",
+        },
+        Idle: {
+          x: 150,
+          y: 280,
+          w: 280,
+          h: 94,
+          subtitle: "registered, quiescent",
+        },
+        Attached: {
+          x: 520,
+          y: 248,
+          w: 320,
+          h: 116,
+          subtitle: "runtime bound / ingress armed",
+        },
+        Running: {
+          x: 830,
+          y: 392,
+          w: 410,
+          h: 188,
+          subtitle: "active work / interrupts / staged visibility",
+          emphasis: true,
+        },
+        Recovering: {
+          x: 1290,
+          y: 180,
+          w: 320,
+          h: 94,
+          subtitle: "fault repair / boundary salvage",
+        },
+        Retired: {
+          x: 1390,
+          y: 430,
+          w: 280,
+          h: 96,
+          subtitle: "retired / no new work",
+        },
+        Stopped: {
+          x: 1300,
+          y: 790,
+          w: 300,
+          h: 94,
+          subtitle: "executor halted / session remains",
+        },
+        Destroyed: {
+          x: 860,
+          y: 1060,
+          w: 330,
+          h: 112,
+          subtitle: "terminal sink",
+          sink: true,
+        },
+      },
+      statePanels: {
+        left: [
+          {
+            title: "Runtime Binding Plane",
+            note: "Identity, work ownership, and the bound runtime envelope.",
+            fields: [
+              "session_id",
+              "active_runtime_id",
+              "active_fence_token",
+              "active_generation",
+              "active_work_id",
+            ],
+          },
+          {
+            title: "Control Fabric",
+            note: "Wake, process, interrupt, shutdown, ingress, and drain latches.",
+            fields: [
+              "wake_pending",
+              "process_pending",
+              "interrupt_pending",
+              "shutdown_pending",
+              "peer_ingress_configured",
+              "drain_running",
+            ],
+          },
+        ],
+        right: [
+          {
+            title: "Visibility Commit Pipeline",
+            note: "Staged → active → committed filter promotion with witness tables.",
+            fields: [
+              "inherited_base_filter",
+              "active_filter",
+              "staged_filter",
+              "active_requested_deferred_names",
+              "staged_requested_deferred_names",
+              "requested_witnesses",
+              "filter_witnesses",
+              "active_visibility_revision",
+              "staged_visibility_revision",
+              "committed_visibility_revision",
+            ],
+          },
+          {
+            title: "Peer Reachability Fabric",
+            note: "Resolved peers, reachability table, and terminal send reasons.",
+            fields: [
+              "resolved_peer_keys",
+              "peer_reachability",
+              "peer_last_reason",
+            ],
+          },
+        ],
+      },
+      groups: [
+        {
+          id: "lifecycle",
+          title: "Lifecycle + Binding Spine",
+          note: "The top-level movement between initialization, registration, binding, recovery, retirement, and destruction.",
+          x: 36,
+          y: 64,
+          w: 430,
+          columns: 1,
+          anchors: ["Initializing", "Idle", "Attached", "Recovering", "Retired", "Stopped", "Destroyed"],
+          triggers: [
+            "Initialize",
+            "RegisterSession",
+            "UnregisterSession",
+            "PrepareBindings",
+            "Recover",
+            "Retire",
+            "Reset",
+            "StopRuntimeExecutor",
+            "Destroy",
+            "Recycle",
+          ],
+        },
+        {
+          id: "run-boundary",
+          title: "Run + Boundary Fabric",
+          note: "Interrupt, defer-to-boundary cancellation, terminal work outcomes, and cross-kernel work ingress.",
+          x: 620,
+          y: 112,
+          w: 620,
+          columns: 2,
+          anchors: ["Running", "Attached"],
+          triggers: [
+            "InterruptCurrentRun",
+            "CancelAfterBoundary",
+            "BoundaryApplied",
+            "RunCompleted",
+            "RunFailed",
+            "RunCancelled",
+            "SubmitMobWork",
+          ],
+        },
+        {
+          id: "visibility",
+          title: "Visibility Revision Pipeline",
+          note: "Filter staging, deferred tools, boundary promotion, and surface delta handling.",
+          x: 1420,
+          y: 42,
+          w: 500,
+          columns: 2,
+          anchors: ["Attached", "Running"],
+          triggers: [
+            "StagePersistentFilter",
+            "RequestDeferredTools",
+            "PublishCommittedVisibleSet",
+            "StageAdd",
+            "StageRemove",
+            "StageReload",
+            "ApplySurfaceBoundary",
+            "PendingSucceeded",
+            "PendingFailed",
+            "CallStarted",
+            "CallFinished",
+            "FinalizeRemovalClean",
+            "FinalizeRemovalForced",
+            "SnapshotAligned",
+            "ShutdownSurface",
+          ],
+        },
+        {
+          id: "peer-drain",
+          title: "Peer + Drain Interconnect",
+          note: "Ingress context, drain liveness, reachability repair, and session-local drain control.",
+          x: 1450,
+          y: 430,
+          w: 470,
+          columns: 2,
+          anchors: ["Attached", "Running", "Stopped"],
+          triggers: [
+            "SetPeerIngressContext",
+            "NotifyDrainExited",
+            "ReconcileResolvedDirectory",
+            "RecordSendSucceeded",
+            "RecordSendFailed",
+            "Abort",
+            "AbortAll",
+            "Wait",
+            "EnsureDrainRunning",
+            "PeerReady",
+            "RegisterWatcher",
+            "ProgressReported",
+          ],
+        },
+        {
+          id: "query-ingress",
+          title: "Ingress + Observation Surface",
+          note: "Session queries, ingress acceptance, event publication, and boundary receipt inspection.",
+          x: 42,
+          y: 470,
+          w: 450,
+          columns: 1,
+          anchors: ["Idle", "Attached", "Running"],
+          triggers: [
+            "EnsureSessionWithExecutor",
+            "SetSilentIntents",
+            "ContainsSession",
+            "SessionHasExecutor",
+            "SessionHasComms",
+            "OpsLifecycleRegistry",
+            "InputState",
+            "ListActiveInputs",
+            "Ingest",
+            "PublishEvent",
+            "RuntimeState",
+            "LoadBoundaryReceipt",
+            "AcceptWithCompletion",
+            "AcceptWithoutWake",
+          ],
+        },
+        {
+          id: "execution",
+          title: "Execution + LLM Return Fabric",
+          note: "Prepare/commit/fail plus admission, primitive execution, tool-call return, and boundary exit paths.",
+          x: 72,
+          y: 810,
+          w: 610,
+          columns: 2,
+          anchors: ["Running", "Attached"],
+          triggers: [
+            "Prepare",
+            "Commit",
+            "Fail",
+            "AdmitQueued",
+            "AdmitConsumedOnAccept",
+            "StageDrainSnapshot",
+            "SupersedeQueuedInput",
+            "CoalesceQueuedInputs",
+            "SetSilentIntentOverrides",
+            "StartConversationRun",
+            "StartImmediateAppend",
+            "StartImmediateContext",
+            "PrimitiveApplied",
+            "LlmReturnedToolCalls",
+            "LlmReturnedTerminal",
+            "RegisterPendingOps",
+            "ToolCallsResolved",
+            "OpsBarrierSatisfied",
+            "BoundaryContinue",
+            "BoundaryComplete",
+            "RecoverableFailure",
+            "FatalFailure",
+            "RetryRequested",
+            "CancelNow",
+            "CancellationObserved",
+            "AcknowledgeTerminal",
+          ],
+        },
+        {
+          id: "terminal",
+          title: "Terminal + Extraction Control",
+          note: "Extraction branch, op provisioning, retirement, wait-all, and terminal collection.",
+          x: 730,
+          y: 840,
+          w: 560,
+          columns: 2,
+          anchors: ["Running", "Retired", "Stopped"],
+          triggers: [
+            "TurnLimitReached",
+            "BudgetExhausted",
+            "TimeBudgetExceeded",
+            "EnterExtraction",
+            "ExtractionValidationPassed",
+            "ExtractionValidationFailed",
+            "ExtractionStart",
+            "ForceCancelNoRun",
+            "RegisterOperation",
+            "ProvisioningSucceeded",
+            "ProvisioningFailed",
+            "AbortProvisioning",
+            "CompleteOperation",
+            "FailOperation",
+            "CancelOperation",
+            "RetireRequested",
+            "RetireCompleted",
+            "CollectTerminal",
+            "BeginWaitAll",
+            "CancelWaitAll",
+            "ClassifyExternalEnvelope",
+            "ClassifyPlainEvent",
+          ],
+        },
+      ],
+    },
   },
   {
     id: "mob_machine",
     title: "MobMachine",
-    subtitle: "Identity-first orchestration kernel",
+    subtitle: "Identity / Runtime / Flow / Orchestration Architecture",
     tlaPath: path.join(
       repoRoot,
       "specs",
@@ -54,24 +390,306 @@ const MACHINE_SPECS = [
       "mob_machine",
       "contract.md",
     ),
-    accent: "#355f73",
+    catalogPath: path.join(
+      repoRoot,
+      "meerkat-machine-schema",
+      "src",
+      "catalog",
+      "mob_machine.rs",
+    ),
+    accent: "#6d8fa0",
+    layout: {
+      plate: { width: 1880, height: 1220 },
+      phases: {
+        Creating: {
+          x: 330,
+          y: 104,
+          w: 300,
+          h: 90,
+          subtitle: "boot / empty registry",
+        },
+        Running: {
+          x: 760,
+          y: 350,
+          w: 420,
+          h: 190,
+          subtitle: "active members / runs / loops / subscriptions",
+          emphasis: true,
+        },
+        Stopped: {
+          x: 1210,
+          y: 790,
+          w: 300,
+          h: 92,
+          subtitle: "runtime stopped / state retained",
+        },
+        Completed: {
+          x: 1430,
+          y: 530,
+          w: 290,
+          h: 92,
+          subtitle: "mob terminalized",
+        },
+        Destroyed: {
+          x: 800,
+          y: 1040,
+          w: 340,
+          h: 110,
+          subtitle: "terminal sink",
+          sink: true,
+        },
+      },
+      statePanels: {
+        left: [
+          {
+            title: "Identity Runtime Plane",
+            note: "Stable identity, active runtime incarnation, fence, generation, and inflight work.",
+            fields: [
+              "active_identity",
+              "active_runtime_id",
+              "active_fence_token",
+              "current_generation",
+              "inflight_work_id",
+            ],
+          },
+          {
+            title: "Operator + Orchestrator Counters",
+            note: "Membership, spawn pressure, retirement pressure, and kickoff intent.",
+            fields: [
+              "active_member_count",
+              "pending_spawn_count",
+              "retiring_member_count",
+              "coordinator_bound",
+              "kickoff_pending",
+            ],
+          },
+        ],
+        right: [
+          {
+            title: "Execution Fabric",
+            note: "Run, frame, loop, and wiring occupancy inside the orchestration core.",
+            fields: [
+              "active_run_count",
+              "active_frame_count",
+              "active_loop_count",
+              "wiring_edge_count",
+            ],
+          },
+          {
+            title: "Task + Event Surface",
+            note: "Task board volume and event subscription pressure.",
+            fields: ["task_count", "event_subscription_count"],
+          },
+        ],
+      },
+      groups: [
+        {
+          id: "lifecycle-ops",
+          title: "Lifecycle + Operator Control",
+          note: "Direct operator/runtime commands that alter mob lifecycle and runtime ownership.",
+          x: 32,
+          y: 60,
+          w: 430,
+          columns: 1,
+          anchors: ["Creating", "Running", "Stopped", "Completed", "Destroyed"],
+          triggers: [
+            "Start",
+            "Spawn",
+            "Retire",
+            "Respawn",
+            "RetireAll",
+            "Stop",
+            "Resume",
+            "Complete",
+            "Reset",
+            "Destroy",
+            "Shutdown",
+            "ForceCancel",
+          ],
+        },
+        {
+          id: "runtime-bridge",
+          title: "Runtime Bridge Observations",
+          note: "Seam-fed runtime notices and member-lifecycle proxy signals that keep the mob model honest.",
+          x: 520,
+          y: 62,
+          w: 620,
+          columns: 2,
+          anchors: ["Running", "Stopped", "Completed", "Destroyed"],
+          triggers: [
+            "ObserveRuntimeReady",
+            "SubmitWork",
+            "CancelWork",
+            "CancelAllWork",
+            "ObserveWorkCompleted",
+            "ObserveWorkFailed",
+            "ObserveWorkCancelled",
+            "RetireMember",
+            "ObserveRuntimeRetired",
+            "ResetMember",
+            "RespawnMember",
+            "DestroyMob",
+            "ObserveRuntimeDestroyed",
+          ],
+        },
+        {
+          id: "orchestrator",
+          title: "Orchestrator Control Matrix",
+          note: "Coordinator lifecycle, kickoff choreography, peer exposure, and runtime stop/failure handling.",
+          x: 1340,
+          y: 58,
+          w: 500,
+          columns: 2,
+          anchors: ["Running", "Completed", "Destroyed"],
+          triggers: [
+            "MarkCompleted",
+            "BeginCleanup",
+            "FinishCleanup",
+            "InitializeOrchestrator",
+            "BindCoordinator",
+            "UnbindCoordinator",
+            "StageSpawn",
+            "CompleteSpawn",
+            "StopOrchestrator",
+            "ResumeOrchestrator",
+            "DestroyOrchestrator",
+            "ForceCancelMember",
+            "MemberPeerExposed",
+            "MemberTerminalized",
+            "OperationPeerTrusted",
+            "PeerInputAdmitted",
+            "RuntimeWorkAdmitted",
+            "KickoffStarted",
+            "KickoffCallbackPending",
+            "KickoffFailed",
+            "KickoffCancelled",
+            "KickoffForceCancelled",
+            "RuntimeRunSubmitted",
+            "RuntimeRunCompleted",
+            "RuntimeRunFailed",
+            "RuntimeRunCancelled",
+            "RuntimeStopRequested",
+          ],
+        },
+        {
+          id: "topology-turns",
+          title: "Topology + Turn Surface",
+          note: "Wiring graph changes, external/internal turns, and spawn policy.",
+          x: 34,
+          y: 470,
+          w: 430,
+          columns: 1,
+          anchors: ["Running", "Creating"],
+          triggers: [
+            "Wire",
+            "Unwire",
+            "ExternalTurn",
+            "InternalTurn",
+            "SetSpawnPolicy",
+          ],
+        },
+        {
+          id: "tasks-events",
+          title: "Task + Event Surface",
+          note: "Query/control slab for tasks, rosters, streams, snapshots, and provenance recording.",
+          x: 1380,
+          y: 430,
+          w: 460,
+          columns: 2,
+          anchors: ["Running"],
+          triggers: [
+            "TaskCreate",
+            "TaskUpdate",
+            "TaskList",
+            "TaskGet",
+            "McpServerStates",
+            "RosterSnapshot",
+            "ListMembers",
+            "ListMembersIncludingRetiring",
+            "ListAllMembers",
+            "MemberStatus",
+            "SubscribeAgentEvents",
+            "SubscribeAllAgentEvents",
+            "SubscribeMobEvents",
+            "PollEvents",
+            "ReplayAllEvents",
+            "RecordOperatorActionProvenance",
+            "GetMember",
+            "KickoffBarrierSnapshot",
+          ],
+        },
+        {
+          id: "flow-engine",
+          title: "Flow Engine Plate",
+          note: "Run creation, dispatch, target outcomes, and step-level control semantics.",
+          x: 430,
+          y: 760,
+          w: 630,
+          columns: 2,
+          anchors: ["Running"],
+          triggers: [
+            "RunFlow",
+            "CancelFlow",
+            "FlowStatus",
+            "StartFlow",
+            "CompleteFlow",
+            "CreateRun",
+            "StartRun",
+            "FinishRun",
+            "DispatchStep",
+            "CompleteStep",
+            "RecordStepOutput",
+            "ConditionPassed",
+            "ConditionRejected",
+            "FailStep",
+            "SkipStep",
+            "ProjectFrameStepStatus",
+            "CancelStep",
+            "RegisterTargets",
+            "RecordTargetSuccess",
+            "RecordTargetTerminalFailure",
+            "RecordTargetCanceled",
+            "RecordTargetFailure",
+          ],
+        },
+        {
+          id: "frame-loop",
+          title: "Frame + Loop Fabric",
+          note: "Ready/pending frame queues, root/body frame lifecycles, node terminals, and loop control.",
+          x: 1080,
+          y: 820,
+          w: 760,
+          columns: 2,
+          anchors: ["Running", "Completed"],
+          triggers: [
+            "RegisterReadyFrame",
+            "RegisterPendingBodyFrame",
+            "NodeExecutionReleased",
+            "FrameTerminated",
+            "TerminalizeCompleted",
+            "TerminalizeFailed",
+            "TerminalizeCanceled",
+            "StartRootFrame",
+            "StartBodyFrame",
+            "CompleteNode",
+            "RecordNodeOutput",
+            "FailNode",
+            "SkipNode",
+            "CancelNode",
+            "StartLoop",
+            "BodyFrameStarted",
+            "BodyFrameCompleted",
+            "BodyFrameFailed",
+            "BodyFrameCanceled",
+            "UntilConditionMet",
+            "UntilConditionFailed",
+            "CancelLoop",
+          ],
+        },
+      ],
+    },
   },
 ];
-
-const THEME = {
-  paper: "#f4f0e7",
-  panel: "#fbfaf6",
-  card: "#fffdf8",
-  border: "#cfc8bb",
-  ink: "#181716",
-  muted: "#6d6a63",
-  rule: "#d7d0c3",
-  input: "#2c5668",
-  signal: "#b3791b",
-  effect: "#4f7259",
-  phase: "#ece6da",
-  shadow: "rgba(24, 23, 22, 0.08)",
-};
 
 main();
 
@@ -82,18 +700,20 @@ function main() {
   for (const poster of posters) {
     fs.writeFileSync(
       path.join(outputDir, `${poster.id}.html`),
-      renderPosterHtml(poster),
+      cleanGeneratedText(renderPosterHtml(poster)),
       "utf8",
     );
   }
   fs.writeFileSync(
     path.join(outputDir, "index.html"),
-    renderIndexHtml(posters),
+    cleanGeneratedText(renderIndexHtml(posters)),
     "utf8",
   );
 
   for (const poster of posters) {
-    console.log(`generated ${path.relative(repoRoot, path.join(outputDir, `${poster.id}.html`))}`);
+    console.log(
+      `generated ${path.relative(repoRoot, path.join(outputDir, `${poster.id}.html`))}`,
+    );
   }
   console.log(`generated ${path.relative(repoRoot, path.join(outputDir, "index.html"))}`);
 }
@@ -101,63 +721,36 @@ function main() {
 function buildPoster(spec) {
   const contract = parseContract(fs.readFileSync(spec.contractPath, "utf8"));
   const tla = parseTla(fs.readFileSync(spec.tlaPath, "utf8"));
-
-  const transitionRecords = contract.transitions.map((transition, index) => {
-    const tlaDef = tla.definitions.get(transition.name);
-    const writes = tlaDef ? extractWrites(tlaDef.body) : [];
-    const clauses = tlaDef ? extractClauses(tlaDef.body) : [];
-    const phaseShift =
-      transition.from.length === 1 && transition.from[0] === transition.to
-        ? "loop"
-        : "handoff";
-    return {
-      ...transition,
-      key: `${transition.name}-${index}`,
-      kind: contract.inputNames.has(transition.onName) ? "input" : "signal",
-      writes,
-      clauses,
-      body: tlaDef?.body ?? "",
-      phaseShift,
-    };
-  });
-
-  const transitionsByPhase = new Map(
-    contract.phases.map((phase) => [phase, []]),
+  const effectDispositions = parseEffectDispositions(
+    fs.readFileSync(spec.catalogPath, "utf8"),
   );
-  for (const record of transitionRecords) {
-    for (const phase of record.from) {
-      if (!transitionsByPhase.has(phase)) {
-        transitionsByPhase.set(phase, []);
-      }
-      transitionsByPhase.get(phase).push(record);
-    }
-  }
-  for (const [phase, records] of transitionsByPhase) {
-    records.sort((a, b) => {
-      if (a.kind !== b.kind) {
-        return a.kind.localeCompare(b.kind);
-      }
-      return a.name.localeCompare(b.name);
-    });
-  }
-
+  const triggerRecords = aggregateTriggers(contract, tla);
+  const groupedTriggers = buildTriggerGroups(
+    spec.layout.groups,
+    triggerRecords,
+    contract.phases,
+  );
+  const statePanels = buildStatePanels(spec.layout.statePanels, contract.stateFields);
+  const effectBus = buildEffectBus(contract.effects, effectDispositions);
   const invariants = contract.invariants.map((name) => ({
     name,
-    formula: tla.invariants.get(name) ?? "",
+    formula: tla.invariants.get(name) ?? "—",
   }));
+  const phaseStats = buildPhaseStats(contract.phases, contract.transitions, contract.inputNames);
+  const schematicSvg = renderSchematicSvg(spec.layout, groupedTriggers, phaseStats, spec.accent);
 
   return {
     ...spec,
     generatedAt: new Date().toISOString(),
-    phases: contract.phases,
-    stateFields: contract.stateFields,
-    inputs: contract.inputs,
-    signals: contract.signals,
-    effects: contract.effects,
+    contract,
+    tla,
+    triggerRecords,
+    groupedTriggers,
+    statePanels,
+    effectBus,
     invariants,
-    transitions: transitionRecords,
-    transitionsByPhase,
-    overviewSvg: renderOverviewSvg(contract.phases, transitionRecords, spec.accent),
+    phaseStats,
+    schematicSvg,
   };
 }
 
@@ -183,7 +776,10 @@ function parseContract(text) {
 
     if (section === "State") {
       if (line.startsWith("- Phase enum:")) {
-        phases = extractBackticked(line)[0].split("|").map((item) => item.trim());
+        phases = extractBackticked(line)[0]
+          .split("|")
+          .map((item) => item.trim())
+          .filter(Boolean);
       } else if (line.startsWith("- `")) {
         const match = line.match(/^- `([^`]+)`: `([^`]+)`/);
         if (match) {
@@ -192,24 +788,16 @@ function parseContract(text) {
       }
     } else if (section === "Inputs") {
       const item = parseSignatureBullet(line);
-      if (item) {
-        inputs.push(item);
-      }
+      if (item) inputs.push(item);
     } else if (section === "Signals") {
       const item = parseSignatureBullet(line);
-      if (item) {
-        signals.push(item);
-      }
+      if (item) signals.push(item);
     } else if (section === "Effects") {
       const item = parseSignatureBullet(line);
-      if (item) {
-        effects.push(item);
-      }
+      if (item) effects.push(item);
     } else if (section === "Invariants") {
       const item = parseSignatureBullet(line);
-      if (item) {
-        invariants.push(item.name);
-      }
+      if (item) invariants.push(item.name);
     } else if (section === "Transitions" && line.startsWith("### `")) {
       const [transition, nextIndex] = parseTransitionBlock(lines, index);
       transitions.push(transition);
@@ -245,6 +833,7 @@ function parseTransitionBlock(lines, start) {
     emits: [],
     guards: [],
   };
+
   let index = start + 1;
   while (index < lines.length) {
     const line = lines[index];
@@ -273,17 +862,16 @@ function parseTransitionBlock(lines, start) {
       index += 1;
       while (index < lines.length && lines[index].startsWith("  - ")) {
         const guardMatch = lines[index].match(/^  - `([^`]+)`$/);
-        if (guardMatch) {
-          transition.guards.push(guardMatch[1]);
-        } else {
-          transition.guards.push(lines[index].replace(/^  - /, "").trim());
-        }
+        transition.guards.push(
+          guardMatch ? guardMatch[1] : lines[index].replace(/^  - /, "").trim(),
+        );
         index += 1;
       }
       continue;
     }
     index += 1;
   }
+
   return [transition, index];
 }
 
@@ -304,27 +892,22 @@ function parseTla(text) {
       defIndices.push({
         index,
         name: match[1],
-        params: match[2] ? match[2].split(",").map((part) => part.trim()).filter(Boolean) : [],
+        params: match[2]
+          ? match[2]
+              .split(",")
+              .map((part) => part.trim())
+              .filter(Boolean)
+          : [],
       });
     }
   }
-  for (let i = 0; i < defIndices.length; i += 1) {
-    const current = defIndices[i];
-    const end = i + 1 < defIndices.length ? defIndices[i + 1].index : lines.length;
-    const body = lines.slice(current.index + 1, end).join("\n").trimEnd();
-    definitions.set(current.name, { params: current.params, body });
-  }
-
-  const nextStart = lines.findIndex((line) => line === "Next ==");
-  const nextLines = [];
-  if (nextStart >= 0) {
-    for (let index = nextStart + 1; index < lines.length; index += 1) {
-      const line = lines[index];
-      if (/^[a-z_][A-Za-z0-9_]* ==/.test(line) || line.startsWith("CiStateConstraint ==")) {
-        break;
-      }
-      nextLines.push(line);
-    }
+  for (let index = 0; index < defIndices.length; index += 1) {
+    const current = defIndices[index];
+    const end = index + 1 < defIndices.length ? defIndices[index + 1].index : lines.length;
+    definitions.set(current.name, {
+      params: current.params,
+      body: lines.slice(current.index + 1, end).join("\n").trimEnd(),
+    });
   }
 
   const invariants = new Map();
@@ -337,279 +920,575 @@ function parseTla(text) {
     }
   }
 
+  return { variables, definitions, invariants };
+}
+
+function parseEffectDispositions(text) {
+  const effectMap = new Map();
+  for (const match of text.matchAll(/\blocal_disposition\("([^"]+)"\)/g)) {
+    effectMap.set(match[1], { kind: "local", consumers: [] });
+  }
+  for (const match of text.matchAll(/\bexternal_disposition\("([^"]+)"\)/g)) {
+    effectMap.set(match[1], { kind: "external", consumers: [] });
+  }
+  for (const match of text.matchAll(/\brouted_disposition\("([^"]+)",\s*&\[(.*?)\]\)/gs)) {
+    const consumers = [...match[2].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+    effectMap.set(match[1], { kind: "routed", consumers });
+  }
+  return effectMap;
+}
+
+function aggregateTriggers(contract, tla) {
+  const grouped = new Map();
+  for (const transition of contract.transitions) {
+    const tlaDef = tla.definitions.get(transition.name);
+    const record =
+      grouped.get(transition.onName) ??
+      {
+        name: transition.onName,
+        kind: contract.inputNames.has(transition.onName) ? "input" : "signal",
+        transitions: [],
+        from: new Set(),
+        to: new Set(),
+        effects: new Set(),
+        guards: new Set(),
+        writes: new Set(),
+      };
+    record.transitions.push({
+      name: transition.name,
+      from: transition.from,
+      to: transition.to,
+      emits: transition.emits,
+      guards: transition.guards,
+      signature: transition.onSignature,
+    });
+    for (const phase of transition.from) record.from.add(phase);
+    if (transition.to) record.to.add(transition.to);
+    for (const effect of transition.emits) record.effects.add(effect);
+    for (const guard of transition.guards) record.guards.add(guard);
+    if (tlaDef) {
+      for (const write of extractWrites(tlaDef.body)) {
+        if (write !== "model_step_count") {
+          record.writes.add(write);
+        }
+      }
+    }
+    grouped.set(transition.onName, record);
+  }
+
+  return [...grouped.values()]
+    .map((record) => ({
+      name: record.name,
+      kind: record.kind,
+      transitions: record.transitions,
+      from: [...record.from],
+      to: [...record.to],
+      effects: [...record.effects],
+      guards: [...record.guards],
+      writes: [...record.writes],
+      pathLabel: renderTriggerPath(record.transitions),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function buildTriggerGroups(layoutGroups, triggerRecords, phases) {
+  const triggerMap = new Map(triggerRecords.map((record) => [record.name, record]));
+  const assigned = new Set();
+  const groups = [];
+
+  for (const config of layoutGroups) {
+    const records = config.triggers
+      .map((name) => triggerMap.get(name))
+      .filter(Boolean);
+    for (const record of records) {
+      assigned.add(record.name);
+    }
+    groups.push(finalizeGroup(config, records, phases));
+  }
+
+  const leftovers = triggerRecords.filter((record) => !assigned.has(record.name));
+  if (leftovers.length > 0) {
+    console.warn(
+      `[posters] ${leftovers.length} unassigned triggers fell into Emergent Surfaces: ${leftovers
+        .map((item) => item.name)
+        .join(", ")}`,
+    );
+    groups.push(
+      finalizeGroup(
+        {
+          id: "emergent",
+          title: "Emergent / Unassigned Surfaces",
+          note: "Schema changed without an explicit visual assignment. Review this cluster and reclassify it deliberately.",
+          x: 40,
+          y: 1120,
+          w: 520,
+          columns: 2,
+          anchors: [phases[phases.length - 1]],
+        },
+        leftovers,
+        phases,
+      ),
+    );
+  }
+
+  return groups;
+}
+
+function finalizeGroup(config, records, phaseOrder) {
+  const columns = config.columns ?? (records.length > 12 ? 2 : 1);
+  const rowCount = Math.max(1, Math.ceil(records.length / columns));
+  const height = 88 + rowCount * 34 + 108;
+  const inputCount = records.filter((item) => item.kind === "input").length;
+  const signalCount = records.length - inputCount;
+  const writes = unique(records.flatMap((item) => item.writes));
+  const guards = unique(records.flatMap((item) => item.guards));
+  const effects = unique(records.flatMap((item) => item.effects));
+
   return {
-    variables,
-    definitions,
-    next: nextLines,
-    invariants,
+    ...config,
+    records: records.map((record) => ({
+      ...record,
+      pathLabel: normalizePhaseList(record.pathLabel, phaseOrder),
+    })),
+    columns,
+    height,
+    stats: { total: records.length, inputCount, signalCount },
+    writes,
+    guards,
+    effects,
+    tone:
+      inputCount === 0 ? "signal" : signalCount === 0 ? "input" : "hybrid",
   };
 }
 
-function extractWrites(body) {
-  const matches = [...body.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)'\s*=/g)].map((match) => match[1]);
-  return [...new Set(matches)];
+function buildStatePanels(panelConfig, stateFields) {
+  const stateFieldMap = new Map(stateFields.map((field) => [field.name, field]));
+  return {
+    left: buildStatePanelList(panelConfig.left, stateFieldMap),
+    right: buildStatePanelList(panelConfig.right, stateFieldMap),
+  };
 }
 
-function extractClauses(body) {
-  const clauses = [];
-  for (const rawLine of body.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line.startsWith("/\\")) {
-      continue;
-    }
-    const clause = line.replace(/^\/\\\s*/, "").trim();
-    if (!clause || clause.startsWith("UNCHANGED")) {
-      continue;
-    }
-    if (/\bmodel_step_count'\s*=/.test(clause)) {
-      continue;
-    }
-    if (clause.includes("' =")) {
-      continue;
-    }
-    clauses.push(clause);
+function buildStatePanelList(panels, stateFieldMap) {
+  const used = new Set();
+  const realized = panels.map((panel) => {
+    const fields = panel.fields
+      .map((name) => stateFieldMap.get(name))
+      .filter(Boolean);
+    for (const field of fields) used.add(field.name);
+    return { ...panel, fields };
+  });
+  const leftover = [...stateFieldMap.values()].filter((field) => !used.has(field.name));
+  if (leftover.length > 0) {
+    realized.push({
+      title: "Residual Registers",
+      note: "Fields not explicitly assigned to a poster subsystem.",
+      fields: leftover,
+    });
   }
-  return clauses;
+  return realized;
 }
 
-function renderOverviewSvg(phases, transitions, accent) {
-  const width = 1800;
-  const height = 280;
-  const marginX = 120;
-  const nodeWidth = 170;
-  const nodeHeight = 56;
-  const laneY = 156;
-  const step = phases.length > 1 ? (width - marginX * 2 - nodeWidth) / (phases.length - 1) : 0;
-  const nodes = phases.map((phase, index) => ({
-    phase,
-    x: marginX + index * step,
-    y: laneY,
-  }));
+function buildEffectBus(effects, dispositionMap) {
+  const lanes = {
+    routed: [],
+    external: [],
+    local: [],
+    unknown: [],
+  };
+  for (const effect of effects) {
+    const info = dispositionMap.get(effect.name);
+    if (!info) {
+      lanes.unknown.push({ name: effect.name, consumers: [] });
+      continue;
+    }
+    lanes[info.kind].push({ name: effect.name, consumers: info.consumers });
+  }
+  return lanes;
+}
 
-  const edgeMap = new Map();
+function buildPhaseStats(phases, transitions, inputNames) {
+  const stats = new Map();
+  for (const phase of phases) {
+    stats.set(phase, {
+      loopCount: 0,
+      exitCount: 0,
+      entryCount: 0,
+      inputLegs: 0,
+      signalLegs: 0,
+    });
+  }
+
   for (const transition of transitions) {
+    const isInput = inputNames.has(transition.onName);
     for (const from of transition.from) {
-      const key = `${from}->${transition.to}`;
-      if (!edgeMap.has(key)) {
-        edgeMap.set(key, {
-          from,
-          to: transition.to,
-          count: 0,
-          inputCount: 0,
-          signalCount: 0,
-        });
-      }
-      const edge = edgeMap.get(key);
-      edge.count += 1;
-      if (transition.kind === "input") {
-        edge.inputCount += 1;
+      const phaseStats = stats.get(from);
+      if (transition.to === from) {
+        phaseStats.loopCount += 1;
       } else {
-        edge.signalCount += 1;
+        phaseStats.exitCount += 1;
+      }
+      if (isInput) {
+        phaseStats.inputLegs += 1;
+      } else {
+        phaseStats.signalLegs += 1;
       }
     }
-  }
-
-  const svg = [];
-  svg.push(
-    `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Phase wiring overview">`,
-  );
-  svg.push(
-    `<rect x="0" y="0" width="${width}" height="${height}" rx="28" fill="${THEME.panel}" stroke="${THEME.border}" />`,
-  );
-  svg.push(
-    `<text x="64" y="46" fill="${THEME.ink}" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="700">Phase transfer schematic</text>`,
-  );
-  svg.push(
-    `<text x="64" y="76" fill="${THEME.muted}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">Aggregated transition count per from → to edge. Solid = mostly inputs, dashed = mostly signals.</text>`,
-  );
-
-  for (const edge of edgeMap.values()) {
-    const source = nodes.find((node) => node.phase === edge.from);
-    const target = nodes.find((node) => node.phase === edge.to);
-    if (!source || !target) {
-      continue;
-    }
-    const mostlySignal = edge.signalCount > edge.inputCount;
-    const stroke = mostlySignal ? THEME.signal : accent;
-    const dash = mostlySignal ? `stroke-dasharray="10 8"` : "";
-    if (edge.from === edge.to) {
-      const x = source.x + nodeWidth / 2;
-      const y = source.y - 12;
-      const loopPath = [
-        `M ${x - 36} ${y}`,
-        `C ${x - 60} ${y - 72}, ${x + 60} ${y - 72}, ${x + 36} ${y}`,
-      ].join(" ");
-      svg.push(
-        `<path d="${loopPath}" fill="none" stroke="${stroke}" stroke-width="3.5" ${dash} />`,
-      );
-      svg.push(
-        `<text x="${x}" y="${y - 70}" fill="${stroke}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">${edge.count}</text>`,
-      );
-    } else {
-      const startX = source.x + nodeWidth / 2;
-      const endX = target.x + nodeWidth / 2;
-      const direction = endX > startX ? 1 : -1;
-      const curvature = Math.max(36, Math.abs(endX - startX) * 0.18);
-      const baseY = source.y - 24;
-      const controlY = baseY - (direction > 0 ? 48 : 72);
-      const path = [
-        `M ${startX} ${baseY}`,
-        `C ${startX + curvature * direction} ${controlY}, ${endX - curvature * direction} ${controlY}, ${endX} ${baseY}`,
-      ].join(" ");
-      svg.push(
-        `<path d="${path}" fill="none" stroke="${stroke}" stroke-width="3.25" ${dash} marker-end="url(#arrow-${mostlySignal ? "signal" : "input"})" />`,
-      );
-      svg.push(
-        `<text x="${(startX + endX) / 2}" y="${controlY - 8}" fill="${stroke}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">${edge.count}</text>`,
-      );
+    if (transition.to && !transition.from.includes(transition.to)) {
+      stats.get(transition.to).entryCount += 1;
     }
   }
-
-  svg.push(
-    `<defs>
-      <marker id="arrow-input" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-        <path d="M0,0 L12,6 L0,12 z" fill="${accent}" />
-      </marker>
-      <marker id="arrow-signal" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-        <path d="M0,0 L12,6 L0,12 z" fill="${THEME.signal}" />
-      </marker>
-    </defs>`,
-  );
-
-  for (const node of nodes) {
-    svg.push(
-      `<rect x="${node.x}" y="${node.y}" width="${nodeWidth}" height="${nodeHeight}" rx="18" fill="${THEME.phase}" stroke="${THEME.border}" />`,
-    );
-    svg.push(
-      `<text x="${node.x + nodeWidth / 2}" y="${node.y + 24}" fill="${THEME.ink}" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">${escapeHtml(
-        node.phase,
-      )}</text>`,
-    );
-    const count = transitions.filter((transition) => transition.from.includes(node.phase)).length;
-    svg.push(
-      `<text x="${node.x + nodeWidth / 2}" y="${node.y + 42}" fill="${THEME.muted}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">${count} transitions</text>`,
-    );
-  }
-
-  svg.push(`</svg>`);
-  return svg.join("");
+  return stats;
 }
 
 function renderPosterHtml(poster) {
+  const totalWidth = poster.layout.plate.width + 780;
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${escapeHtml(poster.title)} poster</title>
-    <style>
-      ${renderStyles(poster.accent, poster.phases.length)}
-    </style>
+    <title>${escapeHtml(poster.title)} architectural plate</title>
+    <style>${renderStyles(poster)}</style>
   </head>
   <body>
-    <main class="poster-shell" style="--phase-count:${poster.phases.length}">
-      <header class="masthead">
-        <div class="masthead__eyebrow">Generated machine poster</div>
-        <div class="masthead__row">
-          <div>
-            <a class="back-link" href="./index.html">← Poster index</a>
+    <main class="page-shell">
+      <a class="page-index-link" href="./index.html">← Poster index</a>
+      <article class="architectural-plate" style="--poster-width:${totalWidth}px; --plate-width:${poster.layout.plate.width}px; --plate-height:${poster.layout.plate.height}px;">
+        <header class="plate-header">
+          <div class="title-plaque">
+            <div class="eyebrow">Canonical machine plate / generated from TLA + contract artifacts</div>
             <h1>${escapeHtml(poster.title)}</h1>
             <p class="subtitle">${escapeHtml(poster.subtitle)}</p>
           </div>
-          <div class="meta-stack">
-            <div class="meta-chip"><span>Source</span><strong>${escapeHtml(
-              path.relative(repoRoot, poster.tlaPath),
-            )}</strong></div>
-            <div class="meta-chip"><span>Contract</span><strong>${escapeHtml(
-              path.relative(repoRoot, poster.contractPath),
-            )}</strong></div>
-            <div class="meta-chip"><span>Generated</span><strong>${escapeHtml(
-              poster.generatedAt.replace("T", " ").replace("Z", " UTC"),
-            )}</strong></div>
-          </div>
-        </div>
-        <div class="stat-ribbon">
-          ${renderStat("phases", poster.phases.length)}
-          ${renderStat("transitions", poster.transitions.length)}
-          ${renderStat("inputs", poster.inputs.length)}
-          ${renderStat("signals", poster.signals.length)}
-          ${renderStat("effects", poster.effects.length)}
-          ${renderStat("invariants", poster.invariants.length)}
-          ${renderStat("state vars", poster.stateFields.length)}
-        </div>
-      </header>
-
-      <section class="overview-panel">
-        ${poster.overviewSvg}
-      </section>
-
-      <section class="summary-grid">
-        <section class="panel">
-          <div class="panel__header">State vector</div>
-          <div class="field-list">
-            ${poster.stateFields
-              .map(
-                (field) => `<div class="field-pill"><strong>${escapeHtml(field.name)}</strong><span>${escapeHtml(
-                  field.type,
-                )}</span></div>`,
-              )
-              .join("")}
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel__header">Invariants</div>
-          <div class="invariant-list">
-            ${poster.invariants
-              .map(
-                (invariant) => `<article class="invariant-card"><h3>${escapeHtml(
-                  invariant.name,
-                )}</h3><pre>${escapeHtml(invariant.formula || "—")}</pre></article>`,
-              )
-              .join("")}
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel__header panel__header--input">Inputs</div>
-          <div class="alphabet-list">
-            ${poster.inputs
-              .map((item) => renderAlphabetItem(item, "input"))
-              .join("")}
-          </div>
-        </section>
-        <section class="panel">
-          <div class="panel__header panel__header--signal">Signals</div>
-          <div class="alphabet-list">
-            ${poster.signals
-              .map((item) => renderAlphabetItem(item, "signal"))
-              .join("")}
-          </div>
-        </section>
-      </section>
-
-      <section class="board">
-        ${poster.phases
-          .map((phase) => {
-            const cards = poster.transitionsByPhase.get(phase) ?? [];
-            return `<section class="phase-column">
-              <header class="phase-column__header">
-                <div class="phase-name">${escapeHtml(phase)}</div>
-                <div class="phase-count">${cards.length} legal transitions</div>
-              </header>
-              <div class="phase-column__cards">
-                ${cards.map((card) => renderTransitionCard(card)).join("")}
+          <div class="legend-plaque">
+            <section class="legend-plaque__section">
+              <div class="section-label">Sources</div>
+              <div class="meta-grid">
+                ${renderMetaChip("TLA source", path.relative(repoRoot, poster.tlaPath))}
+                ${renderMetaChip("contract", path.relative(repoRoot, poster.contractPath))}
+                ${renderMetaChip("catalog", path.relative(repoRoot, poster.catalogPath))}
+                ${renderMetaChip("generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC"))}
               </div>
-            </section>`;
-          })
-          .join("")}
-      </section>
+            </section>
+            <section class="legend-plaque__section">
+              <div class="section-label">Legend + density</div>
+              <div class="legend-grid">
+                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>input</strong><span>runtime command alphabet</span></div>
+                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>signal</strong><span>formal seam / internal trigger</span></div>
+                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>effect</strong><span>local / external / routed exits</span></div>
+              </div>
+              <div class="stat-band">
+                ${renderStatChip("phases", poster.contract.phases.length)}
+                ${renderStatChip("domains", poster.groupedTriggers.length)}
+                ${renderStatChip("inputs", poster.contract.inputs.length)}
+                ${renderStatChip("signals", poster.contract.signals.length)}
+                ${renderStatChip("effects", poster.contract.effects.length)}
+                ${renderStatChip("invariants", poster.invariants.length)}
+                ${renderStatChip("state vars", poster.contract.stateFields.length)}
+              </div>
+            </section>
+          </div>
+        </header>
 
-      <footer class="footer-note">
-        <div>Poster design: generated from canonical TLA transition bodies with normalized contract metadata.</div>
-        <div>Regenerate with <code>node scripts/machine-posters/generate-machine-posters.mjs</code>.</div>
-      </footer>
+        <section class="poster-grid">
+          <aside class="sidebar">
+          ${poster.statePanels.left.map((panel) => renderStatePanel(panel)).join("")}
+          </aside>
+
+          <section class="schematic-column">
+            ${renderSchematicPlate(poster)}
+          </section>
+
+          <aside class="sidebar">
+            ${poster.statePanels.right.map((panel) => renderStatePanel(panel)).join("")}
+          </aside>
+        </section>
+
+        <section class="bottom-band">
+          <section class="effect-panel">
+            <div class="section-label">Effect bus</div>
+            <div class="effect-lanes">
+              ${renderEffectLane("routed", "Routed effects", poster.effectBus.routed)}
+              ${renderEffectLane("external", "External effects", poster.effectBus.external)}
+              ${renderEffectLane("local", "Local effects", poster.effectBus.local)}
+              ${poster.effectBus.unknown.length > 0 ? renderEffectLane("unknown", "Unknown disposition", poster.effectBus.unknown) : ""}
+            </div>
+          </section>
+          <section class="invariant-panel">
+            <div class="section-label">Invariant plate</div>
+            <div class="invariant-grid">
+              ${poster.invariants
+                .map(
+                  (invariant) => `<article class="invariant-card">
+                    <h3>${escapeHtml(invariant.name)}</h3>
+                    <pre>${escapeHtml(invariant.formula)}</pre>
+                  </article>`,
+                )
+                .join("")}
+            </div>
+          </section>
+        </section>
+
+        <footer class="footer-note">
+          <div>Complexity target: central lifecycle spine, radial transition halos, sidecar subsystems, effect bus, invariant plate.</div>
+          <div>Regenerate with <code>node scripts/machine-posters/generate-machine-posters.mjs</code>.</div>
+        </footer>
+      </article>
     </main>
   </body>
 </html>`;
+}
+
+function renderSchematicPlate(poster) {
+  const { width, height } = poster.layout.plate;
+  return `<section class="schematic-plate" style="width:${width}px; height:${height}px;">
+    <svg class="schematic-svg" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeHtml(
+      poster.title,
+    )} schematic">${poster.schematicSvg}</svg>
+    ${renderPhaseCards(poster)}
+    ${poster.groupedTriggers.map((group) => renderGroupCard(group)).join("")}
+  </section>`;
+}
+
+function renderPhaseCards(poster) {
+  return poster.contract.phases
+    .map((phase) => {
+      const layout = poster.layout.phases[phase];
+      const stats = poster.phaseStats.get(phase);
+      return `<article class="phase-card ${layout.emphasis ? "phase-card--emphasis" : ""} ${
+        layout.sink ? "phase-card--sink" : ""
+      }" style="left:${layout.x}px; top:${layout.y}px; width:${layout.w}px; height:${layout.h}px;">
+        <div class="phase-card__eyebrow">phase</div>
+        <h2>${escapeHtml(phase)}</h2>
+        <div class="phase-card__subtitle">${escapeHtml(layout.subtitle ?? "")}</div>
+        <div class="phase-card__stats">
+          <span>loops ${stats.loopCount}</span>
+          <span>exits ${stats.exitCount}</span>
+          <span>entries ${stats.entryCount}</span>
+        </div>
+        <div class="phase-card__stats phase-card__stats--secondary">
+          <span>input legs ${stats.inputLegs}</span>
+          <span>signal legs ${stats.signalLegs}</span>
+        </div>
+      </article>`;
+    })
+    .join("");
+}
+
+function renderGroupCard(group) {
+  return `<section class="cluster cluster--${group.tone}" style="left:${group.x}px; top:${group.y}px; width:${group.w}px; height:${group.height}px; --cols:${group.columns};">
+    <header class="cluster__header">
+      <div>
+        <div class="cluster__eyebrow">control domain</div>
+        <h3>${escapeHtml(group.title)}</h3>
+      </div>
+      <div class="cluster__counts">
+        <span>${group.stats.total} triggers</span>
+        <span>${group.stats.inputCount} input</span>
+        <span>${group.stats.signalCount} signal</span>
+      </div>
+    </header>
+    <p class="cluster__note">${escapeHtml(group.note)}</p>
+    <div class="cluster__grid">
+      ${group.records
+        .map(
+          (record) => `<div class="trigger-row trigger-row--${record.kind}">
+            <span class="trigger-row__kind"></span>
+            <div class="trigger-row__body">
+              <div class="trigger-row__name">${escapeHtml(record.name)}</div>
+              <div class="trigger-row__path">${escapeHtml(record.pathLabel)}</div>
+            </div>
+          </div>`,
+        )
+        .join("")}
+    </div>
+    <footer class="cluster__footer">
+      ${renderTokenLane("writes", group.writes, 9)}
+      ${renderTokenLane("guards", group.guards, 6)}
+      ${renderTokenLane("effects", group.effects, 6)}
+    </footer>
+  </section>`;
+}
+
+function renderStatePanel(panel) {
+  return `<section class="state-panel">
+    <div class="section-label">Subsystem</div>
+    <h3 class="state-panel__title">${escapeHtml(panel.title)}</h3>
+    <p class="panel-note">${escapeHtml(panel.note ?? "")}</p>
+    <div class="state-field-list">
+      ${panel.fields
+        .map(
+          (field) => `<div class="state-field">
+            <strong>${escapeHtml(field.name)}</strong>
+            <span>${escapeHtml(field.type)}</span>
+          </div>`,
+        )
+        .join("")}
+    </div>
+  </section>`;
+}
+
+function renderEffectLane(kind, title, effects) {
+  return `<article class="effect-lane effect-lane--${kind}">
+    <div class="effect-lane__title">${escapeHtml(title)}</div>
+    <div class="effect-chip-list">
+      ${effects
+        .map((effect) => {
+          const label =
+            effect.consumers && effect.consumers.length > 0
+              ? `${effect.name} → ${effect.consumers.join(", ")}`
+              : effect.name;
+          return `<span class="effect-chip">${escapeHtml(label)}</span>`;
+        })
+        .join("")}
+    </div>
+  </article>`;
+}
+
+function renderTokenLane(label, items, limit) {
+  if (items.length === 0) {
+    return "";
+  }
+  const shown = items.slice(0, limit);
+  const hidden = items.length - shown.length;
+  return `<div class="token-lane">
+    <span class="token-lane__label">${escapeHtml(label)}</span>
+    <div class="token-lane__tokens">
+      ${shown.map((item) => `<span class="token-chip">${escapeHtml(item)}</span>`).join("")}
+      ${hidden > 0 ? `<span class="token-chip token-chip--overflow">+${hidden}</span>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderMetaChip(label, value) {
+  return `<div class="meta-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function renderStatChip(label, value) {
+  return `<div class="stat-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function renderSchematicSvg(layout, groups, phaseStats, accent) {
+  const { width, height } = layout.plate;
+  const phaseEntries = Object.entries(layout.phases).map(([name, box]) => ({
+    name,
+    ...box,
+    cx: box.x + box.w / 2,
+    cy: box.y + box.h / 2,
+  }));
+
+  const svg = [];
+  svg.push(
+    `<defs>
+      <marker id="phase-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+        <path d="M0,0 L12,6 L0,12 z" fill="${accent}" />
+      </marker>
+      <marker id="ghost-arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="rgba(244,239,229,0.28)" />
+      </marker>
+    </defs>`,
+  );
+  svg.push(
+    `<rect x="0" y="0" width="${width}" height="${height}" fill="${THEME.plate}" stroke="${THEME.border}" rx="28" />`,
+  );
+  svg.push(renderGrid(width, height));
+
+  const phaseEdgeMap = buildPhaseEdgeMap(phaseEntries.map((item) => item.name), groups);
+  for (const edge of phaseEdgeMap) {
+    const from = phaseEntries.find((item) => item.name === edge.from);
+    const to = phaseEntries.find((item) => item.name === edge.to);
+    if (!from || !to || edge.from === edge.to) continue;
+    const [sx, sy] = anchorPoint(from, to);
+    const [ex, ey] = anchorPoint(to, from);
+    const midX = Math.round((sx + ex) / 2);
+    const route = `M ${sx} ${sy} L ${midX} ${sy} L ${midX} ${ey} L ${ex} ${ey}`;
+    svg.push(
+      `<path d="${route}" fill="none" stroke="${accent}" stroke-width="3" stroke-opacity="0.8" marker-end="url(#phase-arrow)" />`,
+    );
+    svg.push(
+      `<text x="${midX + 10}" y="${Math.round((sy + ey) / 2) - 8}" fill="${accent}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">${edge.count}</text>`,
+    );
+  }
+
+  for (const group of groups) {
+    const groupBox = {
+      x: group.x,
+      y: group.y,
+      w: group.w,
+      h: group.height,
+      cx: group.x + group.w / 2,
+      cy: group.y + group.height / 2,
+    };
+    for (const phaseName of group.anchors) {
+      const phase = phaseEntries.find((entry) => entry.name === phaseName);
+      if (!phase) continue;
+      const [sx, sy] = anchorPoint(groupBox, phase);
+      const [ex, ey] = anchorPoint(phase, groupBox);
+      const horizontal = Math.abs(ex - sx) >= Math.abs(ey - sy);
+      const mid = horizontal ? Math.round((sx + ex) / 2) : Math.round((sy + ey) / 2);
+      const route = horizontal
+        ? `M ${sx} ${sy} L ${mid} ${sy} L ${mid} ${ey} L ${ex} ${ey}`
+        : `M ${sx} ${sy} L ${sx} ${mid} L ${ex} ${mid} L ${ex} ${ey}`;
+      const stroke =
+        group.tone === "input"
+          ? THEME.input
+          : group.tone === "signal"
+            ? THEME.signal
+            : "rgba(244,239,229,0.34)";
+      svg.push(
+        `<path d="${route}" fill="none" stroke="${stroke}" stroke-width="1.8" stroke-dasharray="8 7" marker-end="url(#ghost-arrow)" />`,
+      );
+    }
+  }
+
+  return svg.join("");
+}
+
+function buildPhaseEdgeMap(phases, groups) {
+  const map = new Map();
+  for (const group of groups) {
+    for (const record of group.records) {
+      for (const transition of record.transitions) {
+        for (const from of transition.from) {
+          const key = `${from}->${transition.to}`;
+          map.set(key, {
+            from,
+            to: transition.to,
+            count: (map.get(key)?.count ?? 0) + 1,
+          });
+        }
+      }
+    }
+  }
+  return [...map.values()].filter((edge) => phases.includes(edge.from) && phases.includes(edge.to));
+}
+
+function renderGrid(width, height) {
+  const vertical = [];
+  const horizontal = [];
+  for (let x = 40; x < width; x += 40) {
+    vertical.push(`<line x1="${x}" y1="0" x2="${x}" y2="${height}" />`);
+  }
+  for (let y = 40; y < height; y += 40) {
+    horizontal.push(`<line x1="0" y1="${y}" x2="${width}" y2="${y}" />`);
+  }
+  return `<g stroke="${THEME.grid}" stroke-width="1">${vertical.join("")}${horizontal.join("")}</g>`;
+}
+
+function anchorPoint(source, target) {
+  const dx = target.cx - source.cx;
+  const dy = target.cy - source.cy;
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return [
+      dx >= 0 ? source.x + source.w : source.x,
+      clamp(target.cy, source.y + 18, source.y + source.h - 18),
+    ];
+  }
+  return [
+    clamp(target.cx, source.x + 18, source.x + source.w - 18),
+    dy >= 0 ? source.y + source.h : source.y,
+  ];
 }
 
 function renderIndexHtml(posters) {
@@ -618,78 +1497,73 @@ function renderIndexHtml(posters) {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Machine posters</title>
+    <title>Machine architectural plates</title>
     <style>
       body {
         margin: 0;
         min-height: 100vh;
-        background: ${THEME.paper};
+        background: ${THEME.bg};
         color: ${THEME.ink};
         font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
       }
       main {
-        max-width: 1080px;
+        max-width: 1180px;
         margin: 0 auto;
-        padding: 48px 32px 72px;
-      }
-      h1 {
-        margin: 0 0 12px;
-        font-size: 48px;
-        letter-spacing: -0.04em;
-      }
-      p {
-        margin: 0 0 28px;
-        color: ${THEME.muted};
-        max-width: 48rem;
-        line-height: 1.5;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 20px;
-      }
-      a.card {
-        display: block;
-        padding: 28px;
-        border-radius: 22px;
-        border: 1px solid ${THEME.border};
-        background: ${THEME.panel};
-        color: inherit;
-        text-decoration: none;
-        box-shadow: 0 20px 36px rgba(24, 23, 22, 0.06);
-      }
-      a.card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 26px 40px rgba(24, 23, 22, 0.08);
+        padding: 54px 32px 80px;
       }
       .eyebrow {
         color: ${THEME.muted};
-        font-size: 12px;
-        letter-spacing: 0.18em;
+        letter-spacing: 0.2em;
         text-transform: uppercase;
+        font-size: 12px;
+      }
+      h1 {
+        margin: 14px 0 12px;
+        font-size: 54px;
+        letter-spacing: -0.06em;
+      }
+      p {
+        margin: 0 0 32px;
+        max-width: 50rem;
+        color: ${THEME.muted};
+        line-height: 1.6;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 20px;
+      }
+      .card {
+        display: block;
+        padding: 28px;
+        border-radius: 22px;
+        background: ${THEME.panel};
+        border: 1px solid ${THEME.border};
+        color: inherit;
+        text-decoration: none;
+        box-shadow: 0 24px 42px rgba(0,0,0,0.25);
       }
       .card h2 {
-        margin: 12px 0 10px;
-        font-size: 30px;
-        letter-spacing: -0.03em;
+        margin: 8px 0 10px;
+        font-size: 32px;
+        letter-spacing: -0.04em;
       }
       .card small {
         display: block;
-        margin-top: 18px;
-        color: ${THEME.muted};
+        margin-top: 16px;
+        color: ${THEME.faint};
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       }
     </style>
   </head>
   <body>
     <main>
-      <div class="eyebrow">Generated posters</div>
+      <div class="eyebrow">Generated architectural plates</div>
       <h1>Canonical machine posters</h1>
       <p>
-        Large-format, Dieter Rams-inspired machine posters generated from the
-        canonical formal models. Each view combines the normalized input/signal
-        alphabet with raw TLA-derived transition writes, guards, and phase
-        transfers.
+        Large-format, regenerated plates built from the canonical TLA machine models
+        and normalized contract metadata. Each poster is laid out as a phase core
+        with subsystem halos, sidecar state blocks, and an effect bus.
       </p>
       <div class="grid">
         ${posters
@@ -697,7 +1571,7 @@ function renderIndexHtml(posters) {
             (poster) => `<a class="card" href="./${poster.id}.html">
               <div class="eyebrow">${escapeHtml(poster.subtitle)}</div>
               <h2>${escapeHtml(poster.title)}</h2>
-              <p>${poster.phases.length} phases · ${poster.transitions.length} transitions · ${poster.inputs.length} inputs · ${poster.signals.length} signals</p>
+              <p>${poster.contract.inputs.length} inputs · ${poster.contract.signals.length} signals · ${poster.contract.effects.length} effects</p>
               <small>${escapeHtml(path.relative(repoRoot, poster.tlaPath))}</small>
             </a>`,
           )
@@ -708,422 +1582,588 @@ function renderIndexHtml(posters) {
 </html>`;
 }
 
-function renderTransitionCard(card) {
-  const kindLabel = card.kind === "input" ? "INPUT" : "SIGNAL";
-  const writes = card.writes.filter((name) => name !== "model_step_count");
-  const guardMarkup =
-    card.guards.length > 0
-      ? `<ul class="guard-list">${card.guards
-          .map((guard) => `<li>${escapeHtml(guard)}</li>`)
-          .join("")}</ul>`
-      : `<div class="guard-empty">No named guard beyond phase legality.</div>`;
-  const clauseMarkup =
-    card.clauses.length > 0
-      ? `<pre class="clause-block">${escapeHtml(card.clauses.slice(0, 3).join("\n"))}</pre>`
-      : `<pre class="clause-block clause-block--empty">No additional raw guard clauses.</pre>`;
-  return `<article class="transition-card transition-card--${card.kind}">
-    <header class="transition-card__header">
-      <span class="kind-pill kind-pill--${card.kind}">${kindLabel}</span>
-      <span class="phase-shift phase-shift--${card.phaseShift}">${escapeHtml(card.to)}</span>
-    </header>
-    <h3>${escapeHtml(card.name)}</h3>
-    <div class="trigger-line">${escapeHtml(card.onSignature || `${card.onName}()`)} </div>
-    <div class="detail-grid">
-      <div>
-        <div class="detail-label">Guards</div>
-        ${guardMarkup}
-      </div>
-      <div>
-        <div class="detail-label">Writes</div>
-        <div class="write-list">${writes.length ? writes.map((name) => `<span>${escapeHtml(name)}</span>`).join("") : `<span>phase only</span>`}</div>
-      </div>
-    </div>
-    ${card.emits.length ? `<div class="effect-row"><span class="detail-label">Effects</span>${card.emits.map((effect) => `<span class="effect-pill">${escapeHtml(effect)}</span>`).join("")}</div>` : ""}
-    <div class="detail-label">TLA clauses</div>
-    ${clauseMarkup}
-  </article>`;
-}
-
-function renderAlphabetItem(item, kind) {
-  return `<div class="alphabet-item alphabet-item--${kind}">
-    <strong>${escapeHtml(item.name)}</strong>
-    <span>${escapeHtml(item.signature || `${item.name}()` )}</span>
-  </div>`;
-}
-
-function renderStat(label, value) {
-  return `<div class="stat-chip"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`;
-}
-
-function renderStyles(accent, phaseCount) {
+function renderStyles(poster) {
   return `
-      :root {
-        --paper: ${THEME.paper};
-        --panel: ${THEME.panel};
-        --card: ${THEME.card};
-        --border: ${THEME.border};
-        --ink: ${THEME.ink};
-        --muted: ${THEME.muted};
-        --rule: ${THEME.rule};
-        --input: ${THEME.input};
-        --signal: ${THEME.signal};
-        --effect: ${THEME.effect};
-        --phase: ${THEME.phase};
-        --accent: ${accent};
+    :root {
+      --bg: ${THEME.bg};
+      --shell: ${THEME.shell};
+      --plate: ${THEME.plate};
+      --panel: ${THEME.panel};
+      --card: ${THEME.card};
+      --border: ${THEME.border};
+      --grid: ${THEME.grid};
+      --ink: ${THEME.ink};
+      --muted: ${THEME.muted};
+      --faint: ${THEME.faint};
+      --input: ${THEME.input};
+      --signal: ${THEME.signal};
+      --effect: ${THEME.effect};
+      --routed: ${THEME.routed};
+      --local: ${THEME.local};
+      --external: ${THEME.external};
+      --accent: ${poster.accent};
+      --sink: ${THEME.sink};
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background:
+        radial-gradient(circle at 20% 0%, rgba(201, 109, 84, 0.08), transparent 30%),
+        radial-gradient(circle at 90% 10%, rgba(132, 191, 215, 0.08), transparent 28%),
+        linear-gradient(180deg, #090b0d 0%, #0b0d10 18%, #0b0d0f 100%);
+      color: var(--ink);
+      font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+    }
+    code, pre, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .page-shell {
+      min-height: 100vh;
+      padding: 22px 24px 34px;
+    }
+    .page-index-link {
+      display: inline-block;
+      margin: 0 0 12px 6px;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 11px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+    .architectural-plate {
+      width: max(calc(var(--poster-width) * 1px), 96vw);
+      max-width: 3520px;
+      margin: 0 auto;
+      padding: 24px 26px 28px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), transparent 24%),
+        linear-gradient(90deg, rgba(255,255,255,0.01), transparent 22%, transparent 78%, rgba(255,255,255,0.01)),
+        var(--shell);
+      border: 1px solid rgba(255,255,255,0.11);
+      border-radius: 24px;
+      box-shadow:
+        0 44px 120px rgba(0,0,0,0.5),
+        inset 0 1px 0 rgba(255,255,255,0.05),
+        inset 0 0 0 1px rgba(0,0,0,0.22);
+    }
+    .plate-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      padding: 4px 4px 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .title-plaque {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .eyebrow, .section-label, .cluster__eyebrow, .phase-card__eyebrow {
+      color: var(--faint);
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 8px 0 0;
+      font-size: clamp(64px, 4.8vw, 108px);
+      line-height: 0.92;
+      letter-spacing: -0.07em;
+      font-weight: 600;
+    }
+    .subtitle {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.5;
+      max-width: 44rem;
+    }
+    .legend-plaque {
+      width: 760px;
+      display: grid;
+      gap: 14px;
+      padding: 14px 16px 16px;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.025);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .legend-plaque__section {
+      display: grid;
+      gap: 10px;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(260px, 1fr));
+      gap: 10px;
+      min-width: auto;
+    }
+    .meta-chip, .stat-chip {
+      background: rgba(255,255,255,0.018);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .meta-chip span, .stat-chip span {
+      display: block;
+      color: var(--faint);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 10px;
+    }
+    .meta-chip strong, .stat-chip strong {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      line-height: 1.4;
+    }
+    .legend-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .legend-chip {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.018);
+    }
+    .legend-chip__swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      background: var(--accent);
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
+    }
+    .legend-chip__swatch--input { background: var(--input); }
+    .legend-chip__swatch--signal { background: var(--signal); }
+    .legend-chip__swatch--effect { background: var(--effect); }
+    .legend-chip strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .legend-chip span:last-child {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .stat-band {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .poster-grid {
+      display: grid;
+      grid-template-columns: 330px minmax(calc(var(--plate-width) * 1px), 1fr) 360px;
+      gap: 20px;
+      align-items: start;
+      margin-top: 18px;
+    }
+    .sidebar {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .state-panel,
+    .effect-panel,
+    .invariant-panel {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.03),
+        0 10px 22px rgba(0,0,0,0.16);
+      clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+    }
+    .state-panel__title {
+      margin: 8px 0 0;
+      font-size: 22px;
+      letter-spacing: -0.035em;
+      line-height: 1.05;
+    }
+    .panel-note {
+      margin: 10px 0 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .state-field-list {
+      display: grid;
+      gap: 10px;
+    }
+    .state-field {
+      padding: 11px 12px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .state-field strong {
+      display: block;
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    .state-field span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .schematic-column {
+      overflow-x: auto;
+      padding-bottom: 6px;
+    }
+    .schematic-plate {
+      position: relative;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(255,255,255,0.028), transparent 32%),
+        linear-gradient(180deg, rgba(255,255,255,0.012), transparent 12%),
+        var(--plate);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.04),
+        inset 0 0 0 1px rgba(0,0,0,0.12),
+        0 18px 42px rgba(0,0,0,0.22);
+      overflow: hidden;
+      clip-path: polygon(16px 0, calc(100% - 16px) 0, 100% 16px, 100% calc(100% - 16px), calc(100% - 16px) 100%, 16px 100%, 0 calc(100% - 16px), 0 16px);
+    }
+    .schematic-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .phase-card,
+    .cluster {
+      position: absolute;
+      overflow: hidden;
+      border-radius: 14px;
+      backdrop-filter: blur(3px);
+      clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+    }
+    .phase-card {
+      padding: 16px 18px 14px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: linear-gradient(180deg, rgba(109,143,160,0.11), rgba(255,255,255,0.03));
+      box-shadow:
+        0 14px 30px rgba(0,0,0,0.18),
+        inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    .phase-card--emphasis {
+      border-color: rgba(201,109,84,0.45);
+      background: linear-gradient(180deg, rgba(201,109,84,0.16), rgba(255,255,255,0.04));
+      box-shadow:
+        0 24px 40px rgba(0,0,0,0.24),
+        inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .phase-card--sink {
+      border-color: rgba(201,109,84,0.5);
+      background: linear-gradient(180deg, rgba(68,18,18,0.8), rgba(25,12,12,0.95));
+    }
+    .phase-card h2 {
+      margin: 8px 0 8px;
+      font-size: 36px;
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+      font-weight: 600;
+    }
+    .phase-card__subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .phase-card__stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 11px;
+      color: var(--ink);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .phase-card__stats span {
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .phase-card__stats--secondary span {
+      color: var(--muted);
+      background: rgba(255,255,255,0.04);
+    }
+    .cluster {
+      padding: 14px 16px 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: linear-gradient(180deg, rgba(255,255,255,0.028), rgba(255,255,255,0.012));
+      box-shadow: 0 16px 34px rgba(0,0,0,0.18);
+    }
+    .cluster--input {
+      border-top: 3px solid var(--input);
+    }
+    .cluster--signal {
+      border-top: 3px solid var(--signal);
+    }
+    .cluster--hybrid {
+      border-top: 3px solid var(--accent);
+    }
+    .cluster__header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .cluster__header h3 {
+      margin: 8px 0 0;
+      font-size: 23px;
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+      font-weight: 600;
+    }
+    .cluster__counts {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      text-align: right;
+    }
+    .cluster__note {
+      margin: 10px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .cluster__grid {
+      display: grid;
+      grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+      gap: 9px 10px;
+    }
+    .trigger-row {
+      display: grid;
+      grid-template-columns: 10px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 8px 0 8px;
+      border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .trigger-row:first-child,
+    .cluster__grid > .trigger-row:nth-child(-n + var(--cols)) {
+      border-top: none;
+    }
+    .trigger-row__kind {
+      width: 10px;
+      height: 10px;
+      margin-top: 5px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+    .trigger-row--input .trigger-row__kind {
+      background: var(--input);
+    }
+    .trigger-row--signal .trigger-row__kind {
+      background: var(--signal);
+    }
+    .trigger-row__name {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.25;
+      letter-spacing: 0.01em;
+    }
+    .trigger-row__path {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.4;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .cluster__footer {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .token-lane {
+      display: grid;
+      grid-template-columns: 66px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+    .token-lane__label {
+      color: var(--faint);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 10px;
+      padding-top: 4px;
+    }
+    .token-lane__tokens,
+    .effect-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .token-chip,
+    .effect-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      line-height: 1.3;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.04);
+      color: var(--ink);
+    }
+    .token-chip--overflow {
+      color: var(--muted);
+    }
+    .bottom-band {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .effect-lanes {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .effect-lane {
+      padding: 12px 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.03);
+    }
+    .effect-lane__title {
+      margin-bottom: 10px;
+      font-size: 12px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .effect-lane--routed { border-left: 4px solid var(--routed); }
+    .effect-lane--external { border-left: 4px solid var(--external); }
+    .effect-lane--local { border-left: 4px solid var(--local); }
+    .invariant-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .invariant-card {
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.03);
+    }
+    .invariant-card h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      letter-spacing: -0.02em;
+    }
+    .invariant-card pre {
+      margin: 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .footer-note {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 16px;
+      padding: 14px 4px 0;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      color: var(--faint);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    @media (max-width: 2200px) {
+      .meta-grid {
+        grid-template-columns: 1fr 1fr;
+        min-width: 480px;
       }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        background:
-          radial-gradient(circle at top left, rgba(255,255,255,0.6), transparent 42%),
-          linear-gradient(180deg, #d8d2c6 0%, #e7e2d8 18%, var(--paper) 54%, #ebe6dd 100%);
-        color: var(--ink);
-        font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
-      }
-      code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .poster-shell {
-        width: max(calc(${phaseCount} * 295px + 520px), 96vw);
-        max-width: 3400px;
-        margin: 18px auto 40px;
-        padding: 28px 30px 40px;
-        background: var(--paper);
-        border: 1px solid rgba(24, 23, 22, 0.16);
-        box-shadow:
-          0 24px 50px rgba(24, 23, 22, 0.08),
-          inset 0 1px 0 rgba(255,255,255,0.75);
-      }
-      .masthead {
-        border-bottom: 1px solid var(--rule);
-        padding-bottom: 18px;
-      }
-      .masthead__eyebrow {
-        color: var(--muted);
-        font-size: 12px;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        margin-bottom: 12px;
-      }
-      .back-link {
-        display: inline-block;
-        margin-bottom: 18px;
-        color: var(--accent);
-        text-decoration: none;
-        font-size: 12px;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-      }
-      .masthead__row {
-        display: flex;
-        justify-content: space-between;
-        gap: 28px;
-        align-items: flex-start;
-      }
-      h1 {
-        margin: 0;
-        font-size: clamp(56px, 5vw, 92px);
-        font-weight: 700;
-        letter-spacing: -0.06em;
-        line-height: 0.96;
-      }
-      .subtitle {
-        margin: 10px 0 0;
-        color: var(--muted);
-        font-size: 19px;
-        line-height: 1.4;
-      }
-      .meta-stack {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(180px, 1fr));
-        gap: 12px;
-        min-width: min(48vw, 760px);
-      }
-      .meta-chip, .stat-chip {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 12px 14px;
-      }
-      .meta-chip span,
-      .stat-chip span,
-      .panel__header,
-      .detail-label {
-        display: block;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.15em;
-        font-size: 11px;
-      }
-      .meta-chip strong,
-      .stat-chip strong {
-        display: block;
-        margin-top: 6px;
-        font-size: 16px;
-        line-height: 1.35;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .stat-ribbon {
-        display: grid;
-        grid-template-columns: repeat(7, minmax(140px, 1fr));
-        gap: 12px;
-        margin-top: 22px;
-      }
-      .overview-panel {
-        margin-top: 20px;
-      }
-      .summary-grid {
-        display: grid;
-        grid-template-columns: 1.25fr 1.4fr 1fr 1.25fr;
-        gap: 18px;
-        margin-top: 18px;
-      }
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 22px;
-        padding: 18px;
-        min-height: 240px;
-      }
-      .panel__header {
-        margin-bottom: 14px;
-      }
-      .panel__header--input { color: var(--input); }
-      .panel__header--signal { color: var(--signal); }
-      .field-list,
-      .alphabet-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-      .field-pill,
-      .alphabet-item {
-        display: flex;
+    }
+    @media (max-width: 1680px) {
+      .plate-header {
         flex-direction: column;
-        gap: 4px;
-        min-width: 120px;
-        padding: 10px 12px;
-        border-radius: 16px;
-        border: 1px solid var(--border);
-        background: var(--card);
       }
-      .field-pill strong,
-      .alphabet-item strong {
-        font-size: 14px;
-        line-height: 1.25;
+      .legend-plaque {
+        width: 100%;
       }
-      .field-pill span,
-      .alphabet-item span {
-        color: var(--muted);
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 11px;
-        line-height: 1.35;
+      .meta-grid {
+        width: 100%;
       }
-      .alphabet-item--input {
-        border-color: rgba(44, 86, 104, 0.25);
+      .poster-grid {
+        grid-template-columns: 1fr;
       }
-      .alphabet-item--signal {
-        border-color: rgba(179, 121, 27, 0.28);
+      .sidebar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-      .invariant-list {
-        display: grid;
-        gap: 10px;
+      .bottom-band {
+        grid-template-columns: 1fr;
       }
-      .invariant-card {
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        background: var(--card);
-        padding: 12px 14px;
+    }`;
+}
+
+function renderTriggerPath(transitions) {
+  const segments = transitions.map((transition) => {
+    const from = transition.from.join(" · ");
+    if (transition.from.length === 1 && transition.from[0] === transition.to) {
+      return `${from} ⟲`;
+    }
+    return `${from} → ${transition.to}`;
+  });
+  return segments.join(" / ");
+}
+
+function normalizePhaseList(label, phaseOrder) {
+  const order = new Map(phaseOrder.map((phase, index) => [phase, index]));
+  return label
+    .split(" / ")
+    .map((segment) => {
+      if (!segment.includes("→") && !segment.includes("⟲")) {
+        return segment;
       }
-      .invariant-card h3 {
-        margin: 0 0 8px;
-        font-size: 15px;
-      }
-      .invariant-card pre,
-      .clause-block {
-        margin: 0;
-        white-space: pre-wrap;
-        word-break: break-word;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.5;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .board {
-        display: grid;
-        margin-top: 20px;
-        gap: 18px;
-        overflow-x: auto;
-        padding-bottom: 8px;
-        grid-template-columns: repeat(${phaseCount}, minmax(280px, 1fr));
-      }
-      .phase-column {
-        background: linear-gradient(180deg, rgba(255,255,255,0.55), rgba(255,255,255,0.18));
-        border: 1px solid var(--border);
-        border-radius: 24px;
-        padding: 16px;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
-      }
-      .phase-column__header {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        gap: 12px;
-        border-bottom: 1px solid var(--rule);
-        padding-bottom: 10px;
-        margin-bottom: 14px;
-      }
-      .phase-name {
-        font-size: 30px;
-        font-weight: 700;
-        letter-spacing: -0.04em;
-      }
-      .phase-count {
-        color: var(--muted);
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 12px;
-      }
-      .phase-column__cards {
-        display: grid;
-        gap: 12px;
-      }
-      .transition-card {
-        padding: 14px;
-        border-radius: 18px;
-        border: 1px solid var(--border);
-        background: var(--card);
-        box-shadow: 0 8px 18px rgba(24, 23, 22, 0.05);
-      }
-      .transition-card--input {
-        border-top: 4px solid var(--input);
-      }
-      .transition-card--signal {
-        border-top: 4px solid var(--signal);
-      }
-      .transition-card__header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-      }
-      .kind-pill,
-      .effect-pill,
-      .phase-shift {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 5px 9px;
-        border-radius: 999px;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-      }
-      .kind-pill--input {
-        color: white;
-        background: var(--input);
-      }
-      .kind-pill--signal {
-        color: white;
-        background: var(--signal);
-      }
-      .phase-shift {
-        color: var(--ink);
-        background: var(--phase);
-      }
-      .transition-card h3 {
-        margin: 10px 0 4px;
-        font-size: 22px;
-        line-height: 1.1;
-        letter-spacing: -0.03em;
-      }
-      .trigger-line {
-        color: var(--muted);
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 12px;
-        line-height: 1.45;
-      }
-      .detail-grid {
-        display: grid;
-        grid-template-columns: 1.4fr 1fr;
-        gap: 12px;
-        margin-top: 12px;
-      }
-      .guard-list {
-        margin: 8px 0 0;
-        padding-left: 18px;
-        color: var(--ink);
-        font-size: 13px;
-        line-height: 1.5;
-      }
-      .guard-empty {
-        margin-top: 8px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .write-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin-top: 8px;
-      }
-      .write-list span,
-      .effect-pill {
-        padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(53, 95, 115, 0.1);
-        color: var(--ink);
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 11px;
-      }
-      .effect-row {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 6px;
-        margin-top: 12px;
-      }
-      .effect-pill {
-        background: rgba(79, 114, 89, 0.12);
-      }
-      .clause-block {
-        margin-top: 8px;
-        padding: 10px 12px;
-        border-radius: 14px;
-        border: 1px solid rgba(24, 23, 22, 0.08);
-        background: rgba(255,255,255,0.75);
-      }
-      .clause-block--empty {
-        color: var(--muted);
-      }
-      .footer-note {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        margin-top: 18px;
-        padding-top: 16px;
-        border-top: 1px solid var(--rule);
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.5;
-      }
-      @media (max-width: 1600px) {
-        .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .meta-stack { grid-template-columns: 1fr; min-width: 260px; }
-      }
-      @media (max-width: 1080px) {
-        .masthead__row { flex-direction: column; }
-        .summary-grid { grid-template-columns: 1fr; }
-        .stat-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      }`;
+      const arrow = segment.includes("⟲") ? "⟲" : "→";
+      const parts = segment.split(arrow);
+      const left = parts[0]
+        .split(" · ")
+        .map((item) => item.trim())
+        .sort((a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999))
+        .join(" · ");
+      const right = parts[1] ? parts[1].trim() : "";
+      return arrow === "⟲" ? `${left} ⟲` : `${left} → ${right}`;
+    })
+    .join(" / ");
+}
+
+function extractWrites(body) {
+  return unique(
+    [...body.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)'\s*=/g)].map((match) => match[1]),
+  );
 }
 
 function parseSignatureBullet(line) {
   const match = line.match(/^- `([^`]+)`(?:\((.*)\))?/);
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
   return {
     name: match[1],
     signature: `${match[1]}(${match[2] ?? ""})`,
@@ -1134,6 +2174,14 @@ function extractBackticked(line) {
   return [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
 }
 
+function unique(items) {
+  return [...new Set(items)];
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -1141,4 +2189,8 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function cleanGeneratedText(text) {
+  return text.replace(/[ \t]+$/gm, "");
 }

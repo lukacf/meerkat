@@ -1,0 +1,3495 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MobMachine poster</title>
+    <style>
+      
+      :root {
+        --paper: #f4f0e7;
+        --panel: #fbfaf6;
+        --card: #fffdf8;
+        --border: #cfc8bb;
+        --ink: #181716;
+        --muted: #6d6a63;
+        --rule: #d7d0c3;
+        --input: #2c5668;
+        --signal: #b3791b;
+        --effect: #4f7259;
+        --phase: #ece6da;
+        --accent: #355f73;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at top left, rgba(255,255,255,0.6), transparent 42%),
+          linear-gradient(180deg, #d8d2c6 0%, #e7e2d8 18%, var(--paper) 54%, #ebe6dd 100%);
+        color: var(--ink);
+        font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .poster-shell {
+        width: max(calc(5 * 295px + 520px), 96vw);
+        max-width: 3400px;
+        margin: 18px auto 40px;
+        padding: 28px 30px 40px;
+        background: var(--paper);
+        border: 1px solid rgba(24, 23, 22, 0.16);
+        box-shadow:
+          0 24px 50px rgba(24, 23, 22, 0.08),
+          inset 0 1px 0 rgba(255,255,255,0.75);
+      }
+      .masthead {
+        border-bottom: 1px solid var(--rule);
+        padding-bottom: 18px;
+      }
+      .masthead__eyebrow {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        margin-bottom: 12px;
+      }
+      .back-link {
+        display: inline-block;
+        margin-bottom: 18px;
+        color: var(--accent);
+        text-decoration: none;
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+      .masthead__row {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        align-items: flex-start;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(56px, 5vw, 92px);
+        font-weight: 700;
+        letter-spacing: -0.06em;
+        line-height: 0.96;
+      }
+      .subtitle {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 19px;
+        line-height: 1.4;
+      }
+      .meta-stack {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(180px, 1fr));
+        gap: 12px;
+        min-width: min(48vw, 760px);
+      }
+      .meta-chip, .stat-chip {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 12px 14px;
+      }
+      .meta-chip span,
+      .stat-chip span,
+      .panel__header,
+      .detail-label {
+        display: block;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        font-size: 11px;
+      }
+      .meta-chip strong,
+      .stat-chip strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 16px;
+        line-height: 1.35;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .stat-ribbon {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(140px, 1fr));
+        gap: 12px;
+        margin-top: 22px;
+      }
+      .overview-panel {
+        margin-top: 20px;
+      }
+      .summary-grid {
+        display: grid;
+        grid-template-columns: 1.25fr 1.4fr 1fr 1.25fr;
+        gap: 18px;
+        margin-top: 18px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        padding: 18px;
+        min-height: 240px;
+      }
+      .panel__header {
+        margin-bottom: 14px;
+      }
+      .panel__header--input { color: var(--input); }
+      .panel__header--signal { color: var(--signal); }
+      .field-list,
+      .alphabet-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .field-pill,
+      .alphabet-item {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 120px;
+        padding: 10px 12px;
+        border-radius: 16px;
+        border: 1px solid var(--border);
+        background: var(--card);
+      }
+      .field-pill strong,
+      .alphabet-item strong {
+        font-size: 14px;
+        line-height: 1.25;
+      }
+      .field-pill span,
+      .alphabet-item span {
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+      .alphabet-item--input {
+        border-color: rgba(44, 86, 104, 0.25);
+      }
+      .alphabet-item--signal {
+        border-color: rgba(179, 121, 27, 0.28);
+      }
+      .invariant-list {
+        display: grid;
+        gap: 10px;
+      }
+      .invariant-card {
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--card);
+        padding: 12px 14px;
+      }
+      .invariant-card h3 {
+        margin: 0 0 8px;
+        font-size: 15px;
+      }
+      .invariant-card pre,
+      .clause-block {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .board {
+        display: grid;
+        margin-top: 20px;
+        gap: 18px;
+        overflow-x: auto;
+        padding-bottom: 8px;
+        grid-template-columns: repeat(5, minmax(280px, 1fr));
+      }
+      .phase-column {
+        background: linear-gradient(180deg, rgba(255,255,255,0.55), rgba(255,255,255,0.18));
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        padding: 16px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
+      }
+      .phase-column__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 12px;
+        border-bottom: 1px solid var(--rule);
+        padding-bottom: 10px;
+        margin-bottom: 14px;
+      }
+      .phase-name {
+        font-size: 30px;
+        font-weight: 700;
+        letter-spacing: -0.04em;
+      }
+      .phase-count {
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+      .phase-column__cards {
+        display: grid;
+        gap: 12px;
+      }
+      .transition-card {
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        box-shadow: 0 8px 18px rgba(24, 23, 22, 0.05);
+      }
+      .transition-card--input {
+        border-top: 4px solid var(--input);
+      }
+      .transition-card--signal {
+        border-top: 4px solid var(--signal);
+      }
+      .transition-card__header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+      .kind-pill,
+      .effect-pill,
+      .phase-shift {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 5px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .kind-pill--input {
+        color: white;
+        background: var(--input);
+      }
+      .kind-pill--signal {
+        color: white;
+        background: var(--signal);
+      }
+      .phase-shift {
+        color: var(--ink);
+        background: var(--phase);
+      }
+      .transition-card h3 {
+        margin: 10px 0 4px;
+        font-size: 22px;
+        line-height: 1.1;
+        letter-spacing: -0.03em;
+      }
+      .trigger-line {
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .guard-list {
+        margin: 8px 0 0;
+        padding-left: 18px;
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .guard-empty {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .write-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .write-list span,
+      .effect-pill {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(53, 95, 115, 0.1);
+        color: var(--ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+      }
+      .effect-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-top: 12px;
+      }
+      .effect-pill {
+        background: rgba(79, 114, 89, 0.12);
+      }
+      .clause-block {
+        margin-top: 8px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(24, 23, 22, 0.08);
+        background: rgba(255,255,255,0.75);
+      }
+      .clause-block--empty {
+        color: var(--muted);
+      }
+      .footer-note {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--rule);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      @media (max-width: 1600px) {
+        .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .meta-stack { grid-template-columns: 1fr; min-width: 260px; }
+      }
+      @media (max-width: 1080px) {
+        .masthead__row { flex-direction: column; }
+        .summary-grid { grid-template-columns: 1fr; }
+        .stat-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="poster-shell" style="--phase-count:5">
+      <header class="masthead">
+        <div class="masthead__eyebrow">Generated machine poster</div>
+        <div class="masthead__row">
+          <div>
+            <a class="back-link" href="./index.html">← Poster index</a>
+            <h1>MobMachine</h1>
+            <p class="subtitle">Identity-first orchestration kernel</p>
+          </div>
+          <div class="meta-stack">
+            <div class="meta-chip"><span>Source</span><strong>specs/machines/mob_machine/model.tla</strong></div>
+            <div class="meta-chip"><span>Contract</span><strong>specs/machines/mob_machine/contract.md</strong></div>
+            <div class="meta-chip"><span>Generated</span><strong>2026-04-14 10:09:56.196 UTC</strong></div>
+          </div>
+        </div>
+        <div class="stat-ribbon">
+          <div class="stat-chip"><span>phases</span><strong>5</strong></div>
+          <div class="stat-chip"><span>transitions</span><strong>119</strong></div>
+          <div class="stat-chip"><span>inputs</span><strong>40</strong></div>
+          <div class="stat-chip"><span>signals</span><strong>79</strong></div>
+          <div class="stat-chip"><span>effects</span><strong>40</strong></div>
+          <div class="stat-chip"><span>invariants</span><strong>7</strong></div>
+          <div class="stat-chip"><span>state vars</span><strong>16</strong></div>
+        </div>
+      </header>
+
+      <section class="overview-panel">
+        <svg viewBox="0 0 1800 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Phase wiring overview"><rect x="0" y="0" width="1800" height="280" rx="28" fill="#fbfaf6" stroke="#cfc8bb" /><text x="64" y="46" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="700">Phase transfer schematic</text><text x="64" y="76" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">Aggregated transition count per from → to edge. Solid = mostly inputs, dashed = mostly signals.</text><path d="M 205 132 C 267.55 84, 489.95 84, 552.5 132" fill="none" stroke="#355f73" stroke-width="3.25"  marker-end="url(#arrow-input)" /><text x="378.75" y="76" fill="#355f73" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">2</text><path d="M 900 132 C 837.45 60, 615.05 60, 552.5 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="726.25" y="52" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">4</text><path d="M 516.5 144 C 492.5 72, 612.5 72, 588.5 144" fill="none" stroke="#b3791b" stroke-width="3.5" stroke-dasharray="10 8" /><text x="552.5" y="74" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">113</text><path d="M 552.5 132 C 615.05 84, 837.45 84, 900 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="726.25" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">1</text><path d="M 552.5 132 C 677.6 84, 1122.4 84, 1247.5 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="900" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">1</text><path d="M 900 132 C 962.55 84, 1184.95 84, 1247.5 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="1073.75" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">1</text><path d="M 205 132 C 455.2 84, 1344.8 84, 1595 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="900" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">1</text><path d="M 552.5 132 C 740.15 84, 1407.35 84, 1595 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="1073.75" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">3</text><path d="M 900 132 C 1025.1 84, 1469.9 84, 1595 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="1247.5" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">2</text><path d="M 1247.5 132 C 1310.05 84, 1532.45 84, 1595 132" fill="none" stroke="#b3791b" stroke-width="3.25" stroke-dasharray="10 8" marker-end="url(#arrow-signal)" /><text x="1421.25" y="76" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">2</text><path d="M 1559 144 C 1535 72, 1655 72, 1631 144" fill="none" stroke="#b3791b" stroke-width="3.5" stroke-dasharray="10 8" /><text x="1595" y="74" fill="#b3791b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" text-anchor="middle">1</text><defs>
+      <marker id="arrow-input" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+        <path d="M0,0 L12,6 L0,12 z" fill="#355f73" />
+      </marker>
+      <marker id="arrow-signal" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+        <path d="M0,0 L12,6 L0,12 z" fill="#b3791b" />
+      </marker>
+    </defs><rect x="120" y="156" width="170" height="56" rx="18" fill="#ece6da" stroke="#cfc8bb" /><text x="205" y="180" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">Creating</text><text x="205" y="198" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">3 transitions</text><rect x="467.5" y="156" width="170" height="56" rx="18" fill="#ece6da" stroke="#cfc8bb" /><text x="552.5" y="180" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">Running</text><text x="552.5" y="198" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">118 transitions</text><rect x="815" y="156" width="170" height="56" rx="18" fill="#ece6da" stroke="#cfc8bb" /><text x="900" y="180" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">Stopped</text><text x="900" y="198" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">7 transitions</text><rect x="1162.5" y="156" width="170" height="56" rx="18" fill="#ece6da" stroke="#cfc8bb" /><text x="1247.5" y="180" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">Completed</text><text x="1247.5" y="198" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">2 transitions</text><rect x="1510" y="156" width="170" height="56" rx="18" fill="#ece6da" stroke="#cfc8bb" /><text x="1595" y="180" fill="#181716" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" text-anchor="middle">Destroyed</text><text x="1595" y="198" fill="#6d6a63" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">1 transitions</text></svg>
+      </section>
+
+      <section class="summary-grid">
+        <section class="panel">
+          <div class="panel__header">State vector</div>
+          <div class="field-list">
+            <div class="field-pill"><strong>active_identity</strong><span>Option&lt;AgentIdentity&gt;</span></div><div class="field-pill"><strong>active_runtime_id</strong><span>Option&lt;AgentRuntimeId&gt;</span></div><div class="field-pill"><strong>active_fence_token</strong><span>Option&lt;FenceToken&gt;</span></div><div class="field-pill"><strong>current_generation</strong><span>Option&lt;Generation&gt;</span></div><div class="field-pill"><strong>inflight_work_id</strong><span>Option&lt;WorkId&gt;</span></div><div class="field-pill"><strong>active_member_count</strong><span>u32</span></div><div class="field-pill"><strong>active_run_count</strong><span>u32</span></div><div class="field-pill"><strong>pending_spawn_count</strong><span>u32</span></div><div class="field-pill"><strong>retiring_member_count</strong><span>u32</span></div><div class="field-pill"><strong>wiring_edge_count</strong><span>u32</span></div><div class="field-pill"><strong>task_count</strong><span>u32</span></div><div class="field-pill"><strong>event_subscription_count</strong><span>u32</span></div><div class="field-pill"><strong>active_frame_count</strong><span>u32</span></div><div class="field-pill"><strong>active_loop_count</strong><span>u32</span></div><div class="field-pill"><strong>coordinator_bound</strong><span>Bool</span></div><div class="field-pill"><strong>kickoff_pending</strong><span>Bool</span></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel__header">Invariants</div>
+          <div class="invariant-list">
+            <article class="invariant-card"><h3>active_work_requires_runtime</h3><pre>((inflight_work_id = None) \/ (active_runtime_id # None))</pre></article><article class="invariant-card"><h3>destroyed_has_no_active_runtime</h3><pre>((phase # &quot;Destroyed&quot;) \/ (active_runtime_id = None))</pre></article><article class="invariant-card"><h3>active_runtime_has_identity</h3><pre>((active_runtime_id = None) \/ (active_identity # None))</pre></article><article class="invariant-card"><h3>active_frames_require_runs</h3><pre>((active_frame_count = 0) \/ (active_run_count &gt; 0))</pre></article><article class="invariant-card"><h3>active_loops_require_frames</h3><pre>((active_loop_count = 0) \/ (active_frame_count &gt; 0))</pre></article><article class="invariant-card"><h3>retiring_members_do_not_exceed_active_members</h3><pre>(retiring_member_count &lt;= active_member_count)</pre></article><article class="invariant-card"><h3>kickoff_pending_requires_members</h3><pre>((kickoff_pending = FALSE) \/ (active_member_count &gt; 0))</pre></article>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel__header panel__header--input">Inputs</div>
+          <div class="alphabet-list">
+            <div class="alphabet-item alphabet-item--input">
+    <strong>Spawn</strong>
+    <span>Spawn(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>SubmitWork</strong>
+    <span>SubmitWork(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>RunFlow</strong>
+    <span>RunFlow()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>CancelFlow</strong>
+    <span>CancelFlow()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>FlowStatus</strong>
+    <span>FlowStatus()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Retire</strong>
+    <span>Retire(agent_runtime_id: AgentRuntimeId)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Respawn</strong>
+    <span>Respawn(agent_runtime_id: AgentRuntimeId)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>RetireAll</strong>
+    <span>RetireAll()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Wire</strong>
+    <span>Wire()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Unwire</strong>
+    <span>Unwire()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ExternalTurn</strong>
+    <span>ExternalTurn()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>InternalTurn</strong>
+    <span>InternalTurn()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>CancelWork</strong>
+    <span>CancelWork(work_id: WorkId)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>CancelAllWork</strong>
+    <span>CancelAllWork(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Stop</strong>
+    <span>Stop()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Resume</strong>
+    <span>Resume()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Complete</strong>
+    <span>Complete()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Reset</strong>
+    <span>Reset()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Destroy</strong>
+    <span>Destroy()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>TaskCreate</strong>
+    <span>TaskCreate()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>TaskUpdate</strong>
+    <span>TaskUpdate()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>TaskList</strong>
+    <span>TaskList()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>TaskGet</strong>
+    <span>TaskGet()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>McpServerStates</strong>
+    <span>McpServerStates()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>RosterSnapshot</strong>
+    <span>RosterSnapshot()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ListMembers</strong>
+    <span>ListMembers()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ListMembersIncludingRetiring</strong>
+    <span>ListMembersIncludingRetiring()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ListAllMembers</strong>
+    <span>ListAllMembers()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>MemberStatus</strong>
+    <span>MemberStatus()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>SubscribeAgentEvents</strong>
+    <span>SubscribeAgentEvents()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>SubscribeAllAgentEvents</strong>
+    <span>SubscribeAllAgentEvents()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>SubscribeMobEvents</strong>
+    <span>SubscribeMobEvents()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>PollEvents</strong>
+    <span>PollEvents()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ReplayAllEvents</strong>
+    <span>ReplayAllEvents()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>RecordOperatorActionProvenance</strong>
+    <span>RecordOperatorActionProvenance()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>GetMember</strong>
+    <span>GetMember()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>KickoffBarrierSnapshot</strong>
+    <span>KickoffBarrierSnapshot()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>SetSpawnPolicy</strong>
+    <span>SetSpawnPolicy()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>Shutdown</strong>
+    <span>Shutdown()</span>
+  </div><div class="alphabet-item alphabet-item--input">
+    <strong>ForceCancel</strong>
+    <span>ForceCancel()</span>
+  </div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel__header panel__header--signal">Signals</div>
+          <div class="alphabet-list">
+            <div class="alphabet-item alphabet-item--signal">
+    <strong>Start</strong>
+    <span>Start()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveRuntimeReady</strong>
+    <span>ObserveRuntimeReady(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveWorkCompleted</strong>
+    <span>ObserveWorkCompleted(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveWorkFailed</strong>
+    <span>ObserveWorkFailed(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveWorkCancelled</strong>
+    <span>ObserveWorkCancelled(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RetireMember</strong>
+    <span>RetireMember(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveRuntimeRetired</strong>
+    <span>ObserveRuntimeRetired(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ResetMember</strong>
+    <span>ResetMember(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RespawnMember</strong>
+    <span>RespawnMember(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>DestroyMob</strong>
+    <span>DestroyMob()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ObserveRuntimeDestroyed</strong>
+    <span>ObserveRuntimeDestroyed(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>MarkCompleted</strong>
+    <span>MarkCompleted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StartRun</strong>
+    <span>StartRun()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>FinishRun</strong>
+    <span>FinishRun()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BeginCleanup</strong>
+    <span>BeginCleanup()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>FinishCleanup</strong>
+    <span>FinishCleanup()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>InitializeOrchestrator</strong>
+    <span>InitializeOrchestrator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BindCoordinator</strong>
+    <span>BindCoordinator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>UnbindCoordinator</strong>
+    <span>UnbindCoordinator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StageSpawn</strong>
+    <span>StageSpawn()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CompleteSpawn</strong>
+    <span>CompleteSpawn()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StartFlow</strong>
+    <span>StartFlow()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CompleteFlow</strong>
+    <span>CompleteFlow()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StopOrchestrator</strong>
+    <span>StopOrchestrator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ResumeOrchestrator</strong>
+    <span>ResumeOrchestrator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>DestroyOrchestrator</strong>
+    <span>DestroyOrchestrator()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ForceCancelMember</strong>
+    <span>ForceCancelMember()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>MemberPeerExposed</strong>
+    <span>MemberPeerExposed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>MemberTerminalized</strong>
+    <span>MemberTerminalized()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>OperationPeerTrusted</strong>
+    <span>OperationPeerTrusted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>PeerInputAdmitted</strong>
+    <span>PeerInputAdmitted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeWorkAdmitted</strong>
+    <span>RuntimeWorkAdmitted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>KickoffStarted</strong>
+    <span>KickoffStarted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>KickoffCallbackPending</strong>
+    <span>KickoffCallbackPending()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>KickoffFailed</strong>
+    <span>KickoffFailed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>KickoffCancelled</strong>
+    <span>KickoffCancelled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>KickoffForceCancelled</strong>
+    <span>KickoffForceCancelled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeRunSubmitted</strong>
+    <span>RuntimeRunSubmitted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeRunCompleted</strong>
+    <span>RuntimeRunCompleted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeRunFailed</strong>
+    <span>RuntimeRunFailed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeRunCancelled</strong>
+    <span>RuntimeRunCancelled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RuntimeStopRequested</strong>
+    <span>RuntimeStopRequested()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CreateRun</strong>
+    <span>CreateRun()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>DispatchStep</strong>
+    <span>DispatchStep()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CompleteStep</strong>
+    <span>CompleteStep()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordStepOutput</strong>
+    <span>RecordStepOutput()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ConditionPassed</strong>
+    <span>ConditionPassed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ConditionRejected</strong>
+    <span>ConditionRejected()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>FailStep</strong>
+    <span>FailStep()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>SkipStep</strong>
+    <span>SkipStep()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>ProjectFrameStepStatus</strong>
+    <span>ProjectFrameStepStatus()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CancelStep</strong>
+    <span>CancelStep()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RegisterTargets</strong>
+    <span>RegisterTargets()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordTargetSuccess</strong>
+    <span>RecordTargetSuccess()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordTargetTerminalFailure</strong>
+    <span>RecordTargetTerminalFailure()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordTargetCanceled</strong>
+    <span>RecordTargetCanceled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordTargetFailure</strong>
+    <span>RecordTargetFailure()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RegisterReadyFrame</strong>
+    <span>RegisterReadyFrame()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RegisterPendingBodyFrame</strong>
+    <span>RegisterPendingBodyFrame()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>NodeExecutionReleased</strong>
+    <span>NodeExecutionReleased()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>FrameTerminated</strong>
+    <span>FrameTerminated()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>TerminalizeCompleted</strong>
+    <span>TerminalizeCompleted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>TerminalizeFailed</strong>
+    <span>TerminalizeFailed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>TerminalizeCanceled</strong>
+    <span>TerminalizeCanceled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StartRootFrame</strong>
+    <span>StartRootFrame()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StartBodyFrame</strong>
+    <span>StartBodyFrame()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CompleteNode</strong>
+    <span>CompleteNode()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>RecordNodeOutput</strong>
+    <span>RecordNodeOutput()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>FailNode</strong>
+    <span>FailNode()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>SkipNode</strong>
+    <span>SkipNode()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CancelNode</strong>
+    <span>CancelNode()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>StartLoop</strong>
+    <span>StartLoop()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BodyFrameStarted</strong>
+    <span>BodyFrameStarted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BodyFrameCompleted</strong>
+    <span>BodyFrameCompleted()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BodyFrameFailed</strong>
+    <span>BodyFrameFailed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>BodyFrameCanceled</strong>
+    <span>BodyFrameCanceled()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>UntilConditionMet</strong>
+    <span>UntilConditionMet()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>UntilConditionFailed</strong>
+    <span>UntilConditionFailed()</span>
+  </div><div class="alphabet-item alphabet-item--signal">
+    <strong>CancelLoop</strong>
+    <span>CancelLoop()</span>
+  </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="board">
+        <section class="phase-column">
+              <header class="phase-column__header">
+                <div class="phase-name">Creating</div>
+                <div class="phase-count">3 legal transitions</div>
+              </header>
+              <div class="phase-column__cards">
+                <article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>Spawn</h3>
+    <div class="trigger-line">Spawn(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>DestroyMob</h3>
+    <div class="trigger-line">DestroyMob() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeDestroy</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>Start</h3>
+    <div class="trigger-line">Start() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article>
+              </div>
+            </section><section class="phase-column">
+              <header class="phase-column__header">
+                <div class="phase-name">Running</div>
+                <div class="phase-count">118 legal transitions</div>
+              </header>
+              <div class="phase-column__cards">
+                <article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelAllWorkRunning</h3>
+    <div class="trigger-line">CancelAllWork() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">FlowTerminalized</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelFlowRunning</h3>
+    <div class="trigger-line">CancelFlow() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">FlowTerminalized</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelWorkRunning</h3>
+    <div class="trigger-line">CancelWork(work_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">FlowTerminalized</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CompleteRunning</h3>
+    <div class="trigger-line">Complete() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>DestroyRunning</h3>
+    <div class="trigger-line">Destroy() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ExternalTurnRunning</h3>
+    <div class="trigger-line">ExternalTurn() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitProgressNote</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FlowStatusRunning</h3>
+    <div class="trigger-line">FlowStatus() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ForceCancelRunning</h3>
+    <div class="trigger-line">ForceCancel() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">FlowTerminalized</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>GetMemberRunning</h3>
+    <div class="trigger-line">GetMember() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>InternalTurnRunning</h3>
+    <div class="trigger-line">InternalTurn() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitProgressNote</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffBarrierSnapshotRunning</h3>
+    <div class="trigger-line">KickoffBarrierSnapshot() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ListAllMembersRunning</h3>
+    <div class="trigger-line">ListAllMembers() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ListMembersIncludingRetiringRunning</h3>
+    <div class="trigger-line">ListMembersIncludingRetiring() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ListMembersRunning</h3>
+    <div class="trigger-line">ListMembers() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>McpServerStatesRunning</h3>
+    <div class="trigger-line">McpServerStates() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>MemberStatusRunning</h3>
+    <div class="trigger-line">MemberStatus() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>PollEventsRunning</h3>
+    <div class="trigger-line">PollEvents() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordOperatorActionProvenanceRunning</h3>
+    <div class="trigger-line">RecordOperatorActionProvenance() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ReplayAllEventsRunning</h3>
+    <div class="trigger-line">ReplayAllEvents() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ResetRunning</h3>
+    <div class="trigger-line">Reset() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RespawnRunning</h3>
+    <div class="trigger-line">Respawn(agent_runtime_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>pending_spawn_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ExposePendingSpawn</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ResumeRunning</h3>
+    <div class="trigger-line">Resume() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RetireAllRunning</h3>
+    <div class="trigger-line">RetireAll() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>retiring_member_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RetireRunning</h3>
+    <div class="trigger-line">Retire(agent_runtime_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li><li>unretired_members_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>retiring_member_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeRetire</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)
+(active_member_count &gt; retiring_member_count)</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RosterSnapshotRunning</h3>
+    <div class="trigger-line">RosterSnapshot() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RunFlowRunning</h3>
+    <div class="trigger-line">RunFlow() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li><li>runtime_is_bound</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_run_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitFlowRunNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)
+(active_runtime_id # None)</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SetSpawnPolicyRunning</h3>
+    <div class="trigger-line">SetSpawnPolicy() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ShutdownRunning</h3>
+    <div class="trigger-line">Shutdown() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>Spawn</h3>
+    <div class="trigger-line">Spawn(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StopRunning</h3>
+    <div class="trigger-line">Stop() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SubmitWork</h3>
+    <div class="trigger-line">SubmitWork(agent_runtime_id, fence_token, work_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>runtime_is_bound</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">SubmitMemberWork</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_runtime_id # None)</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SubscribeAgentEventsRunning</h3>
+    <div class="trigger-line">SubscribeAgentEvents() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>event_subscription_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SubscribeAllAgentEventsRunning</h3>
+    <div class="trigger-line">SubscribeAllAgentEvents() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>event_subscription_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SubscribeMobEventsRunning</h3>
+    <div class="trigger-line">SubscribeMobEvents() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>event_subscription_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TaskCreateRunning</h3>
+    <div class="trigger-line">TaskCreate() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>task_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitTaskNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TaskGetRunning</h3>
+    <div class="trigger-line">TaskGet() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TaskListRunning</h3>
+    <div class="trigger-line">TaskList() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TaskUpdateRunning</h3>
+    <div class="trigger-line">TaskUpdate() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitTaskNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>UnwireRunning</h3>
+    <div class="trigger-line">Unwire() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>wired_edges_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>wiring_edge_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(wiring_edge_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>WireRunning</h3>
+    <div class="trigger-line">Wire() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>wiring_edge_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BeginCleanupRunning</h3>
+    <div class="trigger-line">BeginCleanup() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BindCoordinatorRunning</h3>
+    <div class="trigger-line">BindCoordinator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BodyFrameCanceledRunning</h3>
+    <div class="trigger-line">BodyFrameCanceled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_frames_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">BodyFrameCanceled</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_frame_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BodyFrameCompletedRunning</h3>
+    <div class="trigger-line">BodyFrameCompleted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_frames_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">BodyFrameCompleted</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_frame_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BodyFrameFailedRunning</h3>
+    <div class="trigger-line">BodyFrameFailed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_frames_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">BodyFrameFailed</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_frame_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>BodyFrameStartedRunning</h3>
+    <div class="trigger-line">BodyFrameStarted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestBodyFrameStart</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelLoopRunning</h3>
+    <div class="trigger-line">CancelLoop() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_loops_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">LoopCanceled</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_loop_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelNodeRunning</h3>
+    <div class="trigger-line">CancelNode() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CancelStepRunning</h3>
+    <div class="trigger-line">CancelStep() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CompleteFlowRunning</h3>
+    <div class="trigger-line">CompleteFlow() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">FlowTerminalized</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CompleteNodeRunning</h3>
+    <div class="trigger-line">CompleteNode() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CompleteSpawnRunning</h3>
+    <div class="trigger-line">CompleteSpawn() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>pending_spawns_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_member_count</span><span>pending_spawn_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(pending_spawn_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CompleteStepRunning</h3>
+    <div class="trigger-line">CompleteStep() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ConditionPassedRunning</h3>
+    <div class="trigger-line">ConditionPassed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ConditionRejectedRunning</h3>
+    <div class="trigger-line">ConditionRejected() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>CreateRunRunning</h3>
+    <div class="trigger-line">CreateRun() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li><li>runtime_is_bound</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_run_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)
+(active_runtime_id # None)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>DestroyMob</h3>
+    <div class="trigger-line">DestroyMob() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeDestroy</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>DestroyOrchestratorRunning</h3>
+    <div class="trigger-line">DestroyOrchestrator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>DispatchStepRunning</h3>
+    <div class="trigger-line">DispatchStep() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitStepWork</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FailNodeRunning</h3>
+    <div class="trigger-line">FailNode() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FailStepRunning</h3>
+    <div class="trigger-line">FailStep() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FinishCleanupRunning</h3>
+    <div class="trigger-line">FinishCleanup() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FinishRunRunning</h3>
+    <div class="trigger-line">FinishRun() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ForceCancelMemberRunning</h3>
+    <div class="trigger-line">ForceCancelMember() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberTerminalNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>FrameTerminatedRunning</h3>
+    <div class="trigger-line">FrameTerminated() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_frames_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_frame_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>InitializeOrchestratorRunning</h3>
+    <div class="trigger-line">InitializeOrchestrator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffCallbackPendingRunning</h3>
+    <div class="trigger-line">KickoffCallbackPending() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffCancelledRunning</h3>
+    <div class="trigger-line">KickoffCancelled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberTerminalNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffFailedRunning</h3>
+    <div class="trigger-line">KickoffFailed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberTerminalNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffForceCancelledRunning</h3>
+    <div class="trigger-line">KickoffForceCancelled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberTerminalNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>KickoffStartedRunning</h3>
+    <div class="trigger-line">KickoffStarted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitKickoffTurn</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Completed</span>
+    </header>
+    <h3>MarkCompleted</h3>
+    <div class="trigger-line">MarkCompleted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>no_inflight_work</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;
+(inflight_work_id = None)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>MemberPeerExposedRunning</h3>
+    <div class="trigger-line">MemberPeerExposed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitPeerInput</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>MemberTerminalizedRunning</h3>
+    <div class="trigger-line">MemberTerminalized() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberTerminalNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>NodeExecutionReleasedRunning</h3>
+    <div class="trigger-line">NodeExecutionReleased() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NodeExecutionReleased</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>ObserveRuntimeDestroyed</h3>
+    <div class="trigger-line">ObserveRuntimeDestroyed(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot; \/ phase = &quot;Destroyed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ObserveRuntimeReady</h3>
+    <div class="trigger-line">ObserveRuntimeReady(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Stopped</span>
+    </header>
+    <h3>ObserveRuntimeRetired</h3>
+    <div class="trigger-line">ObserveRuntimeRetired(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_runtime_id</span><span>active_fence_token</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ObserveWorkCancelled</h3>
+    <div class="trigger-line">ObserveWorkCancelled(agent_runtime_id, fence_token, work_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ObserveWorkCompleted</h3>
+    <div class="trigger-line">ObserveWorkCompleted(agent_runtime_id, fence_token, work_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ObserveWorkFailed</h3>
+    <div class="trigger-line">ObserveWorkFailed(agent_runtime_id, fence_token, work_id) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>OperationPeerTrustedRunning</h3>
+    <div class="trigger-line">OperationPeerTrusted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitPeerInput</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>PeerInputAdmittedRunning</h3>
+    <div class="trigger-line">PeerInputAdmitted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitPeerInput</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ProjectFrameStepStatusRunning</h3>
+    <div class="trigger-line">ProjectFrameStepStatus() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordNodeOutputRunning</h3>
+    <div class="trigger-line">RecordNodeOutput() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">PersistStepOutput</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordStepOutputRunning</h3>
+    <div class="trigger-line">RecordStepOutput() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">PersistStepOutput</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordTargetCanceledRunning</h3>
+    <div class="trigger-line">RecordTargetCanceled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ProjectTargetCanceled</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordTargetFailureRunning</h3>
+    <div class="trigger-line">RecordTargetFailure() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ProjectTargetFailure</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordTargetSuccessRunning</h3>
+    <div class="trigger-line">RecordTargetSuccess() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ProjectTargetSuccess</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RecordTargetTerminalFailureRunning</h3>
+    <div class="trigger-line">RecordTargetTerminalFailure() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ProjectTargetFailure</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RegisterPendingBodyFrameRunning</h3>
+    <div class="trigger-line">RegisterPendingBodyFrame() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestBodyFrameStart</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RegisterReadyFrameRunning</h3>
+    <div class="trigger-line">RegisterReadyFrame() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RegisterTargetsRunning</h3>
+    <div class="trigger-line">RegisterTargets() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>ResetMember</h3>
+    <div class="trigger-line">ResetMember(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>RespawnMember</h3>
+    <div class="trigger-line">RespawnMember(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>ResumeOrchestratorRunning</h3>
+    <div class="trigger-line">ResumeOrchestrator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RetireMember</h3>
+    <div class="trigger-line">RetireMember(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeRetire</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeRunCancelledRunning</h3>
+    <div class="trigger-line">RuntimeRunCancelled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeRunCompletedRunning</h3>
+    <div class="trigger-line">RuntimeRunCompleted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeRunFailedRunning</h3>
+    <div class="trigger-line">RuntimeRunFailed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>inflight_work_id</span><span>active_run_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeRunSubmittedRunning</h3>
+    <div class="trigger-line">RuntimeRunSubmitted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeStopRequestedRunning</h3>
+    <div class="trigger-line">RuntimeStopRequested() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>RuntimeWorkAdmittedRunning</h3>
+    <div class="trigger-line">RuntimeWorkAdmitted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">AdmitStepWork</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SkipNodeRunning</h3>
+    <div class="trigger-line">SkipNode() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>SkipStepRunning</h3>
+    <div class="trigger-line">SkipStep() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitStepNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StageSpawnRunning</h3>
+    <div class="trigger-line">StageSpawn() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>pending_spawn_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">ExposePendingSpawn</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StartBodyFrameRunning</h3>
+    <div class="trigger-line">StartBodyFrame() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestBodyFrameStart</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StartFlowRunning</h3>
+    <div class="trigger-line">StartFlow() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li><li>runtime_is_bound</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_run_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitFlowRunNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)
+(active_runtime_id # None)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StartLoopRunning</h3>
+    <div class="trigger-line">StartLoop() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li><li>active_frames_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">StartLoopNode</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)
+(active_frame_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StartRootFrameRunning</h3>
+    <div class="trigger-line">StartRootFrame() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_runs_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_frame_count</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_run_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StartRunRunning</h3>
+    <div class="trigger-line">StartRun() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_members_present</li><li>runtime_is_bound</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_run_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitRunLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_member_count &gt; 0)
+(active_runtime_id # None)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>StopOrchestratorRunning</h3>
+    <div class="trigger-line">StopOrchestrator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TerminalizeCanceledRunning</h3>
+    <div class="trigger-line">TerminalizeCanceled() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RootFrameCanceled</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TerminalizeCompletedRunning</h3>
+    <div class="trigger-line">TerminalizeCompleted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RootFrameCompleted</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>TerminalizeFailedRunning</h3>
+    <div class="trigger-line">TerminalizeFailed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RootFrameFailed</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>UnbindCoordinatorRunning</h3>
+    <div class="trigger-line">UnbindCoordinator() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>coordinator_bound</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">NotifyCoordinator</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>UntilConditionFailedRunning</h3>
+    <div class="trigger-line">UntilConditionFailed() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>active_loops_present</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_loop_count</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">LoopCompleted</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;
+(active_loop_count &gt; 0)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--loop">Running</span>
+    </header>
+    <h3>UntilConditionMetRunning</h3>
+    <div class="trigger-line">UntilConditionMet() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EvaluateUntilCondition</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot;</pre>
+  </article>
+              </div>
+            </section><section class="phase-column">
+              <header class="phase-column__header">
+                <div class="phase-name">Stopped</div>
+                <div class="phase-count">7 legal transitions</div>
+              </header>
+              <div class="phase-column__cards">
+                <article class="transition-card transition-card--input">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--input">INPUT</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>Spawn</h3>
+    <div class="trigger-line">Spawn(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>DestroyMob</h3>
+    <div class="trigger-line">DestroyMob() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeDestroy</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Completed</span>
+    </header>
+    <h3>MarkCompleted</h3>
+    <div class="trigger-line">MarkCompleted() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <ul class="guard-list"><li>no_inflight_work</li></ul>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;
+(inflight_work_id = None)</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>ObserveRuntimeDestroyed</h3>
+    <div class="trigger-line">ObserveRuntimeDestroyed(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot; \/ phase = &quot;Destroyed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>ResetMember</h3>
+    <div class="trigger-line">ResetMember(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>RespawnMember</h3>
+    <div class="trigger-line">RespawnMember(agent_identity, agent_runtime_id, fence_token, generation) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>active_frame_count</span><span>active_loop_count</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeBinding</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Running</span>
+    </header>
+    <h3>Start</h3>
+    <div class="trigger-line">Start() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span></div>
+      </div>
+    </div>
+    
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Stopped&quot;</pre>
+  </article>
+              </div>
+            </section><section class="phase-column">
+              <header class="phase-column__header">
+                <div class="phase-name">Completed</div>
+                <div class="phase-count">2 legal transitions</div>
+              </header>
+              <div class="phase-column__cards">
+                <article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>DestroyMob</h3>
+    <div class="trigger-line">DestroyMob() </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">RequestRuntimeDestroy</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Creating&quot; \/ phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot;</pre>
+  </article><article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>ObserveRuntimeDestroyed</h3>
+    <div class="trigger-line">ObserveRuntimeDestroyed(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot; \/ phase = &quot;Destroyed&quot;</pre>
+  </article>
+              </div>
+            </section><section class="phase-column">
+              <header class="phase-column__header">
+                <div class="phase-name">Destroyed</div>
+                <div class="phase-count">1 legal transitions</div>
+              </header>
+              <div class="phase-column__cards">
+                <article class="transition-card transition-card--signal">
+    <header class="transition-card__header">
+      <span class="kind-pill kind-pill--signal">SIGNAL</span>
+      <span class="phase-shift phase-shift--handoff">Destroyed</span>
+    </header>
+    <h3>ObserveRuntimeDestroyed</h3>
+    <div class="trigger-line">ObserveRuntimeDestroyed(agent_runtime_id, fence_token) </div>
+    <div class="detail-grid">
+      <div>
+        <div class="detail-label">Guards</div>
+        <div class="guard-empty">No named guard beyond phase legality.</div>
+      </div>
+      <div>
+        <div class="detail-label">Writes</div>
+        <div class="write-list"><span>phase</span><span>active_identity</span><span>active_runtime_id</span><span>active_fence_token</span><span>current_generation</span><span>inflight_work_id</span><span>active_member_count</span><span>active_run_count</span><span>pending_spawn_count</span><span>retiring_member_count</span><span>wiring_edge_count</span><span>task_count</span><span>event_subscription_count</span><span>active_frame_count</span><span>active_loop_count</span><span>coordinator_bound</span><span>kickoff_pending</span></div>
+      </div>
+    </div>
+    <div class="effect-row"><span class="detail-label">Effects</span><span class="effect-pill">EmitMemberLifecycleNotice</span></div>
+    <div class="detail-label">TLA clauses</div>
+    <pre class="clause-block">phase = &quot;Running&quot; \/ phase = &quot;Stopped&quot; \/ phase = &quot;Completed&quot; \/ phase = &quot;Destroyed&quot;</pre>
+  </article>
+              </div>
+            </section>
+      </section>
+
+      <footer class="footer-note">
+        <div>Poster design: generated from canonical TLA transition bodies with normalized contract metadata.</div>
+        <div>Regenerate with <code>node scripts/machine-posters/generate-machine-posters.mjs</code>.</div>
+      </footer>
+    </main>
+  </body>
+</html>

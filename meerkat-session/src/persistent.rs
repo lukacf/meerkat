@@ -848,6 +848,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             epoch_id: meerkat_core::RuntimeEpochId::new(),
                             ops_lifecycle,
                             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+                            tool_visibility_owner: Arc::new(
+                                meerkat_core::LocalToolVisibilityOwner::new(),
+                            ),
                         },
                     )
                 })
@@ -1010,6 +1013,16 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     ) -> Result<(), SessionError> {
         self.inner
             .hot_swap_session_llm_identity(id, client, identity)
+            .await
+    }
+
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .set_session_tool_visibility_state(id, state)
             .await
     }
 

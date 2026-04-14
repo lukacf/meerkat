@@ -412,6 +412,16 @@ mod tests {
         ) -> Result<Vec<InputId>, RuntimeDriverError> {
             Ok(Vec::new())
         }
+
+        async fn reconfigure_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _request: meerkat_runtime::SessionLlmReconfigureRequest,
+        ) -> Result<meerkat_runtime::SessionLlmReconfigureReport, RuntimeDriverError> {
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Retired,
+            })
+        }
     }
 
     #[tokio::test]

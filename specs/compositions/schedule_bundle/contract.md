@@ -17,7 +17,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Transaction Plans
 - `transactional_claim` via `claim_due_occurrences` / `ScheduleStore::claim_due_occurrences` — store-backed claim uses authoritative store time plus durable lease state
-- `revision_supersede_and_replan` via `update_schedule_revision` / `ScheduleStore::put_schedule + put_occurrences` — revision-affecting schedule updates supersede pending future occurrences before replanning
+- `revision_supersede_and_replan` via `update_schedule_revision` / `ScheduleStore::commit_schedule_mutation` — revision-affecting schedule updates supersede pending future occurrences before replanning
 
 ## Scheduler Rules
 - `(none)`

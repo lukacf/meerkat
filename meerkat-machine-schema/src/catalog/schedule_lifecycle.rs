@@ -60,6 +60,19 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
             name: "ScheduleLifecycleInput".into(),
             variants: vec![
                 VariantSchema {
+                    name: "Create".into(),
+                    fields: vec![
+                        field("trigger_key", TypeRef::String),
+                        field("target_binding_key", TypeRef::String),
+                        field("misfire_policy", TypeRef::Enum("MisfirePolicy".into())),
+                        field("overlap_policy", TypeRef::Enum("OverlapPolicy".into())),
+                        field(
+                            "missing_target_policy",
+                            TypeRef::Enum("MissingTargetPolicy".into()),
+                        ),
+                    ],
+                },
+                VariantSchema {
                     name: "Revise".into(),
                     fields: vec![
                         field("trigger_key", TypeRef::String),
@@ -79,9 +92,18 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                         field("next_occurrence_ordinal", TypeRef::U64),
                     ],
                 },
-                variant("Pause"),
-                variant("Resume"),
-                variant("Delete"),
+                VariantSchema {
+                    name: "Pause".into(),
+                    fields: vec![field("at_utc_ms", TypeRef::U64)],
+                },
+                VariantSchema {
+                    name: "Resume".into(),
+                    fields: vec![field("at_utc_ms", TypeRef::U64)],
+                },
+                VariantSchema {
+                    name: "Delete".into(),
+                    fields: vec![field("at_utc_ms", TypeRef::U64)],
+                },
             ],
         },
         signals: EnumSchema {
@@ -149,17 +171,18 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
             },
         ],
         transitions: vec![
+            create_transition(),
             revise_transition("ReviseActive", "Active"),
             revise_transition("RevisePaused", "Paused"),
             planning_window_transition("RecordPlanningWindowActive", "Active"),
             planning_window_transition("RecordPlanningWindowPaused", "Paused"),
             TransitionSchema {
-                name: "PauseActive".into(),
-                from: vec!["Active".into()],
+                name: "PauseActiveOrPaused".into(),
+                from: vec!["Active".into(), "Paused".into()],
                 on: InputMatch {
                     kind: TriggerKind::Input,
                     variant: "Pause".into(),
-                    bindings: vec![],
+                    bindings: vec!["at_utc_ms".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -167,12 +190,12 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                 emit: vec![schedule_notice()],
             },
             TransitionSchema {
-                name: "ResumePaused".into(),
-                from: vec!["Paused".into()],
+                name: "ResumeActiveOrPaused".into(),
+                from: vec!["Active".into(), "Paused".into()],
                 on: InputMatch {
                     kind: TriggerKind::Input,
                     variant: "Resume".into(),
-                    bindings: vec![],
+                    bindings: vec!["at_utc_ms".into()],
                 },
                 guards: vec![],
                 updates: vec![],
@@ -193,6 +216,49 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
             disposition("PlanningWindowRecorded", EffectDisposition::Local),
         ],
         ci_step_limit: None,
+    }
+}
+
+fn create_transition() -> TransitionSchema {
+    TransitionSchema {
+        name: "CreateSchedule".into(),
+        from: vec!["Active".into()],
+        on: InputMatch {
+            kind: TriggerKind::Input,
+            variant: "Create".into(),
+            bindings: vec![
+                "trigger_key".into(),
+                "target_binding_key".into(),
+                "misfire_policy".into(),
+                "overlap_policy".into(),
+                "missing_target_policy".into(),
+            ],
+        },
+        guards: vec![],
+        updates: vec![
+            Update::Assign {
+                field: "trigger_key".into(),
+                expr: Expr::Binding("trigger_key".into()),
+            },
+            Update::Assign {
+                field: "target_binding_key".into(),
+                expr: Expr::Binding("target_binding_key".into()),
+            },
+            Update::Assign {
+                field: "misfire_policy".into(),
+                expr: Expr::Binding("misfire_policy".into()),
+            },
+            Update::Assign {
+                field: "overlap_policy".into(),
+                expr: Expr::Binding("overlap_policy".into()),
+            },
+            Update::Assign {
+                field: "missing_target_policy".into(),
+                expr: Expr::Binding("missing_target_policy".into()),
+            },
+        ],
+        to: "Active".into(),
+        emit: vec![schedule_notice()],
     }
 }
 
@@ -312,7 +378,7 @@ fn delete_transition(name: &str, phase: &str) -> TransitionSchema {
         on: InputMatch {
             kind: TriggerKind::Input,
             variant: "Delete".into(),
-            bindings: vec![],
+            bindings: vec!["at_utc_ms".into()],
         },
         guards: vec![],
         updates: vec![

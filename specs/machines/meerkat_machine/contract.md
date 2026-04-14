@@ -16,11 +16,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `process_pending`: `Bool`
 - `peer_ingress_configured`: `Bool`
 - `drain_running`: `Bool`
-- `resolved_peer_keys`: `Set<ReachabilityKey>`
-- `peer_reachability`: `Map<ReachabilityKey, PeerReachability>`
-- `peer_last_reason`: `Map<ReachabilityKey, Option<PeerReachabilityReason>>`
-- `interrupt_pending`: `Bool`
-- `shutdown_pending`: `Bool`
+- `current_llm_identity`: `Option<SessionLlmIdentity>`
+- `current_capability_surface`: `Option<SessionLlmCapabilitySurface>`
+- `capability_surface_status`: `SessionLlmCapabilitySurfaceStatus`
+- `capability_base_filter`: `ToolFilter`
 - `inherited_base_filter`: `ToolFilter`
 - `active_filter`: `ToolFilter`
 - `staged_filter`: `ToolFilter`
@@ -35,11 +34,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId)
+- `ReconfigureSessionLlmIdentity`(model: Option<String>, provider: Option<String>, provider_params: Option<JsonValue>)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(revision: u64)
 - `Recover`
 - `Retire`
@@ -70,12 +72,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Signals
 - `Initialize`
-- `SubmitMobWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
-- `ReconcileResolvedDirectory`(keys: Set<ReachabilityKey>, reachability: Map<ReachabilityKey, PeerReachability>, last_reason: Map<ReachabilityKey, Option<PeerReachabilityReason>>)
-- `RecordSendSucceeded`(key: ReachabilityKey)
-- `RecordSendFailed`(key: ReachabilityKey, reason: PeerReachabilityReason)
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `BoundaryApplied`(revision: u64)
 - `RunCompleted`(work_id: WorkId)
 - `RunFailed`(work_id: WorkId)
@@ -124,6 +120,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireRequested`
 - `RetireCompleted`
 - `CollectTerminal`
+- `OwnerTerminated`
 - `BeginWaitAll`
 - `CancelWaitAll`
 - `ClassifyExternalEnvelope`
@@ -174,9 +171,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExposeOperationPeer`
 - `RetainTerminalRecord`
 - `EvictCompletedRecord`
+- `CompletionProduced`(seq: u64, operation_id: OperationId, kind: OperationKind)
 - `WaitAllSatisfied`
 - `CollectCompletedResult`
-- `ConcurrencyLimitExceeded`
 - `EnqueueClassifiedEntry`
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`
@@ -191,13 +188,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FilterWitnessKeys`() -> `Set<String>`
 
 ## Invariants
-- `running_has_active_work`
 - `bound_runtime_has_fence`
 - `destroyed_has_no_active_work`
-- `interrupt_pending_only_while_active`
 - `drain_requires_ingress_context`
-- `peer_reachability_keys_are_resolved`
-- `peer_last_reason_keys_are_resolved`
 - `active_visibility_revision_not_ahead_of_staged`
 - `active_requested_names_subset_of_staged`
 - `equal_visibility_revision_means_equal_active_and_staged_state`
@@ -221,12 +214,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_matches_current`
 - To: `Idle`
 
+### `ReconfigureSessionLlmIdentityAttached`
+- From: `Attached`
+- On: `ReconfigureSessionLlmIdentity`(model, provider, provider_params)
+- Guards:
+  - `session_registered`
+  - `runtime_is_bound`
+- To: `Attached`
+
+### `ReconfigureSessionLlmIdentityRunning`
+- From: `Running`
+- On: `ReconfigureSessionLlmIdentity`(model, provider, provider_params)
+- Guards:
+  - `session_registered`
+  - `runtime_is_bound`
+- To: `Running`
+
 ### `StagePersistentFilterAttached`
 - From: `Attached`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
   - `session_registered`
 - To: `Attached`
+
+### `StagePersistentFilterIdle`
+- From: `Idle`
+- On: `StagePersistentFilter`(filter, witnesses)
+- Guards:
+  - `session_registered`
+- To: `Idle`
 
 ### `StagePersistentFilterRunning`
 - From: `Running`
@@ -242,6 +258,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Attached`
 
+### `RequestDeferredToolsIdle`
+- From: `Idle`
+- On: `RequestDeferredTools`(names, witnesses)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
 ### `RequestDeferredToolsRunning`
 - From: `Running`
 - On: `RequestDeferredTools`(names, witnesses)
@@ -249,13 +272,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Running`
 
-### `PrepareBindings`
-- From: `Idle`, `Stopped`, `Retired`
+### `PrepareBindingsInitializing`
+- From: `Initializing`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
-- Guards:
-  - `session_registered`
+- Emits: `RuntimeBound`
+- To: `Initializing`
+
+### `PrepareBindingsIdle`
+- From: `Idle`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- Emits: `RuntimeBound`
+- To: `Idle`
+
+### `PrepareBindingsAttached`
+- From: `Attached`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
 - Emits: `RuntimeBound`
 - To: `Attached`
+
+### `PrepareBindingsRecovering`
+- From: `Recovering`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- Emits: `RuntimeBound`
+- To: `Recovering`
+
+### `PrepareBindingsRunning`
+- From: `Running`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- Emits: `RuntimeBound`
+- To: `Running`
+
+### `PrepareBindingsRetired`
+- From: `Retired`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- Emits: `RuntimeBound`
+- To: `Retired`
+
+### `PrepareBindingsStopped`
+- From: `Stopped`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
+- Emits: `RuntimeBound`
+- To: `Stopped`
+
+### `SetPeerIngressContextIdle`
+- From: `Idle`
+- On: `SetPeerIngressContext`(keep_alive)
+- Guards:
+  - `session_registered`
+- To: `Idle`
 
 ### `SetPeerIngressContextAttached`
 - From: `Attached`
@@ -270,6 +334,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
 - To: `Running`
+
+### `SetPeerIngressContextRecovering`
+- From: `Recovering`
+- On: `SetPeerIngressContext`(keep_alive)
+- Guards:
+  - `session_registered`
+- To: `Recovering`
+
+### `SetPeerIngressContextRetired`
+- From: `Retired`
+- On: `SetPeerIngressContext`(keep_alive)
+- Guards:
+  - `session_registered`
+- To: `Retired`
+
+### `SetPeerIngressContextStopped`
+- From: `Stopped`
+- On: `SetPeerIngressContext`(keep_alive)
+- Guards:
+  - `session_registered`
+- To: `Stopped`
+
+### `NotifyDrainExitedIdle`
+- From: `Idle`
+- On: `NotifyDrainExited`(reason)
+- Guards:
+  - `session_registered`
+- Emits: `RuntimeNotice`
+- To: `Idle`
 
 ### `NotifyDrainExitedAttached`
 - From: `Attached`
@@ -287,56 +380,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Running`
 
-### `ReconcileResolvedDirectoryAttached`
-- From: `Attached`
-- On: `ReconcileResolvedDirectory`(keys, reachability, last_reason)
+### `NotifyDrainExitedRecovering`
+- From: `Recovering`
+- On: `NotifyDrainExited`(reason)
 - Guards:
-  - `reachability_keys_subset_of_resolved`
-  - `last_reason_keys_subset_of_resolved`
-- To: `Attached`
+  - `session_registered`
+- Emits: `RuntimeNotice`
+- To: `Recovering`
 
-### `ReconcileResolvedDirectoryRunning`
-- From: `Running`
-- On: `ReconcileResolvedDirectory`(keys, reachability, last_reason)
+### `NotifyDrainExitedRetired`
+- From: `Retired`
+- On: `NotifyDrainExited`(reason)
 - Guards:
-  - `reachability_keys_subset_of_resolved`
-  - `last_reason_keys_subset_of_resolved`
-- To: `Running`
+  - `session_registered`
+- Emits: `RuntimeNotice`
+- To: `Retired`
 
-### `RecordSendSucceededAttached`
-- From: `Attached`
-- On: `RecordSendSucceeded`(key)
+### `NotifyDrainExitedStopped`
+- From: `Stopped`
+- On: `NotifyDrainExited`(reason)
 - Guards:
-  - `peer_key_is_resolved`
-- To: `Attached`
-
-### `RecordSendSucceededRunning`
-- From: `Running`
-- On: `RecordSendSucceeded`(key)
-- Guards:
-  - `peer_key_is_resolved`
-- To: `Running`
-
-### `RecordSendFailedAttached`
-- From: `Attached`
-- On: `RecordSendFailed`(key, reason)
-- Guards:
-  - `peer_key_is_resolved`
-- To: `Attached`
-
-### `RecordSendFailedRunning`
-- From: `Running`
-- On: `RecordSendFailed`(key, reason)
-- Guards:
-  - `peer_key_is_resolved`
-- To: `Running`
-
-### `BeginRunFromIdle`
-- From: `Attached`
-- On: `SubmitMobWork`(agent_runtime_id, fence_token, work_id)
-- Guards:
-  - `runtime_is_bound`
-- To: `Running`
+  - `session_registered`
+- Emits: `RuntimeNotice`
+- To: `Stopped`
 
 ### `InterruptCurrentRun`
 - From: `Running`
@@ -371,6 +437,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `revision_not_ahead_of_active`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Running`
+
+### `PublishCommittedVisibleSetIdle`
+- From: `Idle`
+- On: `PublishCommittedVisibleSet`(revision)
+- Guards:
+  - `revision_matches_active`
+- Emits: `CommittedVisibleSetPublished`
+- To: `Idle`
 
 ### `PublishCommittedVisibleSetAttached`
 - From: `Attached`
@@ -423,6 +497,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Recover`()
 - Emits: `RuntimeNotice`
 - To: `Attached`
+
+### `RecoverFromRecovering`
+- From: `Recovering`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Recovering`
+
+### `RecoverFromRetired`
+- From: `Retired`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Retired`
+
+### `RecoverFromStopped`
+- From: `Stopped`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Stopped`
+
+### `RecoverFromInitializing`
+- From: `Initializing`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Initializing`
 
 ### `RetireRequestedFromIdle`
 - From: `Idle`, `Attached`, `Running`
@@ -701,13 +799,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_is_bound`
 - To: `Running`
 
+### `PrepareIdle`
+- From: `Idle`
+- On: `Prepare`(session_id)
+- Guards:
+  - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
 ### `PrepareAttached`
 - From: `Attached`
 - On: `Prepare`(session_id)
 - Guards:
   - `session_registered`
 - Emits: `SubmitRunPrimitive`
-- To: `Attached`
+- To: `Running`
 
 ### `StartConversationRunAttached`
 - From: `Attached`
@@ -733,20 +839,27 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitRunPrimitive`
 - To: `Attached`
 
-### `CommitRunning`
+### `CommitRunningToIdle`
 - From: `Running`
 - On: `Commit`(input_id, run_id)
-- Guards:
-  - `has_active_work`
-- To: `Running`
+- To: `Idle`
 
-### `FailRunning`
+### `FailRunningToIdle`
 - From: `Running`
 - On: `Fail`(run_id)
-- Guards:
-  - `has_active_work`
 - Emits: `RecordTerminalOutcome`
-- To: `Running`
+- To: `Idle`
+
+### `CommitRunningToAttached`
+- From: `Running`
+- On: `Commit`(input_id, run_id)
+- To: `Attached`
+
+### `FailRunningToAttached`
+- From: `Running`
+- On: `Fail`(run_id)
+- Emits: `RecordTerminalOutcome`
+- To: `Attached`
 
 ### `AdmitQueuedRunning`
 - From: `Running`
@@ -1065,6 +1178,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `has_active_work`
 - Emits: `CollectCompletedResult`
+- To: `Running`
+
+### `OwnerTerminatedRunning`
+- From: `Running`
+- On: `OwnerTerminated`()
+- Guards:
+  - `has_active_work`
+- Emits: `CompletionResolved`
 - To: `Running`
 
 ### `BeginWaitAllRunning`

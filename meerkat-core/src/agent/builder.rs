@@ -14,7 +14,8 @@ use crate::state::LoopState;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::tool_scope::{
-    EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope,
+    EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY,
+    LocalToolVisibilityOwner, ToolFilter, ToolScope, ToolVisibilityOwner,
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
@@ -55,6 +56,7 @@ pub struct AgentBuilder {
     pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
     pub(super) call_timeout_override: CallTimeoutOverride,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
+    pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
 }
 
 impl AgentBuilder {
@@ -86,6 +88,7 @@ impl AgentBuilder {
             model_defaults_resolver: None,
             call_timeout_override: CallTimeoutOverride::default(),
             epoch_cursor_state: None,
+            tool_visibility_owner: None,
         }
     }
 
@@ -264,10 +267,12 @@ impl AgentBuilder {
                     std::collections::HashSet::new(),
                 )
             };
-        let tool_scope = ToolScope::new_with_projection_names(
+        let tool_scope = ToolScope::new_with_visibility_owner(
             tools.tools(),
             control_tool_names,
             deferred_tool_names,
+            self.tool_visibility_owner
+                .unwrap_or_else(|| Arc::new(LocalToolVisibilityOwner::new())),
         );
         let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
@@ -500,6 +505,12 @@ impl AgentBuilder {
         state: Arc<crate::runtime_epoch::EpochCursorState>,
     ) -> Self {
         self.epoch_cursor_state = Some(state);
+        self
+    }
+
+    /// Set the canonical durable tool-visibility owner for this build.
+    pub fn with_tool_visibility_owner(mut self, owner: Arc<dyn ToolVisibilityOwner>) -> Self {
+        self.tool_visibility_owner = Some(owner);
         self
     }
 

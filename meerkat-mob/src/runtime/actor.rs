@@ -25,6 +25,7 @@ use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::time_compat::SystemTime;
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -4714,6 +4715,62 @@ impl MobActor {
 
                 self.ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
                     .await?;
+
+                // Prefer runtime-owned durable peer ingress for ordinary
+                // autonomous member sends so callback-pending/running inputs
+                // survive restart. Render metadata still falls back to the
+                // legacy injector path because PeerInput has no render-metadata
+                // carrier today.
+                if render_metadata.is_none()
+                    && let Some(adapter) = self.runtime_adapter.as_ref()
+                {
+                    use meerkat_runtime::input::{
+                        Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+                        PeerConvention, PeerInput,
+                    };
+
+                    let body = content.text_content();
+                    let blocks = if content.has_images() {
+                        Some(content.into_blocks())
+                    } else {
+                        None
+                    };
+                    let input = Input::Peer(PeerInput {
+                        header: InputHeader {
+                            id: meerkat_core::lifecycle::InputId::new(),
+                            timestamp: chrono::Utc::now(),
+                            source: InputOrigin::Peer {
+                                peer_id: "mob/member_send".to_string(),
+                                runtime_id: None,
+                            },
+                            durability: InputDurability::Durable,
+                            visibility: InputVisibility {
+                                transcript_eligible: true,
+                                operator_eligible: true,
+                            },
+                            idempotency_key: None,
+                            supersession_key: None,
+                            correlation_id: None,
+                        },
+                        convention: Some(PeerConvention::Message),
+                        body,
+                        blocks,
+                        handling_mode: match handling_mode {
+                            meerkat_core::types::HandlingMode::Queue => None,
+                            mode => Some(mode),
+                        },
+                    });
+                    adapter
+                        .accept_input(bridge_session_id, input)
+                        .await
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "autonomous dispatch runtime accept failed for '{}': {}",
+                                entry.meerkat_id, error
+                            ))
+                        })?;
+                    return Ok(bridge_session_id.clone());
+                }
 
                 let injector = self
                     .provisioner

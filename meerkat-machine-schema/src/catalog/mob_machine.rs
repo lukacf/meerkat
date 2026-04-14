@@ -102,10 +102,6 @@ pub fn mob_machine() -> MachineSchema {
                         fields: runtime_binding_request_fields(),
                     },
                     VariantSchema {
-                        name: "SubmitMemberWork".into(),
-                        fields: work_submission_fields(),
-                    },
-                    VariantSchema {
                         name: "RequestRuntimeRetire".into(),
                         fields: runtime_observation_fields(),
                     },
@@ -228,9 +224,46 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
+            // Spawn is a per-phase self-loop: runtime does require_state
+            // but never applies a lifecycle transition. Creating→Creating
+            // and Running→Running are both valid.
             TransitionSchema {
-                name: "Spawn".into(),
-                from: vec!["Creating".into(), "Running".into()],
+                name: "SpawnCreating".into(),
+                from: vec!["Creating".into()],
+                on: InputMatch {
+                    kind: mob_trigger_kind("Spawn"),
+                    variant: "Spawn".into(),
+                    bindings: vec![
+                        "agent_identity".into(),
+                        "agent_runtime_id".into(),
+                        "fence_token".into(),
+                        "generation".into(),
+                    ],
+                },
+                guards: vec![],
+                updates: {
+                    let mut updates = reset_member_runtime_updates();
+                    updates.extend(vec![
+                        assign_some("active_identity", "agent_identity"),
+                        assign_some("active_runtime_id", "agent_runtime_id"),
+                        assign_some("active_fence_token", "fence_token"),
+                        assign_some("current_generation", "generation"),
+                        Update::Assign {
+                            field: "active_member_count".into(),
+                            expr: Expr::U64(1),
+                        },
+                    ]);
+                    updates
+                },
+                to: "Creating".into(),
+                emit: vec![
+                    runtime_binding_emit("RequestRuntimeBinding"),
+                    lifecycle_notice_emit("spawned"),
+                ],
+            },
+            TransitionSchema {
+                name: "SpawnRunning".into(),
+                from: vec!["Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("Spawn"),
                     variant: "Spawn".into(),
@@ -275,8 +308,40 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
+            // SubmitWork: per-phase self-loop. Runtime does
+            // require_state([Running, Creating]) with no lifecycle change.
             TransitionSchema {
-                name: "SubmitWork".into(),
+                name: "SubmitWorkCreating".into(),
+                from: vec!["Creating".into()],
+                on: InputMatch {
+                    kind: mob_trigger_kind("SubmitWork"),
+                    variant: "SubmitWork".into(),
+                    bindings: vec![
+                        "agent_runtime_id".into(),
+                        "fence_token".into(),
+                        "work_id".into(),
+                    ],
+                },
+                guards: vec![Guard {
+                    name: "runtime_is_bound".into(),
+                    expr: Expr::Neq(
+                        Box::new(Expr::Field("active_runtime_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![
+                    assign_some("inflight_work_id", "work_id"),
+                    Update::Increment {
+                        field: "active_run_count".into(),
+                        amount: 1,
+                    },
+                ],
+                to: "Creating".into(),
+                // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "SubmitWorkRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("SubmitWork"),
@@ -302,7 +367,8 @@ pub fn mob_machine() -> MachineSchema {
                     },
                 ],
                 to: "Running".into(),
-                emit: vec![work_submission_emit("SubmitMemberWork", "work_id")],
+                // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
+                emit: vec![],
             },
             TransitionSchema {
                 name: "ObserveWorkCompleted".into(),
@@ -474,10 +540,10 @@ pub fn mob_machine() -> MachineSchema {
                     bindings: vec![],
                 },
                 guards: vec![Guard {
-                    name: "no_inflight_work".into(),
+                    name: "no_active_runs".into(),
                     expr: Expr::Eq(
-                        Box::new(Expr::Field("inflight_work_id".into())),
-                        Box::new(Expr::None),
+                        Box::new(Expr::Field("active_run_count".into())),
+                        Box::new(Expr::U64(0)),
                     ),
                 }],
                 updates: vec![],
@@ -527,7 +593,6 @@ pub fn mob_machine() -> MachineSchema {
         ci_step_limit: Some(6),
         effect_dispositions: vec![
             routed_disposition("RequestRuntimeBinding", &["MeerkatMachine"]),
-            routed_disposition("SubmitMemberWork", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeRetire", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeDestroy", &["MeerkatMachine"]),
             external_disposition("EmitMemberLifecycleNotice"),
@@ -597,20 +662,6 @@ fn runtime_observation_emit(variant: &str) -> EffectEmit {
         fields: IndexMap::from([
             ("agent_runtime_id".into(), option_value("active_runtime_id")),
             ("fence_token".into(), option_value("active_fence_token")),
-        ]),
-    }
-}
-
-fn work_submission_emit(variant: &str, binding: &str) -> EffectEmit {
-    EffectEmit {
-        variant: variant.into(),
-        fields: IndexMap::from([
-            (
-                "agent_runtime_id".into(),
-                Expr::Binding("agent_runtime_id".into()),
-            ),
-            ("fence_token".into(), Expr::Binding("fence_token".into())),
-            ("work_id".into(), Expr::Binding(binding.into())),
         ]),
     }
 }
@@ -1276,8 +1327,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ("SkipNode", Some("EmitStepNotice"), vec![]),
         ("CancelNode", Some("EmitStepNotice"), vec![]),
         ("UntilConditionMet", Some("EvaluateUntilCondition"), vec![]),
-        ("BeginCleanup", Some("EmitRunLifecycleNotice"), vec![]),
-        ("FinishCleanup", Some("EmitRunLifecycleNotice"), vec![]),
     ] {
         transitions.push(mob_self_loop_transition(
             variant,
@@ -1288,6 +1337,54 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             emit_variant.into_iter().map(simple_emit).collect(),
         ));
     }
+
+    // BeginCleanup: runtime lifecycle authority accepts from Stopped|Completed -> Stopped.
+    // From Stopped it's a self-loop; from Completed it's a phase change.
+    transitions.push(mob_self_loop_transition(
+        "BeginCleanup",
+        "Stopped",
+        "BeginCleanup",
+        vec![],
+        vec![],
+        vec![simple_emit("EmitRunLifecycleNotice")],
+    ));
+    transitions.push(TransitionSchema {
+        name: "BeginCleanupCompleted".into(),
+        from: vec!["Completed".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("BeginCleanup"),
+            variant: "BeginCleanup".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: vec![],
+        to: "Stopped".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+
+    // FinishCleanup: runtime lifecycle authority accepts from Stopped|Completed -> Stopped.
+    // From Stopped it's a self-loop; from Completed it's a phase change.
+    transitions.push(mob_self_loop_transition(
+        "FinishCleanup",
+        "Stopped",
+        "FinishCleanup",
+        vec![],
+        vec![],
+        vec![simple_emit("EmitRunLifecycleNotice")],
+    ));
+    transitions.push(TransitionSchema {
+        name: "FinishCleanupCompleted".into(),
+        from: vec!["Completed".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("FinishCleanup"),
+            variant: "FinishCleanup".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: vec![],
+        to: "Stopped".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
 
     transitions.push(TransitionSchema {
         name: "KickoffStartedRunning".into(),
@@ -1475,9 +1572,10 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("RequestBodyFrameStart")],
     });
 
+    // CompleteFlow: runtime orchestrator authority accepts from Running|Completed -> Running.
     transitions.push(TransitionSchema {
         name: "CompleteFlowRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Running".into(), "Completed".into()],
         on: InputMatch {
             kind: mob_trigger_kind("CompleteFlow"),
             variant: "CompleteFlow".into(),
@@ -1758,9 +1856,10 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("LoopCanceled")],
     });
 
+    // FinishRun: runtime lifecycle authority accepts from Running|Stopped -> Running.
     transitions.push(TransitionSchema {
         name: "FinishRunRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Running".into(), "Stopped".into()],
         on: InputMatch {
             kind: mob_trigger_kind("FinishRun"),
             variant: "FinishRun".into(),
@@ -1834,9 +1933,10 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         });
     }
 
+    // CompleteSpawn: runtime orchestrator authority accepts from Running|Stopped -> Running.
     transitions.push(TransitionSchema {
         name: "CompleteSpawnRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Running".into(), "Stopped".into()],
         on: InputMatch {
             kind: mob_trigger_kind("CompleteSpawn"),
             variant: "CompleteSpawn".into(),
@@ -1898,15 +1998,18 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    // CancelWork: always errors in runtime, no phase check. Running-only is fine.
-    transitions.push(mob_self_loop_transition(
-        "CancelWork",
-        "Running",
-        "CancelWork",
-        vec!["work_id"],
-        clear_work_updates(),
-        vec![simple_emit("FlowTerminalized")],
-    ));
+    // CancelWork: handled directly in handle.rs with no actor dispatch or
+    // phase guard. Returns WorkNotFound from any phase. Self-loop per phase.
+    for phase in ["Creating", "Running", "Stopped", "Completed", "Destroyed"] {
+        transitions.push(mob_self_loop_transition(
+            "CancelWork",
+            phase,
+            "CancelWork",
+            vec!["work_id"],
+            clear_work_updates(),
+            vec![simple_emit("FlowTerminalized")],
+        ));
+    }
 
     // CancelAllWork: delegates to ForceCancel which accepts [Creating, Running]
     for phase in ["Creating", "Running"] {

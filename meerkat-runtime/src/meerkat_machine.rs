@@ -17,10 +17,11 @@
 //! queues through the driver; wake signals the loop; the loop dequeues, stages,
 //! applies via `CoreExecutor`, and marks inputs consumed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::RwLock as StdRwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use meerkat_core::BlobStore;
 use meerkat_core::comms_drain_lifecycle_authority::{
@@ -31,6 +32,10 @@ use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
+use meerkat_core::{
+    SessionToolVisibilityState, ToolFilter, ToolScopeApplyError, ToolScopeRevision,
+    ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
+};
 
 use crate::accept::AcceptOutcome;
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
@@ -40,15 +45,18 @@ use crate::input::Input;
 use crate::input_lifecycle_authority::InputLifecycleError;
 use crate::input_state::InputState;
 use crate::meerkat_machine_types::{
-    MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,
-    MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
-    MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineControlCommand,
-    MeerkatMachineControlCommandResult, MeerkatMachineDrainCommand,
+    HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
+    MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
+    MeerkatCursorSnapshot, MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot,
+    MeerkatMachineControlCommand, MeerkatMachineControlCommandResult, MeerkatMachineDrainCommand,
     MeerkatMachineDrainCommandResult, MeerkatMachineDrainLocalCommand,
     MeerkatMachineIngressCommand, MeerkatMachineIngressCommandResult,
     MeerkatMachineLegacyRunCommand, MeerkatMachineLegacyRunCommandResult,
     MeerkatMachineLegacyRunPrepared, MeerkatMachineSessionCommand,
     MeerkatMachineSessionCommandResult, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    SessionLlmCapabilityDelta, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -272,6 +280,97 @@ impl DriverEntry {
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
 pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::CompletionRegistry>>;
 
+#[derive(Debug, Default)]
+struct MachineToolVisibilityOwner {
+    state: StdRwLock<SessionToolVisibilityState>,
+    next_revision: AtomicU64,
+}
+
+impl MachineToolVisibilityOwner {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ToolVisibilityOwner for MachineToolVisibilityOwner {
+    fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        self.state
+            .read()
+            .map(|state| state.clone())
+            .map_err(|_| ToolScopeApplyError::Owner {
+                message: "machine visibility state lock poisoned".to_string(),
+            })
+    }
+
+    fn replace_visibility_state(
+        &self,
+        visibility_state: SessionToolVisibilityState,
+    ) -> Result<(), ToolScopeApplyError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let next_revision = visibility_state
+            .active_revision
+            .max(visibility_state.staged_revision);
+        *state = visibility_state;
+        self.next_revision.store(next_revision, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stage_persistent_filter(
+        &self,
+        filter: ToolFilter,
+        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_filter = filter;
+        state.filter_witnesses.extend(witnesses);
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn stage_requested_deferred_names(
+        &self,
+        names: std::collections::BTreeSet<String>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_requested_deferred_names = names;
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn request_deferred_tools(
+        &self,
+        names: std::collections::BTreeSet<String>,
+        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_requested_deferred_names.extend(names);
+        state.requested_witnesses.extend(witnesses);
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        state.active_filter = state.staged_filter.clone();
+        state.active_requested_deferred_names = state.staged_requested_deferred_names.clone();
+        state.active_revision = state.staged_revision;
+        Ok(state.clone())
+    }
+}
+
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
@@ -284,6 +383,16 @@ struct RuntimeSessionEntry {
     cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
+    /// Canonical durable visibility owner for this session.
+    tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
+    /// Machine-owned current durable/live LLM identity for the registered session.
+    current_llm_identity: Option<meerkat_core::SessionLlmIdentity>,
+    /// Machine-owned current capability surface for the registered session.
+    current_capability_surface: Option<SessionLlmCapabilitySurface>,
+    /// Whether the machine has a resolved capability surface for the current identity.
+    capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+    /// Canonical base tool inventory for capability-derived visibility deltas.
+    base_tool_names: BTreeSet<String>,
     /// Registration phase — explicit type-level distinction between
     /// "registered but inert" and "executor attached."
     phase: RegistrationPhase,
@@ -462,6 +571,8 @@ pub struct MeerkatMachine {
     blob_store: Option<Arc<dyn BlobStore>>,
     /// Per-session comms drain lifecycle, driven by machine authority.
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
+    /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
+    llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
 }
 
 impl MeerkatMachine {
@@ -473,6 +584,7 @@ impl MeerkatMachine {
             store: None,
             blob_store: None,
             comms_drain_slots: RwLock::new(HashMap::new()),
+            llm_reconfigure_host: StdRwLock::new(None),
         }
     }
 
@@ -484,6 +596,7 @@ impl MeerkatMachine {
             store: Some(store),
             blob_store: Some(blob_store),
             comms_drain_slots: RwLock::new(HashMap::new()),
+            llm_reconfigure_host: StdRwLock::new(None),
         }
     }
 
@@ -500,6 +613,7 @@ impl MeerkatMachine {
             store: Some(store),
             blob_store: None,
             comms_drain_slots: RwLock::new(HashMap::new()),
+            llm_reconfigure_host: StdRwLock::new(None),
         }
     }
 
@@ -734,6 +848,8 @@ impl MeerkatMachine {
                         ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
                             as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
                         cursor_state: Arc::clone(&entry.cursor_state),
+                        tool_visibility_owner: Arc::clone(&entry.tool_visibility_owner)
+                            as Arc<dyn meerkat_core::ToolVisibilityOwner>,
                     },
                 ))
             }
@@ -768,6 +884,81 @@ impl MeerkatMachine {
                 let driver = driver.lock().await;
                 Ok(MeerkatMachineSessionCommandResult::ActiveInputs(
                     driver.as_driver().active_input_ids(),
+                ))
+            }
+            MeerkatMachineSessionCommand::ReconfigureSessionLlmIdentity {
+                session_id,
+                request,
+            } => self
+                .reconfigure_session_llm_identity_inner(&session_id, *request)
+                .await
+                .map(MeerkatMachineSessionCommandResult::LlmReconfigured),
+            MeerkatMachineSessionCommand::StagePersistentFilter {
+                session_id,
+                filter,
+                witnesses,
+            } => {
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                let owner = {
+                    let sessions = self.sessions.read().await;
+                    Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    )
+                };
+                let revision = owner
+                    .stage_persistent_filter(filter, witnesses)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                Ok(MeerkatMachineSessionCommandResult::VisibilityRevision(
+                    revision,
+                ))
+            }
+            MeerkatMachineSessionCommand::RequestDeferredTools {
+                session_id,
+                names,
+                witnesses,
+            } => {
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                let owner = {
+                    let sessions = self.sessions.read().await;
+                    Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    )
+                };
+                let revision = owner
+                    .request_deferred_tools(names, witnesses)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                Ok(MeerkatMachineSessionCommandResult::VisibilityRevision(
+                    revision,
                 ))
             }
             MeerkatMachineSessionCommand::PublishCommittedVisibleSet {
@@ -805,6 +996,21 @@ impl MeerkatMachine {
                             visibility_state.active_revision, visibility_state.staged_revision,
                         ),
                     });
+                }
+
+                {
+                    let sessions = self.sessions.read().await;
+                    let owner = Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    );
+                    owner
+                        .replace_visibility_state(*visibility_state.clone())
+                        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
                 }
 
                 Ok(MeerkatMachineSessionCommandResult::VisibilityPublished(
@@ -1167,13 +1373,20 @@ impl MeerkatMachine {
                 let (_session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
-                if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
-                ) {
-                    return Err(RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    });
+                let state = Self::driver_runtime_state(&driver).await;
+                if matches!(state, RuntimeState::Destroyed) {
+                    return Err(RuntimeControlPlaneError::InvalidState { state });
+                }
+
+                // Guard: runtime_is_bound — reject Destroy if the runtime was
+                // never bound via PrepareBindings. The driver's Initializing
+                // state means Initialize hasn't even been called. Beyond that,
+                // the ephemeral driver transitions through PrepareBindings ->
+                // Attached, so Initializing is the only state where the runtime
+                // is definitely unbound. (The schema field `active_runtime_id`
+                // maps to "has PrepareBindings been called and not reset".)
+                if matches!(state, RuntimeState::Initializing) {
+                    return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
 
                 let mut drv = driver.lock().await;
@@ -1611,6 +1824,11 @@ impl MeerkatMachine {
             epoch_id,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
+            tool_visibility_owner: Arc::new(MachineToolVisibilityOwner::new()),
+            current_llm_identity: None,
+            current_capability_surface: None,
+            capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
+            base_tool_names: BTreeSet::new(),
             phase: RegistrationPhase::Queuing,
             detached_wake: None,
         };
@@ -1757,6 +1975,12 @@ impl MeerkatMachine {
                             epoch_id: recovered_epoch,
                             cursor_state: recovered_cursors,
                             completions: completions.clone(),
+                            tool_visibility_owner: Arc::new(MachineToolVisibilityOwner::new()),
+                            current_llm_identity: None,
+                            current_capability_surface: None,
+                            capability_surface_status:
+                                SessionLlmCapabilitySurfaceStatus::Unresolved,
+                            base_tool_names: BTreeSet::new(),
                             phase: RegistrationPhase::Queuing,
                             detached_wake: None,
                         },
@@ -1929,6 +2153,36 @@ impl MeerkatMachine {
             return;
         }
 
+        let host = {
+            self.llm_reconfigure_host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if let Some(host) = host {
+            match host.hydrate_session_llm_state(&session_id).await {
+                Ok(hydrated) => {
+                    if let Err(error) = self
+                        .cache_hydrated_session_llm_state(&session_id, &hydrated)
+                        .await
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            error = %error,
+                            "failed to seed machine-owned llm state after live attachment"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "failed to hydrate live llm state after runtime attachment"
+                    );
+                }
+            }
+        }
+
         if should_wake {
             let _ = wake_tx.try_send(());
         }
@@ -2073,6 +2327,54 @@ impl MeerkatMachine {
         .map(|_| ())
     }
 
+    /// Stage a durable session visibility filter through the machine-owned visibility state.
+    pub async fn stage_persistent_filter(
+        &self,
+        session_id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::StagePersistentFilter {
+                    session_id: session_id.clone(),
+                    filter,
+                    witnesses,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::VisibilityRevision(revision) => Ok(revision),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for stage_persistent_filter: {other:?}"
+            ))),
+        }
+    }
+
+    /// Record durable deferred-tool visibility intent through the machine seam.
+    pub async fn request_deferred_tools(
+        &self,
+        session_id: &SessionId,
+        names: std::collections::BTreeSet<String>,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::RequestDeferredTools {
+                    session_id: session_id.clone(),
+                    names,
+                    witnesses,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::VisibilityRevision(revision) => Ok(revision),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for request_deferred_tools: {other:?}"
+            ))),
+        }
+    }
+
     /// Publish the committed visible tool set through the machine dispatch.
     ///
     /// Routes the visibility publication through the canonical command path,
@@ -2099,6 +2401,334 @@ impl MeerkatMachine {
                 "unexpected MeerkatMachineSessionCommandResult for publish_committed_visible_set: {other:?}"
             ))),
         }
+    }
+
+    /// Install the runtime-owned shell seam for live LLM reconfiguration.
+    pub fn set_session_llm_reconfigure_host(&self, host: Arc<dyn SessionLlmReconfigureHost>) {
+        *self
+            .llm_reconfigure_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    pub async fn seed_live_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let host = self.llm_reconfigure_host()?;
+        let hydrated = host.hydrate_session_llm_state(session_id).await?;
+        self.cache_hydrated_session_llm_state(session_id, &hydrated)
+            .await
+    }
+
+    fn llm_reconfigure_host(
+        &self,
+    ) -> Result<Arc<dyn SessionLlmReconfigureHost>, RuntimeDriverError> {
+        self.llm_reconfigure_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "session llm reconfigure host is not configured".to_string(),
+                )
+            })
+    }
+
+    fn capability_delta(
+        previous: Option<SessionLlmCapabilitySurface>,
+        current: Option<SessionLlmCapabilitySurface>,
+    ) -> SessionLlmCapabilityDelta {
+        SessionLlmCapabilityDelta {
+            changed: previous != current,
+            previous,
+            current,
+        }
+    }
+
+    fn committed_visibility_allows(
+        base_tool_names: &std::collections::BTreeSet<String>,
+        visibility_state: &SessionToolVisibilityState,
+        tool_name: &str,
+    ) -> bool {
+        if !base_tool_names.contains(tool_name) {
+            return false;
+        }
+
+        meerkat_core::ToolScope::compose(&[
+            visibility_state.capability_base_filter.clone(),
+            visibility_state.inherited_base_filter.clone(),
+            visibility_state.active_filter.clone(),
+        ])
+        .allows(tool_name)
+    }
+
+    fn derive_reconfigured_visibility_state(
+        current: &SessionToolVisibilityState,
+        target_capability_surface: &SessionLlmCapabilitySurface,
+        base_tool_names: &std::collections::BTreeSet<String>,
+    ) -> (SessionToolVisibilityState, SessionToolVisibilityDelta) {
+        let previous_capability_base_filter = current.capability_base_filter.clone();
+        let current_view_image_visible = Self::committed_visibility_allows(
+            base_tool_names,
+            current,
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        );
+
+        let mut next = current.clone();
+        next.capability_base_filter = meerkat_core::capability_base_filter_for_image_tool_results(
+            target_capability_surface.image_tool_results,
+        );
+
+        let next_view_image_visible = Self::committed_visibility_allows(
+            base_tool_names,
+            &next,
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        );
+        let committed_visible_set_changed = current_view_image_visible != next_view_image_visible;
+        let revision_bumped = committed_visible_set_changed;
+        if revision_bumped {
+            next.active_revision = current.active_revision.max(current.staged_revision) + 1;
+        }
+
+        (
+            next.clone(),
+            SessionToolVisibilityDelta {
+                previous_capability_base_filter,
+                current_capability_base_filter: next.capability_base_filter,
+                committed_visible_set_changed,
+                revision_bumped,
+            },
+        )
+    }
+
+    async fn set_cached_session_llm_state(
+        &self,
+        session_id: &SessionId,
+        current_identity: Option<meerkat_core::SessionLlmIdentity>,
+        current_capability_surface: Option<SessionLlmCapabilitySurface>,
+        capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.current_llm_identity = current_identity;
+            entry.current_capability_surface = current_capability_surface;
+            entry.capability_surface_status = capability_surface_status;
+        }
+    }
+
+    async fn cache_hydrated_session_llm_state(
+        &self,
+        session_id: &SessionId,
+        hydrated: &HydratedSessionLlmState,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        entry
+            .tool_visibility_owner
+            .replace_visibility_state(hydrated.current_visibility_state.clone())
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+        entry.current_llm_identity = Some(hydrated.current_identity.clone());
+        entry.current_capability_surface = hydrated.current_capability_surface.clone();
+        entry.capability_surface_status = hydrated.capability_surface_status;
+        entry.base_tool_names = hydrated.base_tool_names.clone();
+        Ok(())
+    }
+
+    async fn cached_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<HydratedSessionLlmState>, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return Ok(None);
+        };
+        let Some(current_identity) = entry.current_llm_identity.clone() else {
+            return Ok(None);
+        };
+        let current_visibility_state = entry
+            .tool_visibility_owner
+            .visibility_state()
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+        Ok(Some(HydratedSessionLlmState {
+            current_identity,
+            current_visibility_state,
+            current_capability_surface: entry.current_capability_surface.clone(),
+            capability_surface_status: entry.capability_surface_status,
+            base_tool_names: entry.base_tool_names.clone(),
+        }))
+    }
+
+    async fn replace_machine_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: SessionToolVisibilityState,
+    ) -> Result<(), RuntimeDriverError> {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        entry
+            .tool_visibility_owner
+            .replace_visibility_state(visibility_state)
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rollback_reconfigure_failure(
+        &self,
+        host: &Arc<dyn SessionLlmReconfigureHost>,
+        session_id: &SessionId,
+        previous_identity: &meerkat_core::SessionLlmIdentity,
+        previous_visibility_state: &SessionToolVisibilityState,
+        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+        previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        original_error: RuntimeDriverError,
+    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        let rollback_result = async {
+            host.apply_live_session_llm_identity(session_id, previous_identity)
+                .await?;
+            host.apply_live_session_tool_visibility_state(
+                session_id,
+                Some(previous_visibility_state.clone()),
+            )
+            .await?;
+            Ok::<(), RuntimeDriverError>(())
+        }
+        .await;
+
+        match rollback_result {
+            Ok(()) => {
+                self.set_cached_session_llm_state(
+                    session_id,
+                    Some(previous_identity.clone()),
+                    previous_capability_surface,
+                    previous_capability_surface_status,
+                )
+                .await;
+                Err(original_error)
+            }
+            Err(rollback_error) => {
+                let _ = host.discard_live_session(session_id).await;
+                self.set_cached_session_llm_state(
+                    session_id,
+                    None,
+                    None,
+                    SessionLlmCapabilitySurfaceStatus::Unresolved,
+                )
+                .await;
+                Err(RuntimeDriverError::Internal(format!(
+                    "failed to rollback live llm reconfiguration after error ({original_error}): {rollback_error}"
+                )))
+            }
+        }
+    }
+
+    async fn reconfigure_session_llm_identity_inner(
+        &self,
+        session_id: &SessionId,
+        request: SessionLlmReconfigureRequest,
+    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        let host = self.llm_reconfigure_host()?;
+        let runtime_state = self
+            .existing_session_runtime_state(session_id)
+            .await
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if !matches!(
+            runtime_state,
+            RuntimeState::Attached | RuntimeState::Running
+        ) {
+            return Err(RuntimeDriverError::NotReady {
+                state: runtime_state,
+            });
+        }
+
+        let hydrated = match self.cached_session_llm_state(session_id).await? {
+            Some(cached) => cached,
+            None => {
+                let hydrated = host.hydrate_session_llm_state(session_id).await?;
+                self.cache_hydrated_session_llm_state(session_id, &hydrated)
+                    .await?;
+                hydrated
+            }
+        };
+
+        let resolved = host
+            .resolve_target_session_llm_identity(&request, &hydrated.current_identity)
+            .await?;
+
+        let (next_visibility_state, tool_visibility_delta) =
+            Self::derive_reconfigured_visibility_state(
+                &hydrated.current_visibility_state,
+                &resolved.target_capability_surface,
+                &hydrated.base_tool_names,
+            );
+        let capability_delta = Self::capability_delta(
+            hydrated.current_capability_surface.clone(),
+            Some(resolved.target_capability_surface.clone()),
+        );
+
+        host.apply_live_session_llm_identity(session_id, &resolved.target_identity)
+            .await?;
+        if let Err(error) = host
+            .apply_live_session_tool_visibility_state(
+                session_id,
+                Some(next_visibility_state.clone()),
+            )
+            .await
+        {
+            return self
+                .rollback_reconfigure_failure(
+                    &host,
+                    session_id,
+                    &hydrated.current_identity,
+                    &hydrated.current_visibility_state,
+                    hydrated.current_capability_surface.clone(),
+                    hydrated.capability_surface_status,
+                    error,
+                )
+                .await;
+        }
+
+        if let Err(error) = host.persist_live_session(session_id).await {
+            return self
+                .rollback_reconfigure_failure(
+                    &host,
+                    session_id,
+                    &hydrated.current_identity,
+                    &hydrated.current_visibility_state,
+                    hydrated.current_capability_surface.clone(),
+                    hydrated.capability_surface_status,
+                    error,
+                )
+                .await;
+        }
+
+        self.replace_machine_visibility_state(session_id, next_visibility_state)
+            .await?;
+        self.set_cached_session_llm_state(
+            session_id,
+            Some(resolved.target_identity.clone()),
+            Some(resolved.target_capability_surface.clone()),
+            SessionLlmCapabilitySurfaceStatus::Resolved,
+        )
+        .await;
+
+        Ok(SessionLlmReconfigureReport {
+            previous_identity: hydrated.current_identity,
+            new_identity: resolved.target_identity,
+            capability_delta,
+            tool_visibility_delta,
+            rollback_occurred: false,
+        })
     }
 
     async fn interrupt_current_run_inner(
@@ -2924,6 +3554,27 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             ))),
         }
     }
+
+    async fn reconfigure_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        request: SessionLlmReconfigureRequest,
+    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::ReconfigureSessionLlmIdentity {
+                    session_id: session_id.clone(),
+                    request: Box::new(request),
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::LlmReconfigured(report) => Ok(report),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for SessionServiceRuntimeExt::reconfigure_session_llm_identity: {other:?}"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2964,11 +3615,24 @@ impl MeerkatMachine {
     }
 
     async fn existing_session_runtime_state(&self, session_id: &SessionId) -> Option<RuntimeState> {
-        let driver = {
+        let (driver, has_live_attachment, has_live_session_state) = {
             let sessions = self.sessions.read().await;
-            sessions.get(session_id).map(|entry| entry.driver.clone())
+            sessions.get(session_id).map(|entry| {
+                (
+                    entry.driver.clone(),
+                    entry.has_live_attachment(),
+                    entry.current_llm_identity.is_some(),
+                )
+            })
         }?;
-        Some(Self::driver_runtime_state(&driver).await)
+        let driver_state = Self::driver_runtime_state(&driver).await;
+        if matches!(driver_state, RuntimeState::Idle)
+            && (has_live_attachment || has_live_session_state)
+        {
+            Some(RuntimeState::Attached)
+        } else {
+            Some(driver_state)
+        }
     }
 
     async fn driver_runtime_state(driver: &SharedDriver) -> RuntimeState {

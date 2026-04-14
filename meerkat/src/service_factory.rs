@@ -694,6 +694,7 @@ mod tests {
             epoch_id: meerkat_core::runtime_epoch::RuntimeEpochId::new(),
             ops_lifecycle: expected_registry.clone(),
             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
         };
 
         let req = CreateSessionRequest {
@@ -869,6 +870,7 @@ mod tests {
                 .await
                 .ok_or_else(|| "missing runtime registry".to_string())?,
             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+            tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
         };
 
         let req = CreateSessionRequest {

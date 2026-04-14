@@ -43,7 +43,6 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
     }
     for required in [
         "\"Initialize\"",
-        "\"SubmitMobWork\"",
         "\"StagePersistentFilter\"",
         "\"RequestDeferredTools\"",
     ] {
@@ -114,8 +113,8 @@ fn renders_machine_mapping_coverage_with_named_items() {
     assert!(rendered.contains("### Code Anchors"));
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Transitions"));
-    assert!(rendered.contains("- `PrepareBindings`"));
-    assert!(rendered.contains("- `running_has_active_work`"));
+    assert!(rendered.contains("- `PrepareBindingsIdle`"));
+    assert!(rendered.contains("- `destroyed_has_no_active_work`"));
 }
 
 #[test]
@@ -148,7 +147,7 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     );
     assert!(appended.contains("Manual text."));
     assert!(appended.contains(GENERATED_COVERAGE_START));
-    assert!(appended.contains("- `PrepareBindings`"));
+    assert!(appended.contains("- `PrepareBindingsIdle`"));
     assert!(appended.contains(GENERATED_COVERAGE_END));
 
     let existing = format!(
@@ -157,5 +156,5 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     let replaced = merge_mapping_document(Some(&existing), "MeerkatMachine", &generated);
     assert!(!replaced.contains("old block"));
     assert!(replaced.contains("Manual text."));
-    assert!(replaced.contains("- `PrepareBindings`"));
+    assert!(replaced.contains("- `PrepareBindingsIdle`"));
 }

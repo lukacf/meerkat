@@ -58,8 +58,27 @@ Start ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-Spawn(agent_identity, agent_runtime_id, fence_token, generation) ==
-    /\ phase = "Creating" \/ phase = "Running"
+SpawnCreating(agent_identity, agent_runtime_id, fence_token, generation) ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_identity' = Some(agent_identity)
+    /\ active_runtime_id' = Some(agent_runtime_id)
+    /\ active_fence_token' = Some(fence_token)
+    /\ current_generation' = Some(generation)
+    /\ inflight_work_id' = None
+    /\ active_member_count' = 1
+    /\ active_run_count' = 0
+    /\ pending_spawn_count' = 0
+    /\ retiring_member_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+SpawnRunning(agent_identity, agent_runtime_id, fence_token, generation) ==
+    /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_identity' = Some(agent_identity)
@@ -84,7 +103,17 @@ ObserveRuntimeReady(agent_runtime_id, fence_token) ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-SubmitWork(agent_runtime_id, fence_token, work_id) ==
+SubmitWorkCreating(agent_runtime_id, fence_token, work_id) ==
+    /\ phase = "Creating"
+    /\ (active_runtime_id # None)
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = Some(work_id)
+    /\ active_run_count' = (active_run_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubmitWorkRunning(agent_runtime_id, fence_token, work_id) ==
     /\ phase = "Running"
     /\ (active_runtime_id # None)
     /\ phase' = "Running"
@@ -191,7 +220,7 @@ RespawnMember(agent_identity, agent_runtime_id, fence_token, generation) ==
 
 MarkCompleted ==
     /\ phase = "Running" \/ phase = "Stopped"
-    /\ (inflight_work_id = None)
+    /\ (active_run_count = 0)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
@@ -1398,16 +1427,30 @@ UntilConditionMetRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-BeginCleanupRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
+BeginCleanupStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-FinishCleanupRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
+BeginCleanupCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+FinishCleanupStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+FinishCleanupCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -1507,7 +1550,7 @@ RegisterPendingBodyFrameRunning ==
 
 
 CompleteFlowRunning ==
-    /\ phase = "Running"
+    /\ phase = "Running" \/ phase = "Completed"
     /\ (active_run_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1615,7 +1658,7 @@ CancelLoopRunning ==
 
 
 FinishRunRunning ==
-    /\ phase = "Running"
+    /\ phase = "Running" \/ phase = "Stopped"
     /\ (active_run_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1682,7 +1725,7 @@ RetireAllStopped ==
 
 
 CompleteSpawnRunning ==
-    /\ phase = "Running"
+    /\ phase = "Running" \/ phase = "Stopped"
     /\ (pending_spawn_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1729,9 +1772,57 @@ RespawnRunning(agent_runtime_id) ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+CancelWorkCreating(work_id) ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
 CancelWorkRunning(work_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+CancelWorkStopped(work_id) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+CancelWorkCompleted(work_id) ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+CancelWorkDestroyed(work_id) ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ inflight_work_id' = None
     /\ active_run_count' = 0
@@ -1767,9 +1858,11 @@ CancelAllWorkRunning ==
 
 Next ==
     \/ Start
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : Spawn(agent_identity, agent_runtime_id, fence_token, generation)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : SpawnCreating(agent_identity, agent_runtime_id, fence_token, generation)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : SpawnRunning(agent_identity, agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeReady(agent_runtime_id, fence_token)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : SubmitWork(agent_runtime_id, fence_token, work_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : SubmitWorkCreating(agent_runtime_id, fence_token, work_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : SubmitWorkRunning(agent_runtime_id, fence_token, work_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : ObserveWorkCompleted(agent_runtime_id, fence_token, work_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : ObserveWorkFailed(agent_runtime_id, fence_token, work_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : ObserveWorkCancelled(agent_runtime_id, fence_token, work_id)
@@ -1931,8 +2024,10 @@ Next ==
     \/ SkipNodeRunning
     \/ CancelNodeRunning
     \/ UntilConditionMetRunning
-    \/ BeginCleanupRunning
-    \/ FinishCleanupRunning
+    \/ BeginCleanupStopped
+    \/ BeginCleanupCompleted
+    \/ FinishCleanupStopped
+    \/ FinishCleanupCompleted
     \/ KickoffStartedRunning
     \/ KickoffCallbackPendingRunning
     \/ RunFlowRunning
@@ -1965,7 +2060,11 @@ Next ==
     \/ DestroyFromAny
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnCreating(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnRunning(agent_runtime_id)
+    \/ \E work_id \in WorkIdValues : CancelWorkCreating(work_id)
     \/ \E work_id \in WorkIdValues : CancelWorkRunning(work_id)
+    \/ \E work_id \in WorkIdValues : CancelWorkStopped(work_id)
+    \/ \E work_id \in WorkIdValues : CancelWorkCompleted(work_id)
+    \/ \E work_id \in WorkIdValues : CancelWorkDestroyed(work_id)
     \/ CancelAllWorkCreating
     \/ CancelAllWorkRunning
     \/ TerminalStutter

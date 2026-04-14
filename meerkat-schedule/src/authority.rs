@@ -161,6 +161,9 @@ impl ScheduleLifecycleAuthority {
             }
             ScheduleLifecycleInput::Delete { at_utc } => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
+                if schedule.phase == SchedulePhase::Deleted {
+                    return Err(ScheduleLifecycleError::Deleted);
+                }
                 schedule.revision = schedule.revision.next();
                 schedule.phase = SchedulePhase::Deleted;
                 schedule.planning_cursor_utc = None;

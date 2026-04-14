@@ -39,6 +39,18 @@ TerminalStutter ==
     /\ phase = "Deleted"
     /\ UNCHANGED vars
 
+CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ trigger_key' = arg_trigger_key
+    /\ target_binding_key' = arg_target_binding_key
+    /\ misfire_policy' = arg_misfire_policy
+    /\ overlap_policy' = arg_overlap_policy
+    /\ missing_target_policy' = arg_missing_target_policy
+    /\ UNCHANGED << revision, planning_cursor_utc_ms, next_occurrence_ordinal >>
+
+
 ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy) ==
     /\ phase = "Active"
     /\ phase' = "Active"
@@ -87,21 +99,21 @@ RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordin
     /\ UNCHANGED << revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy >>
 
 
-PauseActive ==
-    /\ phase = "Active"
+PauseActiveOrPaused(at_utc_ms) ==
+    /\ phase = "Active" \/ phase = "Paused"
     /\ phase' = "Paused"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal >>
 
 
-ResumePaused ==
-    /\ phase = "Paused"
+ResumeActiveOrPaused(at_utc_ms) ==
+    /\ phase = "Active" \/ phase = "Paused"
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal >>
 
 
-DeleteActive ==
+DeleteActive(at_utc_ms) ==
     /\ phase = "Active"
     /\ phase' = "Deleted"
     /\ model_step_count' = model_step_count + 1
@@ -110,7 +122,7 @@ DeleteActive ==
     /\ UNCHANGED << trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, next_occurrence_ordinal >>
 
 
-DeletePaused ==
+DeletePaused(at_utc_ms) ==
     /\ phase = "Paused"
     /\ phase' = "Deleted"
     /\ model_step_count' = model_step_count + 1
@@ -120,14 +132,15 @@ DeletePaused ==
 
 
 Next ==
+    \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)
     \/ \E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)
-    \/ PauseActive
-    \/ ResumePaused
-    \/ DeleteActive
-    \/ DeletePaused
+    \/ \E at_utc_ms \in 0..2 : PauseActiveOrPaused(at_utc_ms)
+    \/ \E at_utc_ms \in 0..2 : ResumeActiveOrPaused(at_utc_ms)
+    \/ \E at_utc_ms \in 0..2 : DeleteActive(at_utc_ms)
+    \/ \E at_utc_ms \in 0..2 : DeletePaused(at_utc_ms)
     \/ TerminalStutter
 
 revision_is_positive == (revision > 0)

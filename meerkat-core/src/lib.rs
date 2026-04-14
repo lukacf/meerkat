@@ -190,7 +190,8 @@ pub use session::{
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
     SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
     SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
-    ToolCategoryOverride, ToolVisibilityWitness,
+    ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
+    capability_base_filter_for_image_tool_results,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
@@ -210,8 +211,9 @@ pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
-    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, ToolFilter, ToolScope,
-    ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot, ToolScopeStageError,
+    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter,
+    ToolScope, ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
+    ToolScopeStageError, ToolVisibilityOwner,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{

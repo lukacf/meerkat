@@ -1423,7 +1423,9 @@ impl From<CliMcpScope> for Option<McpScope> {
 #[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
     // Initialize tracing
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse_from(inject_default_run_subcommand(std::env::args_os()));
 

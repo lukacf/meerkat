@@ -16,9 +16,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `claimed_by`: `Option<String>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
 - `claimed_at_utc_ms`: `Option<u64>`
-- `claim_token`: `Option<String>`
+- `claim_token`: `Option<ClaimToken>`
 - `delivery_correlation_id`: `Option<String>`
-- `last_receipt_stage`: `Option<DeliveryReceiptStage>`
+- `last_receipt`: `Option<DeliveryReceipt>`
 - `failure_class`: `Option<OccurrenceFailureClass>`
 - `failure_detail`: `Option<String>`
 - `dispatched_at_utc_ms`: `Option<u64>`
@@ -27,14 +27,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `superseded_by_revision`: `Option<u64>`
 
 ## Inputs
-- `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: String)
+- `Claim`(owner_id: String, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<String>, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
-- `Complete`(receipt_stage: DeliveryReceiptStage, at_utc_ms: u64)
+- `Complete`(receipt: DeliveryReceipt, at_utc_ms: u64)
 - `Skip`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Misfire`(detail: Option<String>, failure_class: Option<OccurrenceFailureClass>, at_utc_ms: u64)
 - `Supersede`(superseded_by_revision: u64, at_utc_ms: u64)
-- `DeliveryFailed`(receipt_stage: Option<DeliveryReceiptStage>, failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
+- `DeliveryFailed`(receipt: Option<DeliveryReceipt>, failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 
 ## Signals
@@ -79,7 +79,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CompleteFromDispatchingOrAwaiting`
 - From: `Dispatching`, `AwaitingCompletion`
-- On: `Complete`(receipt_stage, at_utc_ms)
+- On: `Complete`(receipt, at_utc_ms)
 - Emits: `Completed`
 - To: `Completed`
 
@@ -103,7 +103,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeliveryFailedFromClaimedOrLive`
 - From: `Claimed`, `Dispatching`, `AwaitingCompletion`
-- On: `DeliveryFailed`(receipt_stage, failure_class, detail, at_utc_ms)
+- On: `DeliveryFailed`(receipt, failure_class, detail, at_utc_ms)
 - Emits: `DeliveryFailed`
 - To: `DeliveryFailed`
 

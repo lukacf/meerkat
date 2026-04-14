@@ -1515,6 +1515,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .map_err(SessionError::Agent)
     }
 
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        Self::set_session_tool_visibility_state(self, id, state).await
+    }
+
     async fn set_session_tool_filter(
         &self,
         id: &SessionId,

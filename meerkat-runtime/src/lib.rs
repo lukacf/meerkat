@@ -87,6 +87,11 @@ pub use input_state::{
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
 pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
+pub use meerkat_machine_types::{
+    HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
+    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,
+    SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+};
 #[doc(hidden)]
 pub use meerkat_machine_types::{
     MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,

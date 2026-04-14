@@ -341,8 +341,8 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         start_after > start_before,
         "turn-driven path should invoke start_turn"
     );
-    assert!(
-        inject_after > inject_before,
-        "autonomous path should invoke event injector"
+    assert_eq!(
+        inject_after, inject_before,
+        "autonomous path should prefer runtime admission over the live injector when a runtime adapter is installed"
     );
 }

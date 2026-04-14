@@ -187,7 +187,7 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
 fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> String {
     match (producer, effect_variant, consumer) {
         ("MobMachine", "RequestRuntimeBinding", "MeerkatMachine") => "PrepareBindings".to_string(),
-        ("MobMachine", "SubmitMemberWork", "MeerkatMachine") => "SubmitMobWork".to_string(),
+        // SubmitMemberWork -> SubmitMobWork route removed (unimplemented)
         ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "RetireRuntime".to_string(),
         ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "DestroyRuntime".to_string(),
         ("MeerkatMachine", "RuntimeBound", "MobMachine") => "ObserveRuntimeReady".to_string(),

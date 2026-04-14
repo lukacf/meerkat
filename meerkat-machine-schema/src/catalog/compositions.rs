@@ -48,7 +48,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                 "revision_supersede_and_replan",
                 "update_schedule_revision",
                 "revision-affecting schedule updates supersede pending future occurrences before replanning",
-                "ScheduleStore::put_schedule + put_occurrences",
+                "ScheduleStore::commit_schedule_mutation",
             ),
         ],
         actor_priorities: vec![],
@@ -219,19 +219,6 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 ],
             ),
             route(
-                "member_work_reaches_meerkat",
-                "mob",
-                "SubmitMemberWork",
-                "meerkat",
-                RouteTargetKind::Signal,
-                "SubmitMobWork",
-                &[
-                    bind("agent_runtime_id", "agent_runtime_id"),
-                    bind("fence_token", "fence_token"),
-                    bind("work_id", "work_id"),
-                ],
-            ),
-            route(
                 "retire_request_reaches_meerkat",
                 "mob",
                 "RequestRuntimeRetire",
@@ -336,7 +323,6 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "basic_round_trip",
                 &[
                     "binding_request_reaches_meerkat",
-                    "member_work_reaches_meerkat",
                     "runtime_bound_reaches_mob",
                     "work_completed_reaches_mob",
                 ],

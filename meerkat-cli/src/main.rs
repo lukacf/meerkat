@@ -1806,7 +1806,7 @@ async fn resolve_runtime_skill_path(
     };
     let canonical = tokio::fs::canonicalize(&absolute)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{}': {e}", raw))?;
+        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{raw}': {e}"))?;
 
     let (repo_root, skill_dir) = if canonical.is_file() {
         if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
@@ -5317,7 +5317,7 @@ async fn resolve_skill_repo_for_config(
     };
     let canonical = tokio::fs::canonicalize(&absolute)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{}': {e}", raw))?;
+        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{raw}': {e}"))?;
 
     let implied_skill_name = if canonical.is_file() {
         if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {

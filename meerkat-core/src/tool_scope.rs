@@ -490,11 +490,13 @@ impl ToolScope {
                 )
             })
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        let previous_visibility_state = self.visibility_owner.visibility_state()?;
         let visibility_state = self.promote_staged_visibility()?;
-        self.apply_staged_projection(
+        self.apply_staged_projection_with_previous(
             new_base_tools,
             control_tool_names,
             deferred_tool_names,
+            &previous_visibility_state,
             &visibility_state,
         )
     }
@@ -514,6 +516,24 @@ impl ToolScope {
         deferred_tool_names: HashSet<String>,
         visibility_state: &SessionToolVisibilityState,
     ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        let previous_visibility_state = self.visibility_owner.visibility_state()?;
+        self.apply_staged_projection_with_previous(
+            new_base_tools,
+            control_tool_names,
+            deferred_tool_names,
+            &previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    pub(crate) fn apply_staged_projection_with_previous(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: HashSet<String>,
+        deferred_tool_names: HashSet<String>,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
         if self
             .fail_next_boundary_apply
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -525,11 +545,10 @@ impl ToolScope {
             .state
             .write()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
-        let previous_visibility_state = self.visibility_owner.visibility_state()?;
 
         let previous_base_names = state.known_base_names.clone();
         let previous_visible_names =
-            Self::visible_names_for_state(&state, &previous_visibility_state);
+            Self::visible_names_for_state(&state, previous_visibility_state);
         let previous_active_revision = ToolScopeRevision(previous_visibility_state.active_revision);
 
         state.base_tools = new_base_tools;
@@ -1330,6 +1349,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["visible".to_string()]
         );
+    }
+
+    #[test]
+    fn boundary_projection_uses_pre_promotion_visibility_for_change_detection() {
+        let scope = ToolScope::new(tools(&["visible", "secret"]));
+        let handle = scope.handle();
+
+        handle
+            .stage_external_filter(ToolFilter::Deny(set(&["secret"])))
+            .unwrap();
+
+        let previous_visibility_state = scope.visibility_state().unwrap();
+        let promoted_visibility_state = scope.promote_staged_visibility().unwrap();
+        let applied = scope
+            .apply_staged_projection_with_previous(
+                tools(&["visible", "secret"]),
+                HashSet::new(),
+                HashSet::new(),
+                &previous_visibility_state,
+                &promoted_visibility_state,
+            )
+            .expect("projection refresh should detect the promoted visibility change");
+
+        assert!(applied.visible_changed());
+        assert_eq!(applied.previous_visible_names, vec!["visible", "secret"]);
+        assert_eq!(applied.visible_names, vec!["visible"]);
+        assert_eq!(applied.previous_active_revision, ToolScopeRevision(0));
+        assert_eq!(applied.applied_revision, ToolScopeRevision(1));
     }
 
     #[test]

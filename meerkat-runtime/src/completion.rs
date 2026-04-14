@@ -55,6 +55,7 @@ pub struct CompletionRegistrySnapshot {
 }
 
 /// Handle for awaiting the completion of an accepted input.
+#[derive(Debug)]
 pub struct CompletionHandle {
     rx: oneshot::Receiver<CompletionOutcome>,
 }

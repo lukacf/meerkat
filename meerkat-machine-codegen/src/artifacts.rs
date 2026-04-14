@@ -209,6 +209,13 @@ pub fn render_machine_contract_markdown(
 
     render_state_markdown(&mut out, schema);
     render_enum_markdown(&mut out, "Inputs", &schema.inputs);
+    if !schema.surface_only_inputs.is_empty() {
+        pushln!(&mut out, "## Surface-only Inputs");
+        for input in &schema.surface_only_inputs {
+            pushln!(&mut out, "- `{input}`");
+        }
+        pushln!(&mut out);
+    }
     render_enum_markdown(&mut out, "Signals", &schema.signals);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
 

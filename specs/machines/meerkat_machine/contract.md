@@ -6,7 +6,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Rust owner: `meerkat-runtime` / `generated::meerkat_machine`
 
 ## State
-- Phase enum: `Initializing | Idle | Attached | Running | Recovering | Retired | Stopped | Destroyed`
+- Phase enum: `Initializing | Idle | Attached | Running | Retired | Stopped | Destroyed`
 - `session_id`: `Option<SessionId>`
 - `active_runtime_id`: `Option<AgentRuntimeId>`
 - `active_fence_token`: `Option<FenceToken>`
@@ -40,6 +40,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `NotifyDrainExited`(reason: String)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(revision: u64)
 - `Recover`
 - `Retire`
@@ -70,8 +72,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Signals
 - `Initialize`
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `BoundaryApplied`(revision: u64)
 - `RunCompleted`(work_id: WorkId)
 - `RunFailed`(work_id: WorkId)
@@ -290,12 +290,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeBound`
 - To: `Attached`
 
-### `PrepareBindingsRecovering`
-- From: `Recovering`
-- On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
-- Emits: `RuntimeBound`
-- To: `Recovering`
-
 ### `PrepareBindingsRunning`
 - From: `Running`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation)
@@ -335,13 +329,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Running`
 
-### `SetPeerIngressContextRecovering`
-- From: `Recovering`
-- On: `SetPeerIngressContext`(keep_alive)
-- Guards:
-  - `session_registered`
-- To: `Recovering`
-
 ### `SetPeerIngressContextRetired`
 - From: `Retired`
 - On: `SetPeerIngressContext`(keep_alive)
@@ -379,14 +366,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - Emits: `RuntimeNotice`
 - To: `Running`
-
-### `NotifyDrainExitedRecovering`
-- From: `Recovering`
-- On: `NotifyDrainExited`(reason)
-- Guards:
-  - `session_registered`
-- Emits: `RuntimeNotice`
-- To: `Recovering`
 
 ### `NotifyDrainExitedRetired`
 - From: `Retired`
@@ -498,12 +477,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Attached`
 
-### `RecoverFromRecovering`
-- From: `Recovering`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Recovering`
-
 ### `RecoverFromRetired`
 - From: `Retired`
 - On: `Recover`()
@@ -529,19 +502,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Retired`
 
 ### `Reset`
-- From: `Initializing`, `Idle`, `Attached`, `Recovering`, `Retired`
+- From: `Initializing`, `Idle`, `Attached`, `Retired`
 - On: `Reset`()
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
 ### `StopRuntimeExecutor`
-- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`
 - On: `StopRuntimeExecutor`()
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
 ### `Destroy`
-- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
 - On: `Destroy`()
 - Guards:
   - `runtime_is_bound`
@@ -641,11 +614,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AbortAll`()
 - To: `Running`
-
-### `AbortAllRecovering`
-- From: `Recovering`
-- On: `AbortAll`()
-- To: `Recovering`
 
 ### `AbortAllRetired`
 - From: `Retired`

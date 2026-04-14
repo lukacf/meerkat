@@ -35,7 +35,8 @@ use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_ingress_authority::{ContentShape, IngressPhase, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
-    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeDriverError,
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
+    RuntimeControlPlaneError, RuntimeDriverError,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,10 +142,22 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
 }
 
-/// Public Meerkat lifecycle/control mutations that now route through the
-/// top-level Meerkat machine seam instead of bespoke adapter entrypoints.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MeerkatMachineCommandError {
+    #[error(transparent)]
+    Driver(#[from] RuntimeDriverError),
+    #[error(transparent)]
+    Control(#[from] RuntimeControlPlaneError),
+}
+
+/// Unified internal Meerkat machine command surface.
+///
+/// This replaces the old per-domain dispatch split (session, drain,
+/// drain-local, control, ingress, legacy-run) while keeping the public helper
+/// methods and external runtime/machine surface unchanged.
 #[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineSessionCommand {
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum MeerkatMachineCommand {
     RegisterSession {
         session_id: SessionId,
     },
@@ -214,26 +227,6 @@ pub(crate) enum MeerkatMachineSessionCommand {
         session_id: SessionId,
         visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
     },
-}
-
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineSessionCommandResult {
-    Unit,
-    Bool(bool),
-    OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
-    Bindings(meerkat_core::SessionRuntimeBindings),
-    InputState(Option<InputState>),
-    ActiveInputs(Vec<InputId>),
-    LlmReconfigured(SessionLlmReconfigureReport),
-    VisibilityRevision(meerkat_core::ToolScopeRevision),
-    VisibilityPublished(meerkat_core::SessionToolVisibilityState),
-}
-
-/// Public comms-drain mutations that now route through the Meerkat machine
-/// instead of a wrapper/helper split.
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineDrainCommand {
     SetPeerIngressContext {
         session_id: SessionId,
         keep_alive: bool,
@@ -243,25 +236,13 @@ pub(crate) enum MeerkatMachineDrainCommand {
         session_id: SessionId,
         reason: DrainExitReason,
     },
-}
-
-pub(crate) enum MeerkatMachineDrainCommandResult {
-    Spawned(bool),
-    Notified,
-}
-
-/// Public comms-drain local lifecycle helpers that do not require `Arc<Self>`
-/// task-spawn authority.
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineDrainLocalCommand {
     AbortAll,
-    Abort { session_id: SessionId },
-    Wait { session_id: SessionId },
-}
-
-#[derive(CommandManifest)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineControlCommand {
+    Abort {
+        session_id: SessionId,
+    },
+    Wait {
+        session_id: SessionId,
+    },
     Ingest {
         runtime_id: LogicalRuntimeId,
         input: Input,
@@ -292,61 +273,14 @@ pub(crate) enum MeerkatMachineControlCommand {
         run_id: LifecycleRunId,
         sequence: u64,
     },
-}
-
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineIngressCommand {
-    AcceptWithCompletion { session_id: SessionId, input: Input },
-    AcceptWithoutWake { session_id: SessionId, input: Input },
-}
-
-pub(crate) enum MeerkatMachineIngressCommandResult {
     AcceptWithCompletion {
-        outcome: AcceptOutcome,
-        handle: Option<crate::completion::CompletionHandle>,
+        session_id: SessionId,
+        input: Input,
     },
-    AcceptOutcome(AcceptOutcome),
-}
-
-#[doc(hidden)]
-#[must_use]
-pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
-    let mut variants = IndexSet::new();
-    variants.extend(
-        MeerkatMachineSessionCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineControlCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineDrainCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineDrainLocalCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineIngressCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineLegacyRunCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants
-}
-
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineLegacyRunCommand {
+    AcceptWithoutWake {
+        session_id: SessionId,
+        input: Input,
+    },
     Prepare {
         session_id: SessionId,
         input: Input,
@@ -364,23 +298,31 @@ pub(crate) enum MeerkatMachineLegacyRunCommand {
     },
 }
 
+#[derive(Debug)]
 pub(crate) struct MeerkatMachineLegacyRunPrepared {
     pub input_id: InputId,
     pub run_id: RunId,
     pub primitive: RunPrimitive,
 }
 
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineLegacyRunCommandResult {
-    Prepared(MeerkatMachineLegacyRunPrepared),
-    Unit,
-}
-
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineControlCommandResult {
+pub(crate) enum MeerkatMachineCommandResult {
     AcceptOutcome(AcceptOutcome),
+    AcceptWithCompletion {
+        outcome: AcceptOutcome,
+        handle: Option<crate::completion::CompletionHandle>,
+    },
     Unit,
+    Bool(bool),
+    Spawned(bool),
+    OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
+    Bindings(meerkat_core::SessionRuntimeBindings),
+    InputState(Option<InputState>),
+    ActiveInputs(Vec<InputId>),
+    LlmReconfigured(SessionLlmReconfigureReport),
+    VisibilityRevision(meerkat_core::ToolScopeRevision),
+    VisibilityPublished(meerkat_core::SessionToolVisibilityState),
     RetireReport(RetireReport),
     RecycleReport(RecycleReport),
     ResetReport(ResetReport),
@@ -388,6 +330,16 @@ pub(crate) enum MeerkatMachineControlCommandResult {
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
+    Prepared(MeerkatMachineLegacyRunPrepared),
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+    MeerkatMachineCommand::command_manifest()
+        .iter()
+        .copied()
+        .collect()
 }
 
 /// Snapshot of completion waiters registered for one input.

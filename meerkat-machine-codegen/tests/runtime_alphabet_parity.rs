@@ -37,6 +37,11 @@ fn mob_machine_inputs_equal_runtime_manifest_exactly() {
 #[test]
 fn every_canonical_input_has_transition_coverage() {
     for schema in [meerkat_machine(), mob_machine()] {
+        let surface_only_inputs: BTreeSet<&str> = schema
+            .surface_only_inputs
+            .iter()
+            .map(String::as_str)
+            .collect();
         let covered: BTreeSet<&str> = schema
             .transitions
             .iter()
@@ -45,6 +50,9 @@ fn every_canonical_input_has_transition_coverage() {
             .collect();
 
         for input in &schema.inputs.variants {
+            if surface_only_inputs.contains(input.name.as_str()) {
+                continue;
+            }
             assert!(
                 covered.contains(input.name.as_str()),
                 "{} input `{}` has no transition coverage",

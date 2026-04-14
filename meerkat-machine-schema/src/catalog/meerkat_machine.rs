@@ -27,10 +27,9 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant("Idle"),
                     variant("Attached"),
                     variant("Running"),
-                    // Recovering is declared for completeness but is only reachable
-                    // via the internal RuntimeControl sub-machine, not at the
-                    // MeerkatMachine level.
-                    variant("Recovering"),
+                    // Recovering remains an internal RuntimeControlAuthority
+                    // phase, but the top-level MeerkatMachine never transitions
+                    // into it directly.
                     variant("Retired"),
                     variant("Stopped"),
                     variant("Destroyed"),
@@ -143,6 +142,7 @@ pub fn meerkat_machine() -> MachineSchema {
             name: "MeerkatMachineInput".into(),
             variants: input_variants,
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "MeerkatMachineSignal".into(),
             variants: signal_variants,
@@ -602,7 +602,6 @@ pub fn meerkat_machine() -> MachineSchema {
             ),
             prepare_bindings_transition("PrepareBindingsIdle", "Idle", "Attached"),
             prepare_bindings_transition("PrepareBindingsAttached", "Attached", "Attached"),
-            prepare_bindings_transition("PrepareBindingsRecovering", "Recovering", "Recovering"),
             prepare_bindings_transition("PrepareBindingsRunning", "Running", "Running"),
             prepare_bindings_transition("PrepareBindingsRetired", "Retired", "Retired"),
             TransitionSchema {
@@ -632,7 +631,6 @@ pub fn meerkat_machine() -> MachineSchema {
             set_peer_ingress_transition("SetPeerIngressContextIdle", "Idle"),
             set_peer_ingress_transition("SetPeerIngressContextAttached", "Attached"),
             set_peer_ingress_transition("SetPeerIngressContextRunning", "Running"),
-            set_peer_ingress_transition("SetPeerIngressContextRecovering", "Recovering"),
             set_peer_ingress_transition("SetPeerIngressContextRetired", "Retired"),
             set_peer_ingress_transition("SetPeerIngressContextStopped", "Stopped"),
             // NotifyDrainExited: the comms drain exits asynchronously, so the
@@ -684,22 +682,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     expr: Expr::Bool(false),
                 }],
                 to: "Running".into(),
-                emit: vec![notice_emit("drain", "drain exited")],
-            },
-            TransitionSchema {
-                name: "NotifyDrainExitedRecovering".into(),
-                from: vec!["Recovering".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("NotifyDrainExited"),
-                    variant: "NotifyDrainExited".into(),
-                    bindings: vec!["reason".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![Update::Assign {
-                    field: "drain_running".into(),
-                    expr: Expr::Bool(false),
-                }],
-                to: "Recovering".into(),
                 emit: vec![notice_emit("drain", "drain exited")],
             },
             TransitionSchema {
@@ -980,19 +962,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("recover", "runtime recovering")],
             },
             TransitionSchema {
-                name: "RecoverFromRecovering".into(),
-                from: vec!["Recovering".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Recovering".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
                 name: "RecoverFromRetired".into(),
                 from: vec!["Retired".into()],
                 on: InputMatch {
@@ -1050,7 +1019,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Initializing".into(),
                     "Idle".into(),
                     "Attached".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                 ],
                 on: InputMatch {
@@ -1099,7 +1067,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Idle".into(),
                     "Attached".into(),
                     "Running".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                 ],
                 on: InputMatch {
@@ -1128,7 +1095,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Idle".into(),
                     "Attached".into(),
                     "Running".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                     "Stopped".into(),
                 ],
@@ -1628,6 +1594,8 @@ fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
             | "PrepareBindings"
             | "InputState"
             | "ListActiveInputs"
+            | "StagePersistentFilter"
+            | "RequestDeferredTools"
             | "PublishCommittedVisibleSet"
             | "Ingest"
             | "PublishEvent"
@@ -1853,7 +1821,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    for phase in ["Attached", "Running", "Recovering", "Retired", "Stopped"] {
+    for phase in ["Attached", "Running", "Retired", "Stopped"] {
         transitions.push(self_loop_transition_with(
             &format!("AbortAll{phase}"),
             phase,

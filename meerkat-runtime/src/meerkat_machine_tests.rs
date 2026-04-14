@@ -9579,13 +9579,19 @@ async fn register_session_rejects_destroyed_session() {
     // Second register must be rejected — DestroyedShapeInvariant forbids
     // resurrecting a destroyed binding.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::RegisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("register should reject a destroyed session");
     assert!(
-        matches!(err, RuntimeDriverError::Destroyed),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::Destroyed)
+        ),
         "expected Destroyed, got {err:?}"
     );
 }
@@ -9597,13 +9603,19 @@ async fn unregister_session_rejects_unknown_session() {
 
     // Unregister on a session that was never registered must return an error.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::UnregisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::UnregisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("unregister should reject an unknown session");
     assert!(
-        matches!(err, RuntimeDriverError::NotReady { .. }),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::NotReady { .. })
+        ),
         "expected NotReady, got {err:?}"
     );
 }

@@ -1039,6 +1039,7 @@ mod tests {
                     },
                 ],
             },
+            surface_only_inputs: vec![],
             signals: EnumSchema {
                 name: "TurnExecutionSignal".to_owned(),
                 variants: vec![],

@@ -8,6 +8,7 @@ pub struct MachineSchema {
     pub rust: RustBinding,
     pub state: StateSchema,
     pub inputs: EnumSchema,
+    pub surface_only_inputs: Vec<String>,
     pub signals: EnumSchema,
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
@@ -26,6 +27,10 @@ impl MachineSchema {
     pub fn validate(&self) -> Result<(), MachineSchemaError> {
         let phase_names = self.state.phase.variants_by_name()?;
         let input_variants = self.inputs.variants_by_name()?;
+        let surface_only_inputs = unique_names(
+            self.surface_only_inputs.iter().map(String::as_str),
+            "surface-only input",
+        )?;
         let signal_variants = self.signals.variants_by_name()?;
         let effect_variants = self.effects.variants_by_name()?;
         let field_names = self.state.fields_by_name()?;
@@ -55,6 +60,17 @@ impl MachineSchema {
             if !field_names.contains(initializer.field.as_str()) {
                 return Err(MachineSchemaError::UnknownField {
                     field: initializer.field.clone(),
+                });
+            }
+        }
+
+        for surface_only_input in &self.surface_only_inputs {
+            if !input_variants
+                .iter()
+                .any(|variant| variant.as_str() == surface_only_input)
+            {
+                return Err(MachineSchemaError::UnknownSurfaceOnlyInputVariant {
+                    variant: surface_only_input.clone(),
                 });
             }
         }
@@ -104,6 +120,14 @@ impl MachineSchema {
                     });
                 }
                 _ => {}
+            }
+            if transition.on.kind == TriggerKind::Input
+                && surface_only_inputs.contains(transition.on.variant.as_str())
+            {
+                return Err(MachineSchemaError::SurfaceOnlyInputHasTransition {
+                    variant: transition.on.variant.clone(),
+                    transition: transition.name.clone(),
+                });
             }
             if !phase_names.contains(&transition.to) {
                 return Err(MachineSchemaError::UnknownPhase {
@@ -968,6 +992,7 @@ pub enum MachineSchemaError {
     UnknownPhase { phase: String },
     UnknownField { field: String },
     UnknownInputVariant { variant: String },
+    UnknownSurfaceOnlyInputVariant { variant: String },
     UnknownSignalVariant { variant: String },
     UnknownEffectVariant { variant: String },
     UnknownHelper { helper: String },
@@ -978,6 +1003,7 @@ pub enum MachineSchemaError {
     DuplicateEffectDisposition { variant: String },
     MissingEffectDisposition { variant: String },
     HandoffProtocolOnRoutedEffect { variant: String },
+    SurfaceOnlyInputHasTransition { variant: String, transition: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -989,6 +1015,9 @@ impl fmt::Display for MachineSchemaError {
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
             Self::UnknownInputVariant { variant } => {
                 write!(f, "unknown input variant `{variant}`")
+            }
+            Self::UnknownSurfaceOnlyInputVariant { variant } => {
+                write!(f, "unknown surface-only input variant `{variant}`")
             }
             Self::UnknownSignalVariant { variant } => {
                 write!(f, "unknown signal variant `{variant}`")
@@ -1020,6 +1049,15 @@ impl fmt::Display for MachineSchemaError {
                     "effect variant `{variant}` has handoff_protocol set but disposition is Routed (use routes instead)"
                 )
             }
+            Self::SurfaceOnlyInputHasTransition {
+                variant,
+                transition,
+            } => {
+                write!(
+                    f,
+                    "surface-only input `{variant}` must not have transition `{transition}`"
+                )
+            }
         }
     }
 }
@@ -1028,7 +1066,7 @@ impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::meerkat_machine;
+    use crate::{MachineSchemaError, catalog::meerkat_machine};
 
     #[test]
     fn validates_meerkat_machine_schema() {
@@ -1066,5 +1104,32 @@ mod tests {
                 .any(|transition| transition.name == "RecordSendFailedAttached")
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_unknown_surface_only_inputs() {
+        let mut schema = meerkat_machine();
+        schema.surface_only_inputs.push("DoesNotExist".into());
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::UnknownSurfaceOnlyInputVariant {
+                variant: "DoesNotExist".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_surface_only_inputs_with_transitions() {
+        let mut schema = meerkat_machine();
+        schema.surface_only_inputs.push("RegisterSession".into());
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::SurfaceOnlyInputHasTransition {
+                variant: "RegisterSession".into(),
+                transition: "RegisterSession".into(),
+            })
+        );
     }
 }

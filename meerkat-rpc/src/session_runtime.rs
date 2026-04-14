@@ -97,6 +97,11 @@ fn pending_system_context_appends(
         .collect()
 }
 
+#[cfg(test)]
+fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToolVisibilityState {
+    session.tool_visibility_state().unwrap_or_default()
+}
+
 fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
     match err {
         SessionError::NotFound { .. } => RuntimeDriverError::NotReady {
@@ -128,9 +133,9 @@ fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
             message,
             data: None,
         },
-        _ => RpcError {
+        other => RpcError {
             code: error::INTERNAL_ERROR,
-            message: err.to_string(),
+            message: other.to_string(),
             data: None,
         },
     }
@@ -161,13 +166,12 @@ struct SessionRuntimeLlmReconfigureHost {
 
 impl SessionRuntimeLlmReconfigureHost {
     async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RuntimeDriverError> {
-        let runtime = {
-            self.config_runtime
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
-        let config = if let Some(runtime) = runtime {
+        let config_runtime = self
+            .config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let config = if let Some(runtime) = config_runtime {
             runtime
                 .get()
                 .await
@@ -186,22 +190,20 @@ impl SessionRuntimeLlmReconfigureHost {
         &self,
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, RuntimeDriverError> {
-        let default_client = {
-            self.default_llm_client
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
-        let raw_client = if let Some(default) = default_client {
+        let default_llm_client = self
+            .default_llm_client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let raw_client = if let Some(default) = default_llm_client {
             default
         } else {
-            let runtime = {
-                self.config_runtime
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-            };
-            let config = if let Some(runtime) = runtime {
+            let config_runtime = self
+                .config_runtime
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let config = if let Some(runtime) = config_runtime {
                 runtime
                     .get()
                     .await
@@ -521,6 +523,7 @@ enum PendingSessionPhase {
 /// Wraps [`PersistentSessionService`] for session lifecycle management while
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
+    factory: AgentFactory,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
@@ -627,13 +630,14 @@ impl SessionRuntime {
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
-                factory: factory_clone,
+                factory: factory_clone.clone(),
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
             },
         ));
 
         Self {
+            factory: factory_clone.clone(),
             service,
             schedule_service,
             schedule_host: Mutex::new(None),
@@ -699,13 +703,14 @@ impl SessionRuntime {
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
                 service: Arc::clone(&service),
-                factory: factory_clone,
+                factory: factory_clone.clone(),
                 default_llm_client: Arc::clone(&default_llm_client),
                 config_runtime: Arc::clone(&config_runtime),
             },
         ));
 
         Self {
+            factory: factory_clone.clone(),
             service,
             schedule_service,
             schedule_host: Mutex::new(None),
@@ -1074,6 +1079,138 @@ impl SessionRuntime {
         }
     }
 
+    fn llm_reconfigure_host(&self) -> SessionRuntimeLlmReconfigureHost {
+        SessionRuntimeLlmReconfigureHost {
+            service: Arc::clone(&self.service),
+            factory: self.factory.clone(),
+            default_llm_client: Arc::clone(&self.default_llm_client),
+            config_runtime: Arc::clone(&self.config_runtime),
+        }
+    }
+
+    fn committed_visibility_allows(
+        base_tool_names: &std::collections::BTreeSet<String>,
+        visibility_state: &meerkat_core::SessionToolVisibilityState,
+        tool_name: &str,
+    ) -> bool {
+        if !base_tool_names.contains(tool_name) {
+            return false;
+        }
+
+        meerkat_core::ToolScope::compose(&[
+            visibility_state.capability_base_filter.clone(),
+            visibility_state.inherited_base_filter.clone(),
+            visibility_state.active_filter.clone(),
+        ])
+        .allows(tool_name)
+    }
+
+    fn derive_reconfigured_visibility_state(
+        current: &meerkat_core::SessionToolVisibilityState,
+        target_capability_surface: &SessionLlmCapabilitySurface,
+        base_tool_names: &std::collections::BTreeSet<String>,
+    ) -> meerkat_core::SessionToolVisibilityState {
+        let current_view_image_visible = Self::committed_visibility_allows(
+            base_tool_names,
+            current,
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        );
+
+        let mut next = current.clone();
+        next.capability_base_filter = meerkat_core::capability_base_filter_for_image_tool_results(
+            target_capability_surface.image_tool_results,
+        );
+
+        let next_view_image_visible = Self::committed_visibility_allows(
+            base_tool_names,
+            &next,
+            meerkat_core::VIEW_IMAGE_TOOL_NAME,
+        );
+        if current_view_image_visible != next_view_image_visible {
+            next.active_revision = current.active_revision.max(current.staged_revision) + 1;
+        }
+
+        next
+    }
+
+    async fn rollback_idle_hot_swap_failure(
+        &self,
+        host: &SessionRuntimeLlmReconfigureHost,
+        session_id: &SessionId,
+        previous_identity: &SessionLlmIdentity,
+        previous_visibility_state: &meerkat_core::SessionToolVisibilityState,
+        original_error: RuntimeDriverError,
+    ) -> Result<(), RuntimeDriverError> {
+        let rollback_result = async {
+            host.apply_live_session_llm_identity(session_id, previous_identity)
+                .await?;
+            host.apply_live_session_tool_visibility_state(
+                session_id,
+                Some(previous_visibility_state.clone()),
+            )
+            .await?;
+            Ok::<(), RuntimeDriverError>(())
+        }
+        .await;
+
+        match rollback_result {
+            Ok(()) => Err(original_error),
+            Err(rollback_error) => {
+                let _ = host.discard_live_session(session_id).await;
+                Err(RuntimeDriverError::Internal(format!(
+                    "failed to rollback idle live llm reconfiguration after error ({original_error}): {rollback_error}"
+                )))
+            }
+        }
+    }
+
+    async fn hot_swap_llm_client_on_idle_session(
+        &self,
+        session_id: &SessionId,
+        request: &SessionLlmReconfigureRequest,
+    ) -> Result<(), RuntimeDriverError> {
+        let host = self.llm_reconfigure_host();
+        let hydrated = host.hydrate_session_llm_state(session_id).await?;
+        let resolved = host
+            .resolve_target_session_llm_identity(request, &hydrated.current_identity)
+            .await?;
+        let next_visibility_state = Self::derive_reconfigured_visibility_state(
+            &hydrated.current_visibility_state,
+            &resolved.target_capability_surface,
+            &hydrated.base_tool_names,
+        );
+
+        host.apply_live_session_llm_identity(session_id, &resolved.target_identity)
+            .await?;
+        if let Err(error) = host
+            .apply_live_session_tool_visibility_state(session_id, Some(next_visibility_state))
+            .await
+        {
+            return self
+                .rollback_idle_hot_swap_failure(
+                    &host,
+                    session_id,
+                    &hydrated.current_identity,
+                    &hydrated.current_visibility_state,
+                    error,
+                )
+                .await;
+        }
+        if let Err(error) = host.persist_live_session(session_id).await {
+            return self
+                .rollback_idle_hot_swap_failure(
+                    &host,
+                    session_id,
+                    &hydrated.current_identity,
+                    &hydrated.current_visibility_state,
+                    error,
+                )
+                .await;
+        }
+
+        Ok(())
+    }
+
     /// Hot-swap the LLM client on a materialized session.
     ///
     /// The machine owns the semantic transition; RPC only adapts the request.
@@ -1082,6 +1219,12 @@ impl SessionRuntime {
         session_id: &SessionId,
         ov: &crate::handlers::turn::TurnOverrides,
     ) -> Result<(), RpcError> {
+        let request = SessionLlmReconfigureRequest {
+            model: ov.model.clone(),
+            provider: ov.provider.clone(),
+            provider_params: ov.provider_params.clone(),
+        };
+
         if !self.runtime_adapter.contains_session(session_id).await
             && self.service.read(session_id).await.is_ok()
         {
@@ -1097,18 +1240,20 @@ impl SessionRuntime {
                 })?;
         }
 
-        self.runtime_adapter
-            .reconfigure_session_llm_identity(
-                session_id,
-                SessionLlmReconfigureRequest {
-                    model: ov.model.clone(),
-                    provider: ov.provider.clone(),
-                    provider_params: ov.provider_params.clone(),
-                },
-            )
+        match self
+            .runtime_adapter
+            .reconfigure_session_llm_identity(session_id, request.clone())
             .await
-            .map(|_| ())
-            .map_err(runtime_driver_error_to_rpc)
+        {
+            Ok(_) => Ok(()),
+            Err(RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Idle,
+            }) => self
+                .hot_swap_llm_client_on_idle_session(session_id, &request)
+                .await
+                .map_err(runtime_driver_error_to_rpc),
+            Err(err) => Err(runtime_driver_error_to_rpc(err)),
+        }
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -5289,7 +5434,7 @@ mod tests {
     }
 
     /// After hot-swapping from an Anthropic model to an OpenAI model, the
-    /// `view_image` tool should be denied via an external tool filter.
+    /// machine-owned capability filter should hide `view_image`.
     #[tokio::test]
     async fn hot_swap_to_openai_hides_view_image() {
         let temp = tempfile::tempdir().unwrap();
@@ -5336,19 +5481,23 @@ mod tests {
             .await
             .unwrap();
 
-        // Export the session and check that the machine-owned capability layer blocks view_image.
+        // Export the session and check that the capability-owned visibility
+        // state blocks view_image without mutating the external overlay.
         let session = runtime
             .service
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let visibility_state = session
-            .tool_visibility_state()
-            .expect("hot-swap should persist canonical tool visibility state");
+        let visibility_state = exported_tool_visibility_state(&session);
         assert_eq!(
             visibility_state.capability_base_filter,
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
-            "hot-swap to OpenAI should deny view_image"
+            meerkat_core::capability_base_filter_for_image_tool_results(false),
+            "hot-swap to OpenAI should deny view_image via the capability base filter"
+        );
+        assert_eq!(
+            visibility_state.staged_filter,
+            meerkat_core::ToolFilter::All,
+            "hot-swap should not widen or replace the user-owned external filter"
         );
     }
 
@@ -5424,13 +5573,16 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let visibility_state = session
-            .tool_visibility_state()
-            .expect("hot-swap should persist canonical tool visibility state");
+        let visibility_state = exported_tool_visibility_state(&session);
         assert_eq!(
             visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::All,
-            "hot-swap back to Anthropic should clear view_image deny"
+            "hot-swap back to Anthropic should clear the capability-owned view_image deny"
+        );
+        assert_eq!(
+            visibility_state.staged_filter,
+            meerkat_core::ToolFilter::All,
+            "hot-swap back to Anthropic should leave the external filter untouched"
         );
     }
 
@@ -5496,23 +5648,21 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let visibility_state = session
-            .tool_visibility_state()
-            .expect("hot-swap should persist canonical tool visibility state");
-
+        let visibility_state = exported_tool_visibility_state(&session);
+        assert_eq!(
+            visibility_state.capability_base_filter,
+            meerkat_core::capability_base_filter_for_image_tool_results(false),
+            "hot-swap should deny view_image via the capability base filter"
+        );
         assert_eq!(
             visibility_state.staged_filter,
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
-            "hot-swap should preserve the user-authored deny filter"
-        );
-        assert_eq!(
-            visibility_state.capability_base_filter,
-            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
-            "hot-swap should add a separate capability-owned view_image deny"
+            "hot-swap should preserve the existing user-owned deny filter"
         );
     }
 
-    /// Hot-swapping back to a capable model removes only view_image, keeping other denied tools.
+    /// Hot-swapping back to a capable model clears only the capability-owned
+    /// `view_image` denial, keeping user-owned denies.
     #[tokio::test]
     async fn hot_swap_back_preserves_other_denied_tools() {
         let temp = tempfile::tempdir().unwrap();
@@ -5539,19 +5689,29 @@ mod tests {
             .await
             .unwrap();
 
-        // Stage a session-local deny filter for datetime.
+        // Simulate a prior OpenAI swap by combining a capability-owned
+        // `view_image` deny with a user-owned external deny for `datetime`.
+        let mut visibility_state = exported_tool_visibility_state(
+            &runtime
+                .service
+                .export_live_session(&session_id)
+                .await
+                .unwrap(),
+        );
+        visibility_state.capability_base_filter =
+            meerkat_core::capability_base_filter_for_image_tool_results(false);
+        visibility_state.active_filter =
+            meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect());
+        visibility_state.staged_filter = visibility_state.active_filter.clone();
         runtime
             .service
-            .set_session_tool_filter(
-                &session_id,
-                meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
-            )
+            .set_session_tool_visibility_state(&session_id, Some(visibility_state))
             .await
-            .expect("staging deny filter for datetime should succeed");
+            .expect("staging mixed capability and external denies should succeed");
 
-        // Hot-swap to OpenAI first so the capability-owned view_image hide is active.
+        // Hot-swap to Anthropic — should clear only the capability-owned deny.
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.2".to_string()),
+            model: Some("claude-sonnet-4-5".to_string()),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -5568,44 +5728,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Hot-swap back to Anthropic — should remove only the capability-owned
-        // view_image hide and preserve the user-authored datetime deny.
-        let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("claude-sonnet-4-5".to_string()),
-            ..Default::default()
-        };
-        let (event_tx3, _event_rx3) = mpsc::channel(100);
-        let _ = runtime
-            .start_turn(
-                &session_id,
-                "Third turn".into(),
-                event_tx3,
-                None,
-                None,
-                None,
-                Some(overrides),
-            )
-            .await
-            .unwrap();
-
         let session = runtime
             .service
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let visibility_state = session
-            .tool_visibility_state()
-            .expect("hot-swap should persist canonical tool visibility state");
+        let visibility_state = exported_tool_visibility_state(&session);
 
-        assert_eq!(
-            visibility_state.staged_filter,
-            meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
-            "hot-swap back to Anthropic should preserve only the user-authored deny"
-        );
         assert_eq!(
             visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::All,
-            "hot-swap back to Anthropic should clear the capability-owned view_image deny"
+            "hot-swap to Anthropic should clear the capability-owned view_image deny"
+        );
+        assert_eq!(
+            visibility_state.staged_filter,
+            meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
+            "hot-swap to Anthropic should keep the user-owned deny filter"
         );
     }
 

@@ -250,16 +250,6 @@ PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
     /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-PrepareBindingsRecovering(agent_runtime_id, fence_token, generation) ==
-    /\ phase = "Recovering"
-    /\ phase' = "Recovering"
-    /\ model_step_count' = model_step_count + 1
-    /\ active_runtime_id' = Some(agent_runtime_id)
-    /\ active_fence_token' = Some(fence_token)
-    /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
 PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -320,16 +310,6 @@ SetPeerIngressContextRunning(keep_alive) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-SetPeerIngressContextRecovering(keep_alive) ==
-    /\ phase = "Recovering"
-    /\ (session_id # None)
-    /\ phase' = "Recovering"
-    /\ model_step_count' = model_step_count + 1
-    /\ peer_ingress_configured' = TRUE
-    /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
 SetPeerIngressContextRetired(keep_alive) ==
     /\ phase = "Retired"
     /\ (session_id # None)
@@ -372,15 +352,6 @@ NotifyDrainExitedRunning(reason) ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
-NotifyDrainExitedRecovering(reason) ==
-    /\ phase = "Recovering"
-    /\ (session_id # None)
-    /\ phase' = "Recovering"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
@@ -511,13 +482,6 @@ RecoverFromAttached ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-RecoverFromRecovering ==
-    /\ phase = "Recovering"
-    /\ phase' = "Recovering"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
 RecoverFromRetired ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
@@ -548,7 +512,7 @@ RetireRequestedFromIdle ==
 
 
 Reset ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Recovering" \/ phase = "Retired"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Retired"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = None
@@ -562,7 +526,7 @@ Reset ==
 
 
 StopRuntimeExecutor ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Retired"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
@@ -571,7 +535,7 @@ StopRuntimeExecutor ==
 
 
 Destroy ==
-    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Retired" \/ phase = "Stopped"
     /\ (active_runtime_id # None)
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
@@ -689,14 +653,6 @@ AbortAllAttached ==
 AbortAllRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
-AbortAllRecovering ==
-    /\ phase = "Recovering"
-    /\ phase' = "Recovering"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
@@ -1525,20 +1481,17 @@ Next ==
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsInitializing(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsIdle(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsAttached(agent_runtime_id, fence_token, generation)
-    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsRecovering(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsRunning(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsRetired(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsStopped(agent_runtime_id, fence_token, generation)
     \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextIdle(keep_alive)
     \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextAttached(keep_alive)
     \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextRunning(keep_alive)
-    \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextRecovering(keep_alive)
     \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextRetired(keep_alive)
     \/ \E keep_alive \in BOOLEAN : SetPeerIngressContextStopped(keep_alive)
     \/ \E reason \in StringValues : NotifyDrainExitedIdle(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedAttached(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedRunning(reason)
-    \/ \E reason \in StringValues : NotifyDrainExitedRecovering(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedRetired(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedStopped(reason)
     \/ InterruptCurrentRun
@@ -1553,7 +1506,6 @@ Next ==
     \/ \E work_id \in WorkIdValues : RunCancelled(work_id)
     \/ RecoverFromIdle
     \/ RecoverFromAttached
-    \/ RecoverFromRecovering
     \/ RecoverFromRetired
     \/ RecoverFromStopped
     \/ RecoverFromInitializing
@@ -1575,7 +1527,6 @@ Next ==
     \/ \E arg_session_id \in SessionIdValues : WaitRunning(arg_session_id)
     \/ AbortAllAttached
     \/ AbortAllRunning
-    \/ AbortAllRecovering
     \/ AbortAllRetired
     \/ AbortAllStopped
     \/ EnsureDrainRunningAttached

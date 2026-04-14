@@ -675,6 +675,7 @@ where
                                 std::collections::HashSet::new(),
                             ),
                         };
+                        let previous_visibility_state = self.tool_scope.visibility_state().ok();
                         let visibility_state = match self.tool_scope.promote_staged_visibility() {
                             Ok(state) => state,
                             Err(err) => {
@@ -685,12 +686,25 @@ where
                                 self.tool_scope.visibility_state().unwrap_or_default()
                             }
                         };
-                        match self.tool_scope.apply_staged_projection(
-                            dispatcher_tools.clone(),
-                            control_tool_names,
-                            deferred_tool_names,
-                            &visibility_state,
-                        ) {
+                        let apply_result = if let Some(previous_visibility_state) =
+                            previous_visibility_state.as_ref()
+                        {
+                            self.tool_scope.apply_staged_projection_with_previous(
+                                dispatcher_tools.clone(),
+                                control_tool_names,
+                                deferred_tool_names,
+                                previous_visibility_state,
+                                &visibility_state,
+                            )
+                        } else {
+                            self.tool_scope.apply_staged_projection(
+                                dispatcher_tools.clone(),
+                                control_tool_names,
+                                deferred_tool_names,
+                                &visibility_state,
+                            )
+                        };
+                        match apply_result {
                             Ok(applied) => {
                                 if let Err(err) = self.publish_committed_visible_set() {
                                     tracing::warn!(

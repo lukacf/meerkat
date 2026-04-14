@@ -43,12 +43,11 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
             "rendered MeerkatMachine module should include input {required}"
         );
     }
-    for required in ["\"Initialize\""] {
-        assert!(
-            rendered.contains(required),
-            "rendered MeerkatMachine module should include signal {required}"
-        );
-    }
+    let required = "\"Initialize\"";
+    assert!(
+        rendered.contains(required),
+        "rendered MeerkatMachine module should include signal {required}"
+    );
     assert!(rendered.contains("TRANSITIONS\n  Initialize"));
     assert!(rendered.contains("PrepareBindings"));
     assert!(rendered.ends_with("====\n"));

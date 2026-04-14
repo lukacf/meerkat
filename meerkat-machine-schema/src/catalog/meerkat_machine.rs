@@ -1052,9 +1052,11 @@ pub fn meerkat_machine() -> MachineSchema {
                 to: "Attached".into(),
                 emit: vec![work_identity_emit("WorkCancelled", "work_id")],
             },
+            // Recover: dispatch calls drv.recover() which only touches ingress
+            // authority — the control phase does NOT change. Self-loops per phase.
             TransitionSchema {
-                name: "Recover".into(),
-                from: vec!["Idle".into(), "Attached".into()],
+                name: "RecoverFromIdle".into(),
+                from: vec!["Idle".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("Recover"),
                     variant: "Recover".into(),
@@ -1062,7 +1064,20 @@ pub fn meerkat_machine() -> MachineSchema {
                 },
                 guards: vec![],
                 updates: vec![],
-                to: "Recovering".into(),
+                to: "Idle".into(),
+                emit: vec![notice_emit("recover", "runtime recovering")],
+            },
+            TransitionSchema {
+                name: "RecoverFromAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    kind: meerkat_trigger_kind("Recover"),
+                    variant: "Recover".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Attached".into(),
                 emit: vec![notice_emit("recover", "runtime recovering")],
             },
             TransitionSchema {
@@ -2188,58 +2203,73 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
+    // Recycle: from Idle/Retired → Idle, from Attached → Attached (dispatch re-attaches).
+    let recycle_updates = vec![
+        Update::Assign {
+            field: "active_runtime_id".into(),
+            expr: Expr::None,
+        },
+        Update::Assign {
+            field: "active_fence_token".into(),
+            expr: Expr::None,
+        },
+        Update::Assign {
+            field: "active_generation".into(),
+            expr: Expr::None,
+        },
+        Update::Assign {
+            field: "active_work_id".into(),
+            expr: Expr::None,
+        },
+        Update::Assign {
+            field: "wake_pending".into(),
+            expr: Expr::Bool(false),
+        },
+        Update::Assign {
+            field: "process_pending".into(),
+            expr: Expr::Bool(false),
+        },
+        Update::Assign {
+            field: "peer_ingress_configured".into(),
+            expr: Expr::Bool(false),
+        },
+        Update::Assign {
+            field: "drain_running".into(),
+            expr: Expr::Bool(false),
+        },
+        Update::Assign {
+            field: "interrupt_pending".into(),
+            expr: Expr::Bool(false),
+        },
+        Update::Assign {
+            field: "shutdown_pending".into(),
+            expr: Expr::Bool(false),
+        },
+    ];
     transitions.push(TransitionSchema {
-        name: "Recycle".into(),
-        from: vec!["Idle".into(), "Attached".into(), "Retired".into()],
+        name: "RecycleFromIdleOrRetired".into(),
+        from: vec!["Idle".into(), "Retired".into()],
         on: InputMatch {
             kind: meerkat_trigger_kind("Recycle"),
             variant: "Recycle".into(),
             bindings: vec![],
         },
         guards: vec![runtime_is_bound_guard()],
-        updates: vec![
-            Update::Assign {
-                field: "active_runtime_id".into(),
-                expr: Expr::None,
-            },
-            Update::Assign {
-                field: "active_fence_token".into(),
-                expr: Expr::None,
-            },
-            Update::Assign {
-                field: "active_generation".into(),
-                expr: Expr::None,
-            },
-            Update::Assign {
-                field: "active_work_id".into(),
-                expr: Expr::None,
-            },
-            Update::Assign {
-                field: "wake_pending".into(),
-                expr: Expr::Bool(false),
-            },
-            Update::Assign {
-                field: "process_pending".into(),
-                expr: Expr::Bool(false),
-            },
-            Update::Assign {
-                field: "peer_ingress_configured".into(),
-                expr: Expr::Bool(false),
-            },
-            Update::Assign {
-                field: "drain_running".into(),
-                expr: Expr::Bool(false),
-            },
-            Update::Assign {
-                field: "interrupt_pending".into(),
-                expr: Expr::Bool(false),
-            },
-            Update::Assign {
-                field: "shutdown_pending".into(),
-                expr: Expr::Bool(false),
-            },
-        ],
+        updates: recycle_updates.clone(),
         to: "Idle".into(),
+        emit: vec![simple_emit("InitiateRecycle")],
+    });
+    transitions.push(TransitionSchema {
+        name: "RecycleFromAttached".into(),
+        from: vec!["Attached".into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("Recycle"),
+            variant: "Recycle".into(),
+            bindings: vec![],
+        },
+        guards: vec![runtime_is_bound_guard()],
+        updates: recycle_updates,
+        to: "Attached".into(),
         emit: vec![simple_emit("InitiateRecycle")],
     });
 

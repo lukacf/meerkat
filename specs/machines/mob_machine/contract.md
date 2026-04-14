@@ -1198,8 +1198,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `active_runs_present`
 - To: `Running`
 
+### `UnwireCreating`
+- From: `Creating`
+- On: `Unwire`()
+- Guards:
+  - `wired_edges_present`
+- Emits: `NotifyCoordinator`
+- To: `Creating`
+
 ### `UnwireRunning`
-- From: `Creating`, `Running`
+- From: `Running`
 - On: `Unwire`()
 - Guards:
   - `wired_edges_present`
@@ -1309,8 +1317,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
+### `RetireCreating`
+- From: `Creating`
+- On: `Retire`(agent_runtime_id)
+- Guards:
+  - `active_members_present`
+  - `unretired_members_present`
+- Emits: `RequestRuntimeRetire`
+- To: `Creating`
+
 ### `RetireRunning`
-- From: `Creating`, `Running`, `Stopped`
+- From: `Running`
 - On: `Retire`(agent_runtime_id)
 - Guards:
   - `active_members_present`
@@ -1318,11 +1335,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
+### `RetireStopped`
+- From: `Stopped`
+- On: `Retire`(agent_runtime_id)
+- Guards:
+  - `active_members_present`
+  - `unretired_members_present`
+- Emits: `RequestRuntimeRetire`
+- To: `Stopped`
+
+### `RetireAllCreating`
+- From: `Creating`
+- On: `RetireAll`()
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Creating`
+
 ### `RetireAllRunning`
-- From: `Creating`, `Running`, `Stopped`
+- From: `Running`
 - On: `RetireAll`()
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
+
+### `RetireAllStopped`
+- From: `Stopped`
+- On: `RetireAll`()
+- Emits: `EmitMemberLifecycleNotice`
+- To: `Stopped`
 
 ### `CompleteSpawnRunning`
 - From: `Running`
@@ -1355,6 +1393,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CancelWork`(work_id)
 - Emits: `FlowTerminalized`
 - To: `Running`
+
+### `CancelAllWorkCreating`
+- From: `Creating`
+- On: `CancelAllWork`()
+- Emits: `FlowTerminalized`
+- To: `Creating`
 
 ### `CancelAllWorkRunning`
 - From: `Running`

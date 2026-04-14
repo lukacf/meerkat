@@ -412,11 +412,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WorkCancelled`
 - To: `Attached`
 
-### `Recover`
-- From: `Idle`, `Attached`
+### `RecoverFromIdle`
+- From: `Idle`
 - On: `Recover`()
 - Emits: `RuntimeNotice`
-- To: `Recovering`
+- To: `Idle`
+
+### `RecoverFromAttached`
+- From: `Attached`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Attached`
 
 ### `RetireRequestedFromIdle`
 - From: `Idle`, `Attached`, `Running`
@@ -1263,13 +1269,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
-### `Recycle`
-- From: `Idle`, `Attached`, `Retired`
+### `RecycleFromIdleOrRetired`
+- From: `Idle`, `Retired`
 - On: `Recycle`()
 - Guards:
   - `runtime_is_bound`
 - Emits: `InitiateRecycle`
 - To: `Idle`
+
+### `RecycleFromAttached`
+- From: `Attached`
+- On: `Recycle`()
+- Guards:
+  - `runtime_is_bound`
+- Emits: `InitiateRecycle`
+- To: `Attached`
 
 ## Coverage
 ### Code Anchors

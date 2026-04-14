@@ -1429,28 +1429,31 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![],
     });
 
-    transitions.push(TransitionSchema {
-        name: "UnwireRunning".into(),
-        from: vec!["Creating".into(), "Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("Unwire"),
-            variant: "Unwire".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "wired_edges_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("wiring_edge_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Decrement {
-            field: "wiring_edge_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("NotifyCoordinator")],
-    });
+    // Unwire: per-phase self-loops for Creating and Running
+    for phase in ["Creating", "Running"] {
+        transitions.push(TransitionSchema {
+            name: format!("Unwire{phase}"),
+            from: vec![phase.into()],
+            on: InputMatch {
+                kind: mob_trigger_kind("Unwire"),
+                variant: "Unwire".into(),
+                bindings: vec![],
+            },
+            guards: vec![Guard {
+                name: "wired_edges_present".into(),
+                expr: Expr::Gt(
+                    Box::new(Expr::Field("wiring_edge_count".into())),
+                    Box::new(Expr::U64(0)),
+                ),
+            }],
+            updates: vec![Update::Decrement {
+                field: "wiring_edge_count".into(),
+                amount: 1,
+            }],
+            to: phase.into(),
+            emit: vec![simple_emit("NotifyCoordinator")],
+        });
+    }
 
     transitions.push(TransitionSchema {
         name: "RegisterPendingBodyFrameRunning".into(),
@@ -1778,54 +1781,61 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
     });
 
-    transitions.push(TransitionSchema {
-        name: "RetireRunning".into(),
-        from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("Retire"),
-            variant: "Retire".into(),
-            bindings: vec!["agent_runtime_id".into()],
+    // Retire: per-phase self-loops for Creating, Running, Stopped
+    let retire_guards = vec![
+        Guard {
+            name: "active_members_present".into(),
+            expr: Expr::Gt(
+                Box::new(Expr::Field("active_member_count".into())),
+                Box::new(Expr::U64(0)),
+            ),
         },
-        guards: vec![
-            Guard {
-                name: "active_members_present".into(),
-                expr: Expr::Gt(
-                    Box::new(Expr::Field("active_member_count".into())),
-                    Box::new(Expr::U64(0)),
-                ),
+        Guard {
+            name: "unretired_members_present".into(),
+            expr: Expr::Gt(
+                Box::new(Expr::Field("active_member_count".into())),
+                Box::new(Expr::Field("retiring_member_count".into())),
+            ),
+        },
+    ];
+    for phase in ["Creating", "Running", "Stopped"] {
+        transitions.push(TransitionSchema {
+            name: format!("Retire{phase}"),
+            from: vec![phase.into()],
+            on: InputMatch {
+                kind: mob_trigger_kind("Retire"),
+                variant: "Retire".into(),
+                bindings: vec!["agent_runtime_id".into()],
             },
-            Guard {
-                name: "unretired_members_present".into(),
-                expr: Expr::Gt(
-                    Box::new(Expr::Field("active_member_count".into())),
-                    Box::new(Expr::Field("retiring_member_count".into())),
-                ),
-            },
-        ],
-        updates: vec![Update::Increment {
-            field: "retiring_member_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![runtime_observation_emit("RequestRuntimeRetire")],
-    });
+            guards: retire_guards.clone(),
+            updates: vec![Update::Increment {
+                field: "retiring_member_count".into(),
+                amount: 1,
+            }],
+            to: phase.into(),
+            emit: vec![runtime_observation_emit("RequestRuntimeRetire")],
+        });
+    }
 
-    transitions.push(TransitionSchema {
-        name: "RetireAllRunning".into(),
-        from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("RetireAll"),
-            variant: "RetireAll".into(),
-            bindings: vec![],
-        },
-        guards: vec![],
-        updates: vec![Update::Assign {
-            field: "retiring_member_count".into(),
-            expr: Expr::Field("active_member_count".into()),
-        }],
-        to: "Running".into(),
-        emit: vec![lifecycle_notice_emit("retiring")],
-    });
+    // RetireAll: per-phase self-loops for Creating, Running, Stopped
+    for phase in ["Creating", "Running", "Stopped"] {
+        transitions.push(TransitionSchema {
+            name: format!("RetireAll{phase}"),
+            from: vec![phase.into()],
+            on: InputMatch {
+                kind: mob_trigger_kind("RetireAll"),
+                variant: "RetireAll".into(),
+                bindings: vec![],
+            },
+            guards: vec![],
+            updates: vec![Update::Assign {
+                field: "retiring_member_count".into(),
+                expr: Expr::Field("active_member_count".into()),
+            }],
+            to: phase.into(),
+            emit: vec![lifecycle_notice_emit("retiring")],
+        });
+    }
 
     transitions.push(TransitionSchema {
         name: "CompleteSpawnRunning".into(),
@@ -1891,27 +1901,25 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    for (variant, bindings, emit_variant, updates) in [
-        (
-            "CancelWork",
-            vec!["work_id"],
-            Some("FlowTerminalized"),
-            clear_work_updates(),
-        ),
-        (
+    // CancelWork: always errors in runtime, no phase check. Running-only is fine.
+    transitions.push(mob_self_loop_transition(
+        "CancelWork",
+        "Running",
+        "CancelWork",
+        vec!["work_id"],
+        clear_work_updates(),
+        vec![simple_emit("FlowTerminalized")],
+    ));
+
+    // CancelAllWork: delegates to ForceCancel which accepts [Creating, Running]
+    for phase in ["Creating", "Running"] {
+        transitions.push(mob_self_loop_transition(
+            "CancelAllWork",
+            phase,
             "CancelAllWork",
             vec![],
-            Some("FlowTerminalized"),
             clear_work_updates(),
-        ),
-    ] {
-        transitions.push(mob_self_loop_transition(
-            variant,
-            "Running",
-            variant,
-            bindings,
-            updates,
-            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![simple_emit("FlowTerminalized")],
         ));
     }
 

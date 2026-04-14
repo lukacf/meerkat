@@ -1514,8 +1514,17 @@ RegisterReadyFrameRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+UnwireCreating ==
+    /\ phase = "Creating"
+    /\ (wiring_edge_count > 0)
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ wiring_edge_count' = (wiring_edge_count) - 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 UnwireRunning ==
-    /\ phase = "Creating" \/ phase = "Running"
+    /\ phase = "Running"
     /\ (wiring_edge_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1653,8 +1662,18 @@ FinishRunRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
 
 
+RetireCreating(agent_runtime_id) ==
+    /\ phase = "Creating"
+    /\ (active_member_count > 0)
+    /\ (active_member_count > retiring_member_count)
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ retiring_member_count' = (retiring_member_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 RetireRunning(agent_runtime_id) ==
-    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Running"
     /\ (active_member_count > 0)
     /\ (active_member_count > retiring_member_count)
     /\ phase' = "Running"
@@ -1663,9 +1682,35 @@ RetireRunning(agent_runtime_id) ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+RetireStopped(agent_runtime_id) ==
+    /\ phase = "Stopped"
+    /\ (active_member_count > 0)
+    /\ (active_member_count > retiring_member_count)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ retiring_member_count' = (retiring_member_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RetireAllCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ retiring_member_count' = active_member_count
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 RetireAllRunning ==
-    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ retiring_member_count' = active_member_count
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RetireAllStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ retiring_member_count' = active_member_count
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
@@ -1722,6 +1767,18 @@ RespawnRunning(agent_runtime_id) ==
 CancelWorkRunning(work_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+CancelAllWorkCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ inflight_work_id' = None
     /\ active_run_count' = 0
@@ -1923,6 +1980,7 @@ Next ==
     \/ CreateRunRunning
     \/ StartRunRunning
     \/ RegisterReadyFrameRunning
+    \/ UnwireCreating
     \/ UnwireRunning
     \/ RegisterPendingBodyFrameRunning
     \/ CompleteFlowRunning
@@ -1937,13 +1995,18 @@ Next ==
     \/ UntilConditionFailedRunning
     \/ CancelLoopRunning
     \/ FinishRunRunning
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireCreating(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireRunning(agent_runtime_id)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireStopped(agent_runtime_id)
+    \/ RetireAllCreating
     \/ RetireAllRunning
+    \/ RetireAllStopped
     \/ CompleteSpawnRunning
     \/ DestroyFromAny
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnCreating(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnRunning(agent_runtime_id)
     \/ \E work_id \in WorkIdValues : CancelWorkRunning(work_id)
+    \/ CancelAllWorkCreating
     \/ CancelAllWorkRunning
     \/ TerminalStutter
 

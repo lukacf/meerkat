@@ -394,9 +394,16 @@ RunCancelled(work_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-Recover ==
-    /\ phase = "Idle" \/ phase = "Attached"
-    /\ phase' = "Recovering"
+RecoverFromIdle ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RecoverFromAttached ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
@@ -1320,10 +1327,28 @@ ShutdownSurfaceRunning ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-Recycle ==
-    /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Retired"
+RecycleFromIdleOrRetired ==
+    /\ phase = "Idle" \/ phase = "Retired"
     /\ (active_runtime_id # None)
     /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ active_generation' = None
+    /\ active_work_id' = None
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+    /\ peer_ingress_configured' = FALSE
+    /\ drain_running' = FALSE
+    /\ interrupt_pending' = FALSE
+    /\ shutdown_pending' = FALSE
+    /\ UNCHANGED << session_id, resolved_peer_keys, peer_reachability, peer_last_reason, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RecycleFromAttached ==
+    /\ phase = "Attached"
+    /\ (active_runtime_id # None)
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = None
     /\ active_fence_token' = None
@@ -1367,7 +1392,8 @@ Next ==
     \/ \E work_id \in WorkIdValues : RunCompleted(work_id)
     \/ \E work_id \in WorkIdValues : RunFailed(work_id)
     \/ \E work_id \in WorkIdValues : RunCancelled(work_id)
-    \/ Recover
+    \/ RecoverFromIdle
+    \/ RecoverFromAttached
     \/ RetireRequestedFromIdle
     \/ Reset
     \/ StopRuntimeExecutor
@@ -1480,7 +1506,8 @@ Next ==
     \/ SnapshotAlignedRunning
     \/ ShutdownSurfaceAttached
     \/ ShutdownSurfaceRunning
-    \/ Recycle
+    \/ RecycleFromIdleOrRetired
+    \/ RecycleFromAttached
     \/ TerminalStutter
 
 running_has_active_work == ((phase # "Running") \/ (active_work_id # None))

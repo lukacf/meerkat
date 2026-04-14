@@ -637,7 +637,7 @@ impl SessionRuntime {
         ));
 
         Self {
-            factory: factory_clone.clone(),
+            factory: factory_clone,
             service,
             schedule_service,
             schedule_host: Mutex::new(None),
@@ -710,7 +710,7 @@ impl SessionRuntime {
         ));
 
         Self {
-            factory: factory_clone.clone(),
+            factory: factory_clone,
             service,
             schedule_service,
             schedule_host: Mutex::new(None),

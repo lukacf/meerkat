@@ -1036,7 +1036,7 @@ async fn e2e_delegate_bidirectional_comms() {
                 .roster()
                 .await
                 .list()
-                .map(|entry| entry.meerkat_id().to_string())
+                .map(|entry| entry.agent_identity.to_string())
                 .collect::<Vec<_>>(),
             session_history_text(router.as_ref(), &session_id, 100).await
         );

@@ -1142,12 +1142,12 @@ function buildPhaseStats(phases, transitions, inputNames) {
 }
 
 function renderPosterHtml(poster) {
-  const outerPad = 28;
-  const leftRail = 340;
-  const rightRail = 380;
-  const railGap = 24;
-  const headerHeight = 188;
-  const footerHeight = 340;
+  const outerPad = 24;
+  const leftRail = 304;
+  const rightRail = 316;
+  const railGap = 18;
+  const headerHeight = 118;
+  const footerHeight = 252;
   const canvasWidth =
     outerPad * 2 + leftRail + railGap + poster.layout.plate.width + railGap + rightRail;
   const canvasHeight = headerHeight + poster.layout.plate.height + footerHeight;
@@ -1175,23 +1175,17 @@ function renderPosterHtml(poster) {
             <p class="subtitle">${escapeHtml(poster.subtitle)}</p>
           </div>
           <div class="legend-plaque">
-            <section class="legend-plaque__section">
-              <div class="section-label">Sources</div>
-              <div class="meta-grid">
-                ${renderMetaChip("TLA source", path.relative(repoRoot, poster.tlaPath))}
-                ${renderMetaChip("contract", path.relative(repoRoot, poster.contractPath))}
-                ${renderMetaChip("catalog", path.relative(repoRoot, poster.catalogPath))}
-                ${renderMetaChip("generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC"))}
-              </div>
-            </section>
-            <section class="legend-plaque__section">
-              <div class="section-label">Legend</div>
-              <div class="legend-grid">
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>input</strong><span>runtime command alphabet</span></div>
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>signal</strong><span>formal seam / derived trigger</span></div>
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>effect</strong><span>local / external / routed exits</span></div>
-              </div>
-            </section>
+            <div class="meta-grid">
+              ${renderMetaChip("TLA", path.relative(repoRoot, poster.tlaPath))}
+              ${renderMetaChip("contract", path.relative(repoRoot, poster.contractPath))}
+              ${renderMetaChip("catalog", path.relative(repoRoot, poster.catalogPath))}
+              ${renderMetaChip("generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC"))}
+            </div>
+            <div class="legend-grid">
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>Input</strong></div>
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>Signal</strong></div>
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>Effect</strong></div>
+            </div>
           </div>
         </header>
 
@@ -1306,7 +1300,6 @@ function renderGroupCard(group) {
         <span>${group.stats.signalCount} signal</span>
       </div>
     </header>
-    <p class="cluster__note">${escapeHtml(group.note)}</p>
     <div class="cluster__grid">
       ${group.records
         .map(
@@ -1332,7 +1325,6 @@ function renderStatePanel(panel) {
   return `<section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">${escapeHtml(panel.title)}</h3>
-    <p class="panel-note">${escapeHtml(panel.note ?? "")}</p>
     <div class="state-field-list">
       ${panel.fields
         .map(
@@ -1666,9 +1658,9 @@ function renderStyles(poster) {
     .plate-header {
       display: flex;
       justify-content: space-between;
-      gap: 24px;
-      align-items: flex-start;
-      padding: 4px 4px 18px;
+      gap: 18px;
+      align-items: flex-end;
+      padding: 2px 4px 10px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
     }
     .title-plaque {
@@ -1682,24 +1674,24 @@ function renderStyles(poster) {
       text-transform: uppercase;
     }
     h1 {
-      margin: 8px 0 0;
-      font-size: clamp(64px, 4.8vw, 108px);
-      line-height: 0.92;
+      margin: 6px 0 0;
+      font-size: clamp(48px, 3.8vw, 84px);
+      line-height: 0.94;
       letter-spacing: -0.07em;
       font-weight: 600;
     }
     .subtitle {
-      margin: 12px 0 0;
+      margin: 8px 0 0;
       color: var(--muted);
-      font-size: 17px;
-      line-height: 1.5;
+      font-size: 14px;
+      line-height: 1.35;
       max-width: 44rem;
     }
     .legend-plaque {
-      width: 760px;
+      width: 620px;
       display: grid;
-      gap: 14px;
-      padding: 14px 16px 16px;
+      gap: 10px;
+      padding: 12px 14px;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 18px;
       background: rgba(255,255,255,0.025);
@@ -1711,15 +1703,15 @@ function renderStyles(poster) {
     }
     .meta-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(260px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 8px;
       min-width: auto;
     }
     .meta-chip, .stat-chip {
       background: rgba(255,255,255,0.018);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 12px;
-      padding: 10px 12px;
+      padding: 8px 10px;
     }
     .meta-chip span, .stat-chip span {
       display: block;
@@ -1730,23 +1722,22 @@ function renderStyles(poster) {
     }
     .meta-chip strong, .stat-chip strong {
       display: block;
-      margin-top: 4px;
+      margin-top: 3px;
       color: var(--ink);
-      font-size: 13px;
+      font-size: 11px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      line-height: 1.4;
+      line-height: 1.35;
     }
     .legend-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
+      gap: 8px;
     }
     .legend-chip {
-      display: grid;
-      grid-template-columns: 16px 1fr;
-      gap: 10px;
+      display: flex;
+      gap: 8px;
       align-items: center;
-      padding: 10px 12px;
+      padding: 8px 10px;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 12px;
       background: rgba(255,255,255,0.018);
@@ -1762,17 +1753,10 @@ function renderStyles(poster) {
     .legend-chip__swatch--signal { background: var(--signal); }
     .legend-chip__swatch--effect { background: var(--effect); }
     .legend-chip strong {
-      display: block;
-      font-size: 13px;
+      font-size: 12px;
       line-height: 1.2;
       text-transform: uppercase;
       letter-spacing: 0.08em;
-    }
-    .legend-chip span:last-child {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.35;
     }
     .stat-band {
       display: grid;
@@ -1806,24 +1790,19 @@ function renderStyles(poster) {
     }
     .state-panel__title {
       margin: 8px 0 0;
-      font-size: 22px;
+      font-size: 19px;
       letter-spacing: -0.035em;
       line-height: 1.05;
-    }
-    .panel-note {
-      margin: 10px 0 14px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
     }
     .state-field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      gap: 6px;
+      margin-top: 10px;
     }
     .state-field {
-      min-height: 54px;
-      padding: 9px 10px;
+      min-height: 48px;
+      padding: 8px 9px;
       border-radius: 10px;
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(255,255,255,0.06);
@@ -1948,7 +1927,7 @@ function renderStyles(poster) {
     }
     .cluster__header h3 {
       margin: 8px 0 0;
-      font-size: 23px;
+      font-size: 20px;
       line-height: 1.05;
       letter-spacing: -0.035em;
       font-weight: 600;
@@ -1962,23 +1941,18 @@ function renderStyles(poster) {
       letter-spacing: 0.12em;
       text-align: right;
     }
-    .cluster__note {
-      margin: 10px 0 12px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
     .cluster__grid {
       display: grid;
       grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
-      gap: 9px 10px;
+      gap: 7px 10px;
+      margin-top: 10px;
     }
     .trigger-row {
       display: grid;
       grid-template-columns: 10px minmax(0, 1fr);
       gap: 10px;
       align-items: start;
-      padding: 8px 0 8px;
+      padding: 6px 0 6px;
       border-top: 1px solid rgba(255,255,255,0.05);
     }
     .trigger-row:first-child,
@@ -1999,7 +1973,7 @@ function renderStyles(poster) {
       background: var(--signal);
     }
     .trigger-row__name {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1.25;
       letter-spacing: 0.01em;
@@ -2007,16 +1981,17 @@ function renderStyles(poster) {
     .trigger-row__path {
       margin-top: 2px;
       color: var(--muted);
-      font-size: 10px;
-      line-height: 1.4;
+      font-size: 9px;
+      line-height: 1.3;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .cluster__footer {
       display: grid;
       gap: 8px;
-      margin-top: 14px;
-      padding-top: 12px;
+      margin-top: 10px;
+      padding-top: 10px;
       border-top: 1px solid rgba(255,255,255,0.06);
+      opacity: 0.72;
     }
     .token-lane {
       display: grid;
@@ -2121,9 +2096,9 @@ function renderStyles(poster) {
       top: 0;
       left: 0;
       display: grid;
-      grid-template-columns: repeat(7, minmax(84px, 1fr));
-      gap: 10px;
-      width: 700px;
+      grid-template-columns: repeat(7, minmax(72px, 1fr));
+      gap: 8px;
+      width: 600px;
       z-index: 5;
     }
     .effect-panel--canvas,

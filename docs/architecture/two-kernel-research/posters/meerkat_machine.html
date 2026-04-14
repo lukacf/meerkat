@@ -70,9 +70,9 @@
     .plate-header {
       display: flex;
       justify-content: space-between;
-      gap: 24px;
-      align-items: flex-start;
-      padding: 4px 4px 18px;
+      gap: 18px;
+      align-items: flex-end;
+      padding: 2px 4px 10px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
     }
     .title-plaque {
@@ -86,24 +86,24 @@
       text-transform: uppercase;
     }
     h1 {
-      margin: 8px 0 0;
-      font-size: clamp(64px, 4.8vw, 108px);
-      line-height: 0.92;
+      margin: 6px 0 0;
+      font-size: clamp(48px, 3.8vw, 84px);
+      line-height: 0.94;
       letter-spacing: -0.07em;
       font-weight: 600;
     }
     .subtitle {
-      margin: 12px 0 0;
+      margin: 8px 0 0;
       color: var(--muted);
-      font-size: 17px;
-      line-height: 1.5;
+      font-size: 14px;
+      line-height: 1.35;
       max-width: 44rem;
     }
     .legend-plaque {
-      width: 760px;
+      width: 620px;
       display: grid;
-      gap: 14px;
-      padding: 14px 16px 16px;
+      gap: 10px;
+      padding: 12px 14px;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 18px;
       background: rgba(255,255,255,0.025);
@@ -115,15 +115,15 @@
     }
     .meta-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(260px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 8px;
       min-width: auto;
     }
     .meta-chip, .stat-chip {
       background: rgba(255,255,255,0.018);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 12px;
-      padding: 10px 12px;
+      padding: 8px 10px;
     }
     .meta-chip span, .stat-chip span {
       display: block;
@@ -134,23 +134,22 @@
     }
     .meta-chip strong, .stat-chip strong {
       display: block;
-      margin-top: 4px;
+      margin-top: 3px;
       color: var(--ink);
-      font-size: 13px;
+      font-size: 11px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      line-height: 1.4;
+      line-height: 1.35;
     }
     .legend-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
+      gap: 8px;
     }
     .legend-chip {
-      display: grid;
-      grid-template-columns: 16px 1fr;
-      gap: 10px;
+      display: flex;
+      gap: 8px;
       align-items: center;
-      padding: 10px 12px;
+      padding: 8px 10px;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 12px;
       background: rgba(255,255,255,0.018);
@@ -166,17 +165,10 @@
     .legend-chip__swatch--signal { background: var(--signal); }
     .legend-chip__swatch--effect { background: var(--effect); }
     .legend-chip strong {
-      display: block;
-      font-size: 13px;
+      font-size: 12px;
       line-height: 1.2;
       text-transform: uppercase;
       letter-spacing: 0.08em;
-    }
-    .legend-chip span:last-child {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.35;
     }
     .stat-band {
       display: grid;
@@ -210,24 +202,19 @@
     }
     .state-panel__title {
       margin: 8px 0 0;
-      font-size: 22px;
+      font-size: 19px;
       letter-spacing: -0.035em;
       line-height: 1.05;
-    }
-    .panel-note {
-      margin: 10px 0 14px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
     }
     .state-field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      gap: 6px;
+      margin-top: 10px;
     }
     .state-field {
-      min-height: 54px;
-      padding: 9px 10px;
+      min-height: 48px;
+      padding: 8px 9px;
       border-radius: 10px;
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(255,255,255,0.06);
@@ -352,7 +339,7 @@
     }
     .cluster__header h3 {
       margin: 8px 0 0;
-      font-size: 23px;
+      font-size: 20px;
       line-height: 1.05;
       letter-spacing: -0.035em;
       font-weight: 600;
@@ -366,23 +353,18 @@
       letter-spacing: 0.12em;
       text-align: right;
     }
-    .cluster__note {
-      margin: 10px 0 12px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
     .cluster__grid {
       display: grid;
       grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
-      gap: 9px 10px;
+      gap: 7px 10px;
+      margin-top: 10px;
     }
     .trigger-row {
       display: grid;
       grid-template-columns: 10px minmax(0, 1fr);
       gap: 10px;
       align-items: start;
-      padding: 8px 0 8px;
+      padding: 6px 0 6px;
       border-top: 1px solid rgba(255,255,255,0.05);
     }
     .trigger-row:first-child,
@@ -403,7 +385,7 @@
       background: var(--signal);
     }
     .trigger-row__name {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1.25;
       letter-spacing: 0.01em;
@@ -411,16 +393,17 @@
     .trigger-row__path {
       margin-top: 2px;
       color: var(--muted);
-      font-size: 10px;
-      line-height: 1.4;
+      font-size: 9px;
+      line-height: 1.3;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .cluster__footer {
       display: grid;
       gap: 8px;
-      margin-top: 14px;
-      padding-top: 12px;
+      margin-top: 10px;
+      padding-top: 10px;
       border-top: 1px solid rgba(255,255,255,0.06);
+      opacity: 0.72;
     }
     .token-lane {
       display: grid;
@@ -525,9 +508,9 @@
       top: 0;
       left: 0;
       display: grid;
-      grid-template-columns: repeat(7, minmax(84px, 1fr));
-      gap: 10px;
-      width: 700px;
+      grid-template-columns: repeat(7, minmax(72px, 1fr));
+      gap: 8px;
+      width: 600px;
       z-index: 5;
     }
     .effect-panel--canvas,
@@ -560,7 +543,7 @@
   <body>
     <main class="page-shell">
       <a class="page-index-link" href="./index.html">← Poster index</a>
-      <article class="architectural-plate" style="--canvas-width:2804; --canvas-height:1788;">
+      <article class="architectural-plate" style="--canvas-width:2684; --canvas-height:1630;">
         <header class="plate-header">
           <div class="title-plaque">
             <div class="eyebrow">Canonical machine plate / generated from TLA + contract artifacts</div>
@@ -568,23 +551,17 @@
             <p class="subtitle">Lifecycle / Transition / Visibility / Effect Architecture</p>
           </div>
           <div class="legend-plaque">
-            <section class="legend-plaque__section">
-              <div class="section-label">Sources</div>
-              <div class="meta-grid">
-                <div class="meta-chip"><span>TLA source</span><strong>specs/machines/meerkat_machine/model.tla</strong></div>
-                <div class="meta-chip"><span>contract</span><strong>specs/machines/meerkat_machine/contract.md</strong></div>
-                <div class="meta-chip"><span>catalog</span><strong>meerkat-machine-schema/src/catalog/meerkat_machine.rs</strong></div>
-                <div class="meta-chip"><span>generated</span><strong>2026-04-14 10:46:10.201 UTC</strong></div>
-              </div>
-            </section>
-            <section class="legend-plaque__section">
-              <div class="section-label">Legend</div>
-              <div class="legend-grid">
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>input</strong><span>runtime command alphabet</span></div>
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>signal</strong><span>formal seam / derived trigger</span></div>
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>effect</strong><span>local / external / routed exits</span></div>
-              </div>
-            </section>
+            <div class="meta-grid">
+              <div class="meta-chip"><span>TLA</span><strong>specs/machines/meerkat_machine/model.tla</strong></div>
+              <div class="meta-chip"><span>contract</span><strong>specs/machines/meerkat_machine/contract.md</strong></div>
+              <div class="meta-chip"><span>catalog</span><strong>meerkat-machine-schema/src/catalog/meerkat_machine.rs</strong></div>
+              <div class="meta-chip"><span>generated</span><strong>2026-04-14 10:47:44.859 UTC</strong></div>
+            </div>
+            <div class="legend-grid">
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>Input</strong></div>
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>Signal</strong></div>
+              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>Effect</strong></div>
+            </div>
           </div>
         </header>
 
@@ -599,11 +576,10 @@
             <div class="stat-chip"><span>state vars</span><strong>24</strong></div>
           </section>
 
-          <aside class="sidebar sidebar--left" style="left:28px; top:188px; width:340px;">
+          <aside class="sidebar sidebar--left" style="left:24px; top:118px; width:304px;">
             <section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Runtime Binding Plane</h3>
-    <p class="panel-note">Identity, work ownership, and the bound runtime envelope.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>session_id</strong>
@@ -625,7 +601,6 @@
   </section><section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Control Fabric</h3>
-    <p class="panel-note">Wake, process, interrupt, shutdown, ingress, and drain latches.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>wake_pending</strong>
@@ -650,7 +625,6 @@
   </section><section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Residual Registers</h3>
-    <p class="panel-note">Fields not explicitly assigned to a poster subsystem.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>resolved_peer_keys</strong>
@@ -696,7 +670,7 @@
   </section>
           </aside>
 
-          <section class="schematic-column" style="left:392px; top:188px; width:1980px;">
+          <section class="schematic-column" style="left:346px; top:118px; width:1980px;">
             <section class="schematic-plate" style="width:1980px; height:1260px;">
     <svg class="schematic-svg" viewBox="0 0 1980 1260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MeerkatMachine schematic"><defs>
       <marker id="phase-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
@@ -823,7 +797,6 @@
         <span>1 signal</span>
       </div>
     </header>
-    <p class="cluster__note">The top-level movement between initialization, registration, binding, recovery, retirement, and destruction.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--signal">
             <span class="trigger-row__kind"></span>
@@ -922,7 +895,6 @@
         <span>5 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Interrupt, defer-to-boundary cancellation, terminal work outcomes, and cross-kernel work ingress.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--input">
             <span class="trigger-row__kind"></span>
@@ -1003,7 +975,6 @@
         <span>14 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Filter staging, deferred tools, boundary promotion, and surface delta handling.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--signal">
             <span class="trigger-row__kind"></span>
@@ -1132,7 +1103,6 @@
         <span>7 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Ingress context, drain liveness, reachability repair, and session-local drain control.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--input">
             <span class="trigger-row__kind"></span>
@@ -1243,7 +1213,6 @@
         <span>0 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Session queries, ingress acceptance, event publication, and boundary receipt inspection.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--input">
             <span class="trigger-row__kind"></span>
@@ -1366,7 +1335,6 @@
         <span>23 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Prepare/commit/fail plus admission, primitive execution, tool-call return, and boundary exit paths.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--input">
             <span class="trigger-row__kind"></span>
@@ -1561,7 +1529,6 @@
         <span>22 signal</span>
       </div>
     </header>
-    <p class="cluster__note">Extraction branch, op provisioning, retirement, wait-all, and terminal collection.</p>
     <div class="cluster__grid">
       <div class="trigger-row trigger-row--signal">
             <span class="trigger-row__kind"></span>
@@ -1724,11 +1691,10 @@
   </section>
           </section>
 
-          <aside class="sidebar sidebar--right" style="left:2396px; top:188px; width:380px;">
+          <aside class="sidebar sidebar--right" style="left:2344px; top:118px; width:316px;">
             <section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Visibility Commit Pipeline</h3>
-    <p class="panel-note">Staged → active → committed filter promotion with witness tables.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>inherited_base_filter</strong>
@@ -1765,7 +1731,6 @@
   </section><section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Peer Reachability Fabric</h3>
-    <p class="panel-note">Resolved peers, reachability table, and terminal send reasons.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>resolved_peer_keys</strong>
@@ -1781,7 +1746,6 @@
   </section><section class="state-panel">
     <div class="section-label">Subsystem</div>
     <h3 class="state-panel__title">Residual Registers</h3>
-    <p class="panel-note">Fields not explicitly assigned to a poster subsystem.</p>
     <div class="state-field-list">
       <div class="state-field">
             <strong>session_id</strong>
@@ -1821,7 +1785,7 @@
   </section>
           </aside>
 
-          <section class="effect-panel effect-panel--canvas" style="left:28px; top:1466px; width:1598px;">
+          <section class="effect-panel effect-panel--canvas" style="left:24px; top:1396px; width:1533px;">
             <div class="section-label">Effect bus</div>
             <div class="effect-lanes">
               <article class="effect-lane effect-lane--routed">
@@ -1846,7 +1810,7 @@
             </div>
           </section>
 
-          <section class="invariant-panel invariant-panel--canvas" style="left:1626px; top:1466px; width:1150px;">
+          <section class="invariant-panel invariant-panel--canvas" style="left:1557px; top:1396px; width:1103px;">
             <div class="section-label">Invariant plate</div>
             <div class="invariant-grid">
               <article class="invariant-card">

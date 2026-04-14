@@ -475,15 +475,14 @@ impl MobEventKind {
 /// intentionally omitted from the public event contract.
 pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde_json::Error> {
     let mut value = serde_json::to_value(event)?;
-    if let Some(member_spawned) = event.kind.member_spawned() {
-        if let Some(bridge_member_ref) = member_spawned.bridge_member_ref() {
-            if let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut) {
-                kind.insert(
-                    "bridge_member_ref".to_string(),
-                    serde_json::to_value(bridge_member_ref)?,
-                );
-            }
-        }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(bridge_member_ref) = member_spawned.bridge_member_ref()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "bridge_member_ref".to_string(),
+            serde_json::to_value(bridge_member_ref)?,
+        );
     }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
@@ -508,8 +507,7 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         })?;
     if schema_version != CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION as u64 {
         return Err(stored_mob_event_format_error(format!(
-            "unsupported stored mob event schema_version={schema_version}; expected {}",
-            CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION
+            "unsupported stored mob event schema_version={schema_version}; expected {CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION}",
         )));
     }
     let mut value = encoded_object
@@ -522,10 +520,10 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value)
         .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
-    if let Some(bridge_member_ref) = bridge_member_ref {
-        if let Some(member_spawned) = event.kind.member_spawned_mut() {
-            member_spawned.bridge_member_ref = Some(bridge_member_ref);
-        }
+    if let Some(bridge_member_ref) = bridge_member_ref
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.bridge_member_ref = Some(bridge_member_ref);
     }
     Ok(event)
 }

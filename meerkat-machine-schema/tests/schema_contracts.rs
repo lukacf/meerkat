@@ -78,16 +78,24 @@ fn kernel_seam_rejects_type_mismatched_route_binding() {
     let meerkat = meerkat_machine();
     let mob = mob_machine();
     let mut composition = meerkat_mob_seam_composition();
-    let route = composition
+    let route_idx = composition
         .routes
-        .iter_mut()
-        .find(|route| route.name == "binding_request_reaches_meerkat")
-        .expect("binding request route");
-    let generation_binding = route
+        .iter()
+        .position(|route| route.name == "binding_request_reaches_meerkat");
+    assert!(route_idx.is_some(), "binding request route");
+    let Some(route_idx) = route_idx else {
+        return;
+    };
+    let route = &mut composition.routes[route_idx];
+    let generation_binding_idx = route
         .bindings
-        .iter_mut()
-        .find(|binding| binding.to_field == "generation")
-        .expect("generation binding");
+        .iter()
+        .position(|binding| binding.to_field == "generation");
+    assert!(generation_binding_idx.is_some(), "generation binding");
+    let Some(generation_binding_idx) = generation_binding_idx else {
+        return;
+    };
+    let generation_binding = &mut route.bindings[generation_binding_idx];
     generation_binding.source = meerkat_machine_schema::RouteBindingSource::Field {
         from_field: "fence_token".into(),
         allow_named_alias: false,
@@ -96,8 +104,8 @@ fn kernel_seam_rejects_type_mismatched_route_binding() {
     let result = composition.validate_against(&[&meerkat, &mob]);
     assert!(matches!(
         result,
-        Err(CompositionSchemaError::RouteFieldTypeMismatch { .. })
-            | Err(CompositionSchemaError::MachineSchema(_))
+        Err(CompositionSchemaError::RouteFieldTypeMismatch { .. }
+            | CompositionSchemaError::MachineSchema(_))
     ));
 }
 

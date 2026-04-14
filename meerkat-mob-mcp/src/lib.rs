@@ -577,7 +577,7 @@ impl MobMcpState {
                     .bridge_session_id()
                     .is_some_and(|candidate| candidate == bridge_session_id)
             }) {
-                resolved = Some((mob_id, member.agent_identity.clone()));
+                resolved = Some((mob_id, member.agent_identity));
                 break;
             }
         }

@@ -438,6 +438,7 @@ pub enum Update {
 }
 
 impl Update {
+    #[allow(clippy::too_many_arguments)]
     fn validate(
         &self,
         phase_names: &IndexSet<&String>,
@@ -670,6 +671,7 @@ pub enum Expr {
 }
 
 impl Expr {
+    #[allow(clippy::too_many_arguments)]
     fn validate(
         &self,
         phase_names: &IndexSet<&String>,

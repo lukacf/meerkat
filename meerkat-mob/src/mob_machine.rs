@@ -131,6 +131,8 @@ pub(crate) enum MobMachineCommand {
     FlowTrackerCounts,
     #[cfg(test)]
     OrchestratorSnapshot,
+    #[allow(dead_code)]
+    // Kept for dispatch pipeline; construction removed by kickoff barrier rewrite
     KickoffBarrierSnapshot {
         meerkat_ids: Vec<MeerkatId>,
     },
@@ -171,13 +173,17 @@ pub(crate) enum MobMachineCommandResult {
     FlowTrackerCounts((usize, usize)),
     #[cfg(test)]
     OrchestratorSnapshot(MobOrchestratorSnapshot),
+    #[allow(dead_code)]
     KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
 }
 
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
-    let mut variants = IndexSet::from_iter(MobMachineCommand::command_manifest().iter().copied());
+    let mut variants: IndexSet<&'static str> = MobMachineCommand::command_manifest()
+        .iter()
+        .copied()
+        .collect();
     for excluded in ["FlowTrackerCounts", "OrchestratorSnapshot"] {
         variants.shift_remove(excluded);
     }

@@ -1819,7 +1819,7 @@ fn mob_self_loop_transition(
         on: InputMatch {
             kind: mob_trigger_kind(variant),
             variant: variant.into(),
-            bindings: bindings.into_iter().map(|binding| binding.into()).collect(),
+            bindings: bindings.into_iter().map(Into::into).collect(),
         },
         guards: vec![],
         updates,

@@ -2257,7 +2257,7 @@ fn self_loop_transition_with(
         on: InputMatch {
             kind: meerkat_trigger_kind(variant),
             variant: variant.into(),
-            bindings: bindings.into_iter().map(|binding| binding.into()).collect(),
+            bindings: bindings.into_iter().map(Into::into).collect(),
         },
         guards,
         updates,

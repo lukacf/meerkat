@@ -2340,9 +2340,11 @@ impl MobHandle {
 
         match entry.kickoff.as_ref().map(|kickoff| kickoff.phase) {
             None
-            | Some(MobMemberKickoffPhase::Started)
-            | Some(MobMemberKickoffPhase::Failed)
-            | Some(MobMemberKickoffPhase::Cancelled) => true,
+            | Some(
+                MobMemberKickoffPhase::Started
+                | MobMemberKickoffPhase::Failed
+                | MobMemberKickoffPhase::Cancelled,
+            ) => true,
             Some(
                 MobMemberKickoffPhase::Pending
                 | MobMemberKickoffPhase::Starting

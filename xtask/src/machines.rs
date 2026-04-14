@@ -124,6 +124,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
+    prune_stale_generated_kernel_modules(root, &registry)?;
     write_generated(
         &generated_kernel_mod_path(root),
         &render_generated_kernel_mod(&kernel_export_schemas),
@@ -162,13 +163,14 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
         write_generated(&mapping_path, &merged)?;
         println!("updated {}", mapping_path.display());
 
+        let generated_slug = generated_kernel_module_slug(&machine.schema.machine);
         write_generated(
-            &generated_kernel_module_path(root, &machine.slug),
+            &generated_kernel_module_path(root, &generated_slug),
             &render_machine_kernel_module(&machine.schema),
         )?;
         println!(
             "generated {}",
-            generated_kernel_module_path(root, &machine.slug).display()
+            generated_kernel_module_path(root, &generated_slug).display()
         );
     }
 
@@ -354,8 +356,9 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
             &render_machine_mapping_coverage(&machine.schema, &machine.coverage),
         )?;
         compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
+        let generated_slug = generated_kernel_module_slug(&machine.schema.machine);
         compare_generated(
-            &generated_kernel_module_path(root, &machine.slug),
+            &generated_kernel_module_path(root, &generated_slug),
             &render_machine_kernel_module(&machine.schema),
             &mut mismatches,
         )?;
@@ -443,9 +446,10 @@ pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>>
 pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<String>> {
     let registry = CanonicalRegistry::load();
     let mut mismatches = Vec::new();
+    let expected_generated = expected_generated_kernel_modules(&registry);
 
     for machine in &registry.machines {
-        let slug = machine_slug(&machine.machine);
+        let slug = generated_kernel_module_slug(&machine.machine);
         let generated_kernel = generated_kernel_module_path(root, &slug);
         if !generated_kernel.exists() {
             continue;
@@ -478,6 +482,39 @@ pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<S
                 generated_kernel.display(),
                 owner_mod.display()
             ));
+        }
+    }
+
+    let generated_mod = generated_kernel_mod_path(root);
+    let generated_dir = generated_mod
+        .parent()
+        .context("generated kernel mod parent")?;
+    if generated_dir.exists() {
+        for entry in fs::read_dir(generated_dir)
+            .with_context(|| format!("read {}", generated_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("scan generated kernel dir {}", generated_dir.display())
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if !expected_generated.contains(stem) {
+                mismatches.push(format!(
+                    "stale generated kernel module must be removed {}",
+                    path.display()
+                ));
+            }
         }
     }
 
@@ -625,13 +662,14 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
         }
 
         let slug = machine_slug(&machine.machine);
+        let generated_slug = generated_kernel_module_slug(&machine.machine);
         for artifact_path in [
             machine_contract_path(root, &slug),
             machine_model_path(root, &slug),
             machine_ci_path(root, &slug),
             machine_deep_path(root, &slug),
             machine_mapping_path(root, &slug),
-            generated_kernel_module_path(root, &slug),
+            generated_kernel_module_path(root, &generated_slug),
         ] {
             if !artifact_path.exists() {
                 mismatches.push(format!(
@@ -1555,7 +1593,7 @@ struct OwnerTestSpec {
 }
 
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
-    const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
+    const MEERKAT: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
@@ -1566,8 +1604,6 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
         },
-    ];
-    const SESSION_TURN_ADMISSION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
@@ -1578,6 +1614,16 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             target: "session_turn_admission_kernel",
             filter: "session_turn_admission_kernel_interrupt_only_wakes_running_turns",
         },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_promotes_staged_filter_at_boundary",
+        },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
+        },
     ];
     const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
@@ -1586,8 +1632,7 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     }];
 
     match slug {
-        "peer_directory_reachability" => PEER_DIRECTORY_REACHABILITY,
-        "session_turn_admission" => SESSION_TURN_ADMISSION,
+        "meerkat_machine" => MEERKAT,
         "mob_machine" => MOB,
         _ => &[],
     }
@@ -1915,6 +1960,64 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
     schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
     schemas.dedup_by(|a, b| a.machine == b.machine);
     schemas
+}
+
+fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
+    let mut expected = registry
+        .machines
+        .iter()
+        .map(|schema| generated_kernel_module_slug(&schema.machine))
+        .collect::<BTreeSet<_>>();
+    for compat in ["flow_frame", "flow_run", "loop_iteration"] {
+        expected.insert(compat.to_string());
+    }
+    expected
+}
+
+fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistry) -> Result<()> {
+    let generated_mod = generated_kernel_mod_path(root);
+    let generated_dir = generated_mod
+        .parent()
+        .context("generated kernel mod parent")?;
+    if !generated_dir.exists() {
+        return Ok(());
+    }
+
+    let expected = expected_generated_kernel_modules(registry);
+    for entry in
+        fs::read_dir(generated_dir).with_context(|| format!("read {}", generated_dir.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("scan generated kernel dir {}", generated_dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if expected.contains(stem) {
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("remove stale generated kernel module {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn generated_kernel_module_slug(machine_name: &str) -> String {
+    match machine_name {
+        "MeerkatMachine" => "meerkat".into(),
+        "MobMachine" => "mob".into(),
+        _ => to_snake_case(machine_name.strip_suffix("Machine").unwrap_or(machine_name)),
+    }
 }
 
 pub fn machine_slug(machine_name: &str) -> String {

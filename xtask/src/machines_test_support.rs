@@ -275,7 +275,7 @@ struct OwnerTestSpec {
 
 #[allow(dead_code)]
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
-    const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
+    const MEERKAT: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
@@ -286,8 +286,6 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
         },
-    ];
-    const SESSION_TURN_ADMISSION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "session_turn_admission_kernel",
@@ -298,6 +296,16 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             target: "session_turn_admission_kernel",
             filter: "session_turn_admission_kernel_interrupt_only_wakes_running_turns",
         },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_promotes_staged_filter_at_boundary",
+        },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
+        },
     ];
     const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
         package: "meerkat-mob",
@@ -306,8 +314,7 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     }];
 
     match slug {
-        "peer_directory_reachability" => PEER_DIRECTORY_REACHABILITY,
-        "session_turn_admission" => SESSION_TURN_ADMISSION,
+        "meerkat_machine" => MEERKAT,
         "mob_machine" => MOB,
         _ => &[],
     }

@@ -19,13 +19,21 @@ fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
         vec![
             "MeerkatMachine",
             "MobMachine",
-            "PeerDirectoryReachabilityMachine",
             "ScheduleLifecycleMachine",
-            "OccurrenceLifecycleMachine",
-            "SessionToolVisibilityMachine",
-            "SessionTurnAdmissionMachine",
+            "OccurrenceLifecycleMachine"
         ]
     );
+
+    for absorbed in [
+        "SessionTurnAdmissionMachine",
+        "SessionToolVisibilityMachine",
+        "PeerDirectoryReachabilityMachine",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == &absorbed),
+            "{absorbed} should be absorbed into canonical kernels, not published separately"
+        );
+    }
 }
 
 #[test]
@@ -163,4 +171,326 @@ fn kernel_seam_retains_coverage_metadata() {
             "schedule_mob_bundle",
         ]
     );
+}
+
+#[test]
+fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
+    let schema = meerkat_machine();
+    let input_names = schema
+        .inputs
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "EnsureSessionWithExecutor",
+        "SetSilentIntents",
+        "Ingest",
+        "PublishEvent",
+        "AcceptWithCompletion",
+        "AcceptWithoutWake",
+        "PrepareLegacyRun",
+        "CommitLegacyRun",
+        "FailLegacyRun",
+        "EnsureDrainRunning",
+        "ClassifyExternalEnvelope",
+        "ClassifyPlainEvent",
+        "RegisterOperation",
+        "StartConversationRun",
+        "InterruptCurrentRun",
+        "CancelAfterBoundary",
+        "StageAdd",
+        "StageRemove",
+        "StageReload",
+        "PendingSucceeded",
+        "SnapshotAligned",
+        "ReconcileResolvedDirectory",
+        "StagePersistentFilter",
+        "RequestDeferredTools",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MeerkatMachine should absorb input {required}"
+        );
+    }
+
+    for required in [
+        "ResolveAdmission",
+        "SubmitAdmittedIngressEffect",
+        "SubmitRunPrimitive",
+        "SubmitOpEvent",
+        "EnqueueClassifiedEntry",
+        "SpawnDrainTask",
+        "EmitExternalToolDelta",
+        "CommittedVisibleSetPublished",
+    ] {
+        assert!(
+            effect_names.iter().any(|name| name == &required),
+            "MeerkatMachine should absorb effect {required}"
+        );
+    }
+}
+
+#[test]
+fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_state() {
+    let schema = meerkat_machine();
+    let field_names = schema
+        .state
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    let transition_names = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<Vec<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "interrupt_pending",
+        "shutdown_pending",
+        "inherited_base_filter",
+        "active_filter",
+        "staged_filter",
+        "active_requested_deferred_names",
+        "staged_requested_deferred_names",
+        "requested_witnesses",
+        "filter_witnesses",
+        "active_visibility_revision",
+        "staged_visibility_revision",
+        "committed_visibility_revision",
+        "resolved_peer_keys",
+        "peer_reachability",
+        "peer_last_reason",
+    ] {
+        assert!(
+            field_names.iter().any(|name| name == &required),
+            "MeerkatMachine state should retain absorbed field {required}"
+        );
+    }
+
+    for required in [
+        "InterruptCurrentRun",
+        "CancelAfterBoundary",
+        "StagePersistentFilterAttached",
+        "StagePersistentFilterRunning",
+        "RequestDeferredToolsAttached",
+        "RequestDeferredToolsRunning",
+        "BoundaryAppliedPromote",
+        "PublishCommittedVisibleSetAttached",
+        "PublishCommittedVisibleSetRunning",
+        "ReconcileResolvedDirectoryAttached",
+        "ReconcileResolvedDirectoryRunning",
+        "RecordSendSucceededAttached",
+        "RecordSendSucceededRunning",
+        "RecordSendFailedAttached",
+        "RecordSendFailedRunning",
+    ] {
+        assert!(
+            transition_names.iter().any(|name| name == &required),
+            "MeerkatMachine should expose absorbed transition {required}"
+        );
+    }
+
+    for required in ["WakeInterrupt", "CommittedVisibleSetPublished"] {
+        assert!(
+            effect_names.iter().any(|name| name == &required),
+            "MeerkatMachine should retain absorbed effect {required}"
+        );
+    }
+}
+
+#[test]
+fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domains() {
+    let schema = mob_machine();
+    let input_names = schema
+        .inputs
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "RunFlow",
+        "CancelFlow",
+        "CancelWork",
+        "CancelAllWork",
+        "Wire",
+        "Unwire",
+        "ExternalTurn",
+        "InternalTurn",
+        "TaskCreate",
+        "TaskUpdate",
+        "SubscribeMobEvents",
+        "StageSpawn",
+        "KickoffStarted",
+        "RuntimeRunSubmitted",
+        "CreateRun",
+        "RegisterTargets",
+        "StartRootFrame",
+        "StartLoop",
+        "BodyFrameCompleted",
+        "UntilConditionFailed",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MobMachine should absorb input {required}"
+        );
+    }
+
+    for required in [
+        "EmitFlowRunNotice",
+        "PersistStepOutput",
+        "AdmitStepWork",
+        "NotifyCoordinator",
+        "AdmitKickoffTurn",
+        "RequestBodyFrameStart",
+        "LoopCompleted",
+        "EmitTaskNotice",
+    ] {
+        assert!(
+            effect_names.iter().any(|name| name == &required),
+            "MobMachine should absorb effect {required}"
+        );
+    }
+}
+
+#[test]
+fn meerkat_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs() {
+    let schema = meerkat_machine();
+    let input_names = schema
+        .inputs
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "RegisterSession",
+        "UnregisterSession",
+        "EnsureSessionWithExecutor",
+        "SetSilentIntents",
+        "InterruptCurrentRun",
+        "CancelAfterBoundary",
+        "StopRuntimeExecutor",
+        "ContainsSession",
+        "SessionHasExecutor",
+        "SessionHasComms",
+        "OpsLifecycleRegistry",
+        "PrepareBindings",
+        "InputState",
+        "ListActiveInputs",
+        "PublishCommittedVisibleSet",
+        "SetPeerIngressContext",
+        "NotifyDrainExited",
+        "AbortAllDrains",
+        "AbortDrain",
+        "WaitDrain",
+        "Ingest",
+        "PublishEvent",
+        "RuntimeState",
+        "LoadBoundaryReceipt",
+        "AcceptWithCompletion",
+        "AcceptWithoutWake",
+        "PrepareLegacyRun",
+        "CommitLegacyRun",
+        "FailLegacyRun",
+        "RetireRuntime",
+        "RecycleRuntime",
+        "ResetRuntime",
+        "RecoverRuntime",
+        "DestroyRuntime",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MeerkatMachine canonical schema should account for runtime command/input {required}"
+        );
+    }
+}
+
+#[test]
+fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs() {
+    let schema = mob_machine();
+    let input_names = schema
+        .inputs
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "RunFlow",
+        "CancelFlow",
+        "FlowStatus",
+        "SpawnMember",
+        "Retire",
+        "Respawn",
+        "RetireAll",
+        "Wire",
+        "Unwire",
+        "ExternalTurn",
+        "InternalTurn",
+        "SubmitWork",
+        "CancelWork",
+        "CancelAllWork",
+        "Stop",
+        "Resume",
+        "Complete",
+        "Reset",
+        "Destroy",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "McpServerStates",
+        "RosterSnapshot",
+        "ListMembers",
+        "ListMembersIncludingRetiring",
+        "ListAllMembers",
+        "MemberStatus",
+        "SubscribeAgentEvents",
+        "SubscribeAllAgentEvents",
+        "SubscribeMobEvents",
+        "PollEvents",
+        "ReplayAllEvents",
+        "RecordOperatorActionProvenance",
+        "GetMember",
+        "KickoffBarrierSnapshot",
+        "SetSpawnPolicy",
+        "Shutdown",
+        "ForceCancel",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MobMachine canonical schema should account for runtime command/input {required}"
+        );
+    }
+
+    for intentionally_test_only in ["FlowTrackerCounts", "OrchestratorSnapshot"] {
+        assert!(
+            !input_names
+                .iter()
+                .any(|name| name == &intentionally_test_only),
+            "MobMachine canonical schema should not publish test-only diagnostic input {intentionally_test_only}"
+        );
+    }
 }

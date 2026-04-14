@@ -858,23 +858,41 @@ pub enum StepRunStatus {
 }
 
 impl StepRunStatus {
+    pub(crate) fn parse_kernel_value(value: &KernelValue) -> Result<Self, String> {
+        let variant = match value {
+            KernelValue::Map(entries) => {
+                let some_value = entries
+                    .get(&KernelValue::String("value".to_string()))
+                    .ok_or_else(|| {
+                        format!("expected option payload with `value`, found {value:?}")
+                    })?;
+                some_value.as_named_variant("StepRunStatus")?
+            }
+            _ => value.as_named_variant("StepRunStatus")?,
+        };
+
+        match variant {
+            "Dispatched" => Ok(Self::Dispatched),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Skipped" => Ok(Self::Skipped),
+            "Canceled" => Ok(Self::Canceled),
+            other => Err(format!("unknown StepRunStatus variant `{other}`")),
+        }
+    }
+
     pub(crate) fn from_flow_run_kernel_value(
         value: &KernelValue,
         run_id: &RunId,
     ) -> Result<Self, MobError> {
-        match value.as_named_variant("StepRunStatus") {
-            Ok("Dispatched") => Ok(Self::Dispatched),
-            Ok("Completed") => Ok(Self::Completed),
-            Ok("Failed") => Ok(Self::Failed),
-            Ok("Skipped") => Ok(Self::Skipped),
-            Ok("Canceled") => Ok(Self::Canceled),
-            Ok(variant) => Err(MobError::Internal(format!(
-                "unknown StepRunStatus variant `{variant}` for {run_id}"
-            ))),
-            Err(reason) => Err(MobError::Internal(format!(
-                "flow_run step_status entry invalid for {run_id}: {reason}"
-            ))),
-        }
+        Self::parse_kernel_value(value).map_err(|reason| {
+            let message = if reason.starts_with("unknown StepRunStatus variant") {
+                format!("{reason} for {run_id}")
+            } else {
+                format!("flow_run step_status entry invalid for {run_id}: {reason}")
+            };
+            MobError::Internal(message)
+        })
     }
 
     /// A step is terminal when it can no longer receive work dispatch or
@@ -1229,6 +1247,34 @@ mod tests {
         assert!(
             matches!(error, MobError::Internal(ref message) if message.contains("unknown StepRunStatus variant `Broken`")),
             "expected explicit step status parse failure, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn test_mob_run_step_status_snapshot_accepts_some_wrapped_variant() {
+        let mut run = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
+            serde_json::json!({}),
+        );
+        run.flow_state.fields.insert(
+            "step_status".to_string(),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("step-a".to_string()),
+                KernelValue::Map(BTreeMap::from([(
+                    KernelValue::String("value".to_string()),
+                    KernelValue::NamedVariant {
+                        enum_name: "StepRunStatus".to_string(),
+                        variant: "Completed".to_string(),
+                    },
+                )])),
+            )])),
+        );
+
+        assert_eq!(
+            run.step_status_snapshot().unwrap(),
+            BTreeMap::from([(StepId::from("step-a"), StepRunStatus::Completed)])
         );
     }
 

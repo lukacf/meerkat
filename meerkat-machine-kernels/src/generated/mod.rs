@@ -5,10 +5,7 @@ pub mod loop_iteration;
 pub mod meerkat;
 pub mod mob;
 pub mod occurrence_lifecycle;
-pub mod peer_directory_reachability;
 pub mod schedule_lifecycle;
-pub mod session_tool_visibility;
-pub mod session_turn_admission;
 
 use crate::runtime::GeneratedMachineKernel;
 
@@ -17,9 +14,6 @@ pub fn all_kernels() -> Vec<GeneratedMachineKernel> {
         meerkat::kernel(),
         mob::kernel(),
         occurrence_lifecycle::kernel(),
-        peer_directory_reachability::kernel(),
         schedule_lifecycle::kernel(),
-        session_tool_visibility::kernel(),
-        session_turn_admission::kernel(),
     ]
 }

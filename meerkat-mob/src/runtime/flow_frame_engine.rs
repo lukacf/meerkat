@@ -615,6 +615,25 @@ impl FlowFrameEngine {
                                         .await?;
                                     continue;
                                 }
+                                if let Some(decision) =
+                                    FlowFrameLoopDriver::recover_pending_body_frame_request(
+                                        &run.flow_state,
+                                        loop_snapshot,
+                                    )?
+                                {
+                                    healed_any = true;
+                                    let _ = self
+                                        .execute_decision(
+                                            run_id,
+                                            root_frame_id,
+                                            root_spec,
+                                            context,
+                                            None,
+                                            decision,
+                                        )
+                                        .await?;
+                                    continue;
+                                }
                                 continue;
                             }
                             healed_any = true;
@@ -1303,6 +1322,14 @@ fn active_body_frame_id(kernel_state: &meerkat_machine_kernels::KernelState) -> 
         Some(KernelValue::String(frame_id)) if !frame_id.is_empty() => {
             Some(FrameId::from(frame_id.as_str()))
         }
+        Some(KernelValue::Map(entries)) => entries
+            .get(&KernelValue::String("value".into()))
+            .and_then(|value| match value {
+                KernelValue::String(frame_id) if !frame_id.is_empty() => {
+                    Some(FrameId::from(frame_id.as_str()))
+                }
+                _ => None,
+            }),
         _ => None,
     }
 }

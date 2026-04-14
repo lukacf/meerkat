@@ -65,83 +65,91 @@ pub fn mob_machine() -> MachineSchema {
         },
         inputs: EnumSchema {
             name: "MobMachineInput".into(),
-            variants: vec![
-                variant("Start"),
-                VariantSchema {
-                    name: "SpawnMember".into(),
-                    fields: identity_runtime_fields(),
-                },
-                VariantSchema {
-                    name: "ObserveRuntimeReady".into(),
-                    fields: runtime_observation_fields(),
-                },
-                VariantSchema {
-                    name: "SubmitWork".into(),
-                    fields: work_submission_fields(),
-                },
-                VariantSchema {
-                    name: "ObserveWorkCompleted".into(),
-                    fields: work_observation_fields(),
-                },
-                VariantSchema {
-                    name: "ObserveWorkFailed".into(),
-                    fields: work_observation_fields(),
-                },
-                VariantSchema {
-                    name: "ObserveWorkCancelled".into(),
-                    fields: work_observation_fields(),
-                },
-                VariantSchema {
-                    name: "RetireMember".into(),
-                    fields: runtime_observation_fields(),
-                },
-                VariantSchema {
-                    name: "ObserveRuntimeRetired".into(),
-                    fields: runtime_observation_fields(),
-                },
-                VariantSchema {
-                    name: "ResetMember".into(),
-                    fields: identity_runtime_fields(),
-                },
-                VariantSchema {
-                    name: "RespawnMember".into(),
-                    fields: identity_runtime_fields(),
-                },
-                variant("DestroyMob"),
-                VariantSchema {
-                    name: "ObserveRuntimeDestroyed".into(),
-                    fields: runtime_observation_fields(),
-                },
-                variant("MarkCompleted"),
-            ],
+            variants: {
+                let mut variants = vec![
+                    variant("Start"),
+                    VariantSchema {
+                        name: "SpawnMember".into(),
+                        fields: identity_runtime_fields(),
+                    },
+                    VariantSchema {
+                        name: "ObserveRuntimeReady".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "SubmitWork".into(),
+                        fields: work_submission_fields(),
+                    },
+                    VariantSchema {
+                        name: "ObserveWorkCompleted".into(),
+                        fields: work_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "ObserveWorkFailed".into(),
+                        fields: work_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "ObserveWorkCancelled".into(),
+                        fields: work_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "RetireMember".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "ObserveRuntimeRetired".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "ResetMember".into(),
+                        fields: identity_runtime_fields(),
+                    },
+                    VariantSchema {
+                        name: "RespawnMember".into(),
+                        fields: identity_runtime_fields(),
+                    },
+                    variant("DestroyMob"),
+                    VariantSchema {
+                        name: "ObserveRuntimeDestroyed".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    variant("MarkCompleted"),
+                ];
+                variants.extend(absorbed_mob_input_variants());
+                variants
+            },
         },
         effects: EnumSchema {
             name: "MobMachineEffect".into(),
-            variants: vec![
-                VariantSchema {
-                    name: "RequestRuntimeBinding".into(),
-                    fields: runtime_binding_request_fields(),
-                },
-                VariantSchema {
-                    name: "SubmitMemberWork".into(),
-                    fields: work_submission_fields(),
-                },
-                VariantSchema {
-                    name: "RequestRuntimeRetire".into(),
-                    fields: runtime_observation_fields(),
-                },
-                VariantSchema {
-                    name: "RequestRuntimeDestroy".into(),
-                    fields: runtime_observation_fields(),
-                },
-                VariantSchema {
-                    name: "EmitMemberLifecycleNotice".into(),
-                    fields: vec![
-                        field("agent_identity", TypeRef::Named("AgentIdentity".into())),
-                        field("kind", TypeRef::String),
-                    ],
-                },
-            ],
+            variants: {
+                let mut variants = vec![
+                    VariantSchema {
+                        name: "RequestRuntimeBinding".into(),
+                        fields: runtime_binding_request_fields(),
+                    },
+                    VariantSchema {
+                        name: "SubmitMemberWork".into(),
+                        fields: work_submission_fields(),
+                    },
+                    VariantSchema {
+                        name: "RequestRuntimeRetire".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "RequestRuntimeDestroy".into(),
+                        fields: runtime_observation_fields(),
+                    },
+                    VariantSchema {
+                        name: "EmitMemberLifecycleNotice".into(),
+                        fields: vec![
+                            field("agent_identity", TypeRef::Named("AgentIdentity".into())),
+                            field("kind", TypeRef::String),
+                        ],
+                    },
+                ];
+                variants.extend(absorbed_mob_effect_variants());
+                variants
+            },
         },
         helpers: vec![],
         derived: vec![],
@@ -533,7 +541,10 @@ pub fn mob_machine() -> MachineSchema {
             routed_disposition("RequestRuntimeRetire", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeDestroy", &["MeerkatMachine"]),
             external_disposition("EmitMemberLifecycleNotice"),
-        ],
+        ]
+        .into_iter()
+        .chain(absorbed_mob_effect_dispositions())
+        .collect(),
     }
 }
 
@@ -688,4 +699,222 @@ fn routed_disposition(effect_variant: &str, consumers: &[&str]) -> EffectDisposi
         },
         handoff_protocol: None,
     }
+}
+
+fn absorbed_mob_input_variants() -> Vec<VariantSchema> {
+    vec![
+        variant("RunFlow"),
+        variant("CancelFlow"),
+        variant("FlowStatus"),
+        VariantSchema {
+            name: "Retire".into(),
+            fields: vec![field("agent_runtime_id", named_runtime_id())],
+        },
+        VariantSchema {
+            name: "Respawn".into(),
+            fields: vec![field("agent_runtime_id", named_runtime_id())],
+        },
+        variant("RetireAll"),
+        variant("Wire"),
+        variant("Unwire"),
+        variant("ExternalTurn"),
+        variant("InternalTurn"),
+        VariantSchema {
+            name: "CancelWork".into(),
+            fields: vec![field("work_id", named_work_id())],
+        },
+        VariantSchema {
+            name: "CancelAllWork".into(),
+            fields: runtime_observation_fields(),
+        },
+        variant("Stop"),
+        variant("Resume"),
+        variant("Complete"),
+        variant("Reset"),
+        variant("Destroy"),
+        variant("TaskCreate"),
+        variant("TaskUpdate"),
+        variant("TaskList"),
+        variant("TaskGet"),
+        variant("McpServerStates"),
+        variant("RosterSnapshot"),
+        variant("ListMembers"),
+        variant("ListMembersIncludingRetiring"),
+        variant("ListAllMembers"),
+        variant("MemberStatus"),
+        variant("SubscribeAgentEvents"),
+        variant("SubscribeAllAgentEvents"),
+        variant("SubscribeMobEvents"),
+        variant("PollEvents"),
+        variant("ReplayAllEvents"),
+        variant("RecordOperatorActionProvenance"),
+        variant("GetMember"),
+        variant("KickoffBarrierSnapshot"),
+        variant("SetSpawnPolicy"),
+        variant("Shutdown"),
+        variant("ForceCancel"),
+        variant("StartRun"),
+        variant("FinishRun"),
+        variant("BeginCleanup"),
+        variant("FinishCleanup"),
+        variant("InitializeOrchestrator"),
+        variant("BindCoordinator"),
+        variant("UnbindCoordinator"),
+        variant("StageSpawn"),
+        variant("CompleteSpawn"),
+        variant("StartFlow"),
+        variant("CompleteFlow"),
+        variant("StopOrchestrator"),
+        variant("ResumeOrchestrator"),
+        variant("DestroyOrchestrator"),
+        variant("ForceCancelMember"),
+        variant("MemberPeerExposed"),
+        variant("MemberTerminalized"),
+        variant("OperationPeerTrusted"),
+        variant("PeerInputAdmitted"),
+        variant("RuntimeWorkAdmitted"),
+        variant("KickoffStarted"),
+        variant("KickoffCallbackPending"),
+        variant("KickoffFailed"),
+        variant("KickoffCancelled"),
+        variant("KickoffForceCancelled"),
+        variant("RuntimeRunSubmitted"),
+        variant("RuntimeRunCompleted"),
+        variant("RuntimeRunFailed"),
+        variant("RuntimeRunCancelled"),
+        variant("RuntimeStopRequested"),
+        variant("CreateRun"),
+        variant("DispatchStep"),
+        variant("CompleteStep"),
+        variant("RecordStepOutput"),
+        variant("ConditionPassed"),
+        variant("ConditionRejected"),
+        variant("FailStep"),
+        variant("SkipStep"),
+        variant("ProjectFrameStepStatus"),
+        variant("CancelStep"),
+        variant("RegisterTargets"),
+        variant("RecordTargetSuccess"),
+        variant("RecordTargetTerminalFailure"),
+        variant("RecordTargetCanceled"),
+        variant("RecordTargetFailure"),
+        variant("RegisterReadyFrame"),
+        variant("RegisterPendingBodyFrame"),
+        variant("NodeExecutionReleased"),
+        variant("FrameTerminated"),
+        variant("TerminalizeCompleted"),
+        variant("TerminalizeFailed"),
+        variant("TerminalizeCanceled"),
+        variant("StartRootFrame"),
+        variant("StartBodyFrame"),
+        variant("CompleteNode"),
+        variant("RecordNodeOutput"),
+        variant("FailNode"),
+        variant("SkipNode"),
+        variant("CancelNode"),
+        variant("StartLoop"),
+        variant("BodyFrameStarted"),
+        variant("BodyFrameCompleted"),
+        variant("BodyFrameFailed"),
+        variant("BodyFrameCanceled"),
+        variant("UntilConditionMet"),
+        variant("UntilConditionFailed"),
+        variant("CancelLoop"),
+    ]
+}
+
+fn absorbed_mob_effect_variants() -> Vec<VariantSchema> {
+    vec![
+        variant("EmitRunLifecycleNotice"),
+        variant("EmitFlowRunNotice"),
+        variant("EmitStepNotice"),
+        variant("AppendFailureLedger"),
+        variant("PersistStepOutput"),
+        variant("AdmitStepWork"),
+        variant("FlowTerminalized"),
+        variant("EscalateSupervisor"),
+        variant("ProjectTargetSuccess"),
+        variant("ProjectTargetFailure"),
+        variant("ProjectTargetCanceled"),
+        variant("GrantNodeSlot"),
+        variant("GrantBodyFrameStart"),
+        variant("NotifyCoordinator"),
+        variant("ExposePendingSpawn"),
+        variant("AdmitKickoffTurn"),
+        variant("EmitMemberTerminalNotice"),
+        variant("AdmitPeerInput"),
+        variant("EmitProgressNote"),
+        variant("EmitTaskNotice"),
+        variant("ReadyFrontierChanged"),
+        variant("StartLoopNode"),
+        variant("NodeExecutionReleased"),
+        variant("RootFrameCompleted"),
+        variant("RootFrameFailed"),
+        variant("RootFrameCanceled"),
+        variant("BodyFrameCompleted"),
+        variant("BodyFrameFailed"),
+        variant("BodyFrameCanceled"),
+        variant("RequestBodyFrameStart"),
+        variant("EvaluateUntilCondition"),
+        variant("LoopCompleted"),
+        variant("LoopExhausted"),
+        variant("LoopFailed"),
+        variant("LoopCanceled"),
+    ]
+}
+
+fn absorbed_mob_effect_dispositions() -> Vec<EffectDispositionRule> {
+    vec![
+        external_disposition("EmitRunLifecycleNotice"),
+        external_disposition("EmitFlowRunNotice"),
+        external_disposition("EmitStepNotice"),
+        local_disposition("AppendFailureLedger"),
+        local_disposition("PersistStepOutput"),
+        local_disposition("AdmitStepWork"),
+        external_disposition("FlowTerminalized"),
+        external_disposition("EscalateSupervisor"),
+        external_disposition("ProjectTargetSuccess"),
+        external_disposition("ProjectTargetFailure"),
+        external_disposition("ProjectTargetCanceled"),
+        local_disposition("GrantNodeSlot"),
+        local_disposition("GrantBodyFrameStart"),
+        external_disposition("NotifyCoordinator"),
+        external_disposition("ExposePendingSpawn"),
+        local_disposition("AdmitKickoffTurn"),
+        external_disposition("EmitMemberTerminalNotice"),
+        external_disposition("AdmitPeerInput"),
+        external_disposition("EmitProgressNote"),
+        external_disposition("EmitTaskNotice"),
+        local_disposition("ReadyFrontierChanged"),
+        local_disposition("StartLoopNode"),
+        local_disposition("NodeExecutionReleased"),
+        external_disposition("RootFrameCompleted"),
+        external_disposition("RootFrameFailed"),
+        external_disposition("RootFrameCanceled"),
+        external_disposition("BodyFrameCompleted"),
+        external_disposition("BodyFrameFailed"),
+        external_disposition("BodyFrameCanceled"),
+        local_disposition("RequestBodyFrameStart"),
+        local_disposition("EvaluateUntilCondition"),
+        external_disposition("LoopCompleted"),
+        external_disposition("LoopExhausted"),
+        external_disposition("LoopFailed"),
+        external_disposition("LoopCanceled"),
+    ]
+}
+
+fn local_disposition(effect_variant: &str) -> EffectDispositionRule {
+    EffectDispositionRule {
+        effect_variant: effect_variant.into(),
+        disposition: EffectDisposition::Local,
+        handoff_protocol: None,
+    }
+}
+
+fn named_runtime_id() -> TypeRef {
+    TypeRef::Named("AgentRuntimeId".into())
+}
+
+fn named_work_id() -> TypeRef {
+    TypeRef::Named("WorkId".into())
 }

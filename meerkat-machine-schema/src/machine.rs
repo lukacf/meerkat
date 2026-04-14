@@ -966,7 +966,7 @@ impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::{meerkat_machine, peer_directory_reachability_machine};
+    use crate::catalog::meerkat_machine;
 
     #[test]
     fn validates_meerkat_machine_schema() {
@@ -993,17 +993,14 @@ mod tests {
     }
 
     #[test]
-    fn validates_peer_directory_reachability_machine() {
-        let schema = peer_directory_reachability_machine();
+    fn validates_meerkat_machine_embeds_peer_directory_region() {
+        let schema = meerkat_machine();
 
-        assert_eq!(schema.machine, "PeerDirectoryReachabilityMachine");
-        assert_eq!(schema.rust.crate_name, "meerkat-comms");
-        assert_eq!(schema.rust.module, "generated::peer_directory_reachability");
         assert!(
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "RecordSendFailed")
+                .any(|transition| transition.name == "RecordSendFailedAttached")
         );
         assert_eq!(schema.validate(), Ok(()));
     }

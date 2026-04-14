@@ -638,6 +638,40 @@ impl FlowFrameLoopDriver {
         )?))
     }
 
+    pub fn recover_pending_body_frame_request(
+        run_state: &KernelState,
+        loop_snapshot: &LoopSnapshot,
+    ) -> Result<Option<FlowFrameLoopDecision>, MobError> {
+        if loop_snapshot.kernel_state.phase != "Running"
+            || !state_is_awaiting_body_frame(&loop_snapshot.kernel_state)
+            || active_body_frame_id(&loop_snapshot.kernel_state).is_some()
+        {
+            return Ok(None);
+        }
+
+        let loop_instance_id = loop_instance_id_from_state(&loop_snapshot.kernel_state)?;
+        if state_set_contains(
+            run_state,
+            "pending_body_frame_loop_membership",
+            &loop_instance_id,
+        )? {
+            return Ok(None);
+        }
+
+        let depth = u64_from_state_field(&loop_snapshot.kernel_state, "depth")?;
+        let next_run_state = run_transition_state(
+            run_state,
+            "RegisterPendingBodyFrame",
+            loop_register_pending_fields(&loop_instance_id, depth),
+        )?;
+        Ok(Some(FlowFrameLoopDecision::plan(
+            FlowFrameLoopStorePlan::RunStateOnly {
+                expected_run_state: run_state.clone(),
+                next_run_state,
+            },
+        )))
+    }
+
     pub fn root_terminal_phase(frame: &FrameSnapshot) -> Option<FlowFrameTerminalPhase> {
         terminal_phase(&frame.kernel_state).ok()
     }
@@ -1073,6 +1107,14 @@ fn active_body_frame_id(state: &KernelState) -> Option<FrameId> {
         Some(KernelValue::String(frame_id)) if !frame_id.is_empty() => {
             Some(FrameId::from(frame_id.as_str()))
         }
+        Some(KernelValue::Map(entries)) => entries
+            .get(&KernelValue::String("value".into()))
+            .and_then(|value| match value {
+                KernelValue::String(frame_id) if !frame_id.is_empty() => {
+                    Some(FrameId::from(frame_id.as_str()))
+                }
+                _ => None,
+            }),
         _ => None,
     }
 }

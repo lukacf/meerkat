@@ -8,10 +8,7 @@ use super::{
     meerkat_machine::meerkat_machine,
     mob_machine::mob_machine,
     occurrence_lifecycle::occurrence_lifecycle_machine,
-    peer_directory_reachability::peer_directory_reachability_machine,
     schedule_lifecycle::schedule_lifecycle_machine,
-    session_tool_visibility::session_tool_visibility_machine,
-    session_turn_admission::session_turn_admission_machine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +66,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat/src/meerkat_machine.rs",
                     "MeerkatMachine snapshot/diagnostic facade",
                 ),
+                anchor(
+                    "peer_directory_reachability_authority",
+                    "meerkat-comms/src/peer_directory_reachability_authority.rs",
+                    "peer directory reachability state now owned as a MeerkatMachine-internal region",
+                ),
             ],
             &[
                 scenario(
@@ -78,6 +80,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "retire-reset-destroy",
                     "runtime retires, resets, stops, and destroys without reopening superseded work",
+                ),
+                scenario(
+                    "staged_visibility_apply",
+                    "tool visibility staged state promotes into the committed visible revision at a boundary",
+                ),
+                scenario(
+                    "turn_interrupt_and_shutdown",
+                    "running work records interrupt and shutdown intent without escaping the Meerkat authority boundary",
+                ),
+                scenario(
+                    "peer_reachability_probe",
+                    "resolved peer directory updates and send outcomes mutate Meerkat-owned peer reachability state",
                 ),
             ],
         ),
@@ -107,18 +121,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &peer_directory_reachability_machine(),
-            &[anchor(
-                "peer_directory_reachability_authority",
-                "meerkat-comms/src/peer_directory_reachability_authority.rs",
-                "peer directory reachability authority and transition ownership",
-            )],
-            &[scenario(
-                "peer_reachability_probe",
-                "reachability probes transition peer directory membership across probe outcomes",
-            )],
-        ),
-        machine_manifest_from_schema(
             &schedule_lifecycle_machine(),
             &[anchor(
                 "schedule_authority",
@@ -140,30 +142,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[scenario(
                 "occurrence_start_complete_fail",
                 "occurrence transitions through pending, running, and terminal lifecycle states",
-            )],
-        ),
-        machine_manifest_from_schema(
-            &session_tool_visibility_machine(),
-            &[anchor(
-                "tool_visibility_state",
-                "meerkat-core/src/tool_scope.rs",
-                "tool visibility projection layered on durable visibility state",
-            )],
-            &[scenario(
-                "staged_visibility_apply",
-                "tool visibility staged state applies and publishes committed revisions at a boundary",
-            )],
-        ),
-        machine_manifest_from_schema(
-            &session_turn_admission_machine(),
-            &[anchor(
-                "turn_admission",
-                "meerkat-core/src/turn_execution_authority.rs",
-                "turn admission and gating authority",
-            )],
-            &[scenario(
-                "turn_admission_accept_reject",
-                "session turn admission accepts or rejects inputs according to machine-owned policy",
             )],
         ),
     ]

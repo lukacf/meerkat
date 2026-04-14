@@ -235,6 +235,14 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
 fn active_body_frame_id(snap: &LoopSnapshot) -> Option<FrameId> {
     match snap.kernel_state.fields.get("active_body_frame_id") {
         Some(KernelValue::String(frame_id)) => Some(FrameId::from(frame_id.as_str())),
+        Some(KernelValue::Map(entries)) => entries
+            .get(&KernelValue::String("value".into()))
+            .and_then(|value| match value {
+                KernelValue::String(frame_id) if !frame_id.is_empty() => {
+                    Some(FrameId::from(frame_id.as_str()))
+                }
+                _ => None,
+            }),
         _ => None,
     }
 }

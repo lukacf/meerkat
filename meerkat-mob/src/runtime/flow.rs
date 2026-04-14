@@ -1658,21 +1658,17 @@ fn effect_step_status(effect: &KernelEffect) -> Result<StepRunStatus, MobError> 
             effect.variant
         ))
     })?;
-    match value.as_named_variant("StepRunStatus") {
-        Ok("Dispatched") => Ok(StepRunStatus::Dispatched),
-        Ok("Completed") => Ok(StepRunStatus::Completed),
-        Ok("Failed") => Ok(StepRunStatus::Failed),
-        Ok("Skipped") => Ok(StepRunStatus::Skipped),
-        Ok("Canceled") => Ok(StepRunStatus::Canceled),
-        Ok(variant) => Err(MobError::Internal(format!(
-            "flow_run effect `{}` unknown step_status `{variant}`",
-            effect.variant
-        ))),
-        Err(reason) => Err(MobError::Internal(format!(
-            "flow_run effect `{}` step_status invalid: {reason}",
-            effect.variant
-        ))),
-    }
+    StepRunStatus::parse_kernel_value(value).map_err(|reason| {
+        let message = if reason.starts_with("unknown StepRunStatus variant") {
+            format!("flow_run effect `{}` {reason}", effect.variant)
+        } else {
+            format!(
+                "flow_run effect `{}` step_status invalid: {reason}",
+                effect.variant
+            )
+        };
+        MobError::Internal(message)
+    })
 }
 
 fn parse_output_value(

@@ -9,10 +9,6 @@ use tempfile::tempdir;
 fn snake_case_handles_kernel_machine_names_and_composition_names() {
     assert_eq!(machine_slug("MeerkatMachine"), "meerkat_machine");
     assert_eq!(machine_slug("MobMachine"), "mob_machine");
-    assert_eq!(
-        machine_slug("SessionTurnAdmissionMachine"),
-        "session_turn_admission"
-    );
     assert_eq!(composition_slug("meerkat_mob_seam"), "meerkat_mob_seam");
     assert_eq!(to_snake_case("Mob Machine"), "mob_machine");
 }
@@ -32,18 +28,10 @@ fn output_paths_land_under_canonical_specs_dirs() {
 
 #[test]
 fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
-    let peer_directory = owner_test_specs_for_machine("peer_directory_reachability");
-    assert_eq!(peer_directory.len(), 2);
+    let meerkat = owner_test_specs_for_machine("meerkat_machine");
+    assert_eq!(meerkat.len(), 6);
     assert!(
-        peer_directory
-            .iter()
-            .all(|spec| spec.package == "meerkat-integration-tests")
-    );
-
-    let turn_admission = owner_test_specs_for_machine("session_turn_admission");
-    assert_eq!(turn_admission.len(), 2);
-    assert!(
-        turn_admission
+        meerkat
             .iter()
             .all(|spec| spec.package == "meerkat-integration-tests")
     );
@@ -51,8 +39,6 @@ fn owner_tests_are_registered_only_for_remaining_canonical_surfaces() {
     let mob = owner_test_specs_for_machine("mob_machine");
     assert_eq!(mob.len(), 1);
     assert!(mob.iter().all(|spec| spec.package == "meerkat-mob"));
-
-    assert!(owner_test_specs_for_machine("meerkat_machine").is_empty());
 }
 
 #[test]

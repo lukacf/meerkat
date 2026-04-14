@@ -20,9 +20,6 @@ Canonical machine set:
 - perimeter machines that remain outside the kernels:
   - `occurrence_lifecycle`
   - `schedule_lifecycle`
-  - `peer_directory_reachability`
-  - `session_tool_visibility`
-  - `session_turn_admission`
 
 Status:
 

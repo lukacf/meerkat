@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use meerkat_machine_kernels::generated::peer_directory_reachability;
+use meerkat_machine_kernels::generated::meerkat;
 use meerkat_machine_kernels::{KernelInput, KernelValue};
 
 fn string(value: &str) -> KernelValue {
@@ -14,6 +14,10 @@ fn named_variant(enum_name: &str, variant: &str) -> KernelValue {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),
     }
+}
+
+fn some(value: KernelValue) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([(string("value"), value)]))
 }
 
 fn key(name: &str, peer_id: &str) -> KernelValue {
@@ -41,11 +45,39 @@ fn map_value<'a>(
     }
 }
 
+fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
+    let initialized = meerkat::transition(
+        &meerkat::initial_state().expect("initial state"),
+        &input("Initialize", vec![]),
+    )
+    .expect("initialize")
+    .next_state;
+    let registered = meerkat::transition(
+        &initialized,
+        &input("RegisterSession", vec![("session_id", string("session-1"))]),
+    )
+    .expect("register session")
+    .next_state;
+    meerkat::transition(
+        &registered,
+        &input(
+            "PrepareBindings",
+            vec![
+                ("agent_runtime_id", string("runtime-7")),
+                ("fence_token", KernelValue::U64(3)),
+                ("generation", KernelValue::U64(1)),
+            ],
+        ),
+    )
+    .expect("prepare bindings")
+    .next_state
+}
+
 #[test]
 fn peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot() {
-    let state = peer_directory_reachability::initial_state().expect("initial state");
+    let state = attached_meerkat_state();
     let peer_key = key("agent-a", "ed25519:a");
-    let reconciled = peer_directory_reachability::transition(
+    let reconciled = meerkat::transition(
         &state,
         &input(
             "ReconcileResolvedDirectory",
@@ -68,22 +100,22 @@ fn peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot() {
     .expect("reconcile directory")
     .next_state;
 
-    assert_eq!(reconciled.phase, "Tracking");
+    assert_eq!(reconciled.phase, "Attached");
     assert_eq!(
-        map_value(&reconciled, "reachability", &peer_key),
+        map_value(&reconciled, "peer_reachability", &peer_key),
         Some(&string("Unknown"))
     );
     assert_eq!(
-        map_value(&reconciled, "last_reason", &peer_key),
+        map_value(&reconciled, "peer_last_reason", &peer_key),
         Some(&KernelValue::None)
     );
 }
 
 #[test]
 fn peer_directory_reachability_kernel_records_send_failures_for_resolved_peers() {
-    let state = peer_directory_reachability::initial_state().expect("initial state");
+    let state = attached_meerkat_state();
     let peer_key = key("agent-a", "ed25519:a");
-    let reconciled = peer_directory_reachability::transition(
+    let reconciled = meerkat::transition(
         &state,
         &input(
             "ReconcileResolvedDirectory",
@@ -106,7 +138,7 @@ fn peer_directory_reachability_kernel_records_send_failures_for_resolved_peers()
     .expect("reconcile directory")
     .next_state;
 
-    let failed = peer_directory_reachability::transition(
+    let failed = meerkat::transition(
         &reconciled,
         &input(
             "RecordSendFailed",
@@ -120,11 +152,11 @@ fn peer_directory_reachability_kernel_records_send_failures_for_resolved_peers()
     .next_state;
 
     assert_eq!(
-        map_value(&failed, "reachability", &peer_key),
+        map_value(&failed, "peer_reachability", &peer_key),
         Some(&named_variant("PeerReachability", "Unreachable"))
     );
     assert_eq!(
-        map_value(&failed, "last_reason", &peer_key),
-        Some(&string("TransportError"))
+        map_value(&failed, "peer_last_reason", &peer_key),
+        Some(&some(string("TransportError")))
     );
 }

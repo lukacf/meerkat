@@ -11,8 +11,7 @@ pub use catalog::{
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_machine,
     meerkat_mob_seam_composition, mob_machine, occurrence_lifecycle_machine,
-    peer_directory_reachability_machine, schedule_lifecycle_machine,
-    session_tool_visibility_machine, session_turn_admission_machine,
+    schedule_lifecycle_machine,
 };
 pub use compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine};
 pub use composition::{

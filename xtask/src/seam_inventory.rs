@@ -155,13 +155,6 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::SurfaceResultAlignment,
             "Occurrence lifecycle outputs are public result surfaces and must match kernel truth",
         ),
-        // === SessionTurnAdmissionMachine ===
-        (
-            "SessionTurnAdmissionMachine",
-            "WakeInterrupt",
-            SeamClassification::NoOwnerRealization,
-            "Wake interrupts stay inside the session-turn admission authority boundary",
-        ),
     ]
 }
 

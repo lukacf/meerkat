@@ -18,10 +18,13 @@ Status: working draft
 | `RuntimeIngressMachine` | Admitted work set, queue and steer ordering, policy snapshot, handling mode, contributor staging, wake/process flags | Merge into the admission and work-queue region of `MeerkatMachine` | Internal to Meerkat |
 | `RuntimeControlMachine` | Runtime phase, active run, executor attachment, control-plane commands, admission resolution, recycle/reset/recover lifecycle | Merge into the top-level control region of `MeerkatMachine` | Internal to Meerkat |
 | `TurnExecutionMachine` | Run execution semantics, barrier membership, pending async-op refs, cancellation timing, extraction retries, turn terminal outcome | Merge into the run-execution region of `MeerkatMachine` | Internal to Meerkat |
+| `SessionTurnAdmissionMachine` | Turn admission truth, interrupt intent, shutdown intent, active/completing lifecycle | Merge into the run-execution and control regions of `MeerkatMachine` | Internal to Meerkat |
 | `OpsLifecycleMachine` | Async operation truth, peer-ready truth, watcher/progress counts, terminal buffering, wait-all truth, completed ordering | Merge into the async-op region of `MeerkatMachine` | Internal to Meerkat |
+| `SessionToolVisibilityMachine` | Staged/active tool filters, deferred request truth, visibility witness sets, active/staged revision sequencing | Merge into the tool-surface and boundary-apply region of `MeerkatMachine` | Internal to Meerkat |
 | `PeerCommsMachine` | Trusted-peer snapshot, raw envelope classification, typed peer input candidate truth, content/correlation preservation | Merge into the typed peer-ingress region of `MeerkatMachine` | Internal to Meerkat |
 | `CommsDrainLifecycleMachine` | Keep-alive drain mode, spawn/abort/respawn truth for drain tasks | Fold into keep-alive and comms-drain control state inside `MeerkatMachine` | Internal to Meerkat |
 | `ExternalToolSurfaceMachine` | Tool-surface visibility, staged add/remove/reload truth, pending surface ops, snapshot alignment, inflight call rejection | Absorb into a tool-surface region inside `MeerkatMachine`; keep router/adapter code mechanical only | Internal to Meerkat |
+| `PeerDirectoryReachabilityMachine` | Resolved-directory peer reachability and last send-failure reason | Merge into the typed peer-ingress and reachability region of `MeerkatMachine` | Internal to Meerkat |
 
 ## Mob Internal
 
@@ -46,7 +49,6 @@ Status: working draft
 
 | Current machine | Owned facts today | Proposed fate | Placement |
 | --- | --- | --- | --- |
-| `PeerDirectoryReachabilityMachine` | Resolved-directory peer reachability and last send-failure reason | Keep outside the kernel boundary as transport-side advisory state | Perimeter |
 | `ScheduleLifecycleMachine` | Schedule revision and phase, trigger binding, target binding, misfire/overlap/missing-target policy, planning cursor | Keep outside the present kernel boundary; if later promoted, make it part of a third kernel rather than folding it into `MeerkatMachine` or `MobMachine` | Perimeter |
 | `OccurrenceLifecycleMachine` | Occurrence claim/lease truth, dispatch stage, completion, skip/misfire/delivery failure/supersession truth | Keep outside the present kernel boundary; if later promoted, make it part of the same third kernel as scheduling | Perimeter |
 
@@ -57,8 +59,11 @@ Status: working draft
   - `RuntimeIngressMachine`
   - `RuntimeControlMachine`
   - `TurnExecutionMachine`
+  - `SessionTurnAdmissionMachine`
   - `OpsLifecycleMachine`
+  - `SessionToolVisibilityMachine`
   - `PeerCommsMachine`
+  - `PeerDirectoryReachabilityMachine`
   - `CommsDrainLifecycleMachine`
   - `ExternalToolSurfaceMachine`
 - This matrix intentionally treats the current mob side as one orchestration kernel plus internal flow sub-automata:

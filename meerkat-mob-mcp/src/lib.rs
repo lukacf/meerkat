@@ -600,13 +600,6 @@ impl MobMcpState {
         self.mob_retire(&mob_id, identity).await
     }
 
-    pub async fn retire_member_by_session_id(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), MobError> {
-        self.retire_member_by_bridge_session_id(session_id).await
-    }
-
     pub async fn owns_live_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         if !self
             .ensure_restored_best_effort("owns_live_bridge_session")
@@ -628,10 +621,6 @@ impl MobMcpState {
             }
         }
         false
-    }
-
-    pub async fn owns_live_session(&self, session_id: &SessionId) -> bool {
-        self.owns_live_bridge_session(session_id).await
     }
 
     pub async fn owns_persisted_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
@@ -660,10 +649,6 @@ impl MobMcpState {
                     .await
             }
         }
-    }
-
-    pub async fn owns_persisted_session(&self, session_id: &SessionId) -> bool {
-        self.owns_persisted_bridge_session(session_id).await
     }
 
     pub async fn mob_wire(
@@ -919,14 +904,6 @@ impl MobMcpState {
             .map(|(id, _)| id.clone())
     }
 
-    /// Compatibility wrapper for callers that still speak in generic
-    /// session-centric terms. Internally this resolves against the owner
-    /// bridge-session index.
-    pub async fn find_implicit_mob(&self, bridge_session_id: &str) -> Option<MobId> {
-        self.find_implicit_mob_for_bridge_session(bridge_session_id)
-            .await
-    }
-
     /// Check whether the given mob is an implicit delegation mob.
     ///
     /// Checks the canonical `is_implicit` field on the mob definition.
@@ -962,11 +939,6 @@ impl MobMcpState {
                 }
             })
             .collect()
-    }
-
-    /// Compatibility wrapper for callers that still use session-centric naming.
-    pub async fn find_mobs_for_session(&self, bridge_session_id: &str) -> Vec<MobId> {
-        self.find_mobs_for_bridge_session(bridge_session_id).await
     }
 
     async fn find_bridge_session_scoped_mobs(&self, bridge_session_id: &str) -> Vec<MobId> {
@@ -1075,16 +1047,6 @@ impl MobMcpState {
             .map(|(mob_id, _created)| mob_id)
     }
 
-    /// Compatibility wrapper for callers that still use session-centric naming.
-    pub async fn get_or_create_implicit_mob(
-        &self,
-        bridge_session_id: &str,
-        model: &str,
-    ) -> Result<MobId, MobError> {
-        self.get_or_create_implicit_mob_for_bridge_session(bridge_session_id, model)
-            .await
-    }
-
     /// Destroy all bridge-session-scoped mobs for the given owner bridge session.
     ///
     /// Called during session archive to clean up mobs whose cleanup truth is
@@ -1114,11 +1076,6 @@ impl MobMcpState {
         let mut locks = self.implicit_mob_locks.lock().await;
         locks.remove(bridge_session_id);
         Ok(())
-    }
-
-    /// Compatibility wrapper for callers that still use session-centric naming.
-    pub async fn destroy_session_mobs(&self, bridge_session_id: &str) -> Result<(), MobError> {
-        self.destroy_bridge_session_mobs(bridge_session_id).await
     }
 
     /// Scavenge orphaned bridge-session-scoped mobs whose owning sessions no

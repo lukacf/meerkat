@@ -2449,7 +2449,7 @@ mod tests {
 
         surface
             .mob_state
-            .get_or_create_implicit_mob(&session_id.to_string(), "gpt-5.2")
+            .get_or_create_implicit_mob_for_bridge_session(&session_id.to_string(), "gpt-5.2")
             .await
             .unwrap();
         assert!(

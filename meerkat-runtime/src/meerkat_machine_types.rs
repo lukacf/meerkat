@@ -4,8 +4,6 @@
 //! the supporting command/result enums and the durable diagnostic snapshots that
 //! remain useful after cutover.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use meerkat_core::RuntimeEpochId;

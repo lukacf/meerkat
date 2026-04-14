@@ -117,11 +117,13 @@ impl AgentToolDispatcher for EmptyDispatcher {
     }
 }
 
+#[cfg_attr(not(feature = "comms"), allow(dead_code))]
 struct NamedDispatcher {
     tools: Arc<[Arc<ToolDef>]>,
 }
 
 impl NamedDispatcher {
+    #[cfg_attr(not(feature = "comms"), allow(dead_code))]
     fn new(name: &str) -> Self {
         Self {
             tools: Arc::from(vec![Arc::new(ToolDef {
@@ -168,6 +170,7 @@ impl meerkat_core::service::MobToolsFactory for RecordingMobToolsFactory {
     }
 }
 
+#[cfg_attr(not(feature = "comms"), allow(dead_code))]
 struct StaticMobToolsFactory {
     dispatcher: Arc<dyn AgentToolDispatcher>,
 }

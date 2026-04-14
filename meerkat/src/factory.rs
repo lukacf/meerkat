@@ -84,7 +84,6 @@ use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
 #[derive(Default)]
-#[allow(dead_code)]
 struct EphemeralSessionStore {
     sessions: RwLock<HashMap<SessionId, Session>>,
 }

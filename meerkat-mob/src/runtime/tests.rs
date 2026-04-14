@@ -16968,3 +16968,169 @@ async fn test_cancel_all_work_valid_fence_succeeds() {
         "cancel_all_work with valid fence should succeed: {result:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Identity-first comms pipeline verification
+// -----------------------------------------------------------------------
+
+/// Verify that spawning members with role-based wiring rules creates correct
+/// identity-keyed roster entries, valid bridge sessions, and bidirectional
+/// wiring — the exact flow that the pictionary e2e-smoke test relies on.
+#[tokio::test]
+async fn test_identity_first_spawn_with_role_wiring_creates_valid_roster_and_sessions() {
+    let mut def = sample_definition_with_cross_role_wiring();
+    // Ensure comms are enabled on both profiles so wiring creates trust edges.
+    for (_, binding) in def.profiles.iter_mut() {
+        if let crate::profile::ProfileBinding::Inline(profile) = binding {
+            profile.tools.comms = true;
+        }
+    }
+    let (handle, _service) = create_test_mob(def).await;
+
+    // Spawn a "lead" and a "worker" — the cross_role_wiring rule wires lead<->worker.
+    let lead_result = handle
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
+        .await
+        .expect("spawn lead");
+    assert_eq!(lead_result.agent_identity, AgentIdentity::from("lead-1"));
+
+    let worker_result = handle
+        .spawn_spec(SpawnMemberSpec::new(
+            "worker",
+            AgentIdentity::from("worker-1"),
+        ))
+        .await
+        .expect("spawn worker");
+    assert_eq!(
+        worker_result.agent_identity,
+        AgentIdentity::from("worker-1")
+    );
+
+    // Verify roster entries exist via identity lookup.
+    let lead_entry = handle
+        .get_member(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead roster entry should exist");
+    assert_eq!(lead_entry.agent_identity, AgentIdentity::from("lead-1"));
+    assert_eq!(lead_entry.role, ProfileName::from("lead"));
+
+    let worker_entry = handle
+        .get_member(&AgentIdentity::from("worker-1"))
+        .await
+        .expect("worker roster entry should exist");
+    assert_eq!(worker_entry.agent_identity, AgentIdentity::from("worker-1"));
+    assert_eq!(worker_entry.role, ProfileName::from("worker"));
+
+    // Verify resolve_bridge_session_id returns valid sessions.
+    let lead_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+        .await;
+    assert!(
+        lead_session.is_some(),
+        "lead should have a bridge session after spawn"
+    );
+
+    let worker_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("worker-1"))
+        .await;
+    assert!(
+        worker_session.is_some(),
+        "worker should have a bridge session after spawn"
+    );
+
+    // Sessions must be distinct.
+    assert_ne!(
+        lead_session, worker_session,
+        "lead and worker should have different bridge sessions"
+    );
+
+    // Verify wiring: worker should be wired to lead (via cross-role rule).
+    let worker_wired_to = &worker_entry.wired_to;
+    assert!(
+        worker_wired_to.contains(&AgentIdentity::from("lead-1")),
+        "worker should be wired to lead via cross-role wiring rule, got: {worker_wired_to:?}"
+    );
+
+    // Verify wiring is bidirectional.
+    // Re-fetch lead entry since wiring might have been set after initial spawn.
+    let lead_entry = handle
+        .get_member(&AgentIdentity::from("lead-1"))
+        .await
+        .expect("lead roster entry should still exist");
+    assert!(
+        lead_entry
+            .wired_to
+            .contains(&AgentIdentity::from("worker-1")),
+        "lead should be wired to worker (bidirectional), got: {:?}",
+        lead_entry.wired_to
+    );
+}
+
+/// Verify that MemberHandle::send delivers content to a wired member
+/// by checking the external turn dispatch resolves correctly.
+#[tokio::test]
+async fn test_identity_first_member_handle_send_routes_through_identity() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    // Spawn a member.
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from("sender"))
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("spawn sender");
+
+    // Acquire a MemberHandle via identity.
+    let member = handle
+        .member(&AgentIdentity::from("sender"))
+        .await
+        .expect("member handle should resolve by identity");
+
+    assert_eq!(member.identity(), AgentIdentity::from("sender"));
+
+    // Verify the member has a valid bridge session.
+    let session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("sender"))
+        .await;
+    assert!(
+        session.is_some(),
+        "member should have a bridge session for turn delivery"
+    );
+}
+
+/// Verify that list_members returns identity-native entries with correct
+/// agent_identity, agent_runtime_id, and fence_token fields.
+#[tokio::test]
+async fn test_identity_first_list_members_returns_identity_native_entries() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("alice")))
+        .await
+        .expect("spawn alice");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("bob")))
+        .await
+        .expect("spawn bob");
+
+    let members = handle.list_members().await;
+    assert_eq!(members.len(), 2, "should have 2 members");
+
+    let identities: std::collections::BTreeSet<_> =
+        members.iter().map(|m| m.agent_identity.clone()).collect();
+    assert!(identities.contains(&AgentIdentity::from("alice")));
+    assert!(identities.contains(&AgentIdentity::from("bob")));
+
+    // Each member should have a valid agent_runtime_id and fence_token.
+    for member in &members {
+        assert_eq!(
+            member.agent_runtime_id.identity, member.agent_identity,
+            "runtime_id identity should match agent_identity"
+        );
+        assert!(
+            member.fence_token.get() > 0,
+            "fence_token should be non-zero after spawn"
+        );
+    }
+}

@@ -3,15 +3,12 @@
 This checklist tracks the canonical runtime/schema parity contract for the
 two-kernel machine schemas.
 
-It is split into three classes:
+It is split into two classes:
 - **mutating commands**: must be modeled by canonical schema transitions
-- **coordination / lock-bearing queries**: observational on paper, but they can
-  participate in scheduling, lock ownership, wait semantics, or other behavior
-  that can interfere with authoritative operations; they must be explicitly
-  modeled and classified
-- **pure observation queries**: observational projections only; they must be
-  explicitly accounted for, but they are excluded from the mutating-command
-  parity bar
+- **query / observation commands**: even when they do not mutate domain state,
+  they still participate in authoritative coordination by taking locks,
+  snapshotting canonical state, or influencing observable behavior around that
+  state; they must also be modeled by canonical schema transitions
 
 ## MeerkatMachine
 
@@ -51,11 +48,9 @@ Absorbed domains included in the merged kernel:
 - [x] `Commit`
 - [x] `Fail`
 
-### Coordination / lock-bearing queries
+### Query / observation commands
 - [x] `OpsLifecycleRegistry`
 - [x] `Wait`
-
-### Pure observation queries
 - [x] `ContainsSession`
 - [x] `SessionHasExecutor`
 - [x] `SessionHasComms`
@@ -103,12 +98,10 @@ Absorbed domains included in the merged kernel:
 - [x] `Shutdown`
 - [x] `ForceCancel`
 
-### Coordination / lock-bearing queries
+### Query / observation commands
 - [x] `PollEvents`
 - [x] `ReplayAllEvents`
 - [x] `KickoffBarrierSnapshot`
-
-### Pure observation queries
 - [x] `FlowStatus`
 - [x] `TaskList`
 - [x] `TaskGet`

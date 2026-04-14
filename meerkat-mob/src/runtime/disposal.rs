@@ -76,7 +76,7 @@ impl std::fmt::Display for DisposalStep {
 ///
 /// Steps never re-read the roster — prevents TOCTOU races.
 pub(super) struct DisposalContext {
-    pub meerkat_id: MeerkatId,
+    pub(crate) meerkat_id: MeerkatId,
     pub entry: RosterEntry,
     pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub retiring_key: Option<String>,

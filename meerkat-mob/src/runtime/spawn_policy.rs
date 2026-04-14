@@ -26,6 +26,7 @@ pub trait SpawnPolicy: Send + Sync {
     /// Given an unknown meerkat ID, return a spawn spec if the policy
     /// should auto-spawn a member for it, or `None` to fall through
     /// to the normal `MeerkatNotFound` error.
+    // TODO: should take AgentIdentity instead of MeerkatId once identity-first migration completes
     async fn resolve(&self, target: &MeerkatId) -> Option<SpawnSpec>;
 }
 

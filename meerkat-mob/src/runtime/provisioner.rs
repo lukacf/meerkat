@@ -30,7 +30,7 @@ pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
     pub binding: RuntimeBinding,
     pub peer_name: String,
-    pub owner_bridge_session_id: Option<SessionId>,
+    pub(crate) owner_bridge_session_id: Option<SessionId>,
     pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 

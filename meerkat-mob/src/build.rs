@@ -37,7 +37,7 @@ impl MobToolAccessContext {
 pub struct BuildAgentConfigParams<'a> {
     pub mob_id: &'a MobId,
     pub profile_name: &'a ProfileName,
-    pub meerkat_id: &'a MeerkatId,
+    pub(crate) meerkat_id: &'a MeerkatId,
     pub profile: &'a Profile,
     pub definition: &'a MobDefinition,
     pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
@@ -55,7 +55,7 @@ pub struct BuildAgentConfigParams<'a> {
 
 pub struct BuildResumedAgentConfigParams<'a> {
     pub base: BuildAgentConfigParams<'a>,
-    pub expected_session_id: &'a SessionId,
+    pub(crate) expected_session_id: &'a SessionId,
     pub resumed_session: Session,
 }
 

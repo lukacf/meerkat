@@ -3103,12 +3103,7 @@ fn build_cli_service(
     config: Config,
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
-    let builder = FactoryAgentBuilder::new(factory, config);
-    *builder
-        .default_schedule_tools
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = default_schedule_tools;
-    EphemeralSessionService::new(builder, 64)
+    meerkat::surface::build_embedded_service(factory, config, 64, default_schedule_tools)
 }
 
 async fn build_deploy_mob_session_service(
@@ -4230,26 +4225,15 @@ fn get_or_create_cli_persistent_surface_from_bundle(
     }
 
     let schedule_service = ScheduleService::new(persistence.schedule_store());
-    let runtime_adapter = persistence.runtime_adapter();
-    let (store, runtime_store, blob_store) = persistence.into_parts();
     let builder = FactoryAgentBuilder::new(factory, config);
-    *builder
-        .default_schedule_tools
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
-        ScheduleToolDispatcher::new(schedule_service.clone()),
-    ));
-
-    let mut service =
-        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store, blob_store);
-    {
-        let adapter = runtime_adapter.clone();
-        service.set_runtime_bindings_provider(Arc::new(move |session_id| {
-            let adapter = adapter.clone();
-            Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
-        }));
-    }
-
+    meerkat::surface::set_default_schedule_tools(
+        &builder,
+        Some(Arc::new(ScheduleToolDispatcher::new(
+            schedule_service.clone(),
+        ))),
+    );
+    let (service, runtime_adapter) =
+        meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
     let service = Arc::new(service);
     let schedule_host = if schedule_host_supported(schedule_service.store().kind()) {
         let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(CliScheduleSessionHost {

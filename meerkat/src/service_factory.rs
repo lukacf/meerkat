@@ -477,7 +477,7 @@ pub fn build_ephemeral_service(
     max_sessions: usize,
 ) -> EphemeralSessionService<FactoryAgentBuilder> {
     let builder = FactoryAgentBuilder::new(factory, config);
-    EphemeralSessionService::new(builder, max_sessions)
+    crate::surface::build_embedded_service_from_builder(builder, max_sessions)
 }
 
 /// Convenience: build a `PersistentSessionService` backed by `AgentFactory`.
@@ -491,22 +491,8 @@ pub fn build_persistent_service_with_runtime_adapter(
     meerkat_session::PersistentSessionService<FactoryAgentBuilder>,
     Arc<meerkat_runtime::MeerkatMachine>,
 ) {
-    let runtime_adapter = persistence.runtime_adapter();
-    let mut builder = FactoryAgentBuilder::new(factory, config);
-    let (store, runtime_store, blob_store) = persistence.into_parts();
-    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
-        &store,
-    ))));
-    (
-        meerkat_session::PersistentSessionService::new(
-            builder,
-            max_sessions,
-            store,
-            runtime_store,
-            blob_store,
-        ),
-        runtime_adapter,
-    )
+    let builder = FactoryAgentBuilder::new(factory, config);
+    crate::surface::build_runtime_backed_service(builder, max_sessions, persistence)
 }
 
 /// Convenience: build a `PersistentSessionService` backed by `AgentFactory`.

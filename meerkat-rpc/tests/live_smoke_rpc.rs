@@ -1166,7 +1166,7 @@ async fn e2e_scenario_21_mob_callback_tools() {
             "params": {
                 "mob_id": mob_id,
                 "profile": "worker",
-                "meerkat_id": "w1",
+                "agent_identity": "w1",
                 "initial_turn": "deferred"
             }
         }),
@@ -1475,7 +1475,7 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
             "params": {
                 "mob_id": mob_id,
                 "profile": "worker",
-                "meerkat_id": "w1",
+                "agent_identity": "w1",
                 "initial_turn": "deferred"
             }
         }),

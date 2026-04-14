@@ -224,9 +224,46 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
+            // Spawn is a per-phase self-loop: runtime does require_state
+            // but never applies a lifecycle transition. Creating→Creating
+            // and Running→Running are both valid.
             TransitionSchema {
-                name: "Spawn".into(),
-                from: vec!["Creating".into(), "Running".into()],
+                name: "SpawnCreating".into(),
+                from: vec!["Creating".into()],
+                on: InputMatch {
+                    kind: mob_trigger_kind("Spawn"),
+                    variant: "Spawn".into(),
+                    bindings: vec![
+                        "agent_identity".into(),
+                        "agent_runtime_id".into(),
+                        "fence_token".into(),
+                        "generation".into(),
+                    ],
+                },
+                guards: vec![],
+                updates: {
+                    let mut updates = reset_member_runtime_updates();
+                    updates.extend(vec![
+                        assign_some("active_identity", "agent_identity"),
+                        assign_some("active_runtime_id", "agent_runtime_id"),
+                        assign_some("active_fence_token", "fence_token"),
+                        assign_some("current_generation", "generation"),
+                        Update::Assign {
+                            field: "active_member_count".into(),
+                            expr: Expr::U64(1),
+                        },
+                    ]);
+                    updates
+                },
+                to: "Creating".into(),
+                emit: vec![
+                    runtime_binding_emit("RequestRuntimeBinding"),
+                    lifecycle_notice_emit("spawned"),
+                ],
+            },
+            TransitionSchema {
+                name: "SpawnRunning".into(),
+                from: vec!["Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("Spawn"),
                     variant: "Spawn".into(),
@@ -271,8 +308,40 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
+            // SubmitWork: per-phase self-loop. Runtime does
+            // require_state([Running, Creating]) with no lifecycle change.
             TransitionSchema {
-                name: "SubmitWork".into(),
+                name: "SubmitWorkCreating".into(),
+                from: vec!["Creating".into()],
+                on: InputMatch {
+                    kind: mob_trigger_kind("SubmitWork"),
+                    variant: "SubmitWork".into(),
+                    bindings: vec![
+                        "agent_runtime_id".into(),
+                        "fence_token".into(),
+                        "work_id".into(),
+                    ],
+                },
+                guards: vec![Guard {
+                    name: "runtime_is_bound".into(),
+                    expr: Expr::Neq(
+                        Box::new(Expr::Field("active_runtime_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![
+                    assign_some("inflight_work_id", "work_id"),
+                    Update::Increment {
+                        field: "active_run_count".into(),
+                        amount: 1,
+                    },
+                ],
+                to: "Creating".into(),
+                // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "SubmitWorkRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("SubmitWork"),
@@ -1929,15 +1998,18 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    // CancelWork: always errors in runtime, no phase check. Running-only is fine.
-    transitions.push(mob_self_loop_transition(
-        "CancelWork",
-        "Running",
-        "CancelWork",
-        vec!["work_id"],
-        clear_work_updates(),
-        vec![simple_emit("FlowTerminalized")],
-    ));
+    // CancelWork: handled directly in handle.rs with no actor dispatch or
+    // phase guard. Returns WorkNotFound from any phase. Self-loop per phase.
+    for phase in ["Creating", "Running", "Stopped", "Completed", "Destroyed"] {
+        transitions.push(mob_self_loop_transition(
+            "CancelWork",
+            phase,
+            "CancelWork",
+            vec!["work_id"],
+            clear_work_updates(),
+            vec![simple_emit("FlowTerminalized")],
+        ));
+    }
 
     // CancelAllWork: delegates to ForceCancel which accepts [Creating, Running]
     for phase in ["Creating", "Running"] {

@@ -1,8 +1,4 @@
-# schedule_mob_bundle Mapping Note
 
-This composition was audited during the two-kernel collapse and retained
-unchanged because it does not route through any absorbed Meerkat or Mob
-internal machine.
 
 <!-- GENERATED_COVERAGE_START -->
 ## Generated Coverage

@@ -36,7 +36,7 @@ fn input_with_fields(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelI
     }
 }
 
-fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
+fn prepared_meerkat_state() -> meerkat_machine_kernels::KernelState {
     let initialized = meerkat::transition_signal(
         &meerkat::initial_state().expect("initial state"),
         &signal("Initialize", vec![]),
@@ -66,8 +66,10 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 
 #[test]
 fn session_turn_admission_kernel_attached_state_reached() {
-    let state = attached_meerkat_state();
-    assert_eq!(state.phase, "Attached");
+    let state = prepared_meerkat_state();
+    // PrepareBindings is now a self-loop (registration + query, no phase
+    // change). Phase stays Idle after Initialize → RegisterSession → PrepareBindings.
+    assert_eq!(state.phase, "Idle");
     // Option<T> in the kernel is Map({"value" => T})
     assert_eq!(
         state.fields.get("active_runtime_id"),
@@ -80,7 +82,7 @@ fn session_turn_admission_kernel_attached_state_reached() {
 
 #[test]
 fn session_turn_admission_kernel_interrupt_rejected_without_active_work() {
-    let state = attached_meerkat_state();
+    let state = prepared_meerkat_state();
     assert!(
         meerkat::transition(&state, &input("InterruptCurrentRun")).is_err(),
         "attached sessions without active work must reject interrupts"
@@ -89,7 +91,7 @@ fn session_turn_admission_kernel_interrupt_rejected_without_active_work() {
 
 #[test]
 fn session_turn_admission_kernel_cancel_boundary_rejected_without_active_work() {
-    let state = attached_meerkat_state();
+    let state = prepared_meerkat_state();
     assert!(
         meerkat::transition(&state, &input("CancelAfterBoundary")).is_err(),
         "attached sessions without active work must reject cancel-after-boundary"

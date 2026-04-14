@@ -33,7 +33,7 @@ fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     }
 }
 
-fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
+fn prepared_meerkat_state() -> meerkat_machine_kernels::KernelState {
     let initialized = meerkat::transition_signal(
         &meerkat::initial_state().expect("initial state"),
         &signal("Initialize", vec![]),
@@ -63,7 +63,7 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 
 #[test]
 fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
-    let attached = attached_meerkat_state();
+    let attached = prepared_meerkat_state();
 
     // PublishCommittedVisibleSet from Attached requires revision == active_visibility_revision.
     // At init, active_visibility_revision == 0.
@@ -76,14 +76,15 @@ fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     )
     .expect("publish committed visible set");
 
-    assert_eq!(published.next_state.phase, "Attached");
+    // PrepareBindings is a self-loop; state stays Idle after registration.
+    assert_eq!(published.next_state.phase, "Idle");
     assert_eq!(published.effects.len(), 1);
     assert_eq!(published.effects[0].variant, "CommittedVisibleSetPublished");
 }
 
 #[test]
 fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state() {
-    let attached = attached_meerkat_state();
+    let attached = prepared_meerkat_state();
     let requested = meerkat::transition_signal(
         &attached,
         &signal(

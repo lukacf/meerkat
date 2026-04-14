@@ -148,7 +148,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `SubmitMemberWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
 - `RequestRuntimeRetire`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RequestRuntimeDestroy`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `EmitMemberLifecycleNotice`(agent_identity: AgentIdentity, kind: String)
@@ -203,8 +202,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Start`()
 - To: `Running`
 
-### `Spawn`
-- From: `Creating`, `Running`
+### `SpawnCreating`
+- From: `Creating`
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation)
+- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
+- To: `Creating`
+
+### `SpawnRunning`
+- From: `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
@@ -214,12 +219,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ObserveRuntimeReady`(agent_runtime_id, fence_token)
 - To: `Running`
 
-### `SubmitWork`
+### `SubmitWorkCreating`
+- From: `Creating`
+- On: `SubmitWork`(agent_runtime_id, fence_token, work_id)
+- Guards:
+  - `runtime_is_bound`
+- To: `Creating`
+
+### `SubmitWorkRunning`
 - From: `Running`
 - On: `SubmitWork`(agent_runtime_id, fence_token, work_id)
 - Guards:
   - `runtime_is_bound`
-- Emits: `SubmitMemberWork`
 - To: `Running`
 
 ### `ObserveWorkCompleted`
@@ -265,7 +276,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`
 - On: `MarkCompleted`()
 - Guards:
-  - `no_inflight_work`
+  - `no_active_runs`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Completed`
 
@@ -1102,17 +1113,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EvaluateUntilCondition`
 - To: `Running`
 
-### `BeginCleanupRunning`
-- From: `Running`
+### `BeginCleanupStopped`
+- From: `Stopped`
 - On: `BeginCleanup`()
 - Emits: `EmitRunLifecycleNotice`
-- To: `Running`
+- To: `Stopped`
 
-### `FinishCleanupRunning`
-- From: `Running`
+### `BeginCleanupCompleted`
+- From: `Completed`
+- On: `BeginCleanup`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `FinishCleanupStopped`
+- From: `Stopped`
 - On: `FinishCleanup`()
 - Emits: `EmitRunLifecycleNotice`
-- To: `Running`
+- To: `Stopped`
+
+### `FinishCleanupCompleted`
+- From: `Completed`
+- On: `FinishCleanup`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
 
 ### `KickoffStartedRunning`
 - From: `Running`
@@ -1197,7 +1220,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `CompleteFlowRunning`
-- From: `Running`
+- From: `Running`, `Completed`
 - On: `CompleteFlow`()
 - Guards:
   - `active_runs_present`
@@ -1284,7 +1307,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `FinishRunRunning`
-- From: `Running`
+- From: `Running`, `Stopped`
 - On: `FinishRun`()
 - Guards:
   - `active_runs_present`
@@ -1337,7 +1360,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Stopped`
 
 ### `CompleteSpawnRunning`
-- From: `Running`
+- From: `Running`, `Stopped`
 - On: `CompleteSpawn`()
 - Guards:
   - `pending_spawns_present`
@@ -1362,11 +1385,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ExposePendingSpawn`
 - To: `Running`
 
+### `CancelWorkCreating`
+- From: `Creating`
+- On: `CancelWork`(work_id)
+- Emits: `FlowTerminalized`
+- To: `Creating`
+
 ### `CancelWorkRunning`
 - From: `Running`
 - On: `CancelWork`(work_id)
 - Emits: `FlowTerminalized`
 - To: `Running`
+
+### `CancelWorkStopped`
+- From: `Stopped`
+- On: `CancelWork`(work_id)
+- Emits: `FlowTerminalized`
+- To: `Stopped`
+
+### `CancelWorkCompleted`
+- From: `Completed`
+- On: `CancelWork`(work_id)
+- Emits: `FlowTerminalized`
+- To: `Completed`
+
+### `CancelWorkDestroyed`
+- From: `Destroyed`
+- On: `CancelWork`(work_id)
+- Emits: `FlowTerminalized`
+- To: `Destroyed`
 
 ### `CancelAllWorkCreating`
 - From: `Creating`

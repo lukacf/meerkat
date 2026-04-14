@@ -1219,7 +1219,7 @@ mod tests {
                 },
             )
             .expect("spawn member");
-        assert_eq!(spawned.transition, "Spawn");
+        assert_eq!(spawned.transition, "SpawnRunning");
         assert_eq!(spawned.next_state.phase, "Running");
         assert!(
             spawned
@@ -1243,7 +1243,7 @@ mod tests {
                 },
             )
             .expect("submit work");
-        assert_eq!(submitted.transition, "SubmitWork");
+        assert_eq!(submitted.transition, "SubmitWorkRunning");
         // SubmitMemberWork effect was removed (unimplemented route to MeerkatMachine).
         assert!(
             !submitted

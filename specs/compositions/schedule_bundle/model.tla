@@ -3,12 +3,13 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_bundle.
 
-CONSTANTS DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, StringValues
+CONSTANTS ClaimTokenValues, DeliveryReceiptValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
-OptionDeliveryReceiptStageValues == {None} \cup {Some(x) : x \in DeliveryReceiptStageValues}
+OptionClaimTokenValues == {None} \cup {Some(x) : x \in ClaimTokenValues}
+OptionDeliveryReceiptValues == {None} \cup {Some(x) : x \in DeliveryReceiptValues}
 OptionOccurrenceFailureClassValues == {None} \cup {Some(x) : x \in OccurrenceFailureClassValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
@@ -73,8 +74,8 @@ RouteDeliveryKind(route_name) ==
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
 PendingActors == {ActorOfMachine(packet.machine) : packet \in SeqElements(pending_inputs)}
@@ -102,7 +103,7 @@ BaseInit ==
     /\ occurrence_claimed_at_utc_ms = None
     /\ occurrence_claim_token = None
     /\ occurrence_delivery_correlation_id = None
-    /\ occurrence_last_receipt_stage = None
+    /\ occurrence_last_receipt = None
     /\ occurrence_failure_class = None
     /\ occurrence_failure_detail = None
     /\ occurrence_dispatched_at_utc_ms = None
@@ -136,6 +137,33 @@ WitnessInit_pause_resume_without_revision ==
     /\ witness_current_script_input = None
     /\ witness_remaining_script_inputs = <<>>
 
+schedule_CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "Create"
+       /\ packet.payload.trigger_key = arg_trigger_key
+       /\ packet.payload.target_binding_key = arg_target_binding_key
+       /\ packet.payload.misfire_policy = arg_misfire_policy
+       /\ packet.payload.overlap_policy = arg_overlap_policy
+       /\ packet.payload.missing_target_policy = arg_missing_target_policy
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Active"
+       /\ schedule_phase' = "Active"
+       /\ schedule_trigger_key' = packet.payload.trigger_key
+       /\ schedule_target_binding_key' = packet.payload.target_binding_key
+       /\ schedule_misfire_policy' = packet.payload.misfire_policy
+       /\ schedule_overlap_policy' = packet.payload.overlap_policy
+       /\ schedule_missing_target_policy' = packet.payload.missing_target_policy
+       /\ UNCHANGED << schedule_revision, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> schedule_phase, revision |-> schedule_revision], effect_id |-> (model_step_count + 1), source_transition |-> "CreateSchedule"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "CreateSchedule", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
@@ -155,7 +183,7 @@ schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_polic
        /\ schedule_overlap_policy' = packet.payload.overlap_policy
        /\ schedule_missing_target_policy' = packet.payload.missing_target_policy
        /\ schedule_planning_cursor_utc_ms' = None
-       /\ UNCHANGED << schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -184,7 +212,7 @@ schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_polic
        /\ schedule_overlap_policy' = packet.payload.overlap_policy
        /\ schedule_missing_target_policy' = packet.payload.missing_target_policy
        /\ schedule_planning_cursor_utc_ms' = None
-       /\ UNCHANGED << schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -206,7 +234,7 @@ schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurre
        /\ schedule_phase' = "Active"
        /\ schedule_planning_cursor_utc_ms' = Some(packet.payload.planning_cursor_utc_ms)
        /\ schedule_next_occurrence_ordinal' = packet.payload.next_occurrence_ordinal
-       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -228,7 +256,7 @@ schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurre
        /\ schedule_phase' = "Paused"
        /\ schedule_planning_cursor_utc_ms' = Some(packet.payload.planning_cursor_utc_ms)
        /\ schedule_next_occurrence_ordinal' = packet.payload.next_occurrence_ordinal
-       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -238,50 +266,53 @@ schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurre
        /\ model_step_count' = model_step_count + 1
 
 
-schedule_PauseActive ==
+schedule_PauseActiveOrPaused(arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
        /\ packet.variant = "Pause"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Active"
+       /\ schedule_phase = "Active" \/ schedule_phase = "Paused"
        /\ schedule_phase' = "Paused"
-       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> schedule_phase, revision |-> schedule_revision], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActive"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "PauseActive", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Paused"]}
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> schedule_phase, revision |-> schedule_revision], effect_id |-> (model_step_count + 1), source_transition |-> "PauseActiveOrPaused"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "PauseActiveOrPaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Paused"]}
        /\ model_step_count' = model_step_count + 1
 
 
-schedule_ResumePaused ==
+schedule_ResumeActiveOrPaused(arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
        /\ packet.variant = "Resume"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Paused"
+       /\ schedule_phase = "Active" \/ schedule_phase = "Paused"
        /\ schedule_phase' = "Active"
-       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> schedule_phase, revision |-> schedule_revision], effect_id |-> (model_step_count + 1), source_transition |-> "ResumePaused"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ResumePaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Active"]}
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> schedule_phase, revision |-> schedule_revision], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeActiveOrPaused"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ResumeActiveOrPaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Active"]}
        /\ model_step_count' = model_step_count + 1
 
 
-schedule_DeleteActive ==
+schedule_DeleteActive(arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
        /\ packet.variant = "Delete"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("schedule_authority")
        /\ schedule_phase = "Active"
        /\ schedule_phase' = "Deleted"
        /\ schedule_revision' = (schedule_revision) + 1
        /\ schedule_planning_cursor_utc_ms' = None
-       /\ UNCHANGED << schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -291,16 +322,17 @@ schedule_DeleteActive ==
        /\ model_step_count' = model_step_count + 1
 
 
-schedule_DeletePaused ==
+schedule_DeletePaused(arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
        /\ packet.variant = "Delete"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("schedule_authority")
        /\ schedule_phase = "Paused"
        /\ schedule_phase' = "Deleted"
        /\ schedule_revision' = (schedule_revision) + 1
        /\ schedule_planning_cursor_utc_ms' = None
-       /\ UNCHANGED << schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> 0, superseded_by_revision |-> (schedule_revision) + 1], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -332,7 +364,7 @@ occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms
        /\ occurrence_claimed_at_utc_ms' = Some(packet.payload.at_utc_ms)
        /\ occurrence_claim_token' = Some(packet.payload.claim_token)
        /\ occurrence_delivery_correlation_id' = None
-       /\ occurrence_last_receipt_stage' = None
+       /\ occurrence_last_receipt' = None
        /\ occurrence_failure_class' = None
        /\ occurrence_failure_detail' = None
        /\ occurrence_dispatched_at_utc_ms' = None
@@ -359,7 +391,7 @@ occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms) ==
        /\ occurrence_phase' = "Dispatching"
        /\ occurrence_delivery_correlation_id' = packet.payload.correlation_id
        /\ occurrence_dispatched_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -378,7 +410,7 @@ occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms) ==
        /\ occurrence_phase = "Dispatching"
        /\ occurrence_phase' = "AwaitingCompletion"
        /\ occurrence_dispatched_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -388,16 +420,16 @@ occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt_stage, arg_at_utc_ms) ==
+occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "Complete"
-       /\ packet.payload.receipt_stage = arg_receipt_stage
+       /\ packet.payload.receipt = arg_receipt
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
        /\ occurrence_phase' = "Completed"
-       /\ occurrence_last_receipt_stage' = Some(packet.payload.receipt_stage)
+       /\ occurrence_last_receipt' = Some(packet.payload.receipt)
        /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
        /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -419,10 +451,14 @@ occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms) =
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending" \/ occurrence_phase = "Claimed" \/ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
        /\ occurrence_phase' = "Skipped"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
        /\ occurrence_failure_class' = packet.payload.failure_class
        /\ occurrence_failure_detail' = packet.payload.detail
        /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_last_receipt, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -442,10 +478,14 @@ occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Pending" \/ occurrence_phase = "Claimed" \/ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
        /\ occurrence_phase' = "Misfired"
+       /\ occurrence_claimed_by' = None
+       /\ occurrence_lease_expires_at_utc_ms' = None
+       /\ occurrence_claim_token' = None
+       /\ occurrence_delivery_correlation_id' = None
        /\ occurrence_failure_class' = packet.payload.failure_class
        /\ occurrence_failure_detail' = packet.payload.detail
        /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_last_receipt, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -466,7 +506,7 @@ occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms) ==
        /\ occurrence_phase' = "Superseded"
        /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
        /\ occurrence_superseded_by_revision' = Some(packet.payload.superseded_by_revision)
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -476,18 +516,18 @@ occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt_stage, arg_failure_class, arg_detail, arg_at_utc_ms) ==
+occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt, arg_failure_class, arg_detail, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "DeliveryFailed"
-       /\ packet.payload.receipt_stage = arg_receipt_stage
+       /\ packet.payload.receipt = arg_receipt
        /\ packet.payload.failure_class = arg_failure_class
        /\ packet.payload.detail = arg_detail
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Claimed" \/ occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion"
        /\ occurrence_phase' = "DeliveryFailed"
-       /\ occurrence_last_receipt_stage' = packet.payload.receipt_stage
+       /\ occurrence_last_receipt' = packet.payload.receipt
        /\ occurrence_failure_class' = Some(packet.payload.failure_class)
        /\ occurrence_failure_detail' = packet.payload.detail
        /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
@@ -515,7 +555,7 @@ occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms) ==
        /\ occurrence_claim_token' = None
        /\ occurrence_delivery_correlation_id' = None
        /\ occurrence_dispatched_at_utc_ms' = None
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -539,7 +579,7 @@ occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms) ==
        /\ occurrence_claim_token' = None
        /\ occurrence_delivery_correlation_id' = None
        /\ occurrence_dispatched_at_utc_ms' = None
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -563,7 +603,7 @@ occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms) ==
        /\ occurrence_claim_token' = None
        /\ occurrence_delivery_correlation_id' = None
        /\ occurrence_dispatched_at_utc_ms' = None
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -585,7 +625,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt_stage, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << schedule_phase, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_target_binding_key, occurrence_due_at_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_last_receipt, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -600,22 +640,23 @@ WitnessInjectNext_pause_resume_without_revision ==
 
 CoreNext ==
     \/ DeliverQueuedRoute
+    \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)
     \/ \E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)
     \/ \E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)
-    \/ schedule_PauseActive
-    \/ schedule_ResumePaused
-    \/ schedule_DeleteActive
-    \/ schedule_DeletePaused
-    \/ \E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in StringValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms)
+    \/ \E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
     \/ \E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)
-    \/ \E arg_receipt_stage \in DeliveryReceiptStageValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt_stage, arg_at_utc_ms)
+    \/ \E arg_receipt \in DeliveryReceiptValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt, arg_at_utc_ms)
     \/ \E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)
     \/ \E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)
     \/ \E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)
-    \/ \E arg_receipt_stage \in OptionDeliveryReceiptStageValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt_stage, arg_failure_class, arg_detail, arg_at_utc_ms)
+    \/ \E arg_receipt \in OptionDeliveryReceiptValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt, arg_failure_class, arg_detail, arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms)
@@ -649,8 +690,8 @@ WitnessStateConstraint_revision_supersede_route == /\ model_step_count <= 8 /\ L
 WitnessStateConstraint_pause_resume_without_revision == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8
 
 Spec == Init /\ [][Next]_vars
-WitnessSpec_revision_supersede_route == WitnessInit_revision_supersede_route /\ [] [WitnessNext_revision_supersede_route]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(schedule_PauseActive) /\ WF_vars(schedule_ResumePaused) /\ WF_vars(schedule_DeleteActive) /\ WF_vars(schedule_DeletePaused) /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in StringValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)) /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_receipt_stage \in DeliveryReceiptStageValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt_stage, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)) /\ WF_vars(\E arg_receipt_stage \in OptionDeliveryReceiptStageValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt_stage, arg_failure_class, arg_detail, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms))
-WitnessSpec_pause_resume_without_revision == WitnessInit_pause_resume_without_revision /\ [] [WitnessNext_pause_resume_without_revision]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(schedule_PauseActive) /\ WF_vars(schedule_ResumePaused) /\ WF_vars(schedule_DeleteActive) /\ WF_vars(schedule_DeletePaused) /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in StringValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)) /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_receipt_stage \in DeliveryReceiptStageValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt_stage, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)) /\ WF_vars(\E arg_receipt_stage \in OptionDeliveryReceiptStageValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt_stage, arg_failure_class, arg_detail, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms))
+WitnessSpec_revision_supersede_route == WitnessInit_revision_supersede_route /\ [] [WitnessNext_revision_supersede_route]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms)) /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)) /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_receipt \in DeliveryReceiptValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)) /\ WF_vars(\E arg_receipt \in OptionDeliveryReceiptValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt, arg_failure_class, arg_detail, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms))
+WitnessSpec_pause_resume_without_revision == WitnessInit_pause_resume_without_revision /\ [] [WitnessNext_pause_resume_without_revision]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_CreateSchedule(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_trigger_key \in StringValues : \E arg_target_binding_key \in StringValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowActive(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_planning_cursor_utc_ms \in 0..2 : \E arg_next_occurrence_ordinal \in 0..2 : schedule_RecordPlanningWindowPaused(arg_planning_cursor_utc_ms, arg_next_occurrence_ordinal)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms)) /\ WF_vars(\E arg_owner_id \in StringValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)) /\ WF_vars(\E arg_correlation_id \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_receipt \in DeliveryReceiptValues : \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_receipt, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_SkipFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_detail \in OptionStringValues : \E arg_failure_class \in OptionOccurrenceFailureClassValues : \E arg_at_utc_ms \in 0..2 : occurrence_MisfireFromPendingOrLive(arg_detail, arg_failure_class, arg_at_utc_ms)) /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedePendingOrLive(arg_superseded_by_revision, arg_at_utc_ms)) /\ WF_vars(\E arg_receipt \in OptionDeliveryReceiptValues : \E arg_failure_class \in OccurrenceFailureClassValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_DeliveryFailedFromClaimedOrLive(arg_receipt, arg_failure_class, arg_detail, arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromClaimed(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromDispatching(arg_at_utc_ms)) /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LeaseExpiredFromAwaitingCompletion(arg_at_utc_ms))
 
 WitnessRouteObserved_revision_supersede_route_revision_supersede_enters_occurrence_authority == <> RouteObserved_revision_supersede_enters_occurrence_authority
 

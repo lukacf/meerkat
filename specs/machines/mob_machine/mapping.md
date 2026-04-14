@@ -19,13 +19,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Start`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `Spawn`
+- `SpawnCreating`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SpawnRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ObserveRuntimeReady`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `SubmitWork`
+- `SubmitWorkCreating`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SubmitWorkRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ObserveWorkCompleted`
@@ -511,10 +517,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UntilConditionMetRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `BeginCleanupRunning`
+- `BeginCleanupStopped`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `FinishCleanupRunning`
+- `BeginCleanupCompleted`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FinishCleanupStopped`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FinishCleanupCompleted`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `KickoffStartedRunning`
@@ -613,7 +625,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelWorkCreating`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `CancelWorkRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelWorkStopped`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelWorkCompleted`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelWorkDestroyed`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `CancelAllWorkCreating`
@@ -625,9 +649,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Effects
 - `RequestRuntimeBinding`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `SubmitMemberWork`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RequestRuntimeRetire`

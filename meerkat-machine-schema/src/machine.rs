@@ -1042,7 +1042,7 @@ mod tests {
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "PrepareBindings")
+                .any(|transition| transition.name == "PrepareBindingsIdle")
         );
         assert!(
             schema

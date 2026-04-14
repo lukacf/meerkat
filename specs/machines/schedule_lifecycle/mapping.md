@@ -14,6 +14,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision
 
 ### Transitions
+- `CreateSchedule`
+  - anchors: `schedule_authority`
+  - scenarios: `schedule_pause_resume_delete`
 - `ReviseActive`
   - anchors: `schedule_authority`
   - scenarios: `schedule_pause_resume_delete`
@@ -26,10 +29,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordPlanningWindowPaused`
   - anchors: `schedule_authority`
   - scenarios: `schedule_pause_resume_delete`
-- `PauseActive`
+- `PauseActiveOrPaused`
   - anchors: `schedule_authority`
   - scenarios: `schedule_pause_resume_delete`
-- `ResumePaused`
+- `ResumeActiveOrPaused`
   - anchors: `schedule_authority`
   - scenarios: `schedule_pause_resume_delete`
 - `DeleteActive`

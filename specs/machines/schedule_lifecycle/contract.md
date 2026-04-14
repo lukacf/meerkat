@@ -17,11 +17,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_occurrence_ordinal`: `u64`
 
 ## Inputs
+- `Create`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy)
 - `Revise`(trigger_key: String, target_binding_key: String, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy)
 - `RecordPlanningWindow`(planning_cursor_utc_ms: u64, next_occurrence_ordinal: u64)
-- `Pause`
-- `Resume`
-- `Delete`
+- `Pause`(at_utc_ms: u64)
+- `Resume`(at_utc_ms: u64)
+- `Delete`(at_utc_ms: u64)
 
 ## Signals
 
@@ -36,6 +37,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `planning_cursor_requires_occurrence_progress`
 
 ## Transitions
+### `CreateSchedule`
+- From: `Active`
+- On: `Create`(trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy)
+- Emits: `EmitScheduleNotice`
+- To: `Active`
+
 ### `ReviseActive`
 - From: `Active`
 - On: `Revise`(trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy)
@@ -64,27 +71,27 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitScheduleNotice`, `PlanningWindowRecorded`
 - To: `Paused`
 
-### `PauseActive`
-- From: `Active`
-- On: `Pause`()
+### `PauseActiveOrPaused`
+- From: `Active`, `Paused`
+- On: `Pause`(at_utc_ms)
 - Emits: `EmitScheduleNotice`
 - To: `Paused`
 
-### `ResumePaused`
-- From: `Paused`
-- On: `Resume`()
+### `ResumeActiveOrPaused`
+- From: `Active`, `Paused`
+- On: `Resume`(at_utc_ms)
 - Emits: `EmitScheduleNotice`
 - To: `Active`
 
 ### `DeleteActive`
 - From: `Active`
-- On: `Delete`()
+- On: `Delete`(at_utc_ms)
 - Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
 - To: `Deleted`
 
 ### `DeletePaused`
 - From: `Paused`
-- On: `Delete`()
+- On: `Delete`(at_utc_ms)
 - Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
 - To: `Deleted`
 

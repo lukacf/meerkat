@@ -320,10 +320,7 @@ enum RpcCommand {
         session_id: String,
     },
     /// Resume the most recent session, or create new if none exist.
-    ResumeLatestOrCreate {
-        target_id: String,
-        model: Option<String>,
-    },
+    ResumeLatestOrCreate { target_id: String },
     /// Respawn a mob member via the hive. Retires + re-spawns with fresh
     /// comms wiring. Used instead of raw session/create for mob members.
     MobRespawn {
@@ -341,7 +338,6 @@ enum KennelClientCommand {
     ClaimTarget { target_id: String },
     ClaimAck { lease_id: String },
     ReleaseTarget { lease_id: String },
-    HivePrompt { prompt: String },
     Shutdown { reply: tokio::sync::oneshot::Sender<()> },
 }
 
@@ -830,7 +826,7 @@ async fn rpc_command_loop(
                     }
                 });
             }
-            RpcCommand::ResumeLatestOrCreate { target_id, model } => {
+            RpcCommand::ResumeLatestOrCreate { target_id } => {
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
                 tokio::spawn(async move {
@@ -1528,18 +1524,6 @@ async fn spawn_kennel_client(
                                 break;
                             }
                         }
-                        KennelClientCommand::HivePrompt { prompt } => {
-                            if !send_kennel_message(
-                                &mut write_half,
-                                &keypair,
-                                &tux_id,
-                                KennelPayload::HivePrompt { prompt },
-                            )
-                            .await
-                            {
-                                break;
-                            }
-                        }
                         KennelClientCommand::Shutdown { reply } => {
                             let lease_ids: Vec<String> = claims
                                 .read()
@@ -1852,10 +1836,7 @@ fn process_event(
                 }
                 // Auto-resume latest session or create new
                 if app.targets[idx].session_id.is_none() {
-                    let _ = rpc_tx.send(RpcCommand::ResumeLatestOrCreate {
-                        target_id,
-                        model: app.pending_model.clone(),
-                    });
+                    let _ = rpc_tx.send(RpcCommand::ResumeLatestOrCreate { target_id });
                 }
             }
         }

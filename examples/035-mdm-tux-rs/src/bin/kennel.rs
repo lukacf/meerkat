@@ -150,12 +150,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Add a sentinel peer so comms tools are never gated out at build time.
     // Real peers are added dynamically when targets register.
-    hive_comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+    hive_comms_runtime
+        .register_trusted_peer(meerkat_comms::TrustedPeer {
         name: "__sentinel__".into(),
         pubkey: hive_comms_runtime.public_key(),
         addr: "inproc://sentinel".into(),
         meta: meerkat_comms::PeerMeta::default(),
-    });
+        })
+        .await?;
 
     // ── Hive agent: AgentFactory + Config ───────────────────────────────────
     let hive_factory = meerkat::AgentFactory::new(&session_dir)
@@ -503,14 +505,14 @@ async fn handle_connection(
                         // Always update trusted peer on (re-)registration so the
                         // hive has the target's current comms address.
                         if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(pubkey) {
-                            hive_comms_runtime.upsert_trusted_peer(
-                                meerkat_comms::TrustedPeer {
+                            hive_comms_runtime
+                                .register_trusted_peer(meerkat_comms::TrustedPeer {
                                     name: name.clone(),
                                     pubkey: pk,
                                     addr: direct_addr.clone(),
                                     meta: meerkat_comms::PeerMeta::default(),
-                                },
-                            );
+                                })
+                                .await?;
                         }
 
                         // Spawn target as external mob member in the hive fleet.

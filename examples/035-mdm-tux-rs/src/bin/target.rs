@@ -787,12 +787,14 @@ async fn apply_target_attachment_effects(
                 for pk in stale_keys {
                     router.remove_trusted_peer(&pk);
                 }
-                comms_runtime.upsert_trusted_peer(TrustedPeer {
+                comms_runtime
+                    .register_trusted_peer(TrustedPeer {
                     name: "tux".into(),
                     pubkey: tux_pk,
                     addr: tux_direct_addr.clone(),
                     meta: PeerMeta::default(),
-                });
+                    })
+                    .await?;
             }
             TaEffect::PersistAttachmentHint { tux_id, lease_id } => {
                 let next = PersistedAttachmentHint {
@@ -1450,12 +1452,14 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                 // Add the hive as a trusted peer so it can send us comms messages.
                 if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
                     if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(pk_str.as_str()) {
-                        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+                        comms_runtime
+                            .register_trusted_peer(meerkat_comms::TrustedPeer {
                             name: "hive".into(),
                             pubkey: pk,
                             addr: addr.clone(),
                             meta: meerkat_comms::PeerMeta::default(),
-                        });
+                            })
+                            .await?;
                         eprintln!("[target] added hive as trusted peer at {addr}");
                     }
                 }
@@ -1613,12 +1617,14 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
                             if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
                                 if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(pk_str.as_str()) {
-                                    comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+                                    comms_runtime
+                                        .register_trusted_peer(meerkat_comms::TrustedPeer {
                                         name: "hive".into(),
                                         pubkey: pk,
                                         addr: addr.clone(),
                                         meta: meerkat_comms::PeerMeta::default(),
-                                    });
+                                        })
+                                        .await?;
                                 }
                             }
                             kennel_session_state = target_kennel_session::transition(
@@ -1639,12 +1645,14 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::PeerWire { peer_name, peer_id, peer_addr } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(&peer_id) {
-                                comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+                                comms_runtime
+                                    .register_trusted_peer(meerkat_comms::TrustedPeer {
                                     name: peer_name.clone(),
                                     pubkey: pk,
                                     addr: peer_addr.clone(),
                                     meta: meerkat_comms::PeerMeta::default(),
-                                });
+                                    })
+                                    .await?;
                                 eprintln!("[target] peer wired: {peer_name} at {peer_addr}");
                             }
                         }
@@ -2250,12 +2258,15 @@ mod tests {
             .unwrap(),
         );
         // Add a dummy peer so comms tools pass the availability gate.
-        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+        comms_runtime
+            .register_trusted_peer(meerkat_comms::TrustedPeer {
             name: "tux".into(),
             pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
             addr: "tcp://127.0.0.1:9999".into(),
             meta: meerkat_comms::PeerMeta::default(),
-        });
+            })
+            .await
+            .unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .shell(true)
             .builtins(true)
@@ -2605,12 +2616,15 @@ mod tests {
             .await
             .unwrap();
         // Add a peer so comms tools pass the availability gate.
-        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+        comms_runtime
+            .register_trusted_peer(meerkat_comms::TrustedPeer {
             name: "tux".into(),
             pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
             addr: "tcp://127.0.0.1:9999".into(),
             meta: meerkat_comms::PeerMeta::default(),
-        });
+            })
+            .await
+            .unwrap();
         let _surface = build_target_runtime_surface(temp.path(), Arc::clone(&comms_runtime))
             .await
             .unwrap();
@@ -2725,12 +2739,15 @@ mod tests {
         let comms_runtime = create_target_comms_runtime("test-resume", temp.path())
             .await
             .unwrap();
-        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+        comms_runtime
+            .register_trusted_peer(meerkat_comms::TrustedPeer {
             name: "tux".into(),
             pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
             addr: "tcp://127.0.0.1:9999".into(),
             meta: meerkat_comms::PeerMeta::default(),
-        });
+            })
+            .await
+            .unwrap();
 
         let session_dir = temp.path().join("sessions");
 

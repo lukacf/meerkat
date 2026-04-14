@@ -149,7 +149,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .current_dir(&project_dir)
         .env("HOME", &home_dir)
         .env("XDG_DATA_HOME", &data_dir)
-        .args(["realms", "show", realm_id])
+        .args(["realm", "show", realm_id])
         .output()
         .await?;
     if !realm_show.status.success() {
@@ -197,18 +197,41 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         Command::new(&rkat)
             .current_dir(&project_dir)
             .env("RKAT_TEST_CLIENT", "1")
-            .args(["resume", &session_id, "Continue."])
+            .args(["run", "--resume", &session_id, "Continue."])
             .output(),
     )
     .await??;
 
     if !output.status.success() {
         return Err(format!(
-            "rkat resume failed: {}",
+            "rkat run --resume failed: {}",
             String::from_utf8_lossy(&output.stderr)
         )
         .into());
     }
+
+    let rejected_override = Command::new(&rkat)
+        .current_dir(&project_dir)
+        .env("RKAT_TEST_CLIENT", "1")
+        .args([
+            "run",
+            "--resume",
+            &session_id,
+            "--tools",
+            "full",
+            "Continue.",
+        ])
+        .output()
+        .await?;
+    assert!(
+        !rejected_override.status.success(),
+        "run --resume should reject create-only --tools overrides"
+    );
+    let rejected_stderr = String::from_utf8_lossy(&rejected_override.stderr);
+    assert!(
+        rejected_stderr.contains("--tools"),
+        "resume override rejection should mention --tools, got: {rejected_stderr}"
+    );
 
     let session = store
         .load(&SessionId::parse(&session_id)?)

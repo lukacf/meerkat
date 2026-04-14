@@ -522,10 +522,17 @@ fn normalize_cli_args(
                 .skip(resume_index + 1)
                 .filter(|arg| !arg.to_string_lossy().starts_with('-'))
                 .count();
-            let next_is_value = patched
+            let next_value = patched
                 .get(resume_index + 1)
-                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'));
-            if !next_is_value || remaining_positionals <= 1 {
+                .and_then(|arg| arg.to_str())
+                .filter(|arg| !arg.starts_with('-'));
+            let should_insert_last = match (next_value, remaining_positionals) {
+                (None, _) => true,
+                (Some(_), 0) => true,
+                (Some(value), 1) => !looks_like_resume_target(value),
+                (Some(_), _) => false,
+            };
+            if should_insert_last {
                 patched.insert(resume_index + 1, "last".into());
             }
         }
@@ -1606,9 +1613,11 @@ async fn handle_run_command(
             || !labels.is_empty()
             || app_context.is_some()
             || keep_alive
+            || tools.is_some()
+            || yolo
         {
             return Err(anyhow::anyhow!(
-                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, and --keep-alive are not supported there yet"
+                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, --keep-alive, --tools, and --yolo are not supported there yet"
             ));
         }
         return resume_session(
@@ -1795,9 +1804,39 @@ fn expand_path(raw: &str) -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(raw))
 }
 
-async fn resolve_runtime_skill_path(
-    raw: &str,
-) -> anyhow::Result<(meerkat_core::skills_config::SkillRepositoryConfig, String)> {
+#[derive(Debug, Clone)]
+struct ResolvedSkillRepoPath {
+    repo_path: PathBuf,
+    implied_skill_id: Option<String>,
+    default_name: String,
+}
+
+fn looks_like_resume_target(raw: &str) -> bool {
+    if matches!(raw, "last" | "~" | "~0") {
+        return true;
+    }
+    if raw
+        .strip_prefix('~')
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return true;
+    }
+    if SessionLocator::parse(raw).is_ok() {
+        return true;
+    }
+    raw.len() >= 8 && raw.len() <= 36 && raw.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+}
+
+fn derive_skill_source_uuid(repo_path: &Path) -> anyhow::Result<meerkat_core::skills::SourceUuid> {
+    let source_uuid = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("rkat-skill-source:{}", repo_path.display()).as_bytes(),
+    );
+    meerkat_core::skills::SourceUuid::parse(&source_uuid.to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to derive source UUID: {e}"))
+}
+
+async fn resolve_skill_repo_path(raw: &str) -> anyhow::Result<ResolvedSkillRepoPath> {
     let input = expand_path(raw)?;
     let absolute = if input.is_absolute() {
         input
@@ -1808,7 +1847,7 @@ async fn resolve_runtime_skill_path(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{raw}': {e}"))?;
 
-    let (repo_root, skill_dir) = if canonical.is_file() {
+    let (repo_path, implied_skill_id) = if canonical.is_file() {
         if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
             return Err(anyhow::anyhow!(
                 "Skill file paths must point to SKILL.md: {}",
@@ -1819,42 +1858,63 @@ async fn resolve_runtime_skill_path(
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Skill file has no parent directory"))?
             .to_path_buf();
-        let repo_root = skill_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
-            .to_path_buf();
-        (repo_root, skill_dir)
+        let skill_id = skill_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Invalid skill directory name: {}", skill_dir.display())
+            })?
+            .to_string();
+        (skill_dir, Some(skill_id))
     } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
-        let repo_root = canonical
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
-            .to_path_buf();
-        (repo_root, canonical)
+        let skill_id = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Invalid skill directory name: {}", canonical.display())
+            })?
+            .to_string();
+        (canonical, Some(skill_id))
     } else {
-        return Err(anyhow::anyhow!(
-            "Runtime --skill paths must point to a skill directory or SKILL.md file: {}",
-            canonical.display()
-        ));
+        let default_name = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("Invalid skill source path: {}", canonical.display()))?;
+        return Ok(ResolvedSkillRepoPath {
+            repo_path: canonical,
+            implied_skill_id: None,
+            default_name,
+        });
     };
 
-    let skill_id = skill_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid skill directory name: {}", skill_dir.display()))?
-        .to_string();
-    let source_uuid = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!("rkat-runtime-skill:{}", repo_root.display()).as_bytes(),
-    );
-    let source_uuid = meerkat_core::skills::SourceUuid::parse(&source_uuid.to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to derive source UUID: {e}"))?;
+    Ok(ResolvedSkillRepoPath {
+        default_name: implied_skill_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Missing implied skill id"))?,
+        repo_path,
+        implied_skill_id,
+    })
+}
+
+async fn resolve_runtime_skill_path(
+    raw: &str,
+) -> anyhow::Result<(meerkat_core::skills_config::SkillRepositoryConfig, String)> {
+    let resolved = resolve_skill_repo_path(raw).await?;
+    let skill_id = resolved.implied_skill_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Runtime --skill paths must point to a skill directory or SKILL.md file: {}",
+            resolved.repo_path.display()
+        )
+    })?;
+    let source_uuid = derive_skill_source_uuid(&resolved.repo_path)?;
 
     Ok((
         meerkat_core::skills_config::SkillRepositoryConfig {
             name: format!("local-{skill_id}"),
             source_uuid,
             transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
-                path: repo_root.display().to_string(),
+                path: resolved.repo_path.display().to_string(),
             },
         },
         skill_id,
@@ -5309,71 +5369,16 @@ async fn resolve_skill_repo_for_config(
     raw: &str,
     name_override: Option<String>,
 ) -> anyhow::Result<meerkat_core::skills_config::SkillRepositoryConfig> {
-    let input = expand_path(raw)?;
-    let absolute = if input.is_absolute() {
-        input
-    } else {
-        std::env::current_dir()?.join(input)
-    };
-    let canonical = tokio::fs::canonicalize(&absolute)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{raw}': {e}"))?;
-
-    let implied_skill_name = if canonical.is_file() {
-        if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
-            return Err(anyhow::anyhow!(
-                "Skill file paths must point to SKILL.md: {}",
-                canonical.display()
-            ));
-        }
-        canonical
-            .parent()
-            .and_then(|dir| dir.file_name())
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-    } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
-        canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-    } else {
-        None
-    };
-
-    let repo_root = if canonical.is_file() {
-        canonical
-            .parent()
-            .and_then(|dir| dir.parent())
-            .ok_or_else(|| anyhow::anyhow!("Skill file must live under a skill directory"))?
-            .to_path_buf()
-    } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
-        canonical
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
-            .to_path_buf()
-    } else {
-        canonical
-    };
-
-    let default_name = repo_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("Invalid skill source path: {}", repo_root.display()))?;
-    let default_name = implied_skill_name.unwrap_or(default_name);
+    let resolved = resolve_skill_repo_path(raw).await?;
+    let default_name = resolved.default_name;
     let name = name_override.unwrap_or(default_name);
-    let source_uuid = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!("rkat-skill-source:{}", repo_root.display()).as_bytes(),
-    );
-    let source_uuid = meerkat_core::skills::SourceUuid::parse(&source_uuid.to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to derive source UUID: {e}"))?;
+    let source_uuid = derive_skill_source_uuid(&resolved.repo_path)?;
 
     Ok(meerkat_core::skills_config::SkillRepositoryConfig {
         name,
         source_uuid,
         transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
-            path: repo_root.display().to_string(),
+            path: resolved.repo_path.display().to_string(),
         },
     })
 }
@@ -5422,14 +5427,17 @@ async fn handle_skills_command(
             updated.skills.enabled = true;
             updated.skills.repositories.push(repo.clone());
             persist_cli_config(updated, scope).await?;
-            println!(
-                "Added skill source '{}' -> {}",
-                repo.name,
-                match &repo.transport {
-                    meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => path,
-                    _ => unreachable!("skill add only creates filesystem repos"),
+            let transport = match &repo.transport {
+                meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => {
+                    path.as_str()
                 }
-            );
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported skill source transport: {other:?}"
+                    ));
+                }
+            };
+            println!("Added skill source '{}' -> {}", repo.name, transport);
             return Ok(());
         }
         SkillsCommands::Remove { selector } => {
@@ -5474,7 +5482,9 @@ async fn handle_skills_command(
                     meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => {
                         println!("Path:        {path}");
                     }
-                    _ => unreachable!("skill get currently expects filesystem repos"),
+                    other => {
+                        println!("Transport:   {other:?}");
+                    }
                 }
             }
             return Ok(());
@@ -8525,6 +8535,24 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         );
+
+        let args = normalize_cli_args(["rkat", "--resume", "~2"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "~2"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "--resume", "019c8b99"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "019c8b99"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -8578,6 +8606,33 @@ mod tests {
         assert!(Cli::try_parse_from(["rkat", "resume", "last", "hello"]).is_err());
         assert!(Cli::try_parse_from(["rkat", "continue", "hello"]).is_err());
         assert!(Cli::try_parse_from(["rkat", "models", "catalog"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_skill_path_helpers_use_same_source_uuid_and_skill_dir_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("demo-skill");
+        tokio::fs::create_dir_all(&skill_dir)
+            .await
+            .expect("skill dir");
+        tokio::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: demo\n---\n\n# demo\n",
+        )
+        .await
+        .expect("skill file");
+
+        let skill_arg = skill_dir.to_string_lossy().to_string();
+        let (runtime_repo, runtime_skill_id) = resolve_runtime_skill_path(&skill_arg)
+            .await
+            .expect("runtime repo");
+        let config_repo = resolve_skill_repo_for_config(&skill_arg, None)
+            .await
+            .expect("config repo");
+
+        assert_eq!(runtime_skill_id, "demo-skill");
+        assert_eq!(runtime_repo.source_uuid, config_repo.source_uuid);
+        assert_eq!(runtime_repo.transport, config_repo.transport);
     }
 
     #[test]

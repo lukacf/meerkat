@@ -438,17 +438,22 @@ faster without re-debating already solid ground.
 
 #### Top-Level Mapping
 
+Status note: the shipped CLI has now taken the canonical singular route for
+`session`, `realm`, and `skill`. Historical references to `sessions`, `realms`,
+and `skills` below should be read as pre-migration discussion, not current CLI
+syntax.
+
 | Current | Proposed | Bucket | Action |
 | --- | --- | --- | --- |
 | bare `rkat "prompt"` | keep | runtime | keep as friendly shorthand for `run` |
 | `rkat run` | keep | runtime | canonical execution verb |
 | `rkat resume` | fold into `rkat run --resume[=<SESSION>]` | runtime | deprecate command |
 | `rkat continue` | fold into `rkat run --resume[=last]` | runtime | remove/deprecate |
-| `rkat sessions ...` | keep | utility | keep, maybe rename to `session` later |
+| `rkat sessions ...` | `rkat session ...` | utility | canonical singular form implemented |
 | `rkat blob ...` | keep | utility | keep, advanced |
-| `rkat realms ...` | keep | realm/config | keep, maybe rename to `realm` later |
+| `rkat realms ...` | `rkat realm ...` | realm/config | canonical singular form implemented |
 | `rkat mcp ...` | keep | realm/config | keep |
-| `rkat skills ...` | rename to `rkat skill ...` | realm/config | expand from introspection to CRUD |
+| `rkat skills ...` | `rkat skill ...` | realm/config | canonical singular form implemented |
 | `rkat mob ...` | split mentally, keep namespace | mostly deployment/build | keep, but narrow primary purpose |
 | `rkat config ...` | keep | realm/config | keep |
 | `rkat capabilities` | keep | utility | keep |
@@ -531,7 +536,7 @@ Keep:
 
 - `rkat config get/set/patch`
 - `rkat mcp add/remove/list/get`
-- `rkat realms current/list/show/create/delete/prune`
+- `rkat realm current/list/show/create/delete/prune`
 - `rkat init`
 
 Change:
@@ -674,9 +679,9 @@ config or mobpack, if such a need remains after Workstream 2.
 - `rkat skill ...`
 - `rkat mcp ...`
 - `rkat config ...`
-- `rkat realm ...` or keep `realms ...`
+- `rkat realm ...`
 - `rkat mob ...`
-- `rkat session ...` or keep `sessions ...`
+- `rkat session ...`
 - `rkat blob ...`
 - `rkat models`
 - `rkat capabilities`

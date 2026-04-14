@@ -26,8 +26,8 @@
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
-    MobStorage, Profile, ProfileBinding, ProfileName, ToolConfig,
+    AgentIdentity, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
+    MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
     definition::{RoleWiringRule, WiringRules},
 };
 use meerkat_session::PersistentSessionService;
@@ -253,10 +253,9 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
 
     for (name, msg) in spawns {
         handle
-            .spawn(
-                ProfileName::from(name),
-                MeerkatId::from(name),
-                Some(ContentInput::Text(msg.to_string())),
+            .spawn_spec(
+                SpawnMemberSpec::new(name, AgentIdentity::from(name))
+                    .with_initial_message(ContentInput::Text(msg.to_string())),
             )
             .await
             .map_err(|e| format!("spawn {name}: {e}"))?;
@@ -333,14 +332,12 @@ async fn wait_for_artist_guess_after_discussion(
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        let members = handle.list_members().await;
-        let artist_guess_received = if let Some(artist) = members
-            .iter()
-            .find(|m| m.meerkat_id == MeerkatId::from("artist"))
-            && let Some(sid) = artist.session_id()
+        let artist_guess_received = if let Some(sid) = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("artist"))
+            .await
             && let Ok(page) = service
                 .read_history(
-                    sid,
+                    &sid,
                     meerkat_core::SessionHistoryQuery {
                         offset: 0,
                         limit: None,
@@ -353,13 +350,12 @@ async fn wait_for_artist_guess_after_discussion(
             false
         };
 
-        let discussion_complete = if let Some(guesser_a) = members
-            .iter()
-            .find(|m| m.meerkat_id == MeerkatId::from("guesser-a"))
-            && let Some(sid) = guesser_a.session_id()
+        let discussion_complete = if let Some(sid) = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("guesser-a"))
+            .await
             && let Ok(page) = service
                 .read_history(
-                    sid,
+                    &sid,
                     meerkat_core::SessionHistoryQuery {
                         offset: 0,
                         limit: None,
@@ -399,13 +395,16 @@ async fn print_conversation(
 
     let members = handle.list_members().await;
     for member in &members {
-        let name = member.meerkat_id.to_string();
-        let Some(session_id) = member.session_id() else {
+        let name = member.agent_identity.to_string();
+        let Some(session_id) = handle
+            .resolve_bridge_session_id(&member.agent_identity)
+            .await
+        else {
             continue;
         };
         let Ok(page) = service
             .read_history(
-                session_id,
+                &session_id,
                 meerkat_core::SessionHistoryQuery {
                     offset: skip_before,
                     limit: None,
@@ -586,7 +585,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         let t = Instant::now();
         println!("  [2/4] Briefing artist...");
         let artist = handle
-            .member(&MeerkatId::from("artist"))
+            .member(&AgentIdentity::from("artist"))
             .await
             .expect("artist");
         artist
@@ -604,14 +603,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         // 3. Send image to all guessers via peer-to-peer comms (from artist)
         let t = Instant::now();
         println!("  [3/4] Sending image to guessers via artist's comms...");
-        let artist_session_id = {
-            let members = handle.list_members().await;
-            members
-                .iter()
-                .find(|m| m.meerkat_id == MeerkatId::from("artist"))
-                .and_then(|m| m.session_id().cloned())
-                .expect("artist session_id")
-        };
+        let artist_session_id = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("artist"))
+            .await
+            .expect("artist session_id");
         let artist_comms = service
             .comms_runtime(&artist_session_id)
             .await
@@ -650,14 +645,16 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         // Verify: check each guesser's session history for image arrival
         sleep(Duration::from_secs(15)).await;
         for guesser_name in ["guesser-a", "guesser-b", "guesser-c"] {
+            let guesser_identity = AgentIdentity::from(guesser_name);
             let members = handle.list_members().await;
-            if let Some(guesser) = members
+            let guesser_status = members
                 .iter()
-                .find(|m| m.meerkat_id == MeerkatId::from(guesser_name))
-                && let Some(sid) = guesser.session_id()
+                .find(|m| m.agent_identity == guesser_identity)
+                .map(|m| m.status);
+            if let Some(sid) = handle.resolve_bridge_session_id(&guesser_identity).await
                 && let Ok(page) = service
                     .read_history(
-                        sid,
+                        &sid,
                         meerkat_core::SessionHistoryQuery {
                             offset: 0,
                             limit: None,
@@ -676,9 +673,8 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                     _ => false,
                 });
                 println!(
-                    "  [DEBUG] {guesser_name}: msgs={} has_image={has_image} has_drew_text={has_drew} status={:?}",
+                    "  [DEBUG] {guesser_name}: msgs={} has_image={has_image} has_drew_text={has_drew} status={guesser_status:?}",
                     page.messages.len(),
-                    guesser.status
                 );
             }
         }
@@ -690,14 +686,12 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         // DEBUG: After a short delay, dump guesser-a's raw history for round 1
         if round_idx == 0 {
             sleep(Duration::from_secs(15)).await;
-            let members = handle.list_members().await;
-            if let Some(ga) = members
-                .iter()
-                .find(|m| m.meerkat_id == MeerkatId::from("guesser-a"))
-                && let Some(sid) = ga.session_id()
+            if let Some(sid) = handle
+                .resolve_bridge_session_id(&AgentIdentity::from("guesser-a"))
+                .await
                 && let Ok(page) = service
                     .read_history(
-                        sid,
+                        &sid,
                         meerkat_core::SessionHistoryQuery {
                             offset: 0,
                             limit: None,

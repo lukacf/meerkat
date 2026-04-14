@@ -18,9 +18,9 @@ use meerkat_mob::definition::{
     RepeatUntilSpec, WiringRules,
 };
 use meerkat_mob::{
-    FlowId, LoopId, MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobRun, MobRunStatus,
-    MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, StepId,
-    ToolConfig,
+    AgentIdentity, FlowId, LoopId, MobBuilder, MobDefinition, MobHandle, MobId, MobRun,
+    MobRunStatus, MobRuntimeMode, MobSessionService, MobStorage, Profile, ProfileBinding,
+    ProfileName, SpawnMemberSpec, StepId, ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
@@ -2450,39 +2450,35 @@ async fn setup_flow_mob(
         .expect("create flow smoke mob");
 
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
         .await
         .expect("spawn lead");
     handle
-        .spawn(
-            ProfileName::from("worker"),
-            MeerkatId::from("worker-1"),
-            None,
-        )
+        .spawn_spec(SpawnMemberSpec::new(
+            "worker",
+            AgentIdentity::from("worker-1"),
+        ))
         .await
         .expect("spawn worker");
     handle
-        .spawn(
-            ProfileName::from("reviewer"),
-            MeerkatId::from("reviewer-1"),
-            None,
-        )
+        .spawn_spec(SpawnMemberSpec::new(
+            "reviewer",
+            AgentIdentity::from("reviewer-1"),
+        ))
         .await
         .expect("spawn reviewer");
     handle
-        .spawn(
-            ProfileName::from("analyst"),
-            MeerkatId::from("analyst-1"),
-            None,
-        )
+        .spawn_spec(SpawnMemberSpec::new(
+            "analyst",
+            AgentIdentity::from("analyst-1"),
+        ))
         .await
         .expect("spawn analyst-1");
     handle
-        .spawn(
-            ProfileName::from("analyst"),
-            MeerkatId::from("analyst-2"),
-            None,
-        )
+        .spawn_spec(SpawnMemberSpec::new(
+            "analyst",
+            AgentIdentity::from("analyst-2"),
+        ))
         .await
         .expect("spawn analyst-2");
 

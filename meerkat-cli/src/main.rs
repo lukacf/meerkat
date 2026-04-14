@@ -1286,9 +1286,9 @@ enum MobCommands {
         mob_id: String,
         /// Task prompt for the helper
         prompt: String,
-        /// Meerkat ID for the helper (auto-generated if omitted)
+        /// Agent identity for the helper (auto-generated if omitted)
         #[arg(long)]
-        meerkat_id: Option<String>,
+        agent_identity: Option<String>,
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
@@ -1304,9 +1304,9 @@ enum MobCommands {
         source_member: String,
         /// Task prompt for the forked helper
         prompt: String,
-        /// Meerkat ID for the helper (auto-generated if omitted)
+        /// Agent identity for the helper (auto-generated if omitted)
         #[arg(long)]
-        meerkat_id: Option<String>,
+        agent_identity: Option<String>,
         /// Profile to use
         #[arg(long)]
         profile: Option<String>,
@@ -1324,8 +1324,8 @@ enum MobCommands {
     MemberStatus {
         /// Mob ID
         mob_id: String,
-        /// Meerkat ID of the member
-        meerkat_id: String,
+        /// Agent identity of the member
+        agent_identity: String,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1334,15 +1334,15 @@ enum MobCommands {
     ForceCancel {
         /// Mob ID
         mob_id: String,
-        /// Meerkat ID of the member to cancel
-        meerkat_id: String,
+        /// Agent identity of the member to cancel
+        agent_identity: String,
     },
     /// Retire and respawn a mob member with the same profile.
     Respawn {
         /// Mob ID
         mob_id: String,
-        /// Meerkat ID to respawn
-        meerkat_id: String,
+        /// Agent identity to respawn
+        agent_identity: String,
         /// Initial message for the respawned member
         #[arg(long)]
         initial_message: Option<String>,
@@ -6056,11 +6056,11 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         MobCommands::SpawnHelper {
             mob_id,
             prompt,
-            meerkat_id,
+            agent_identity,
             profile,
             json,
         } => {
-            let mid = meerkat_mob::AgentIdentity::from(meerkat_id.unwrap_or_else(|| {
+            let mid = meerkat_mob::AgentIdentity::from(agent_identity.unwrap_or_else(|| {
                 format!(
                     "helper-{}",
                     std::time::SystemTime::now()
@@ -6103,13 +6103,13 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             mob_id,
             source_member,
             prompt,
-            meerkat_id,
+            agent_identity,
             profile,
             fork_context,
             last_messages,
             json,
         } => {
-            let mid = meerkat_mob::AgentIdentity::from(meerkat_id.unwrap_or_else(|| {
+            let mid = meerkat_mob::AgentIdentity::from(agent_identity.unwrap_or_else(|| {
                 format!(
                     "fork-{}",
                     std::time::SystemTime::now()
@@ -6160,13 +6160,13 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         }
         MobCommands::MemberStatus {
             mob_id,
-            meerkat_id,
+            agent_identity,
             json,
         } => {
             let snapshot = state
                 .mob_member_status(
                     &meerkat_mob::MobId::from(mob_id),
-                    &meerkat_mob::AgentIdentity::from(meerkat_id),
+                    &meerkat_mob::AgentIdentity::from(agent_identity),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -6194,11 +6194,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             }
             Ok(())
         }
-        MobCommands::ForceCancel { mob_id, meerkat_id } => {
+        MobCommands::ForceCancel {
+            mob_id,
+            agent_identity,
+        } => {
             state
                 .mob_force_cancel(
                     &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::AgentIdentity::from(meerkat_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -6209,13 +6212,13 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         }
         MobCommands::Respawn {
             mob_id,
-            meerkat_id,
+            agent_identity,
             initial_message,
         } => {
             let receipt = state
                 .mob_respawn(
                     &meerkat_mob::MobId::from(mob_id.clone()),
-                    meerkat_mob::AgentIdentity::from(meerkat_id),
+                    meerkat_mob::AgentIdentity::from(agent_identity),
                     initial_message.map(meerkat_core::ContentInput::from),
                 )
                 .await

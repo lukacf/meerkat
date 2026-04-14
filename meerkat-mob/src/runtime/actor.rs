@@ -4666,7 +4666,8 @@ impl MobActor {
                 e
             }
             None => {
-                if let Some(spec) = self.spawn_policy.resolve(&meerkat_id).await {
+                let agent_identity = AgentIdentity::from(meerkat_id.as_str());
+                if let Some(spec) = self.spawn_policy.resolve(&agent_identity).await {
                     self.spawn_from_policy_inline(&meerkat_id, spec)
                         .await
                         .map_err(|error| {

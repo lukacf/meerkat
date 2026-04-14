@@ -322,11 +322,11 @@ Session methods:
 Mob methods:
 
 - `Mob.id` (property) / `Mob.status()` / `Mob.lifecycle(action)`
-- `Mob.spawn(...)` / `Mob.retire(meerkat_id)` / `Mob.respawn(meerkat_id)`
+- `Mob.spawn(...)` / `Mob.retire(agent_identity)` / `Mob.respawn(agent_identity)`
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)`
-- `Mob.members()` / `Mob.member(meerkat_id).send(content, handling_mode=...)`
+- `Mob.members()` / `Mob.member(agent_identity).send(content, handling_mode=...)`
 - `Mob.flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
-- `Mob.subscribe_member_events(meerkat_id)` → `EventSubscription`
+- `Mob.subscribe_member_events(agent_identity)` → `EventSubscription`
 - `Mob.subscribe_events()` → `EventSubscription`
 
 `get_config()` / `patch_config()` return the config envelope.

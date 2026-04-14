@@ -117,15 +117,14 @@ Where needed, direct lifecycle commands are available as operational compatibili
 rkat mob create --definition <path>
 rkat mob list
 rkat mob status <mob_id>
-rkat mob spawn <mob_id> <profile> <meerkat_id>
-rkat mob retire <mob_id> <meerkat_id>
-rkat mob respawn <mob_id> <meerkat_id> [--message <msg>]
+rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>]
+rkat mob member-status <mob_id> <agent_identity>
+rkat mob respawn <mob_id> <agent_identity> [--message <msg>]
 rkat mob wire <mob_id> <a> <b>
 rkat mob unwire <mob_id> <a> <b>
-rkat mob turn <mob_id> <meerkat_id> <message>
-rkat mob stop|resume|complete <mob_id>
-rkat mob events <mob_id> [--member <meerkat_id>]
-rkat mob destroy <mob_id>
+rkat mob force-cancel <mob_id> <agent_identity>
+rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>]
+rkat mob wait-kickoff <mob_id> [--member <agent_identity>...]
 ```
 
 ### Mobpack + web build quick paths
@@ -172,7 +171,7 @@ const runtime = await MeerkatRuntime.init(wasm, {
   anthropicBaseUrl: 'http://localhost:3100/anthropic',
 });
 const mob = await runtime.createMob(definition);
-await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
+await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
 ```
 
 **Architecture:**

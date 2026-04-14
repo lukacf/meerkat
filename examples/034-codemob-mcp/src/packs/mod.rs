@@ -163,7 +163,7 @@ pub fn flow_step(role: &str, message: String, depends_on: &[&str], timeout_ms: u
     }
 }
 
-/// Build an identity spawn policy (meerkat_id == profile name for each agent).
+/// Build an identity spawn policy (agent_identity == profile name for each agent).
 pub fn identity_spawn_policy(names: &[&str]) -> Option<SpawnPolicyConfig> {
     let profile_map = names
         .iter()

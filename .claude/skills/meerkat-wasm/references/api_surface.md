@@ -28,10 +28,10 @@
 | `mob_spawn` | mob_id, specs JSON | result JSON | async, batch spawn |
 | `mob_wire` | mob_id, a, b | `()` | async |
 | `mob_unwire` | mob_id, a, b | `()` | async |
-| `mob_retire` | mob_id, meerkat_id | `()` | async |
+| `mob_retire` | mob_id, agent_identity | `()` | async |
 | `mob_list_members` | mob_id | RosterEntry[] JSON | |
-| `mob_send_message` | mob_id, meerkat_id, msg | `()` | async |
-| `mob_respawn` | mob_id, meerkat_id, initial_message? | result JSON | async, retire + re-spawn same profile |
+| `mob_send_message` | mob_id, agent_identity, msg | `()` | async |
+| `mob_respawn` | mob_id, agent_identity, initial_message? | result JSON | async, retire + re-spawn same profile |
 | `mob_events` | mob_id, after_cursor (u32), limit (u32) | MobEvent[] JSON | |
 | `mob_status` | mob_id | JSON | |
 | `mob_list` | | MobSummary[] JSON | |
@@ -44,7 +44,7 @@
 ### Subscriptions
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `mob_member_subscribe` | mob_id, meerkat_id | handle (u32) | async, per-member broadcast subscription |
+| `mob_member_subscribe` | mob_id, agent_identity | handle (u32) | async, per-member broadcast subscription |
 | `mob_subscribe_events` | mob_id | handle (u32) | async, mob-wide attributed event stream |
 | `poll_subscription` | handle | JSON | Drain events from subscription |
 | `close_subscription` | handle | `()` | Close subscription handle |
@@ -106,7 +106,7 @@ surface semantics like `keep_alive` still belong to the hosting runtime layer.
 [
   {
     "profile": "planner",
-    "meerkat_id": "planner-1",
+    "agent_identity": "planner-1",
     "runtime_mode": "turn_driven",
     "initial_message": "optional prompt",
     "additional_instructions": ["Extra context for this member"],
@@ -173,7 +173,7 @@ const runtime = await MeerkatRuntime.init(wasm, {
 
 // Mob lifecycle
 const mob = await runtime.createMob(definition);
-await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
+await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
 const sub = await mob.subscribe('w1');       // async, returns EventSubscription<EventEnvelope>
 const events = sub.poll();
 sub.close();

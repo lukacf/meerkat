@@ -361,9 +361,9 @@ async function startMatch(): Promise<void> {
       const mobId = parseJsResult(await mod.mob_create(JSON.stringify(def)));
 
       await mod.mob_spawn(mobId, JSON.stringify([
-        { profile: "planner", meerkat_id: `${team}-planner`, runtime_mode: "autonomous_host" },
-        { profile: "operator", meerkat_id: `${team}-operator`, runtime_mode: "autonomous_host" },
-        { profile: "ambassador", meerkat_id: `${team}-ambassador`, runtime_mode: "autonomous_host" },
+        { profile: "planner", agent_identity: `${team}-planner`, runtime_mode: "autonomous_host" },
+        { profile: "operator", agent_identity: `${team}-operator`, runtime_mode: "autonomous_host" },
+        { profile: "ambassador", agent_identity: `${team}-ambassador`, runtime_mode: "autonomous_host" },
       ]));
       await mod.mob_wire(mobId, `${team}-planner`, `${team}-operator`);
       await mod.mob_wire(mobId, `${team}-planner`, `${team}-ambassador`);
@@ -388,7 +388,7 @@ async function startMatch(): Promise<void> {
     try {
       setStatus("Creating war correspondent...");
       narratorMobId = parseJsResult(await mod.mob_create(JSON.stringify(buildNarratorDefinition(models.narrator))));
-      await mod.mob_spawn(narratorMobId, JSON.stringify([{ profile: "narrator", meerkat_id: "narrator", runtime_mode: "turn_driven" }]));
+      await mod.mob_spawn(narratorMobId, JSON.stringify([{ profile: "narrator", agent_identity: "narrator", runtime_mode: "turn_driven" }]));
     } catch { /* narrator optional */ }
 
     const state = defaultState();

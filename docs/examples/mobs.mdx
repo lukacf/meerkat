@@ -220,9 +220,9 @@ planes instead:
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat mob spawn my-mob lead lead-1
-    rkat mob spawn my-mob worker worker-1
-    rkat mob spawn my-mob worker worker-2
+    rkat mob spawn-helper my-mob "join as lead-1" --profile lead --agent-identity lead-1
+    rkat mob spawn-helper my-mob "join as worker-1" --profile worker --agent-identity worker-1
+    rkat mob spawn-helper my-mob "join as worker-2" --profile worker --agent-identity worker-2
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -299,7 +299,7 @@ planes instead:
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat mob retire my-mob worker-2
+    rkat mob respawn my-mob worker-2 --initial-message "resume with fresh runtime"
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -334,7 +334,7 @@ Send a message directly to a specific mob member, triggering an LLM turn.
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat mob turn my-mob lead-1 "Decompose the task and assign to workers."
+    rkat run "send a message to mob member lead-1 in my-mob: Decompose the task and assign to workers."
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -617,5 +617,5 @@ Set per-profile in the definition:
 
 Or per-spawn:
 ```bash
-rkat mob spawn my-mob worker worker-1 --runtime-mode turn_driven
+rkat mob spawn-helper my-mob "join as worker-1" --profile worker --agent-identity worker-1
 ```

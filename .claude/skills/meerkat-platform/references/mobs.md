@@ -14,7 +14,7 @@ This is the detailed reference for Meerkat mobs across Rust SDK, CLI, MCP, REST,
 Core entities:
 
 - `Mob`: persisted aggregate (definition, members, status, events).
-- `Meerkat member`: spawned runtime participant identified by `meerkat_id`.
+- `Mob member`: spawned runtime participant identified by `agent_identity`.
 - `Profile`: role contract (model/tools/skills posture).
 - `Wiring`: peer graph edges.
 - `Mob event`: append-only lifecycle records.

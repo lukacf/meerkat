@@ -36,8 +36,8 @@ export interface MobRuntime {
   mob_create(definition_json: string): Promise<string>;
   mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
-  mob_member_subscribe(mob_id: string, meerkat_id: string): Promise<number>;
-  mob_member_send(mob_id: string, meerkat_id: string, request_json: string): Promise<string>;
+  mob_member_subscribe(mob_id: string, agent_identity: string): Promise<number>;
+  mob_member_send(mob_id: string, agent_identity: string, request_json: string): Promise<string>;
   poll_subscription(handle: number): string;
 }
 
@@ -278,7 +278,7 @@ export class MobOrchestrator {
     // Spawn all agents
     const specs = AGENTS.map((profile) => ({
       profile,
-      meerkat_id: profile,
+      agent_identity: profile,
       runtime_mode: "autonomous_host" as const,
     }));
     await this.runtime.mob_spawn(this.mobId, JSON.stringify(specs));

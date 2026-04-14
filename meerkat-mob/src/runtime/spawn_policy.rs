@@ -1,5 +1,5 @@
 use crate::MobRuntimeMode;
-use crate::ids::{MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, ProfileName};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -13,7 +13,7 @@ pub struct SpawnSpec {
     pub runtime_mode: Option<MobRuntimeMode>,
 }
 
-/// Policy that determines whether an unknown meerkat ID should trigger an
+/// Policy that determines whether an unknown agent identity should trigger an
 /// automatic spawn.
 ///
 /// Attached to the [`MobActor`] at build-time or set dynamically at runtime.
@@ -23,11 +23,10 @@ pub struct SpawnSpec {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SpawnPolicy: Send + Sync {
-    /// Given an unknown meerkat ID, return a spawn spec if the policy
+    /// Given an unknown agent identity, return a spawn spec if the policy
     /// should auto-spawn a member for it, or `None` to fall through
     /// to the normal `MeerkatNotFound` error.
-    // TODO: should take AgentIdentity instead of MeerkatId once identity-first migration completes
-    async fn resolve(&self, target: &MeerkatId) -> Option<SpawnSpec>;
+    async fn resolve(&self, target: &AgentIdentity) -> Option<SpawnSpec>;
 }
 
 /// Explicit owner for mutable runtime spawn-policy state.
@@ -45,7 +44,7 @@ impl SpawnPolicyService {
         *self.policy.write().await = policy;
     }
 
-    pub async fn resolve(&self, target: &MeerkatId) -> Option<SpawnSpec> {
+    pub async fn resolve(&self, target: &AgentIdentity) -> Option<SpawnSpec> {
         let policy = self.policy.read().await.clone();
         let policy = policy?;
         policy.resolve(target).await
@@ -61,7 +60,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl SpawnPolicy for StaticPolicy {
-        async fn resolve(&self, target: &MeerkatId) -> Option<SpawnSpec> {
+        async fn resolve(&self, target: &AgentIdentity) -> Option<SpawnSpec> {
             Some(SpawnSpec {
                 profile: ProfileName::from(format!("role-{target}")),
                 runtime_mode: Some(MobRuntimeMode::TurnDriven),
@@ -72,7 +71,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_policy_service_swaps_runtime_policy_authority() {
         let service = SpawnPolicyService::new();
-        let target = MeerkatId::from("worker-1");
+        let target = AgentIdentity::from("worker-1");
         assert!(service.resolve(&target).await.is_none());
 
         service.set(Some(Arc::new(StaticPolicy))).await;

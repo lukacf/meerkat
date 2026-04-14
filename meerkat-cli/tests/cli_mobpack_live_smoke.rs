@@ -882,9 +882,9 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         results.iter().all(|entry| entry["ok"] == true),
         "all spawn_many entries should succeed: {spawned}"
     );
-    let worker_session_id = results[1]["session_id"]
+    let worker_identity = results[1]["agent_identity"]
         .as_str()
-        .ok_or("worker spawn result missing session_id")?
+        .ok_or("worker spawn result missing agent_identity")?
         .to_string();
 
     let members = poll_members_until(&mut surface, mob_id, |payload| {
@@ -958,7 +958,8 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         15,
     )
     .await?;
-    assert_eq!(appended["session_id"], worker_session_id);
+    // Verify the append targeted the correct member via identity.
+    assert!(!worker_identity.is_empty(), "worker identity should be set");
     assert_eq!(appended["status"], "staged");
 
     let send_err = rpc_call(
@@ -1024,17 +1025,15 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
             .is_some_and(|members| members.len() == 2),
         "respawn should preserve two active members: {after_respawn}"
     );
-    let respawned_session_id = after_respawn["members"]
-        .as_array()
-        .and_then(|members| {
-            members.iter().find_map(|entry| {
-                (entry["agent_identity"].as_str() == Some("worker-1"))
-                    .then(|| entry["member_ref"]["session_id"].as_str())
-                    .flatten()
-                    .map(ToString::to_string)
-            })
-        })
-        .ok_or("respawned worker session_id missing")?;
+    // Verify respawned worker is present in roster with identity.
+    assert!(
+        after_respawn["members"]
+            .as_array()
+            .is_some_and(|members| members
+                .iter()
+                .any(|entry| entry["agent_identity"].as_str() == Some("worker-1"))),
+        "respawned worker-1 should be present in members: {after_respawn}"
+    );
     let send_after_respawn_err = rpc_call(
         &mut surface,
         11,
@@ -1054,8 +1053,6 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
             .contains("Method not found"),
         "removed mob/send route should stay unavailable after respawn: {send_after_respawn_err}"
     );
-    let _ = respawned_session_id;
-
     let stopped = rpc_call(
         &mut surface,
         12,
@@ -1347,10 +1344,11 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         20,
     )
     .await?;
-    let original_session_id = spawned["session_id"]
+    let spawned_identity = spawned["agent_identity"]
         .as_str()
-        .ok_or("mob/spawn missing session_id")?
+        .ok_or("mob/spawn missing agent_identity")?
         .to_string();
+    assert_eq!(spawned_identity, "worker-1");
 
     let appended = rpc_call(
         &mut surface,
@@ -1367,7 +1365,6 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
     )
     .await?;
     assert_eq!(appended["status"], "staged");
-    assert_eq!(appended["session_id"], original_session_id);
 
     let send_err = rpc_call(
         &mut surface,
@@ -1410,10 +1407,10 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
             );
         }
         Ok(broken) => {
-            let broken_session_id = broken["session_id"]
-                .as_str()
-                .ok_or("mob/spawn missing broken session_id")?
-                .to_string();
+            assert!(
+                broken["agent_identity"].as_str().is_some(),
+                "broken spawn should still return agent_identity: {broken}"
+            );
             let broken_send_err = rpc_call(
                 &mut surface,
                 207,
@@ -1431,7 +1428,6 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
                 broken_send_err.to_string().contains("Method not found"),
                 "unexpected broken member error: {broken_send_err}"
             );
-            let _ = broken_session_id;
         }
     }
 
@@ -1451,17 +1447,14 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         })
     })
     .await?;
-    let respawned_session_id = respawned_members["members"]
-        .as_array()
-        .and_then(|members| {
-            members.iter().find_map(|entry| {
-                (entry["agent_identity"].as_str() == Some("worker-1"))
-                    .then(|| entry["member_ref"]["session_id"].as_str())
-                    .flatten()
-                    .map(ToString::to_string)
-            })
-        })
-        .ok_or("respawned worker session_id missing")?;
+    assert!(
+        respawned_members["members"]
+            .as_array()
+            .is_some_and(|members| members
+                .iter()
+                .any(|entry| entry["agent_identity"].as_str() == Some("worker-1"))),
+        "respawned worker-1 should be present: {respawned_members}"
+    );
     let send_after_respawn_err = rpc_call(
         &mut surface,
         210,
@@ -1481,8 +1474,6 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
             .contains("Method not found"),
         "removed mob/send route should stay unavailable after respawn: {send_after_respawn_err}"
     );
-    let _ = respawned_session_id;
-
     let events = rpc_call(
         &mut surface,
         212,

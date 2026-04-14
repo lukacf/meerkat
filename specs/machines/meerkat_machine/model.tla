@@ -395,14 +395,14 @@ RunCancelled(work_id) ==
 
 
 Recover ==
-    /\ phase = "Idle" \/ phase = "Stopped" \/ phase = "Retired"
+    /\ phase = "Idle" \/ phase = "Attached"
     /\ phase' = "Recovering"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RetireRequestedFromIdle ==
-    /\ phase = "Attached" \/ phase = "Running"
+    /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Running"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
@@ -412,7 +412,7 @@ RetireRequestedFromIdle ==
 
 
 Reset ==
-    /\ phase = "Attached" \/ phase = "Retired" \/ phase = "Stopped" \/ phase = "Recovering"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Recovering" \/ phase = "Retired"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = None
@@ -428,7 +428,7 @@ Reset ==
 
 
 StopRuntimeExecutor ==
-    /\ phase = "Attached" \/ phase = "Retired" \/ phase = "Recovering"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
@@ -439,7 +439,7 @@ StopRuntimeExecutor ==
 
 
 Destroy ==
-    /\ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
+    /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
     /\ (active_runtime_id # None)
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
@@ -1321,7 +1321,7 @@ ShutdownSurfaceRunning ==
 
 
 Recycle ==
-    /\ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
+    /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Retired"
     /\ (active_runtime_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1

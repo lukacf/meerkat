@@ -230,7 +230,7 @@ pub fn mob_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "Spawn".into(),
-                from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
+                from: vec!["Creating".into(), "Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("Spawn"),
                     variant: "Spawn".into(),
@@ -433,7 +433,7 @@ pub fn mob_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "RespawnMember".into(),
-                from: vec!["Running".into(), "Stopped".into()],
+                from: vec!["Creating".into(), "Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("RespawnMember"),
                     variant: "RespawnMember".into(),
@@ -925,6 +925,11 @@ fn absorbed_mob_input_variants() -> Vec<VariantSchema> {
 fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
     let mut transitions = Vec::new();
 
+    // Read-only / observation commands: no phase guard in runtime — work from any state.
+    let all_phases: Vec<String> = ["Creating", "Running", "Stopped", "Completed", "Destroyed"]
+        .iter()
+        .map(|p| (*p).into())
+        .collect();
     for variant in [
         "FlowStatus",
         "McpServerStates",
@@ -942,18 +947,82 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         "KickoffBarrierSnapshot",
         "SetSpawnPolicy",
     ] {
-        transitions.push(mob_self_loop_transition(
-            variant,
-            "Running",
-            variant,
-            vec![],
-            vec![],
-            vec![],
-        ));
+        for phase in &all_phases {
+            transitions.push(mob_self_loop_transition(
+                variant,
+                phase,
+                variant,
+                vec![],
+                vec![],
+                vec![],
+            ));
+        }
     }
 
+    // --- Phase-changing transitions (NOT self-loops) ---
+
+    // Stop: Running → Stopped
+    transitions.push(TransitionSchema {
+        name: "StopRunning".into(),
+        from: vec!["Running".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("Stop"),
+            variant: "Stop".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: clear_runtime_projection_updates(),
+        to: "Stopped".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+
+    // Resume: Stopped → Running
+    transitions.push(TransitionSchema {
+        name: "ResumeStopped".into(),
+        from: vec!["Stopped".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("Resume"),
+            variant: "Resume".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: vec![],
+        to: "Running".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+
+    // Complete: Running → Completed
+    transitions.push(TransitionSchema {
+        name: "CompleteRunning".into(),
+        from: vec!["Running".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("Complete"),
+            variant: "Complete".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: clear_runtime_projection_updates(),
+        to: "Completed".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+
+    // Reset: Running|Stopped|Completed → Running
+    transitions.push(TransitionSchema {
+        name: "ResetToRunning".into(),
+        from: vec!["Running".into(), "Stopped".into(), "Completed".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("Reset"),
+            variant: "Reset".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: reset_mob_projection_updates(),
+        to: "Running".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+
+    // --- Multi-phase self-loops (Creating + Running) ---
     for (variant, emit_variant, updates) in [
-        ("CancelFlow", Some("FlowTerminalized"), clear_work_updates()),
         (
             "Wire",
             Some("NotifyCoordinator"),
@@ -965,22 +1034,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ("ExternalTurn", Some("EmitProgressNote"), vec![]),
         ("InternalTurn", Some("EmitProgressNote"), vec![]),
         (
-            "Stop",
-            Some("EmitRunLifecycleNotice"),
-            clear_runtime_projection_updates(),
-        ),
-        ("Resume", Some("EmitRunLifecycleNotice"), vec![]),
-        (
-            "Complete",
-            Some("EmitRunLifecycleNotice"),
-            clear_runtime_projection_updates(),
-        ),
-        (
-            "Reset",
-            Some("EmitRunLifecycleNotice"),
-            reset_mob_projection_updates(),
-        ),
-        (
             "TaskCreate",
             Some("EmitTaskNotice"),
             vec![Update::Increment {
@@ -990,8 +1043,27 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ),
         ("TaskUpdate", Some("EmitTaskNotice"), vec![]),
         (
+            "ForceCancel",
+            Some("FlowTerminalized"),
+            clear_runtime_projection_updates(),
+        ),
+    ] {
+        for phase in ["Creating", "Running"] {
+            transitions.push(mob_self_loop_transition(
+                variant,
+                phase,
+                variant,
+                vec![],
+                updates.clone(),
+                emit_variant.into_iter().map(simple_emit).collect(),
+            ));
+        }
+    }
+
+    // --- Subscribe commands: no phase guard in runtime ---
+    for (variant, updates) in [
+        (
             "SubscribeAgentEvents",
-            None,
             vec![Update::Increment {
                 field: "event_subscription_count".into(),
                 amount: 1,
@@ -999,7 +1071,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ),
         (
             "SubscribeAllAgentEvents",
-            None,
             vec![Update::Increment {
                 field: "event_subscription_count".into(),
                 amount: 1,
@@ -1007,12 +1078,52 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ),
         (
             "SubscribeMobEvents",
-            None,
             vec![Update::Increment {
                 field: "event_subscription_count".into(),
                 amount: 1,
             }],
         ),
+    ] {
+        for phase in &all_phases {
+            transitions.push(mob_self_loop_transition(
+                variant,
+                phase,
+                variant,
+                vec![],
+                updates.clone(),
+                vec![],
+            ));
+        }
+    }
+
+    // Shutdown: from any non-Destroyed state. Running → Stopped; others self-loop.
+    transitions.push(TransitionSchema {
+        name: "ShutdownRunning".into(),
+        from: vec!["Running".into()],
+        on: InputMatch {
+            kind: mob_trigger_kind("Shutdown"),
+            variant: "Shutdown".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: clear_runtime_projection_updates(),
+        to: "Stopped".into(),
+        emit: vec![simple_emit("EmitRunLifecycleNotice")],
+    });
+    for phase in ["Creating", "Stopped", "Completed"] {
+        transitions.push(mob_self_loop_transition(
+            "Shutdown",
+            phase,
+            "Shutdown",
+            vec![],
+            clear_runtime_projection_updates(),
+            vec![simple_emit("EmitRunLifecycleNotice")],
+        ));
+    }
+
+    // --- Signals and other Running-only self-loops ---
+    for (variant, emit_variant, updates) in [
+        ("CancelFlow", Some("FlowTerminalized"), clear_work_updates()),
         (
             "InitializeOrchestrator",
             Some("NotifyCoordinator"),
@@ -1168,16 +1279,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ("SkipNode", Some("EmitStepNotice"), vec![]),
         ("CancelNode", Some("EmitStepNotice"), vec![]),
         ("UntilConditionMet", Some("EvaluateUntilCondition"), vec![]),
-        (
-            "Shutdown",
-            Some("EmitRunLifecycleNotice"),
-            clear_runtime_projection_updates(),
-        ),
-        (
-            "ForceCancel",
-            Some("FlowTerminalized"),
-            clear_runtime_projection_updates(),
-        ),
         ("BeginCleanup", Some("EmitRunLifecycleNotice"), vec![]),
         ("FinishCleanup", Some("EmitRunLifecycleNotice"), vec![]),
     ] {
@@ -1330,7 +1431,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
 
     transitions.push(TransitionSchema {
         name: "UnwireRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Creating".into(), "Running".into()],
         on: InputMatch {
             kind: mob_trigger_kind("Unwire"),
             variant: "Unwire".into(),
@@ -1679,7 +1780,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
 
     transitions.push(TransitionSchema {
         name: "RetireRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
         on: InputMatch {
             kind: mob_trigger_kind("Retire"),
             variant: "Retire".into(),
@@ -1711,7 +1812,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
 
     transitions.push(TransitionSchema {
         name: "RetireAllRunning".into(),
-        from: vec!["Running".into()],
+        from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
         on: InputMatch {
             kind: mob_trigger_kind("RetireAll"),
             variant: "RetireAll".into(),
@@ -1755,9 +1856,15 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![lifecycle_notice_emit("spawned")],
     });
 
+    // Destroy input: runtime allows from all non-Destroyed phases via lifecycle authority.
     transitions.push(TransitionSchema {
-        name: "DestroyRunning".into(),
-        from: vec!["Running".into()],
+        name: "DestroyFromAny".into(),
+        from: vec![
+            "Creating".into(),
+            "Running".into(),
+            "Stopped".into(),
+            "Completed".into(),
+        ],
         on: InputMatch {
             kind: mob_trigger_kind("Destroy"),
             variant: "Destroy".into(),
@@ -1769,16 +1876,22 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![lifecycle_notice_emit("destroyed")],
     });
 
-    for (variant, bindings, emit_variant, updates) in [
-        (
+    // Respawn: from Creating or Running (self-loop per phase)
+    for phase in ["Creating", "Running"] {
+        transitions.push(mob_self_loop_transition(
+            "Respawn",
+            phase,
             "Respawn",
             vec!["agent_runtime_id"],
-            Some("ExposePendingSpawn"),
             vec![Update::Increment {
                 field: "pending_spawn_count".into(),
                 amount: 1,
             }],
-        ),
+            vec![simple_emit("ExposePendingSpawn")],
+        ));
+    }
+
+    for (variant, bindings, emit_variant, updates) in [
         (
             "CancelWork",
             vec!["work_id"],

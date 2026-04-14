@@ -59,7 +59,7 @@ Start ==
 
 
 Spawn(agent_identity, agent_runtime_id, fence_token, generation) ==
-    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Creating" \/ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_identity' = Some(agent_identity)
@@ -171,7 +171,7 @@ ResetMember(agent_identity, agent_runtime_id, fence_token, generation) ==
 
 
 RespawnMember(agent_identity, agent_runtime_id, fence_token, generation) ==
-    /\ phase = "Running" \/ phase = "Stopped"
+    /\ phase = "Creating" \/ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_identity' = Some(agent_identity)
@@ -241,9 +241,44 @@ ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ kickoff_pending' = FALSE
 
 
+FlowStatusCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 FlowStatusRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+FlowStatusStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+FlowStatusCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+FlowStatusDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+McpServerStatesCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -255,9 +290,65 @@ McpServerStatesRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+McpServerStatesStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+McpServerStatesCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+McpServerStatesDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RosterSnapshotCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 RosterSnapshotRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RosterSnapshotStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RosterSnapshotCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RosterSnapshotDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -269,9 +360,65 @@ ListMembersRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+ListMembersStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersIncludingRetiringCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 ListMembersIncludingRetiringRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersIncludingRetiringStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersIncludingRetiringCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListMembersIncludingRetiringDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListAllMembersCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -283,9 +430,65 @@ ListAllMembersRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+ListAllMembersStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListAllMembersCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ListAllMembersDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+MemberStatusCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 MemberStatusRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+MemberStatusStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+MemberStatusCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+MemberStatusDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskListCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -297,9 +500,65 @@ TaskListRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+TaskListStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskListCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskListDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskGetCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 TaskGetRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskGetStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskGetCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskGetDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+PollEventsCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -311,9 +570,65 @@ PollEventsRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+PollEventsStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+PollEventsCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+PollEventsDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ReplayAllEventsCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 ReplayAllEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ReplayAllEventsStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ReplayAllEventsCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ReplayAllEventsDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RecordOperatorActionProvenanceCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -325,9 +640,65 @@ RecordOperatorActionProvenanceRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+RecordOperatorActionProvenanceStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RecordOperatorActionProvenanceCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+RecordOperatorActionProvenanceDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+GetMemberCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 GetMemberRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+GetMemberStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+GetMemberCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+GetMemberDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+KickoffBarrierSnapshotCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
@@ -339,6 +710,34 @@ KickoffBarrierSnapshotRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+KickoffBarrierSnapshotStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+KickoffBarrierSnapshotCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+KickoffBarrierSnapshotDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SetSpawnPolicyCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 SetSpawnPolicyRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -346,43 +745,30 @@ SetSpawnPolicyRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-CancelFlowRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ inflight_work_id' = None
-    /\ active_run_count' = 0
-    /\ active_frame_count' = 0
-    /\ active_loop_count' = 0
-    /\ kickoff_pending' = FALSE
-    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
-
-
-WireRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ wiring_edge_count' = (wiring_edge_count) + 1
-    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
-
-
-ExternalTurnRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
+SetSpawnPolicyStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-InternalTurnRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
+SetSpawnPolicyCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SetSpawnPolicyDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
 StopRunning ==
     /\ phase = "Running"
-    /\ phase' = "Running"
+    /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ inflight_work_id' = None
     /\ active_run_count' = 0
@@ -392,8 +778,8 @@ StopRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
 
 
-ResumeRunning ==
-    /\ phase = "Running"
+ResumeStopped ==
+    /\ phase = "Stopped"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
@@ -401,7 +787,7 @@ ResumeRunning ==
 
 CompleteRunning ==
     /\ phase = "Running"
-    /\ phase' = "Running"
+    /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ inflight_work_id' = None
     /\ active_run_count' = 0
@@ -411,8 +797,8 @@ CompleteRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
 
 
-ResetRunning ==
-    /\ phase = "Running"
+ResetToRunning ==
+    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ inflight_work_id' = None
@@ -429,12 +815,71 @@ ResetRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count >>
 
 
+WireCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ wiring_edge_count' = (wiring_edge_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+WireRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ wiring_edge_count' = (wiring_edge_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ExternalTurnCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ExternalTurnRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+InternalTurnCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+InternalTurnRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskCreateCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ task_count' = (task_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 TaskCreateRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ task_count' = (task_count) + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+TaskUpdateCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
 TaskUpdateRunning ==
@@ -444,9 +889,73 @@ TaskUpdateRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+ForceCancelCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+ForceCancelRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+SubscribeAgentEventsCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 SubscribeAgentEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAgentEventsStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAgentEventsCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAgentEventsDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAllAgentEventsCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
@@ -460,12 +969,128 @@ SubscribeAllAgentEventsRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
+SubscribeAllAgentEventsStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAllAgentEventsCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeAllAgentEventsDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeMobEventsCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
 SubscribeMobEventsRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeMobEventsStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeMobEventsCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+SubscribeMobEventsDestroyed ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ event_subscription_count' = (event_subscription_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
+
+
+ShutdownRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+ShutdownCreating ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+ShutdownStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+ShutdownCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
+
+
+CancelFlowRunning ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ inflight_work_id' = None
+    /\ active_run_count' = 0
+    /\ active_frame_count' = 0
+    /\ active_loop_count' = 0
+    /\ kickoff_pending' = FALSE
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
 
 
 InitializeOrchestratorRunning ==
@@ -808,30 +1433,6 @@ UntilConditionMetRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-ShutdownRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ inflight_work_id' = None
-    /\ active_run_count' = 0
-    /\ active_frame_count' = 0
-    /\ active_loop_count' = 0
-    /\ kickoff_pending' = FALSE
-    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
-
-
-ForceCancelRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ inflight_work_id' = None
-    /\ active_run_count' = 0
-    /\ active_frame_count' = 0
-    /\ active_loop_count' = 0
-    /\ kickoff_pending' = FALSE
-    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, coordinator_bound >>
-
-
 BeginCleanupRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -914,7 +1515,7 @@ RegisterReadyFrameRunning ==
 
 
 UnwireRunning ==
-    /\ phase = "Running"
+    /\ phase = "Creating" \/ phase = "Running"
     /\ (wiring_edge_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1053,7 +1654,7 @@ FinishRunRunning ==
 
 
 RetireRunning(agent_runtime_id) ==
-    /\ phase = "Running"
+    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
     /\ (active_member_count > 0)
     /\ (active_member_count > retiring_member_count)
     /\ phase' = "Running"
@@ -1063,7 +1664,7 @@ RetireRunning(agent_runtime_id) ==
 
 
 RetireAllRunning ==
-    /\ phase = "Running"
+    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ retiring_member_count' = active_member_count
@@ -1080,8 +1681,8 @@ CompleteSpawnRunning ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_run_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-DestroyRunning ==
-    /\ phase = "Running"
+DestroyFromAny ==
+    /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ active_identity' = None
@@ -1100,6 +1701,14 @@ DestroyRunning ==
     /\ active_loop_count' = 0
     /\ coordinator_bound' = FALSE
     /\ kickoff_pending' = FALSE
+
+
+RespawnCreating(agent_runtime_id) ==
+    /\ phase = "Creating"
+    /\ phase' = "Creating"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_spawn_count' = (pending_spawn_count) + 1
+    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
 RespawnRunning(agent_runtime_id) ==
@@ -1149,34 +1758,117 @@ Next ==
     \/ MarkCompleted
     \/ DestroyMob
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeDestroyed(agent_runtime_id, fence_token)
+    \/ FlowStatusCreating
     \/ FlowStatusRunning
+    \/ FlowStatusStopped
+    \/ FlowStatusCompleted
+    \/ FlowStatusDestroyed
+    \/ McpServerStatesCreating
     \/ McpServerStatesRunning
+    \/ McpServerStatesStopped
+    \/ McpServerStatesCompleted
+    \/ McpServerStatesDestroyed
+    \/ RosterSnapshotCreating
     \/ RosterSnapshotRunning
+    \/ RosterSnapshotStopped
+    \/ RosterSnapshotCompleted
+    \/ RosterSnapshotDestroyed
+    \/ ListMembersCreating
     \/ ListMembersRunning
+    \/ ListMembersStopped
+    \/ ListMembersCompleted
+    \/ ListMembersDestroyed
+    \/ ListMembersIncludingRetiringCreating
     \/ ListMembersIncludingRetiringRunning
+    \/ ListMembersIncludingRetiringStopped
+    \/ ListMembersIncludingRetiringCompleted
+    \/ ListMembersIncludingRetiringDestroyed
+    \/ ListAllMembersCreating
     \/ ListAllMembersRunning
+    \/ ListAllMembersStopped
+    \/ ListAllMembersCompleted
+    \/ ListAllMembersDestroyed
+    \/ MemberStatusCreating
     \/ MemberStatusRunning
+    \/ MemberStatusStopped
+    \/ MemberStatusCompleted
+    \/ MemberStatusDestroyed
+    \/ TaskListCreating
     \/ TaskListRunning
+    \/ TaskListStopped
+    \/ TaskListCompleted
+    \/ TaskListDestroyed
+    \/ TaskGetCreating
     \/ TaskGetRunning
+    \/ TaskGetStopped
+    \/ TaskGetCompleted
+    \/ TaskGetDestroyed
+    \/ PollEventsCreating
     \/ PollEventsRunning
+    \/ PollEventsStopped
+    \/ PollEventsCompleted
+    \/ PollEventsDestroyed
+    \/ ReplayAllEventsCreating
     \/ ReplayAllEventsRunning
+    \/ ReplayAllEventsStopped
+    \/ ReplayAllEventsCompleted
+    \/ ReplayAllEventsDestroyed
+    \/ RecordOperatorActionProvenanceCreating
     \/ RecordOperatorActionProvenanceRunning
+    \/ RecordOperatorActionProvenanceStopped
+    \/ RecordOperatorActionProvenanceCompleted
+    \/ RecordOperatorActionProvenanceDestroyed
+    \/ GetMemberCreating
     \/ GetMemberRunning
+    \/ GetMemberStopped
+    \/ GetMemberCompleted
+    \/ GetMemberDestroyed
+    \/ KickoffBarrierSnapshotCreating
     \/ KickoffBarrierSnapshotRunning
+    \/ KickoffBarrierSnapshotStopped
+    \/ KickoffBarrierSnapshotCompleted
+    \/ KickoffBarrierSnapshotDestroyed
+    \/ SetSpawnPolicyCreating
     \/ SetSpawnPolicyRunning
-    \/ CancelFlowRunning
-    \/ WireRunning
-    \/ ExternalTurnRunning
-    \/ InternalTurnRunning
+    \/ SetSpawnPolicyStopped
+    \/ SetSpawnPolicyCompleted
+    \/ SetSpawnPolicyDestroyed
     \/ StopRunning
-    \/ ResumeRunning
+    \/ ResumeStopped
     \/ CompleteRunning
-    \/ ResetRunning
+    \/ ResetToRunning
+    \/ WireCreating
+    \/ WireRunning
+    \/ ExternalTurnCreating
+    \/ ExternalTurnRunning
+    \/ InternalTurnCreating
+    \/ InternalTurnRunning
+    \/ TaskCreateCreating
     \/ TaskCreateRunning
+    \/ TaskUpdateCreating
     \/ TaskUpdateRunning
+    \/ ForceCancelCreating
+    \/ ForceCancelRunning
+    \/ SubscribeAgentEventsCreating
     \/ SubscribeAgentEventsRunning
+    \/ SubscribeAgentEventsStopped
+    \/ SubscribeAgentEventsCompleted
+    \/ SubscribeAgentEventsDestroyed
+    \/ SubscribeAllAgentEventsCreating
     \/ SubscribeAllAgentEventsRunning
+    \/ SubscribeAllAgentEventsStopped
+    \/ SubscribeAllAgentEventsCompleted
+    \/ SubscribeAllAgentEventsDestroyed
+    \/ SubscribeMobEventsCreating
     \/ SubscribeMobEventsRunning
+    \/ SubscribeMobEventsStopped
+    \/ SubscribeMobEventsCompleted
+    \/ SubscribeMobEventsDestroyed
+    \/ ShutdownRunning
+    \/ ShutdownCreating
+    \/ ShutdownStopped
+    \/ ShutdownCompleted
+    \/ CancelFlowRunning
     \/ InitializeOrchestratorRunning
     \/ BindCoordinatorRunning
     \/ UnbindCoordinatorRunning
@@ -1222,8 +1914,6 @@ Next ==
     \/ SkipNodeRunning
     \/ CancelNodeRunning
     \/ UntilConditionMetRunning
-    \/ ShutdownRunning
-    \/ ForceCancelRunning
     \/ BeginCleanupRunning
     \/ FinishCleanupRunning
     \/ KickoffStartedRunning
@@ -1250,7 +1940,8 @@ Next ==
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireRunning(agent_runtime_id)
     \/ RetireAllRunning
     \/ CompleteSpawnRunning
-    \/ DestroyRunning
+    \/ DestroyFromAny
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnCreating(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnRunning(agent_runtime_id)
     \/ \E work_id \in WorkIdValues : CancelWorkRunning(work_id)
     \/ CancelAllWorkRunning

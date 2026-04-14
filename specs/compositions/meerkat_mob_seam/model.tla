@@ -891,7 +891,7 @@ meerkat_Recover ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "Recover"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Idle" \/ meerkat_phase = "Stopped" \/ meerkat_phase = "Retired"
+       /\ meerkat_phase = "Idle" \/ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Recovering"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_phase, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -908,7 +908,7 @@ meerkat_RetireRequestedFromIdle ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "Retire"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached" \/ meerkat_phase = "Running"
+       /\ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Running"
        /\ meerkat_phase' = "Retired"
        /\ meerkat_active_work_id' = None
        /\ meerkat_interrupt_pending' = FALSE
@@ -928,7 +928,7 @@ meerkat_Reset ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "Reset"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached" \/ meerkat_phase = "Retired" \/ meerkat_phase = "Stopped" \/ meerkat_phase = "Recovering"
+       /\ meerkat_phase = "Initializing" \/ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Recovering" \/ meerkat_phase = "Retired"
        /\ meerkat_phase' = "Idle"
        /\ meerkat_active_runtime_id' = None
        /\ meerkat_active_fence_token' = None
@@ -954,7 +954,7 @@ meerkat_StopRuntimeExecutor ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "StopRuntimeExecutor"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached" \/ meerkat_phase = "Retired" \/ meerkat_phase = "Recovering"
+       /\ meerkat_phase = "Initializing" \/ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Running" \/ meerkat_phase = "Recovering" \/ meerkat_phase = "Retired"
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_active_work_id' = None
        /\ meerkat_drain_running' = FALSE
@@ -975,7 +975,7 @@ meerkat_Destroy ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "Destroy"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached" \/ meerkat_phase = "Running" \/ meerkat_phase = "Recovering" \/ meerkat_phase = "Retired" \/ meerkat_phase = "Stopped"
+       /\ meerkat_phase = "Initializing" \/ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Running" \/ meerkat_phase = "Recovering" \/ meerkat_phase = "Retired" \/ meerkat_phase = "Stopped"
        /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Destroyed"
        /\ meerkat_active_work_id' = None
@@ -2979,7 +2979,7 @@ meerkat_Recycle ==
        /\ packet.machine = "meerkat"
        /\ packet.variant = "Recycle"
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Attached" \/ meerkat_phase = "Running" \/ meerkat_phase = "Recovering" \/ meerkat_phase = "Retired" \/ meerkat_phase = "Stopped"
+       /\ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Retired"
        /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Idle"
        /\ meerkat_active_runtime_id' = None
@@ -3040,7 +3040,7 @@ mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generat
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.generation = arg_generation
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Creating" \/ mob_phase = "Running" \/ mob_phase = "Stopped"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_identity' = Some(packet.payload.agent_identity)
        /\ mob_active_runtime_id' = Some(packet.payload.agent_runtime_id)
@@ -3268,7 +3268,7 @@ mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.generation = arg_generation
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running" \/ mob_phase = "Stopped"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_identity' = Some(packet.payload.agent_identity)
        /\ mob_active_runtime_id' = Some(packet.payload.agent_runtime_id)
@@ -3378,6 +3378,23 @@ mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token) ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_FlowStatusCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "FlowStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "FlowStatusCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_FlowStatusRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3392,6 +3409,74 @@ mob_FlowStatusRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "FlowStatusRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_FlowStatusStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "FlowStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "FlowStatusStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_FlowStatusCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "FlowStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "FlowStatusCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_FlowStatusDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "FlowStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "FlowStatusDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_McpServerStatesCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "McpServerStates"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "McpServerStatesCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3412,6 +3497,74 @@ mob_McpServerStatesRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_McpServerStatesStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "McpServerStates"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "McpServerStatesStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_McpServerStatesCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "McpServerStates"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "McpServerStatesCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_McpServerStatesDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "McpServerStates"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "McpServerStatesDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RosterSnapshotCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RosterSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RosterSnapshotCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_RosterSnapshotRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3426,6 +3579,74 @@ mob_RosterSnapshotRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RosterSnapshotRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RosterSnapshotStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RosterSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RosterSnapshotStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RosterSnapshotCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RosterSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RosterSnapshotCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RosterSnapshotDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RosterSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RosterSnapshotDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3446,6 +3667,74 @@ mob_ListMembersRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_ListMembersStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersIncludingRetiringCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembersIncludingRetiring"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersIncludingRetiringCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_ListMembersIncludingRetiringRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3460,6 +3749,74 @@ mob_ListMembersIncludingRetiringRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersIncludingRetiringRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersIncludingRetiringStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembersIncludingRetiring"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersIncludingRetiringStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersIncludingRetiringCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembersIncludingRetiring"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersIncludingRetiringCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListMembersIncludingRetiringDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListMembersIncludingRetiring"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListMembersIncludingRetiringDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListAllMembersCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListAllMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListAllMembersCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3480,6 +3837,74 @@ mob_ListAllMembersRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_ListAllMembersStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListAllMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListAllMembersStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListAllMembersCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListAllMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListAllMembersCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ListAllMembersDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ListAllMembers"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ListAllMembersDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_MemberStatusCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "MemberStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "MemberStatusCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_MemberStatusRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3494,6 +3919,74 @@ mob_MemberStatusRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "MemberStatusRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_MemberStatusStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "MemberStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "MemberStatusStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_MemberStatusCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "MemberStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "MemberStatusCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_MemberStatusDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "MemberStatus"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "MemberStatusDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskListCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskList"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskListCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3514,6 +4007,74 @@ mob_TaskListRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_TaskListStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskList"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskListStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskListCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskList"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskListCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskListDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskList"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskListDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskGetCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskGet"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskGetCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_TaskGetRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3528,6 +4089,74 @@ mob_TaskGetRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskGetRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskGetStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskGet"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskGetStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskGetCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskGet"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskGetCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskGetDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskGet"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskGetDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_PollEventsCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "PollEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "PollEventsCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3548,6 +4177,74 @@ mob_PollEventsRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_PollEventsStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "PollEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "PollEventsStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_PollEventsCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "PollEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "PollEventsCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_PollEventsDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "PollEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "PollEventsDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ReplayAllEventsCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ReplayAllEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ReplayAllEventsCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_ReplayAllEventsRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3562,6 +4259,74 @@ mob_ReplayAllEventsRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ReplayAllEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ReplayAllEventsStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ReplayAllEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ReplayAllEventsStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ReplayAllEventsCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ReplayAllEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ReplayAllEventsCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ReplayAllEventsDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ReplayAllEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ReplayAllEventsDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RecordOperatorActionProvenanceCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RecordOperatorActionProvenance"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RecordOperatorActionProvenanceCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3582,6 +4347,74 @@ mob_RecordOperatorActionProvenanceRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_RecordOperatorActionProvenanceStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RecordOperatorActionProvenance"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RecordOperatorActionProvenanceStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RecordOperatorActionProvenanceCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RecordOperatorActionProvenance"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RecordOperatorActionProvenanceCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RecordOperatorActionProvenanceDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RecordOperatorActionProvenance"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RecordOperatorActionProvenanceDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_GetMemberCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "GetMember"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "GetMemberCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_GetMemberRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3596,6 +4429,74 @@ mob_GetMemberRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "GetMemberRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_GetMemberStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "GetMember"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "GetMemberStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_GetMemberCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "GetMember"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "GetMemberCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_GetMemberDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "GetMember"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "GetMemberDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_KickoffBarrierSnapshotCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "KickoffBarrierSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "KickoffBarrierSnapshotCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3616,6 +4517,74 @@ mob_KickoffBarrierSnapshotRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
+mob_KickoffBarrierSnapshotStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "KickoffBarrierSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "KickoffBarrierSnapshotStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_KickoffBarrierSnapshotCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "KickoffBarrierSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "KickoffBarrierSnapshotCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_KickoffBarrierSnapshotDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "KickoffBarrierSnapshot"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "KickoffBarrierSnapshotDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SetSpawnPolicyCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SetSpawnPolicy"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SetSpawnPolicyCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 mob_SetSpawnPolicyRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -3630,6 +4599,722 @@ mob_SetSpawnPolicyRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SetSpawnPolicyRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SetSpawnPolicyStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SetSpawnPolicy"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SetSpawnPolicyStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SetSpawnPolicyCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SetSpawnPolicy"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SetSpawnPolicyCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SetSpawnPolicyDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SetSpawnPolicy"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SetSpawnPolicyDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_StopRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Stop"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Stopped"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "StopRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ResumeStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Resume"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Running"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ResumeStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_CompleteRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Complete"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Completed"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "CompleteRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ResetToRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Reset"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed"
+       /\ mob_phase' = "Running"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_pending_spawn_count' = 0
+       /\ mob_retiring_member_count' = 0
+       /\ mob_wiring_edge_count' = 0
+       /\ mob_task_count' = 0
+       /\ mob_event_subscription_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_coordinator_bound' = FALSE
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetToRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ResetToRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_WireCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Wire"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_wiring_edge_count' = (mob_wiring_edge_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "NotifyCoordinator", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "WireCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "WireCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_WireRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Wire"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_wiring_edge_count' = (mob_wiring_edge_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "NotifyCoordinator", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "WireRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "WireRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ExternalTurnCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ExternalTurn"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalTurnCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ExternalTurnCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ExternalTurnRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ExternalTurn"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalTurnRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ExternalTurnRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_InternalTurnCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "InternalTurn"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "InternalTurnCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "InternalTurnCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_InternalTurnRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "InternalTurn"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "InternalTurnRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "InternalTurnRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskCreateCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskCreate"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_task_count' = (mob_task_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskCreateCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskCreateCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskCreateRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskCreate"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_task_count' = (mob_task_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskCreateRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskCreateRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskUpdateCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskUpdate"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskUpdateCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskUpdateCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_TaskUpdateRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "TaskUpdate"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskUpdateRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskUpdateRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ForceCancelCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ForceCancel"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "FlowTerminalized", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ForceCancelCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ForceCancelCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ForceCancelRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "ForceCancel"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "FlowTerminalized", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ForceCancelRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ForceCancelRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAgentEventsCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAgentEventsRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAgentEventsStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAgentEventsCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAgentEventsDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAllAgentEventsCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAllAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAllAgentEventsRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAllAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAllAgentEventsStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAllAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAllAgentEventsCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAllAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeAllAgentEventsDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeAllAgentEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeMobEventsCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeMobEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeMobEventsRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeMobEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeMobEventsStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeMobEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeMobEventsCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeMobEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_SubscribeMobEventsDestroyed ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "SubscribeMobEvents"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Destroyed"
+       /\ mob_phase' = "Destroyed"
+       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ShutdownRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Shutdown"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Stopped"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ShutdownRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ShutdownCreating ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Shutdown"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ShutdownCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ShutdownStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Shutdown"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Stopped"
+       /\ mob_phase' = "Stopped"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ShutdownStopped", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_ShutdownCompleted ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Shutdown"
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Completed"
+       /\ mob_phase' = "Completed"
+       /\ mob_inflight_work_id' = None
+       /\ mob_active_run_count' = 0
+       /\ mob_active_frame_count' = 0
+       /\ mob_active_loop_count' = 0
+       /\ mob_kickoff_pending' = FALSE
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ShutdownCompleted", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Completed"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3652,236 +5337,6 @@ mob_CancelFlowRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "FlowTerminalized", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelFlowRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "CancelFlowRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_WireRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Wire"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_wiring_edge_count' = (mob_wiring_edge_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "NotifyCoordinator", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "WireRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "WireRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_ExternalTurnRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "ExternalTurn"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalTurnRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ExternalTurnRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_InternalTurnRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "InternalTurn"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitProgressNote", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "InternalTurnRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "InternalTurnRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_StopRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Stop"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_inflight_work_id' = None
-       /\ mob_active_run_count' = 0
-       /\ mob_active_frame_count' = 0
-       /\ mob_active_loop_count' = 0
-       /\ mob_kickoff_pending' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "StopRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_ResumeRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Resume"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResumeRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ResumeRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_CompleteRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Complete"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_inflight_work_id' = None
-       /\ mob_active_run_count' = 0
-       /\ mob_active_frame_count' = 0
-       /\ mob_active_loop_count' = 0
-       /\ mob_kickoff_pending' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "CompleteRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_ResetRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Reset"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_inflight_work_id' = None
-       /\ mob_active_run_count' = 0
-       /\ mob_pending_spawn_count' = 0
-       /\ mob_retiring_member_count' = 0
-       /\ mob_wiring_edge_count' = 0
-       /\ mob_task_count' = 0
-       /\ mob_event_subscription_count' = 0
-       /\ mob_active_frame_count' = 0
-       /\ mob_active_loop_count' = 0
-       /\ mob_coordinator_bound' = FALSE
-       /\ mob_kickoff_pending' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ResetRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_TaskCreateRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "TaskCreate"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_task_count' = (mob_task_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskCreateRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskCreateRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_TaskUpdateRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "TaskUpdate"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitTaskNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "TaskUpdateRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "TaskUpdateRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_SubscribeAgentEventsRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "SubscribeAgentEvents"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAgentEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_SubscribeAllAgentEventsRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "SubscribeAllAgentEvents"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeAllAgentEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_SubscribeMobEventsRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "SubscribeMobEvents"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_event_subscription_count' = (mob_event_subscription_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "SubscribeMobEventsRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -4675,50 +6130,6 @@ mob_UntilConditionMetRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
-mob_ShutdownRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "Shutdown"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_inflight_work_id' = None
-       /\ mob_active_run_count' = 0
-       /\ mob_active_frame_count' = 0
-       /\ mob_active_loop_count' = 0
-       /\ mob_kickoff_pending' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitRunLifecycleNotice", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ShutdownRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ShutdownRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-mob_ForceCancelRunning ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "mob"
-       /\ packet.variant = "ForceCancel"
-       /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
-       /\ mob_phase' = "Running"
-       /\ mob_inflight_work_id' = None
-       /\ mob_active_run_count' = 0
-       /\ mob_active_frame_count' = 0
-       /\ mob_active_loop_count' = 0
-       /\ mob_kickoff_pending' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "FlowTerminalized", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ForceCancelRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ForceCancelRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
-       /\ model_step_count' = model_step_count + 1
-
-
 mob_BeginCleanupRunning ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
@@ -4895,7 +6306,7 @@ mob_UnwireRunning ==
        /\ packet.machine = "mob"
        /\ packet.variant = "Unwire"
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running"
        /\ (mob_wiring_edge_count > 0)
        /\ mob_phase' = "Running"
        /\ mob_wiring_edge_count' = (mob_wiring_edge_count) - 1
@@ -5175,7 +6586,7 @@ mob_RetireRunning(arg_agent_runtime_id) ==
        /\ packet.variant = "Retire"
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running" \/ mob_phase = "Stopped"
        /\ (mob_active_member_count > 0)
        /\ (mob_active_member_count > mob_retiring_member_count)
        /\ mob_phase' = "Running"
@@ -5195,7 +6606,7 @@ mob_RetireAllRunning ==
        /\ packet.machine = "mob"
        /\ packet.variant = "RetireAll"
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running" \/ mob_phase = "Stopped"
        /\ mob_phase' = "Running"
        /\ mob_retiring_member_count' = mob_active_member_count
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
@@ -5228,12 +6639,12 @@ mob_CompleteSpawnRunning ==
        /\ model_step_count' = model_step_count + 1
 
 
-mob_DestroyRunning ==
+mob_DestroyFromAny ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "mob"
        /\ packet.variant = "Destroy"
        /\ ~HigherPriorityReady("mob_kernel")
-       /\ mob_phase = "Running"
+       /\ mob_phase = "Creating" \/ mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed"
        /\ mob_phase' = "Destroyed"
        /\ mob_active_identity' = None
        /\ mob_active_runtime_id' = None
@@ -5256,8 +6667,27 @@ mob_DestroyRunning ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [agent_identity |-> (IF "value" \in DOMAIN None THEN None["value"] ELSE None), kind |-> "destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "DestroyRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [agent_identity |-> (IF "value" \in DOMAIN None THEN None["value"] ELSE None), kind |-> "destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyFromAny"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "DestroyFromAny", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RespawnCreating(arg_agent_runtime_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "Respawn"
+       /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Creating"
+       /\ mob_phase' = "Creating"
+       /\ mob_pending_spawn_count' = (mob_pending_spawn_count) + 1
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "ExposePendingSpawn", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RespawnCreating"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RespawnCreating", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Creating"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -5546,34 +6976,117 @@ CoreNext ==
     \/ mob_MarkCompleted
     \/ mob_DestroyMob
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)
+    \/ mob_FlowStatusCreating
     \/ mob_FlowStatusRunning
+    \/ mob_FlowStatusStopped
+    \/ mob_FlowStatusCompleted
+    \/ mob_FlowStatusDestroyed
+    \/ mob_McpServerStatesCreating
     \/ mob_McpServerStatesRunning
+    \/ mob_McpServerStatesStopped
+    \/ mob_McpServerStatesCompleted
+    \/ mob_McpServerStatesDestroyed
+    \/ mob_RosterSnapshotCreating
     \/ mob_RosterSnapshotRunning
+    \/ mob_RosterSnapshotStopped
+    \/ mob_RosterSnapshotCompleted
+    \/ mob_RosterSnapshotDestroyed
+    \/ mob_ListMembersCreating
     \/ mob_ListMembersRunning
+    \/ mob_ListMembersStopped
+    \/ mob_ListMembersCompleted
+    \/ mob_ListMembersDestroyed
+    \/ mob_ListMembersIncludingRetiringCreating
     \/ mob_ListMembersIncludingRetiringRunning
+    \/ mob_ListMembersIncludingRetiringStopped
+    \/ mob_ListMembersIncludingRetiringCompleted
+    \/ mob_ListMembersIncludingRetiringDestroyed
+    \/ mob_ListAllMembersCreating
     \/ mob_ListAllMembersRunning
+    \/ mob_ListAllMembersStopped
+    \/ mob_ListAllMembersCompleted
+    \/ mob_ListAllMembersDestroyed
+    \/ mob_MemberStatusCreating
     \/ mob_MemberStatusRunning
+    \/ mob_MemberStatusStopped
+    \/ mob_MemberStatusCompleted
+    \/ mob_MemberStatusDestroyed
+    \/ mob_TaskListCreating
     \/ mob_TaskListRunning
+    \/ mob_TaskListStopped
+    \/ mob_TaskListCompleted
+    \/ mob_TaskListDestroyed
+    \/ mob_TaskGetCreating
     \/ mob_TaskGetRunning
+    \/ mob_TaskGetStopped
+    \/ mob_TaskGetCompleted
+    \/ mob_TaskGetDestroyed
+    \/ mob_PollEventsCreating
     \/ mob_PollEventsRunning
+    \/ mob_PollEventsStopped
+    \/ mob_PollEventsCompleted
+    \/ mob_PollEventsDestroyed
+    \/ mob_ReplayAllEventsCreating
     \/ mob_ReplayAllEventsRunning
+    \/ mob_ReplayAllEventsStopped
+    \/ mob_ReplayAllEventsCompleted
+    \/ mob_ReplayAllEventsDestroyed
+    \/ mob_RecordOperatorActionProvenanceCreating
     \/ mob_RecordOperatorActionProvenanceRunning
+    \/ mob_RecordOperatorActionProvenanceStopped
+    \/ mob_RecordOperatorActionProvenanceCompleted
+    \/ mob_RecordOperatorActionProvenanceDestroyed
+    \/ mob_GetMemberCreating
     \/ mob_GetMemberRunning
+    \/ mob_GetMemberStopped
+    \/ mob_GetMemberCompleted
+    \/ mob_GetMemberDestroyed
+    \/ mob_KickoffBarrierSnapshotCreating
     \/ mob_KickoffBarrierSnapshotRunning
+    \/ mob_KickoffBarrierSnapshotStopped
+    \/ mob_KickoffBarrierSnapshotCompleted
+    \/ mob_KickoffBarrierSnapshotDestroyed
+    \/ mob_SetSpawnPolicyCreating
     \/ mob_SetSpawnPolicyRunning
-    \/ mob_CancelFlowRunning
-    \/ mob_WireRunning
-    \/ mob_ExternalTurnRunning
-    \/ mob_InternalTurnRunning
+    \/ mob_SetSpawnPolicyStopped
+    \/ mob_SetSpawnPolicyCompleted
+    \/ mob_SetSpawnPolicyDestroyed
     \/ mob_StopRunning
-    \/ mob_ResumeRunning
+    \/ mob_ResumeStopped
     \/ mob_CompleteRunning
-    \/ mob_ResetRunning
+    \/ mob_ResetToRunning
+    \/ mob_WireCreating
+    \/ mob_WireRunning
+    \/ mob_ExternalTurnCreating
+    \/ mob_ExternalTurnRunning
+    \/ mob_InternalTurnCreating
+    \/ mob_InternalTurnRunning
+    \/ mob_TaskCreateCreating
     \/ mob_TaskCreateRunning
+    \/ mob_TaskUpdateCreating
     \/ mob_TaskUpdateRunning
+    \/ mob_ForceCancelCreating
+    \/ mob_ForceCancelRunning
+    \/ mob_SubscribeAgentEventsCreating
     \/ mob_SubscribeAgentEventsRunning
+    \/ mob_SubscribeAgentEventsStopped
+    \/ mob_SubscribeAgentEventsCompleted
+    \/ mob_SubscribeAgentEventsDestroyed
+    \/ mob_SubscribeAllAgentEventsCreating
     \/ mob_SubscribeAllAgentEventsRunning
+    \/ mob_SubscribeAllAgentEventsStopped
+    \/ mob_SubscribeAllAgentEventsCompleted
+    \/ mob_SubscribeAllAgentEventsDestroyed
+    \/ mob_SubscribeMobEventsCreating
     \/ mob_SubscribeMobEventsRunning
+    \/ mob_SubscribeMobEventsStopped
+    \/ mob_SubscribeMobEventsCompleted
+    \/ mob_SubscribeMobEventsDestroyed
+    \/ mob_ShutdownRunning
+    \/ mob_ShutdownCreating
+    \/ mob_ShutdownStopped
+    \/ mob_ShutdownCompleted
+    \/ mob_CancelFlowRunning
     \/ mob_InitializeOrchestratorRunning
     \/ mob_BindCoordinatorRunning
     \/ mob_UnbindCoordinatorRunning
@@ -5619,8 +7132,6 @@ CoreNext ==
     \/ mob_SkipNodeRunning
     \/ mob_CancelNodeRunning
     \/ mob_UntilConditionMetRunning
-    \/ mob_ShutdownRunning
-    \/ mob_ForceCancelRunning
     \/ mob_BeginCleanupRunning
     \/ mob_FinishCleanupRunning
     \/ mob_KickoffStartedRunning
@@ -5647,7 +7158,8 @@ CoreNext ==
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)
     \/ mob_RetireAllRunning
     \/ mob_CompleteSpawnRunning
-    \/ mob_DestroyRunning
+    \/ mob_DestroyFromAny
+    \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnCreating(arg_agent_runtime_id)
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)
     \/ \E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)
     \/ mob_CancelAllWorkRunning
@@ -5710,10 +7222,10 @@ WitnessStateConstraint_destroy_runtime_path == /\ model_step_count <= 8 /\ Len(p
 WitnessStateConstraint_work_terminal_variants == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_resolved_peer_keys) <= 0 /\ Cardinality(DOMAIN meerkat_peer_reachability) <= 0 /\ Cardinality(DOMAIN meerkat_peer_last_reason) <= 0 /\ Cardinality(meerkat_active_requested_deferred_names) <= 0 /\ Cardinality(meerkat_staged_requested_deferred_names) <= 0 /\ Cardinality(DOMAIN meerkat_requested_witnesses) <= 0 /\ Cardinality(DOMAIN meerkat_filter_witnesses) <= 0
 
 Spec == Init /\ [][Next]_vars
-WitnessSpec_basic_round_trip == WitnessInit_basic_round_trip /\ [] [WitnessNext_basic_round_trip]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeRunning) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
-WitnessSpec_retire_runtime_path == WitnessInit_retire_runtime_path /\ [] [WitnessNext_retire_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeRunning) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
-WitnessSpec_destroy_runtime_path == WitnessInit_destroy_runtime_path /\ [] [WitnessNext_destroy_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeRunning) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
-WitnessSpec_work_terminal_variants == WitnessInit_work_terminal_variants /\ [] [WitnessNext_work_terminal_variants]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeRunning) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
+WitnessSpec_basic_round_trip == WitnessInit_basic_round_trip /\ [] [WitnessNext_basic_round_trip]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusCreating) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_FlowStatusStopped) /\ WF_vars(mob_FlowStatusCompleted) /\ WF_vars(mob_FlowStatusDestroyed) /\ WF_vars(mob_McpServerStatesCreating) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_McpServerStatesStopped) /\ WF_vars(mob_McpServerStatesCompleted) /\ WF_vars(mob_McpServerStatesDestroyed) /\ WF_vars(mob_RosterSnapshotCreating) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_RosterSnapshotStopped) /\ WF_vars(mob_RosterSnapshotCompleted) /\ WF_vars(mob_RosterSnapshotDestroyed) /\ WF_vars(mob_ListMembersCreating) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersStopped) /\ WF_vars(mob_ListMembersCompleted) /\ WF_vars(mob_ListMembersDestroyed) /\ WF_vars(mob_ListMembersIncludingRetiringCreating) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListMembersIncludingRetiringStopped) /\ WF_vars(mob_ListMembersIncludingRetiringCompleted) /\ WF_vars(mob_ListMembersIncludingRetiringDestroyed) /\ WF_vars(mob_ListAllMembersCreating) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_ListAllMembersStopped) /\ WF_vars(mob_ListAllMembersCompleted) /\ WF_vars(mob_ListAllMembersDestroyed) /\ WF_vars(mob_MemberStatusCreating) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_MemberStatusStopped) /\ WF_vars(mob_MemberStatusCompleted) /\ WF_vars(mob_MemberStatusDestroyed) /\ WF_vars(mob_TaskListCreating) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskListStopped) /\ WF_vars(mob_TaskListCompleted) /\ WF_vars(mob_TaskListDestroyed) /\ WF_vars(mob_TaskGetCreating) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_TaskGetStopped) /\ WF_vars(mob_TaskGetCompleted) /\ WF_vars(mob_TaskGetDestroyed) /\ WF_vars(mob_PollEventsCreating) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_PollEventsStopped) /\ WF_vars(mob_PollEventsCompleted) /\ WF_vars(mob_PollEventsDestroyed) /\ WF_vars(mob_ReplayAllEventsCreating) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_ReplayAllEventsStopped) /\ WF_vars(mob_ReplayAllEventsCompleted) /\ WF_vars(mob_ReplayAllEventsDestroyed) /\ WF_vars(mob_RecordOperatorActionProvenanceCreating) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_GetMemberCreating) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_GetMemberStopped) /\ WF_vars(mob_GetMemberCompleted) /\ WF_vars(mob_GetMemberDestroyed) /\ WF_vars(mob_KickoffBarrierSnapshotCreating) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_KickoffBarrierSnapshotStopped) /\ WF_vars(mob_KickoffBarrierSnapshotCompleted) /\ WF_vars(mob_KickoffBarrierSnapshotDestroyed) /\ WF_vars(mob_SetSpawnPolicyCreating) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireCreating) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnCreating) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnCreating) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateCreating) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateCreating) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelCreating) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsCreating) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsCreating) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsCreating) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownCreating) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnCreating(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
+WitnessSpec_retire_runtime_path == WitnessInit_retire_runtime_path /\ [] [WitnessNext_retire_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusCreating) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_FlowStatusStopped) /\ WF_vars(mob_FlowStatusCompleted) /\ WF_vars(mob_FlowStatusDestroyed) /\ WF_vars(mob_McpServerStatesCreating) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_McpServerStatesStopped) /\ WF_vars(mob_McpServerStatesCompleted) /\ WF_vars(mob_McpServerStatesDestroyed) /\ WF_vars(mob_RosterSnapshotCreating) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_RosterSnapshotStopped) /\ WF_vars(mob_RosterSnapshotCompleted) /\ WF_vars(mob_RosterSnapshotDestroyed) /\ WF_vars(mob_ListMembersCreating) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersStopped) /\ WF_vars(mob_ListMembersCompleted) /\ WF_vars(mob_ListMembersDestroyed) /\ WF_vars(mob_ListMembersIncludingRetiringCreating) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListMembersIncludingRetiringStopped) /\ WF_vars(mob_ListMembersIncludingRetiringCompleted) /\ WF_vars(mob_ListMembersIncludingRetiringDestroyed) /\ WF_vars(mob_ListAllMembersCreating) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_ListAllMembersStopped) /\ WF_vars(mob_ListAllMembersCompleted) /\ WF_vars(mob_ListAllMembersDestroyed) /\ WF_vars(mob_MemberStatusCreating) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_MemberStatusStopped) /\ WF_vars(mob_MemberStatusCompleted) /\ WF_vars(mob_MemberStatusDestroyed) /\ WF_vars(mob_TaskListCreating) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskListStopped) /\ WF_vars(mob_TaskListCompleted) /\ WF_vars(mob_TaskListDestroyed) /\ WF_vars(mob_TaskGetCreating) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_TaskGetStopped) /\ WF_vars(mob_TaskGetCompleted) /\ WF_vars(mob_TaskGetDestroyed) /\ WF_vars(mob_PollEventsCreating) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_PollEventsStopped) /\ WF_vars(mob_PollEventsCompleted) /\ WF_vars(mob_PollEventsDestroyed) /\ WF_vars(mob_ReplayAllEventsCreating) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_ReplayAllEventsStopped) /\ WF_vars(mob_ReplayAllEventsCompleted) /\ WF_vars(mob_ReplayAllEventsDestroyed) /\ WF_vars(mob_RecordOperatorActionProvenanceCreating) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_GetMemberCreating) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_GetMemberStopped) /\ WF_vars(mob_GetMemberCompleted) /\ WF_vars(mob_GetMemberDestroyed) /\ WF_vars(mob_KickoffBarrierSnapshotCreating) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_KickoffBarrierSnapshotStopped) /\ WF_vars(mob_KickoffBarrierSnapshotCompleted) /\ WF_vars(mob_KickoffBarrierSnapshotDestroyed) /\ WF_vars(mob_SetSpawnPolicyCreating) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireCreating) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnCreating) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnCreating) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateCreating) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateCreating) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelCreating) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsCreating) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsCreating) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsCreating) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownCreating) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnCreating(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
+WitnessSpec_destroy_runtime_path == WitnessInit_destroy_runtime_path /\ [] [WitnessNext_destroy_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusCreating) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_FlowStatusStopped) /\ WF_vars(mob_FlowStatusCompleted) /\ WF_vars(mob_FlowStatusDestroyed) /\ WF_vars(mob_McpServerStatesCreating) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_McpServerStatesStopped) /\ WF_vars(mob_McpServerStatesCompleted) /\ WF_vars(mob_McpServerStatesDestroyed) /\ WF_vars(mob_RosterSnapshotCreating) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_RosterSnapshotStopped) /\ WF_vars(mob_RosterSnapshotCompleted) /\ WF_vars(mob_RosterSnapshotDestroyed) /\ WF_vars(mob_ListMembersCreating) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersStopped) /\ WF_vars(mob_ListMembersCompleted) /\ WF_vars(mob_ListMembersDestroyed) /\ WF_vars(mob_ListMembersIncludingRetiringCreating) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListMembersIncludingRetiringStopped) /\ WF_vars(mob_ListMembersIncludingRetiringCompleted) /\ WF_vars(mob_ListMembersIncludingRetiringDestroyed) /\ WF_vars(mob_ListAllMembersCreating) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_ListAllMembersStopped) /\ WF_vars(mob_ListAllMembersCompleted) /\ WF_vars(mob_ListAllMembersDestroyed) /\ WF_vars(mob_MemberStatusCreating) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_MemberStatusStopped) /\ WF_vars(mob_MemberStatusCompleted) /\ WF_vars(mob_MemberStatusDestroyed) /\ WF_vars(mob_TaskListCreating) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskListStopped) /\ WF_vars(mob_TaskListCompleted) /\ WF_vars(mob_TaskListDestroyed) /\ WF_vars(mob_TaskGetCreating) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_TaskGetStopped) /\ WF_vars(mob_TaskGetCompleted) /\ WF_vars(mob_TaskGetDestroyed) /\ WF_vars(mob_PollEventsCreating) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_PollEventsStopped) /\ WF_vars(mob_PollEventsCompleted) /\ WF_vars(mob_PollEventsDestroyed) /\ WF_vars(mob_ReplayAllEventsCreating) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_ReplayAllEventsStopped) /\ WF_vars(mob_ReplayAllEventsCompleted) /\ WF_vars(mob_ReplayAllEventsDestroyed) /\ WF_vars(mob_RecordOperatorActionProvenanceCreating) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_GetMemberCreating) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_GetMemberStopped) /\ WF_vars(mob_GetMemberCompleted) /\ WF_vars(mob_GetMemberDestroyed) /\ WF_vars(mob_KickoffBarrierSnapshotCreating) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_KickoffBarrierSnapshotStopped) /\ WF_vars(mob_KickoffBarrierSnapshotCompleted) /\ WF_vars(mob_KickoffBarrierSnapshotDestroyed) /\ WF_vars(mob_SetSpawnPolicyCreating) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireCreating) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnCreating) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnCreating) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateCreating) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateCreating) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelCreating) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsCreating) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsCreating) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsCreating) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownCreating) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnCreating(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
+WitnessSpec_work_terminal_variants == WitnessInit_work_terminal_variants /\ [] [WitnessNext_work_terminal_variants]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSession(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSession(arg_session_id)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindings(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryAttached(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_keys \in SetOfReachabilityKeyValues : \E arg_reachability \in MapReachabilityKeyPeerReachabilityValues : \E arg_last_reason \in MapReachabilityKeyOptionPeerReachabilityReasonValues : meerkat_ReconcileResolvedDirectoryRunning(arg_keys, arg_reachability, arg_last_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededAttached(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : meerkat_RecordSendSucceededRunning(arg_key)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedAttached(arg_key, arg_reason)) /\ WF_vars(\E arg_key \in ReachabilityKeyValues : \E arg_reason \in PeerReachabilityReasonValues : meerkat_RecordSendFailedRunning(arg_key, arg_reason)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : meerkat_BeginRunFromIdle(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPromote(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedNoop(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_revision)) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_revision)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCompleted(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunFailed(arg_work_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : meerkat_RunCancelled(arg_work_id)) /\ WF_vars(meerkat_Recover) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutor) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ContainsSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_SessionHasCommsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_OpsLifecycleRegistryIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_input_id \in InputIdValues : meerkat_InputStateIdle(arg_session_id, arg_input_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_ListActiveInputsIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRecovering) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_IngestRunning(arg_runtime_id)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithCompletionRunning(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateAttached(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : meerkat_RuntimeStateRunning(arg_runtime_id)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptAttached(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_runtime_id \in StringValues : \E arg_sequence \in 0..2 : meerkat_LoadBoundaryReceiptRunning(arg_runtime_id, arg_sequence)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_PrepareAttached(arg_session_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunning(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunning(arg_run_id)) /\ WF_vars(meerkat_AdmitQueuedRunning) /\ WF_vars(meerkat_AdmitConsumedOnAcceptRunning) /\ WF_vars(meerkat_StageDrainSnapshotRunning) /\ WF_vars(meerkat_SupersedeQueuedInputRunning) /\ WF_vars(meerkat_CoalesceQueuedInputsRunning) /\ WF_vars(meerkat_SetSilentIntentOverridesRunning) /\ WF_vars(meerkat_PrimitiveAppliedRunning) /\ WF_vars(meerkat_LlmReturnedToolCallsRunning) /\ WF_vars(meerkat_LlmReturnedTerminalRunning) /\ WF_vars(meerkat_RegisterPendingOpsRunning) /\ WF_vars(meerkat_ToolCallsResolvedRunning) /\ WF_vars(meerkat_OpsBarrierSatisfiedRunning) /\ WF_vars(meerkat_BoundaryContinueRunning) /\ WF_vars(meerkat_BoundaryCompleteRunning) /\ WF_vars(meerkat_RecoverableFailureRunning) /\ WF_vars(meerkat_FatalFailureRunning) /\ WF_vars(meerkat_RetryRequestedRunning) /\ WF_vars(meerkat_CancelNowRunning) /\ WF_vars(meerkat_CancellationObservedRunning) /\ WF_vars(meerkat_AcknowledgeTerminalRunning) /\ WF_vars(meerkat_TurnLimitReachedRunning) /\ WF_vars(meerkat_BudgetExhaustedRunning) /\ WF_vars(meerkat_TimeBudgetExceededRunning) /\ WF_vars(meerkat_EnterExtractionRunning) /\ WF_vars(meerkat_ExtractionValidationPassedRunning) /\ WF_vars(meerkat_ExtractionValidationFailedRunning) /\ WF_vars(meerkat_ExtractionStartRunning) /\ WF_vars(meerkat_ForceCancelNoRunRunning) /\ WF_vars(meerkat_RegisterOperationRunning) /\ WF_vars(meerkat_ProvisioningSucceededRunning) /\ WF_vars(meerkat_ProvisioningFailedRunning) /\ WF_vars(meerkat_AbortProvisioningRunning) /\ WF_vars(meerkat_PeerReadyRunning) /\ WF_vars(meerkat_RegisterWatcherRunning) /\ WF_vars(meerkat_ProgressReportedRunning) /\ WF_vars(meerkat_CompleteOperationRunning) /\ WF_vars(meerkat_FailOperationRunning) /\ WF_vars(meerkat_CancelOperationRunning) /\ WF_vars(meerkat_RetireRequestedRunning) /\ WF_vars(meerkat_RetireCompletedRunning) /\ WF_vars(meerkat_CollectTerminalRunning) /\ WF_vars(meerkat_BeginWaitAllRunning) /\ WF_vars(meerkat_CancelWaitAllRunning) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_Recycle) /\ WF_vars(mob_Start) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_Spawn(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_SubmitWork(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCompleted(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkFailed(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : mob_ObserveWorkCancelled(arg_agent_runtime_id, arg_fence_token, arg_work_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_FlowStatusCreating) /\ WF_vars(mob_FlowStatusRunning) /\ WF_vars(mob_FlowStatusStopped) /\ WF_vars(mob_FlowStatusCompleted) /\ WF_vars(mob_FlowStatusDestroyed) /\ WF_vars(mob_McpServerStatesCreating) /\ WF_vars(mob_McpServerStatesRunning) /\ WF_vars(mob_McpServerStatesStopped) /\ WF_vars(mob_McpServerStatesCompleted) /\ WF_vars(mob_McpServerStatesDestroyed) /\ WF_vars(mob_RosterSnapshotCreating) /\ WF_vars(mob_RosterSnapshotRunning) /\ WF_vars(mob_RosterSnapshotStopped) /\ WF_vars(mob_RosterSnapshotCompleted) /\ WF_vars(mob_RosterSnapshotDestroyed) /\ WF_vars(mob_ListMembersCreating) /\ WF_vars(mob_ListMembersRunning) /\ WF_vars(mob_ListMembersStopped) /\ WF_vars(mob_ListMembersCompleted) /\ WF_vars(mob_ListMembersDestroyed) /\ WF_vars(mob_ListMembersIncludingRetiringCreating) /\ WF_vars(mob_ListMembersIncludingRetiringRunning) /\ WF_vars(mob_ListMembersIncludingRetiringStopped) /\ WF_vars(mob_ListMembersIncludingRetiringCompleted) /\ WF_vars(mob_ListMembersIncludingRetiringDestroyed) /\ WF_vars(mob_ListAllMembersCreating) /\ WF_vars(mob_ListAllMembersRunning) /\ WF_vars(mob_ListAllMembersStopped) /\ WF_vars(mob_ListAllMembersCompleted) /\ WF_vars(mob_ListAllMembersDestroyed) /\ WF_vars(mob_MemberStatusCreating) /\ WF_vars(mob_MemberStatusRunning) /\ WF_vars(mob_MemberStatusStopped) /\ WF_vars(mob_MemberStatusCompleted) /\ WF_vars(mob_MemberStatusDestroyed) /\ WF_vars(mob_TaskListCreating) /\ WF_vars(mob_TaskListRunning) /\ WF_vars(mob_TaskListStopped) /\ WF_vars(mob_TaskListCompleted) /\ WF_vars(mob_TaskListDestroyed) /\ WF_vars(mob_TaskGetCreating) /\ WF_vars(mob_TaskGetRunning) /\ WF_vars(mob_TaskGetStopped) /\ WF_vars(mob_TaskGetCompleted) /\ WF_vars(mob_TaskGetDestroyed) /\ WF_vars(mob_PollEventsCreating) /\ WF_vars(mob_PollEventsRunning) /\ WF_vars(mob_PollEventsStopped) /\ WF_vars(mob_PollEventsCompleted) /\ WF_vars(mob_PollEventsDestroyed) /\ WF_vars(mob_ReplayAllEventsCreating) /\ WF_vars(mob_ReplayAllEventsRunning) /\ WF_vars(mob_ReplayAllEventsStopped) /\ WF_vars(mob_ReplayAllEventsCompleted) /\ WF_vars(mob_ReplayAllEventsDestroyed) /\ WF_vars(mob_RecordOperatorActionProvenanceCreating) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_GetMemberCreating) /\ WF_vars(mob_GetMemberRunning) /\ WF_vars(mob_GetMemberStopped) /\ WF_vars(mob_GetMemberCompleted) /\ WF_vars(mob_GetMemberDestroyed) /\ WF_vars(mob_KickoffBarrierSnapshotCreating) /\ WF_vars(mob_KickoffBarrierSnapshotRunning) /\ WF_vars(mob_KickoffBarrierSnapshotStopped) /\ WF_vars(mob_KickoffBarrierSnapshotCompleted) /\ WF_vars(mob_KickoffBarrierSnapshotDestroyed) /\ WF_vars(mob_SetSpawnPolicyCreating) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireCreating) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnCreating) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnCreating) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateCreating) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateCreating) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelCreating) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsCreating) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsCreating) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsCreating) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownCreating) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_RuntimeWorkAdmittedRunning) /\ WF_vars(mob_KickoffFailedRunning) /\ WF_vars(mob_KickoffCancelledRunning) /\ WF_vars(mob_KickoffForceCancelledRunning) /\ WF_vars(mob_RuntimeRunSubmittedRunning) /\ WF_vars(mob_RuntimeRunCompletedRunning) /\ WF_vars(mob_RuntimeRunFailedRunning) /\ WF_vars(mob_RuntimeRunCancelledRunning) /\ WF_vars(mob_RuntimeStopRequestedRunning) /\ WF_vars(mob_DispatchStepRunning) /\ WF_vars(mob_CompleteStepRunning) /\ WF_vars(mob_RecordStepOutputRunning) /\ WF_vars(mob_ConditionPassedRunning) /\ WF_vars(mob_ConditionRejectedRunning) /\ WF_vars(mob_FailStepRunning) /\ WF_vars(mob_SkipStepRunning) /\ WF_vars(mob_ProjectFrameStepStatusRunning) /\ WF_vars(mob_CancelStepRunning) /\ WF_vars(mob_RegisterTargetsRunning) /\ WF_vars(mob_RecordTargetSuccessRunning) /\ WF_vars(mob_RecordTargetTerminalFailureRunning) /\ WF_vars(mob_RecordTargetCanceledRunning) /\ WF_vars(mob_RecordTargetFailureRunning) /\ WF_vars(mob_NodeExecutionReleasedRunning) /\ WF_vars(mob_TerminalizeCompletedRunning) /\ WF_vars(mob_TerminalizeFailedRunning) /\ WF_vars(mob_TerminalizeCanceledRunning) /\ WF_vars(mob_CompleteNodeRunning) /\ WF_vars(mob_RecordNodeOutputRunning) /\ WF_vars(mob_FailNodeRunning) /\ WF_vars(mob_SkipNodeRunning) /\ WF_vars(mob_CancelNodeRunning) /\ WF_vars(mob_UntilConditionMetRunning) /\ WF_vars(mob_BeginCleanupRunning) /\ WF_vars(mob_FinishCleanupRunning) /\ WF_vars(mob_KickoffStartedRunning) /\ WF_vars(mob_KickoffCallbackPendingRunning) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_RegisterReadyFrameRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_RegisterPendingBodyFrameRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_StartRootFrameRunning) /\ WF_vars(mob_StartBodyFrameRunning) /\ WF_vars(mob_FrameTerminatedRunning) /\ WF_vars(mob_StartLoopRunning) /\ WF_vars(mob_BodyFrameStartedRunning) /\ WF_vars(mob_BodyFrameCompletedRunning) /\ WF_vars(mob_BodyFrameFailedRunning) /\ WF_vars(mob_BodyFrameCanceledRunning) /\ WF_vars(mob_UntilConditionFailedRunning) /\ WF_vars(mob_CancelLoopRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnCreating(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_work_id \in WorkIdValues : mob_CancelWorkRunning(arg_work_id)) /\ WF_vars(mob_CancelAllWorkRunning)
 
 WitnessRouteObserved_basic_round_trip_binding_request_reaches_meerkat == <> RouteObserved_binding_request_reaches_meerkat
 WitnessRouteObserved_basic_round_trip_member_work_reaches_meerkat == <> RouteObserved_member_work_reaches_meerkat

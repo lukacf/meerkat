@@ -413,31 +413,31 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Attached`
 
 ### `Recover`
-- From: `Idle`, `Stopped`, `Retired`
+- From: `Idle`, `Attached`
 - On: `Recover`()
 - Emits: `RuntimeNotice`
 - To: `Recovering`
 
 ### `RetireRequestedFromIdle`
-- From: `Attached`, `Running`
+- From: `Idle`, `Attached`, `Running`
 - On: `Retire`()
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
 ### `Reset`
-- From: `Attached`, `Retired`, `Stopped`, `Recovering`
+- From: `Initializing`, `Idle`, `Attached`, `Recovering`, `Retired`
 - On: `Reset`()
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
 ### `StopRuntimeExecutor`
-- From: `Attached`, `Retired`, `Recovering`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`
 - On: `StopRuntimeExecutor`()
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
 ### `Destroy`
-- From: `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
 - On: `Destroy`()
 - Guards:
   - `runtime_is_bound`
@@ -1264,7 +1264,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `Recycle`
-- From: `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
+- From: `Idle`, `Attached`, `Retired`
 - On: `Recycle`()
 - Guards:
   - `runtime_is_bound`

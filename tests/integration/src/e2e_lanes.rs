@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -70,6 +70,13 @@ struct CompletedCommand {
     output: String,
 }
 
+#[derive(Clone, Debug)]
+enum PreCommandState {
+    Running,
+    Done,
+    Failed(String),
+}
+
 pub async fn run_catalog_scenario(id: u16) -> Result<(), String> {
     let Some(spec) = scenario_spec(id) else {
         return Err(format!("unknown live/smoke scenario id {id}"));
@@ -128,6 +135,7 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::await_holding_lock)] // Lock is explicitly dropped before await
 async fn run_pre_command(
     entry: CommandEntry,
     cwd: &Path,
@@ -144,16 +152,35 @@ async fn run_pre_command(
         command_display(entry.command),
         env_signature
     );
-    {
+    loop {
         let mut completed = completed_pre_commands().lock().unwrap();
-        if !completed.insert(key) {
-            return Ok(());
+        match completed.get(&key) {
+            Some(PreCommandState::Done) => return Ok(()),
+            Some(PreCommandState::Failed(error)) => return Err(error.clone()),
+            Some(PreCommandState::Running) => {
+                drop(completed);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            None => {
+                completed.insert(key.clone(), PreCommandState::Running);
+                break;
+            }
         }
     }
 
-    run_command(entry.command, cwd, env_overrides, entry.spec.timeout_secs)
+    let result = run_command(entry.command, cwd, env_overrides, entry.spec.timeout_secs)
         .await
-        .map(|_| ())
+        .map(|_| ());
+    let mut completed = completed_pre_commands().lock().unwrap();
+    match &result {
+        Ok(()) => {
+            completed.insert(key, PreCommandState::Done);
+        }
+        Err(error) => {
+            completed.insert(key, PreCommandState::Failed(error.clone()));
+        }
+    }
+    result
 }
 
 async fn run_command(
@@ -527,9 +554,9 @@ fn strict_prereqs_enabled() -> bool {
     )
 }
 
-fn completed_pre_commands() -> &'static Mutex<HashSet<String>> {
-    static PRE_COMMANDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    PRE_COMMANDS.get_or_init(|| Mutex::new(HashSet::new()))
+fn completed_pre_commands() -> &'static Mutex<HashMap<String, PreCommandState>> {
+    static PRE_COMMANDS: OnceLock<Mutex<HashMap<String, PreCommandState>>> = OnceLock::new();
+    PRE_COMMANDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn command_display(command: &[&str]) -> String {

@@ -205,7 +205,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `Spawn`
-- From: `Creating`, `Running`, `Stopped`
+- From: `Creating`, `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
@@ -257,7 +257,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RespawnMember`
-- From: `Running`, `Stopped`
+- From: `Creating`, `Running`
 - On: `RespawnMember`(agent_identity, agent_runtime_id, fence_token, generation)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
@@ -282,113 +282,389 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
 
+### `FlowStatusCreating`
+- From: `Creating`
+- On: `FlowStatus`()
+- To: `Creating`
+
 ### `FlowStatusRunning`
 - From: `Running`
 - On: `FlowStatus`()
 - To: `Running`
+
+### `FlowStatusStopped`
+- From: `Stopped`
+- On: `FlowStatus`()
+- To: `Stopped`
+
+### `FlowStatusCompleted`
+- From: `Completed`
+- On: `FlowStatus`()
+- To: `Completed`
+
+### `FlowStatusDestroyed`
+- From: `Destroyed`
+- On: `FlowStatus`()
+- To: `Destroyed`
+
+### `McpServerStatesCreating`
+- From: `Creating`
+- On: `McpServerStates`()
+- To: `Creating`
 
 ### `McpServerStatesRunning`
 - From: `Running`
 - On: `McpServerStates`()
 - To: `Running`
 
+### `McpServerStatesStopped`
+- From: `Stopped`
+- On: `McpServerStates`()
+- To: `Stopped`
+
+### `McpServerStatesCompleted`
+- From: `Completed`
+- On: `McpServerStates`()
+- To: `Completed`
+
+### `McpServerStatesDestroyed`
+- From: `Destroyed`
+- On: `McpServerStates`()
+- To: `Destroyed`
+
+### `RosterSnapshotCreating`
+- From: `Creating`
+- On: `RosterSnapshot`()
+- To: `Creating`
+
 ### `RosterSnapshotRunning`
 - From: `Running`
 - On: `RosterSnapshot`()
 - To: `Running`
+
+### `RosterSnapshotStopped`
+- From: `Stopped`
+- On: `RosterSnapshot`()
+- To: `Stopped`
+
+### `RosterSnapshotCompleted`
+- From: `Completed`
+- On: `RosterSnapshot`()
+- To: `Completed`
+
+### `RosterSnapshotDestroyed`
+- From: `Destroyed`
+- On: `RosterSnapshot`()
+- To: `Destroyed`
+
+### `ListMembersCreating`
+- From: `Creating`
+- On: `ListMembers`()
+- To: `Creating`
 
 ### `ListMembersRunning`
 - From: `Running`
 - On: `ListMembers`()
 - To: `Running`
 
+### `ListMembersStopped`
+- From: `Stopped`
+- On: `ListMembers`()
+- To: `Stopped`
+
+### `ListMembersCompleted`
+- From: `Completed`
+- On: `ListMembers`()
+- To: `Completed`
+
+### `ListMembersDestroyed`
+- From: `Destroyed`
+- On: `ListMembers`()
+- To: `Destroyed`
+
+### `ListMembersIncludingRetiringCreating`
+- From: `Creating`
+- On: `ListMembersIncludingRetiring`()
+- To: `Creating`
+
 ### `ListMembersIncludingRetiringRunning`
 - From: `Running`
 - On: `ListMembersIncludingRetiring`()
 - To: `Running`
+
+### `ListMembersIncludingRetiringStopped`
+- From: `Stopped`
+- On: `ListMembersIncludingRetiring`()
+- To: `Stopped`
+
+### `ListMembersIncludingRetiringCompleted`
+- From: `Completed`
+- On: `ListMembersIncludingRetiring`()
+- To: `Completed`
+
+### `ListMembersIncludingRetiringDestroyed`
+- From: `Destroyed`
+- On: `ListMembersIncludingRetiring`()
+- To: `Destroyed`
+
+### `ListAllMembersCreating`
+- From: `Creating`
+- On: `ListAllMembers`()
+- To: `Creating`
 
 ### `ListAllMembersRunning`
 - From: `Running`
 - On: `ListAllMembers`()
 - To: `Running`
 
+### `ListAllMembersStopped`
+- From: `Stopped`
+- On: `ListAllMembers`()
+- To: `Stopped`
+
+### `ListAllMembersCompleted`
+- From: `Completed`
+- On: `ListAllMembers`()
+- To: `Completed`
+
+### `ListAllMembersDestroyed`
+- From: `Destroyed`
+- On: `ListAllMembers`()
+- To: `Destroyed`
+
+### `MemberStatusCreating`
+- From: `Creating`
+- On: `MemberStatus`()
+- To: `Creating`
+
 ### `MemberStatusRunning`
 - From: `Running`
 - On: `MemberStatus`()
 - To: `Running`
+
+### `MemberStatusStopped`
+- From: `Stopped`
+- On: `MemberStatus`()
+- To: `Stopped`
+
+### `MemberStatusCompleted`
+- From: `Completed`
+- On: `MemberStatus`()
+- To: `Completed`
+
+### `MemberStatusDestroyed`
+- From: `Destroyed`
+- On: `MemberStatus`()
+- To: `Destroyed`
+
+### `TaskListCreating`
+- From: `Creating`
+- On: `TaskList`()
+- To: `Creating`
 
 ### `TaskListRunning`
 - From: `Running`
 - On: `TaskList`()
 - To: `Running`
 
+### `TaskListStopped`
+- From: `Stopped`
+- On: `TaskList`()
+- To: `Stopped`
+
+### `TaskListCompleted`
+- From: `Completed`
+- On: `TaskList`()
+- To: `Completed`
+
+### `TaskListDestroyed`
+- From: `Destroyed`
+- On: `TaskList`()
+- To: `Destroyed`
+
+### `TaskGetCreating`
+- From: `Creating`
+- On: `TaskGet`()
+- To: `Creating`
+
 ### `TaskGetRunning`
 - From: `Running`
 - On: `TaskGet`()
 - To: `Running`
+
+### `TaskGetStopped`
+- From: `Stopped`
+- On: `TaskGet`()
+- To: `Stopped`
+
+### `TaskGetCompleted`
+- From: `Completed`
+- On: `TaskGet`()
+- To: `Completed`
+
+### `TaskGetDestroyed`
+- From: `Destroyed`
+- On: `TaskGet`()
+- To: `Destroyed`
+
+### `PollEventsCreating`
+- From: `Creating`
+- On: `PollEvents`()
+- To: `Creating`
 
 ### `PollEventsRunning`
 - From: `Running`
 - On: `PollEvents`()
 - To: `Running`
 
+### `PollEventsStopped`
+- From: `Stopped`
+- On: `PollEvents`()
+- To: `Stopped`
+
+### `PollEventsCompleted`
+- From: `Completed`
+- On: `PollEvents`()
+- To: `Completed`
+
+### `PollEventsDestroyed`
+- From: `Destroyed`
+- On: `PollEvents`()
+- To: `Destroyed`
+
+### `ReplayAllEventsCreating`
+- From: `Creating`
+- On: `ReplayAllEvents`()
+- To: `Creating`
+
 ### `ReplayAllEventsRunning`
 - From: `Running`
 - On: `ReplayAllEvents`()
 - To: `Running`
+
+### `ReplayAllEventsStopped`
+- From: `Stopped`
+- On: `ReplayAllEvents`()
+- To: `Stopped`
+
+### `ReplayAllEventsCompleted`
+- From: `Completed`
+- On: `ReplayAllEvents`()
+- To: `Completed`
+
+### `ReplayAllEventsDestroyed`
+- From: `Destroyed`
+- On: `ReplayAllEvents`()
+- To: `Destroyed`
+
+### `RecordOperatorActionProvenanceCreating`
+- From: `Creating`
+- On: `RecordOperatorActionProvenance`()
+- To: `Creating`
 
 ### `RecordOperatorActionProvenanceRunning`
 - From: `Running`
 - On: `RecordOperatorActionProvenance`()
 - To: `Running`
 
+### `RecordOperatorActionProvenanceStopped`
+- From: `Stopped`
+- On: `RecordOperatorActionProvenance`()
+- To: `Stopped`
+
+### `RecordOperatorActionProvenanceCompleted`
+- From: `Completed`
+- On: `RecordOperatorActionProvenance`()
+- To: `Completed`
+
+### `RecordOperatorActionProvenanceDestroyed`
+- From: `Destroyed`
+- On: `RecordOperatorActionProvenance`()
+- To: `Destroyed`
+
+### `GetMemberCreating`
+- From: `Creating`
+- On: `GetMember`()
+- To: `Creating`
+
 ### `GetMemberRunning`
 - From: `Running`
 - On: `GetMember`()
 - To: `Running`
+
+### `GetMemberStopped`
+- From: `Stopped`
+- On: `GetMember`()
+- To: `Stopped`
+
+### `GetMemberCompleted`
+- From: `Completed`
+- On: `GetMember`()
+- To: `Completed`
+
+### `GetMemberDestroyed`
+- From: `Destroyed`
+- On: `GetMember`()
+- To: `Destroyed`
+
+### `KickoffBarrierSnapshotCreating`
+- From: `Creating`
+- On: `KickoffBarrierSnapshot`()
+- To: `Creating`
 
 ### `KickoffBarrierSnapshotRunning`
 - From: `Running`
 - On: `KickoffBarrierSnapshot`()
 - To: `Running`
 
+### `KickoffBarrierSnapshotStopped`
+- From: `Stopped`
+- On: `KickoffBarrierSnapshot`()
+- To: `Stopped`
+
+### `KickoffBarrierSnapshotCompleted`
+- From: `Completed`
+- On: `KickoffBarrierSnapshot`()
+- To: `Completed`
+
+### `KickoffBarrierSnapshotDestroyed`
+- From: `Destroyed`
+- On: `KickoffBarrierSnapshot`()
+- To: `Destroyed`
+
+### `SetSpawnPolicyCreating`
+- From: `Creating`
+- On: `SetSpawnPolicy`()
+- To: `Creating`
+
 ### `SetSpawnPolicyRunning`
 - From: `Running`
 - On: `SetSpawnPolicy`()
 - To: `Running`
 
-### `CancelFlowRunning`
-- From: `Running`
-- On: `CancelFlow`()
-- Emits: `FlowTerminalized`
-- To: `Running`
+### `SetSpawnPolicyStopped`
+- From: `Stopped`
+- On: `SetSpawnPolicy`()
+- To: `Stopped`
 
-### `WireRunning`
-- From: `Running`
-- On: `Wire`()
-- Emits: `NotifyCoordinator`
-- To: `Running`
+### `SetSpawnPolicyCompleted`
+- From: `Completed`
+- On: `SetSpawnPolicy`()
+- To: `Completed`
 
-### `ExternalTurnRunning`
-- From: `Running`
-- On: `ExternalTurn`()
-- Emits: `EmitProgressNote`
-- To: `Running`
-
-### `InternalTurnRunning`
-- From: `Running`
-- On: `InternalTurn`()
-- Emits: `EmitProgressNote`
-- To: `Running`
+### `SetSpawnPolicyDestroyed`
+- From: `Destroyed`
+- On: `SetSpawnPolicy`()
+- To: `Destroyed`
 
 ### `StopRunning`
 - From: `Running`
 - On: `Stop`()
 - Emits: `EmitRunLifecycleNotice`
-- To: `Running`
+- To: `Stopped`
 
-### `ResumeRunning`
-- From: `Running`
+### `ResumeStopped`
+- From: `Stopped`
 - On: `Resume`()
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
@@ -397,13 +673,55 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Complete`()
 - Emits: `EmitRunLifecycleNotice`
-- To: `Running`
+- To: `Completed`
 
-### `ResetRunning`
-- From: `Running`
+### `ResetToRunning`
+- From: `Running`, `Stopped`, `Completed`
 - On: `Reset`()
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
+
+### `WireCreating`
+- From: `Creating`
+- On: `Wire`()
+- Emits: `NotifyCoordinator`
+- To: `Creating`
+
+### `WireRunning`
+- From: `Running`
+- On: `Wire`()
+- Emits: `NotifyCoordinator`
+- To: `Running`
+
+### `ExternalTurnCreating`
+- From: `Creating`
+- On: `ExternalTurn`()
+- Emits: `EmitProgressNote`
+- To: `Creating`
+
+### `ExternalTurnRunning`
+- From: `Running`
+- On: `ExternalTurn`()
+- Emits: `EmitProgressNote`
+- To: `Running`
+
+### `InternalTurnCreating`
+- From: `Creating`
+- On: `InternalTurn`()
+- Emits: `EmitProgressNote`
+- To: `Creating`
+
+### `InternalTurnRunning`
+- From: `Running`
+- On: `InternalTurn`()
+- Emits: `EmitProgressNote`
+- To: `Running`
+
+### `TaskCreateCreating`
+- From: `Creating`
+- On: `TaskCreate`()
+- Emits: `EmitTaskNotice`
+- To: `Creating`
 
 ### `TaskCreateRunning`
 - From: `Running`
@@ -411,25 +729,133 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitTaskNotice`
 - To: `Running`
 
+### `TaskUpdateCreating`
+- From: `Creating`
+- On: `TaskUpdate`()
+- Emits: `EmitTaskNotice`
+- To: `Creating`
+
 ### `TaskUpdateRunning`
 - From: `Running`
 - On: `TaskUpdate`()
 - Emits: `EmitTaskNotice`
 - To: `Running`
 
+### `ForceCancelCreating`
+- From: `Creating`
+- On: `ForceCancel`()
+- Emits: `FlowTerminalized`
+- To: `Creating`
+
+### `ForceCancelRunning`
+- From: `Running`
+- On: `ForceCancel`()
+- Emits: `FlowTerminalized`
+- To: `Running`
+
+### `SubscribeAgentEventsCreating`
+- From: `Creating`
+- On: `SubscribeAgentEvents`()
+- To: `Creating`
+
 ### `SubscribeAgentEventsRunning`
 - From: `Running`
 - On: `SubscribeAgentEvents`()
 - To: `Running`
+
+### `SubscribeAgentEventsStopped`
+- From: `Stopped`
+- On: `SubscribeAgentEvents`()
+- To: `Stopped`
+
+### `SubscribeAgentEventsCompleted`
+- From: `Completed`
+- On: `SubscribeAgentEvents`()
+- To: `Completed`
+
+### `SubscribeAgentEventsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAgentEvents`()
+- To: `Destroyed`
+
+### `SubscribeAllAgentEventsCreating`
+- From: `Creating`
+- On: `SubscribeAllAgentEvents`()
+- To: `Creating`
 
 ### `SubscribeAllAgentEventsRunning`
 - From: `Running`
 - On: `SubscribeAllAgentEvents`()
 - To: `Running`
 
+### `SubscribeAllAgentEventsStopped`
+- From: `Stopped`
+- On: `SubscribeAllAgentEvents`()
+- To: `Stopped`
+
+### `SubscribeAllAgentEventsCompleted`
+- From: `Completed`
+- On: `SubscribeAllAgentEvents`()
+- To: `Completed`
+
+### `SubscribeAllAgentEventsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeAllAgentEvents`()
+- To: `Destroyed`
+
+### `SubscribeMobEventsCreating`
+- From: `Creating`
+- On: `SubscribeMobEvents`()
+- To: `Creating`
+
 ### `SubscribeMobEventsRunning`
 - From: `Running`
 - On: `SubscribeMobEvents`()
+- To: `Running`
+
+### `SubscribeMobEventsStopped`
+- From: `Stopped`
+- On: `SubscribeMobEvents`()
+- To: `Stopped`
+
+### `SubscribeMobEventsCompleted`
+- From: `Completed`
+- On: `SubscribeMobEvents`()
+- To: `Completed`
+
+### `SubscribeMobEventsDestroyed`
+- From: `Destroyed`
+- On: `SubscribeMobEvents`()
+- To: `Destroyed`
+
+### `ShutdownRunning`
+- From: `Running`
+- On: `Shutdown`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `ShutdownCreating`
+- From: `Creating`
+- On: `Shutdown`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Creating`
+
+### `ShutdownStopped`
+- From: `Stopped`
+- On: `Shutdown`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Stopped`
+
+### `ShutdownCompleted`
+- From: `Completed`
+- On: `Shutdown`()
+- Emits: `EmitRunLifecycleNotice`
+- To: `Completed`
+
+### `CancelFlowRunning`
+- From: `Running`
+- On: `CancelFlow`()
+- Emits: `FlowTerminalized`
 - To: `Running`
 
 ### `InitializeOrchestratorRunning`
@@ -702,18 +1128,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EvaluateUntilCondition`
 - To: `Running`
 
-### `ShutdownRunning`
-- From: `Running`
-- On: `Shutdown`()
-- Emits: `EmitRunLifecycleNotice`
-- To: `Running`
-
-### `ForceCancelRunning`
-- From: `Running`
-- On: `ForceCancel`()
-- Emits: `FlowTerminalized`
-- To: `Running`
-
 ### `BeginCleanupRunning`
 - From: `Running`
 - On: `BeginCleanup`()
@@ -785,7 +1199,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `UnwireRunning`
-- From: `Running`
+- From: `Creating`, `Running`
 - On: `Unwire`()
 - Guards:
   - `wired_edges_present`
@@ -896,7 +1310,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RetireRunning`
-- From: `Running`
+- From: `Creating`, `Running`, `Stopped`
 - On: `Retire`(agent_runtime_id)
 - Guards:
   - `active_members_present`
@@ -905,7 +1319,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `RetireAllRunning`
-- From: `Running`
+- From: `Creating`, `Running`, `Stopped`
 - On: `RetireAll`()
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
@@ -918,11 +1332,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
-### `DestroyRunning`
-- From: `Running`
+### `DestroyFromAny`
+- From: `Creating`, `Running`, `Stopped`, `Completed`
 - On: `Destroy`()
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
+
+### `RespawnCreating`
+- From: `Creating`
+- On: `Respawn`(agent_runtime_id)
+- Emits: `ExposePendingSpawn`
+- To: `Creating`
 
 ### `RespawnRunning`
 - From: `Running`

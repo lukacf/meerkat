@@ -1054,7 +1054,7 @@ pub fn meerkat_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "Recover".into(),
-                from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
+                from: vec!["Idle".into(), "Attached".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("Recover"),
                     variant: "Recover".into(),
@@ -1067,7 +1067,7 @@ pub fn meerkat_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "RetireRequestedFromIdle".into(),
-                from: vec!["Attached".into(), "Running".into()],
+                from: vec!["Idle".into(), "Attached".into(), "Running".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("Retire"),
                     variant: "Retire".into(),
@@ -1081,10 +1081,11 @@ pub fn meerkat_machine() -> MachineSchema {
             TransitionSchema {
                 name: "Reset".into(),
                 from: vec![
+                    "Initializing".into(),
+                    "Idle".into(),
                     "Attached".into(),
-                    "Retired".into(),
-                    "Stopped".into(),
                     "Recovering".into(),
+                    "Retired".into(),
                 ],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("Reset"),
@@ -1135,7 +1136,14 @@ pub fn meerkat_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "StopRuntimeExecutor".into(),
-                from: vec!["Attached".into(), "Retired".into(), "Recovering".into()],
+                from: vec![
+                    "Initializing".into(),
+                    "Idle".into(),
+                    "Attached".into(),
+                    "Running".into(),
+                    "Recovering".into(),
+                    "Retired".into(),
+                ],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("StopRuntimeExecutor"),
                     variant: "StopRuntimeExecutor".into(),
@@ -1166,6 +1174,8 @@ pub fn meerkat_machine() -> MachineSchema {
             TransitionSchema {
                 name: "Destroy".into(),
                 from: vec![
+                    "Initializing".into(),
+                    "Idle".into(),
                     "Attached".into(),
                     "Running".into(),
                     "Recovering".into(),
@@ -2180,13 +2190,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
 
     transitions.push(TransitionSchema {
         name: "Recycle".into(),
-        from: vec![
-            "Attached".into(),
-            "Running".into(),
-            "Recovering".into(),
-            "Retired".into(),
-            "Stopped".into(),
-        ],
+        from: vec!["Idle".into(), "Attached".into(), "Retired".into()],
         on: InputMatch {
             kind: meerkat_trigger_kind("Recycle"),
             variant: "Recycle".into(),

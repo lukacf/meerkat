@@ -102,6 +102,9 @@ pub use validate::{
 
 pub(crate) use ids::MeerkatId;
 
+#[doc(hidden)]
+pub mod bridge_session_internals;
+
 /// Closure called at each member spawn to get a fresh snapshot of external tools.
 ///
 /// Returns `None` when no external tools are registered yet (e.g. before SDK

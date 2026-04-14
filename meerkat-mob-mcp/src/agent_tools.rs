@@ -17,7 +17,7 @@ use meerkat_core::types::{
 };
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
-    SpawnMemberSpec, SpawnResult, ids::MeerkatId,
+    SpawnMemberSpec, SpawnResult, bridge_session_internals as bsi, ids::MeerkatId,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -505,8 +505,7 @@ impl AgentMobToolSurface {
             return false;
         };
         let roster = handle.roster().await;
-        let meerkat_id = MeerkatId::from(identity.as_str());
-        let Some(entry) = roster.get(&meerkat_id) else {
+        let Some(entry) = roster.get_by_identity(identity) else {
             return false;
         };
         let Some(helper_peer_id) = entry.peer_id() else {
@@ -533,12 +532,13 @@ impl AgentMobToolSurface {
             .resolve_inline_profile(&entry.role)
             .map(|profile| profile.peer_description.as_str())
             .unwrap_or("delegate helper");
-        let Some(helper_bridge_session_id) = entry.bridge_session_id() else {
+        let Some(helper_bridge_session_id) = handle.resolve_bridge_session_id(identity).await
+        else {
             return false;
         };
         let helper_runtime = meerkat_core::service::SessionServiceCommsExt::comms_runtime(
             self.state.session_service().as_ref(),
-            helper_bridge_session_id,
+            &helper_bridge_session_id,
         )
         .await;
         let Some(helper_runtime) = helper_runtime else {
@@ -675,8 +675,11 @@ impl AgentMobToolSurface {
         // mobs, spoof cross-session ownership, or bypass session-scoped
         // cleanup policy.
         let mut definition = args.definition;
-        definition.clear_internal_lifecycle_flags();
-        definition.mark_owner_bridge_session_indexed(&self.owner_bridge_session_id.to_string());
+        bsi::clear_internal_lifecycle_flags(&mut definition);
+        bsi::mark_owner_bridge_session_indexed(
+            &mut definition,
+            &self.owner_bridge_session_id.to_string(),
+        );
 
         let mob_id = self
             .state
@@ -2388,7 +2391,7 @@ mod tests {
         let factory = AgentMobToolSurfaceFactory::new(Arc::clone(&state));
         let session_id = SessionId::new();
         let mut definition = sample_definition("owned-without-scope");
-        definition.mark_owner_bridge_session_indexed(&session_id.to_string());
+        bsi::mark_owner_bridge_session_indexed(&mut definition, &session_id.to_string());
         let mob_id = state
             .mob_create_definition(definition)
             .await
@@ -2611,7 +2614,7 @@ mod tests {
             .expect("created mob handle");
         let created_definition = created_handle.definition();
         assert_eq!(
-            created_definition.owner_bridge_session_index(),
+            bsi::owner_bridge_session_index(created_definition),
             Some(expected_session_id.as_str()),
             "mob_create must rebind bridge-session indexing to the current owner bridge session"
         );

@@ -38,6 +38,7 @@ use meerkat_core::types::{
     ToolProvenance, ToolResult, ToolSourceKind, Usage,
 };
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
+use meerkat_mob::bridge_session_internals as bsi;
 use meerkat_mob::{
     AgentIdentity, FlowId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
@@ -572,13 +573,9 @@ impl MobMcpState {
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         let mut resolved = None;
         for mob_id in mob_ids {
-            let members = self.handle_for(&mob_id).await?.list_all_members().await;
-            if let Some(member) = members.into_iter().find(|member| {
-                member
-                    .bridge_session_id()
-                    .is_some_and(|candidate| candidate == bridge_session_id)
-            }) {
-                resolved = Some((mob_id, member.agent_identity));
+            let roster = self.handle_for(&mob_id).await?.roster().await;
+            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
+                resolved = Some((mob_id, entry.agent_identity.clone()));
                 break;
             }
         }
@@ -612,12 +609,7 @@ impl MobMcpState {
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         for mob_id in mob_ids {
             if let Ok(handle) = self.handle_for(&mob_id).await {
-                let members = handle.list_all_members().await;
-                if members.into_iter().any(|member| {
-                    member
-                        .bridge_session_id()
-                        .is_some_and(|candidate| candidate == bridge_session_id)
-                }) {
+                if handle.roster().await.has_bridge_session(bridge_session_id) {
                     return true;
                 }
             }
@@ -641,11 +633,7 @@ impl MobMcpState {
             return false;
         };
         match self.handle_for(&mob_id).await {
-            Ok(handle) => handle.list_all_members().await.into_iter().any(|member| {
-                member
-                    .bridge_session_id()
-                    .is_some_and(|candidate| candidate == bridge_session_id)
-            }),
+            Ok(handle) => handle.roster().await.has_bridge_session(bridge_session_id),
             Err(_) => {
                 self.session_service()
                     .session_belongs_to_mob(bridge_session_id, &mob_id)
@@ -903,7 +891,7 @@ impl MobMcpState {
         mobs.iter()
             .find(|(_, m)| {
                 let def = m.handle.definition();
-                def.is_implicit && def.has_owner_bridge_session_index(bridge_session_id)
+                def.is_implicit && bsi::has_owner_bridge_session_index(def, bridge_session_id)
             })
             .map(|(id, _)| id.clone())
     }
@@ -935,10 +923,7 @@ impl MobMcpState {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
-                if m.handle
-                    .definition()
-                    .has_owner_bridge_session_index(bridge_session_id)
-                {
+                if bsi::has_owner_bridge_session_index(m.handle.definition(), bridge_session_id) {
                     Some(id.clone())
                 } else {
                     None
@@ -957,10 +942,10 @@ impl MobMcpState {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
-                if m.handle
-                    .definition()
-                    .is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
-                {
+                if bsi::is_cleanup_scoped_to_owner_bridge_session(
+                    m.handle.definition(),
+                    bridge_session_id,
+                ) {
                     Some(id.clone())
                 } else {
                     None
@@ -980,7 +965,7 @@ impl MobMcpState {
         mobs.get(mob_id).is_some_and(|managed| {
             let definition = managed.handle.definition();
             definition.is_implicit
-                && definition.has_owner_bridge_session_index(bridge_session_id)
+                && bsi::has_owner_bridge_session_index(definition, bridge_session_id)
                 && definition
                     .resolve_inline_profile(&delegate_profile)
                     .is_some_and(|profile| profile.model == model)
@@ -1032,7 +1017,7 @@ impl MobMcpState {
         }
 
         let mob_id = self
-            .mob_create_definition(MobDefinition::implicit(bridge_session_id, model))
+            .mob_create_definition(bsi::implicit_definition(bridge_session_id, model))
             .await?;
         Ok((mob_id, true))
     }
@@ -1121,8 +1106,7 @@ impl MobMcpState {
                     if definition.session_cleanup_policy
                         == meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive
                     {
-                        definition
-                            .owner_bridge_session_index()
+                        bsi::owner_bridge_session_index(definition)
                             .map(|sid| (id.clone(), sid.to_string()))
                     } else {
                         None
@@ -4407,14 +4391,14 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        bsi::set_owner_bridge_session_lookup_index(&mut manual, sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
             .expect("create manual owner-indexed mob");
 
         let mut bridge_session_scoped = explicit_definition("bridge-session-scoped-owner");
-        bridge_session_scoped.mark_owner_bridge_session_indexed(&sid);
+        bsi::mark_owner_bridge_session_indexed(&mut bridge_session_scoped, &sid);
         let bridge_session_scoped_id = state
             .mob_create_definition(bridge_session_scoped)
             .await
@@ -4506,7 +4490,7 @@ mod tests {
 
         // Also create a manual owner-indexed explicit mob that should survive scavenging.
         let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        bsi::set_owner_bridge_session_lookup_index(&mut manual, sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
@@ -4561,7 +4545,7 @@ mod tests {
         let sid = result.session_id.to_string();
 
         let mut bridge_owned = explicit_definition("bridge-owned-orphan");
-        bridge_owned.mark_owner_bridge_session_indexed(&sid);
+        bsi::mark_owner_bridge_session_indexed(&mut bridge_owned, &sid);
         let bridge_owned_id = state
             .mob_create_definition(bridge_owned)
             .await
@@ -4598,7 +4582,7 @@ mod tests {
             "implicit mob must have auto_wire_orchestrator set"
         );
         assert_eq!(
-            handle.definition().owner_bridge_session_index(),
+            bsi::owner_bridge_session_index(handle.definition()),
             Some(sid.as_str()),
             "implicit mob must have correct owner_bridge_session_id"
         );

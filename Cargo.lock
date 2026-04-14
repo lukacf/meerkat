@@ -2653,7 +2653,6 @@ dependencies = [
 name = "meerkat-machine-derive"
 version = "0.5.2"
 dependencies = [
- "proc-macro2",
  "quote",
  "syn",
 ]

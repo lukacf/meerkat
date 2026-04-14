@@ -1,10 +1,9 @@
-//! Concrete helpers for the current runtime control-plane seam.
+//! Concrete helpers for the runtime control-plane seam.
 //!
-//! The long-term 0.5 architecture calls for a fuller `RuntimeControlMachine`,
-//! but today's runtime still coordinates out-of-band executor control through
-//! `RuntimeLoop` plus the per-session driver. These helpers keep the concrete
-//! stop/preemption behavior in one place while the larger control-plane landing
-//! is still in flight.
+//! Control-plane semantics are now part of `MeerkatMachine`, but the runtime
+//! still coordinates out-of-band executor control through `RuntimeLoop` plus
+//! the per-session driver. These helpers keep the concrete stop/preemption
+//! behavior in one place.
 
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 

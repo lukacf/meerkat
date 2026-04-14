@@ -67,9 +67,9 @@ fn prepared_meerkat_state() -> meerkat_machine_kernels::KernelState {
 #[test]
 fn session_turn_admission_kernel_attached_state_reached() {
     let state = prepared_meerkat_state();
-    // PrepareBindings is now a self-loop (registration + query, no phase
-    // change). Phase stays Idle after Initialize → RegisterSession → PrepareBindings.
-    assert_eq!(state.phase, "Idle");
+    // PrepareBindings promotes an idle registered session into Attached while
+    // recording the runtime binding fields.
+    assert_eq!(state.phase, "Attached");
     // Option<T> in the kernel is Map({"value" => T})
     assert_eq!(
         state.fields.get("active_runtime_id"),

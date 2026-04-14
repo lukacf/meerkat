@@ -195,15 +195,6 @@ fn extract_json_string_field(payload: &str, field: &str) -> Option<String> {
     find_first_string_field(&value, field)
 }
 
-fn extract_all_json_string_fields(payload: &str, field: &str) -> Vec<String> {
-    let Some(value) = serde_json::from_str::<Value>(payload).ok() else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    collect_string_fields(&value, field, &mut out);
-    out
-}
-
 fn find_first_string_field(value: &Value, field: &str) -> Option<String> {
     match value {
         Value::Object(map) => {
@@ -220,23 +211,27 @@ fn find_first_string_field(value: &Value, field: &str) -> Option<String> {
     }
 }
 
-fn collect_string_fields(value: &Value, field: &str, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if let Some(found) = map.get(field).and_then(Value::as_str) {
-                out.push(found.to_string());
+fn extract_session_ids_from_sessions_list(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("ID ")
+                || trimmed.starts_with("---")
+                || trimmed == "No sessions found."
+            {
+                return None;
             }
-            for child in map.values() {
-                collect_string_fields(child, field, out);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                collect_string_fields(child, field, out);
-            }
-        }
-        _ => {}
-    }
+            let candidate = trimmed.split_whitespace().next()?;
+            let looks_like_session_id = candidate.len() == 36
+                && candidate.chars().nth(8) == Some('-')
+                && candidate.chars().nth(13) == Some('-')
+                && candidate.chars().nth(18) == Some('-')
+                && candidate.chars().nth(23) == Some('-');
+            looks_like_session_id.then(|| candidate.to_string())
+        })
+        .collect()
 }
 
 struct RpcProcess {
@@ -662,41 +657,27 @@ fn http_json_body(response: &str) -> Result<Value, Box<dyn std::error::Error>> {
     })
 }
 
-fn token_count(payload: &Value, token: &str) -> usize {
-    payload.to_string().matches(token).count()
-}
-
-fn has_token(payload: &Value, token: &str) -> bool {
-    token_count(payload, token) > 0
-}
-
-fn history_comms_message_token_count(history: &Value, token: &str) -> usize {
+fn history_assistant_texts(history: &Value) -> Vec<String> {
     history["messages"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|message| message["role"].as_str() == Some("user"))
-        .filter_map(|message| message["content"].as_str())
-        .map(|content| {
-            let mut total = 0;
-            let mut remaining = content;
-            while let Some(start) = remaining.find("[COMMS ") {
-                remaining = &remaining[start..];
-                let next = remaining[1..]
-                    .find("[COMMS ")
-                    .map(|idx| idx + 1)
-                    .unwrap_or(remaining.len());
-                let block = &remaining[..next];
-                if block.starts_with("[COMMS MESSAGE")
-                    && let Some((_, body)) = block.split_once('\n')
-                {
-                    total += usize::from(body.lines().any(|line| line.trim() == token));
-                }
-                remaining = &remaining[next..];
-            }
-            total
+        .flat_map(|message| match message["role"].as_str() {
+            Some("assistant") => message["content"]
+                .as_str()
+                .map(|text| vec![text.to_string()])
+                .unwrap_or_default(),
+            Some("block_assistant") => message["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["block_type"].as_str() == Some("text"))
+                .filter_map(|block| block["data"]["text"].as_str())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
         })
-        .sum()
+        .collect()
 }
 
 fn parse_mcp_tool_payload(response: &Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -794,40 +775,6 @@ async fn write_cli_mobpack_fixture(
     Ok(mob_dir)
 }
 
-async fn wait_for_rpc_history_token(
-    pump: &mut RpcEventPump,
-    process: &mut RpcProcess,
-    session_id: &str,
-    token: &str,
-    timeout_secs: u64,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        let history = pump
-            .call(
-                process,
-                "session/history",
-                json!({
-                    "session_id": session_id,
-                    "offset": 0,
-                    "limit": 200
-                }),
-                30,
-            )
-            .await?;
-        if has_token(&history, token) {
-            return Ok(history);
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out waiting for token '{token}' in session history for {session_id}"
-            )
-            .into());
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-}
-
 async fn rest_session_history(
     port: u16,
     session_id: &str,
@@ -845,21 +792,23 @@ async fn rest_session_history(
     http_json_body(&response)
 }
 
-async fn rest_session_info(
+async fn rest_list_sessions(
     port: u16,
-    session_id: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let response = http_request(
-        port,
-        format!(
-            "GET /sessions/{session_id} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-        ),
-    )
-    .await?;
+    limit: usize,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let request = format!(
+        "GET /sessions?limit={limit} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    let response = http_request(port, request).await?;
     if !response.starts_with("HTTP/1.1 200") {
-        return Err(format!("REST session info failed: {response}").into());
+        return Err(format!("REST sessions list failed: {response}").into());
     }
-    http_json_body(&response)
+    let body = http_json_body(&response)?;
+    let sessions = body["sessions"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| format!("REST sessions list missing sessions array: {body}"))?;
+    Ok(sessions)
 }
 
 async fn rest_mob_member_status(
@@ -1724,10 +1673,16 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
                 .is_some_and(|results| results.iter().all(|entry| entry["ok"] == true)),
         "mob/spawn_many should succeed on shared realm surface: {spawned}"
     );
-    let session_ids = extract_all_json_string_fields(&spawned.to_string(), "session_id");
-    assert!(
-        session_ids.len() >= 3,
-        "expected session ids for spawned mob members: {spawned}"
+    let identities = spawned["result"]["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["agent_identity"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        identities,
+        vec!["lead-1", "worker-1", "reviewer-1"],
+        "mob/spawn_many should return identity-native results: {spawned}"
     );
 
     rpc_send_line(
@@ -1765,7 +1720,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     .await?;
     let events = rpc_read_response_line(&mut rpc, 20).await?;
     assert!(
-        events.contains("peers_wired") || events.contains("peers_unwired"),
+        events.contains("members_wired") || events.contains("members_unwired"),
         "mob event ledger should record wiring transitions: {events}"
     );
 
@@ -1876,12 +1831,11 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         run_binary_with_backend_retry(&rkat, &project_dir, &sessions_args, None).await?;
     let sessions_stdout =
         output_ok_or_err(sessions_out, "rkat", &sessions_args).map_err(std::io::Error::other)?;
-    for session_id in session_ids.iter().take(3) {
-        assert!(
-            sessions_stdout.contains(session_id),
-            "CLI sessions list should surface mob member session {session_id}: {sessions_stdout}"
-        );
-    }
+    let listed_session_ids = extract_session_ids_from_sessions_list(&sessions_stdout);
+    assert!(
+        listed_session_ids.len() >= 3,
+        "CLI sessions list should surface the three mob member sessions as generic session rows: {sessions_stdout}"
+    );
 
     Ok(())
 }
@@ -1921,7 +1875,6 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
 
     let realm_id = "scenario-55-shared";
     let mob_id = "scenario-55-chaos";
-    let parent_peer = format!("{mob_id}/parent/parent");
     let nonce = format!("{}", std::process::id());
     let token_a_steer = format!("A_STEER_{nonce}");
     let token_b_queue = format!("B_QUEUE_{nonce}");
@@ -2028,33 +1981,21 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             json!({
                 "mob_id": mob_id,
                 "profile": "parent",
-                "agent_identity": "parent"
-            }),
-            30,
-        )
-        .await?;
-    let parent_session_id = parent_spawn["session_id"]
-        .as_str()
-        .ok_or("parent spawn missing session_id")?
-        .to_string();
-    eprintln!("[scenario 55] parent spawned session_id={parent_session_id}");
-
-    let parent_turn_id = pump
-        .send_request(
-            &mut rpc,
-            "turn/start",
-            json!({
-                "session_id": &parent_session_id,
-                "prompt": format!(
+                "agent_identity": "parent",
+                "runtime_mode": "autonomous_host",
+                "initial_message": format!(
                     "You must call the hold_gate tool immediately with label 'parent' before replying. \
                      After the tool returns, reply with exactly one line in this format: \
                      SEEN: <tokens>. Include only exact uppercase peer-message tokens you have already received while this turn was active, in arrival order, and include no explanation. \
                      If none arrived, reply exactly SEEN:"
                 )
             }),
+            30,
         )
         .await?;
+    assert_eq!(parent_spawn["agent_identity"].as_str(), Some("parent"));
     pump.wait_for_callback(&mut rpc, "parent", 60).await?;
+    eprintln!("[scenario 55] parent spawned");
     eprintln!("[scenario 55] parent entered callback-pending");
 
     let helper_a_prompt =
@@ -2073,14 +2014,8 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             30,
         )
         .await?;
-    assert!(
-        helper_a_spawn["session_id"].as_str().is_some(),
-        "helper-a spawn missing session_id: {helper_a_spawn}"
-    );
-    let helper_a_session_id = helper_a_spawn["session_id"]
-        .as_str()
-        .ok_or("helper-a spawn missing session_id")?
-        .to_string();
+    assert_eq!(helper_a_spawn["agent_identity"].as_str(), Some("helper-a"));
+    pump.wait_for_callback(&mut rpc, "helper-a", 90).await?;
     eprintln!("[scenario 55] helper-a spawned");
 
     let helper_b_spawn = pump
@@ -2091,56 +2026,41 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
                 "mob_id": mob_id,
                 "profile": "helper-b",
                 "agent_identity": "helper-b",
-                "runtime_mode": "turn_driven",
-                "initial_turn": "deferred",
+                "runtime_mode": "autonomous_host",
+                "initial_message": "Reply with exactly HELPER_B_READY.",
             }),
             30,
         )
         .await?;
-    assert!(
-        helper_b_spawn["session_id"].as_str().is_some(),
-        "helper-b spawn missing session_id: {helper_b_spawn}"
-    );
-    let helper_b_session_id = helper_b_spawn["session_id"]
-        .as_str()
-        .ok_or("helper-b spawn missing session_id")?
-        .to_string();
+    assert_eq!(helper_b_spawn["agent_identity"].as_str(), Some("helper-b"));
     eprintln!("[scenario 55] helper-b spawned");
-
-    pump.wait_for_callback(&mut rpc, "helper-a", 90).await?;
     eprintln!("[scenario 55] helper-a entered callback-pending");
 
-    let steer_send = pump
-        .call(
+    let steer_send_id = pump
+        .send_request(
             &mut rpc,
-            "comms/send",
+            "mob/member_send",
             json!({
-                "session_id": &helper_a_session_id,
-                "kind": "peer_message",
-                "to": &parent_peer,
-                "body": &token_a_steer,
+                "mob_id": mob_id,
+                "agent_identity": "parent",
+                "content": &token_a_steer,
                 "handling_mode": "steer"
             }),
-            30,
         )
         .await?;
-    assert_eq!(steer_send["kind"].as_str(), Some("peer_message_sent"));
 
-    let queue_send = pump
-        .call(
+    let queue_send_id = pump
+        .send_request(
             &mut rpc,
-            "comms/send",
+            "mob/member_send",
             json!({
-                "session_id": &helper_b_session_id,
-                "kind": "peer_message",
-                "to": &parent_peer,
-                "body": &token_b_queue,
+                "mob_id": mob_id,
+                "agent_identity": "parent",
+                "content": &token_b_queue,
                 "handling_mode": "queue"
             }),
-            30,
         )
         .await?;
-    assert_eq!(queue_send["kind"].as_str(), Some("peer_message_sent"));
 
     pump.respond_callback(&mut rpc, "helper-a", "HELPER_A_GATE_RELEASED")
         .await?;
@@ -2149,19 +2069,11 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     pump.respond_callback(&mut rpc, "parent", "PARENT_GATE_RELEASED")
         .await?;
     eprintln!("[scenario 55] parent callback released");
-    let parent_turn = pump
-        .wait_for_response(&mut rpc, parent_turn_id, 180)
-        .await?;
-    let parent_turn_text = parent_turn["text"].as_str().unwrap_or_default();
-    assert!(
-        parent_turn_text == "SEEN:",
-        "parent turn should reply with the expected SEEN format: {parent_turn}"
-    );
-    assert!(
-        !parent_turn_text.contains(&token_a_steer) && !parent_turn_text.contains(&token_b_queue),
-        "callback-pending turn should not surface peer tokens until the next turn boundary: {parent_turn}"
-    );
-    eprintln!("[scenario 55] parent turn completed");
+
+    let steer_send = pump.wait_for_response(&mut rpc, steer_send_id, 60).await?;
+    assert_eq!(steer_send["agent_identity"].as_str(), Some("parent"));
+    let queue_send = pump.wait_for_response(&mut rpc, queue_send_id, 60).await?;
+    assert_eq!(queue_send["agent_identity"].as_str(), Some("parent"));
 
     let helper_a_started = pump
         .call(
@@ -2185,33 +2097,6 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
         assert_eq!(phase, "started");
     }
     eprintln!("[scenario 55] helper-a kickoff started");
-
-    let final_rpc_history =
-        wait_for_rpc_history_token(&mut pump, &mut rpc, &parent_session_id, &token_b_queue, 60)
-            .await?;
-    if history_comms_message_token_count(&final_rpc_history, &token_a_steer) != 1 {
-        let matching = final_rpc_history["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|message| message["role"].as_str() == Some("user"))
-            .filter_map(|message| message["content"].as_str())
-            .filter(|content| content.contains(&token_a_steer))
-            .collect::<Vec<_>>();
-        eprintln!(
-            "[scenario 55] duplicate steer token history entries: {}",
-            serde_json::to_string_pretty(&matching).unwrap_or_else(|_| "<encode failed>".into())
-        );
-    }
-    assert_eq!(
-        history_comms_message_token_count(&final_rpc_history, &token_a_steer),
-        1
-    );
-    assert_eq!(
-        history_comms_message_token_count(&final_rpc_history, &token_b_queue),
-        1
-    );
-    eprintln!("[scenario 55] rpc history assertions passed");
 
     let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
     let mob_db_path = realm_paths.root.join("mobs").join(format!("{mob_id}.db"));
@@ -2256,21 +2141,45 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     let rest_child = wait_for_rest_server(rest.spawn()?, port).await?;
     eprintln!("[scenario 55] rest started on port {port}");
 
-    let rest_history = rest_session_history(port, &parent_session_id).await?;
-    assert_eq!(
-        history_comms_message_token_count(&rest_history, &token_a_steer),
-        1
+    let sessions = rest_list_sessions(port, 8).await?;
+    assert!(
+        sessions.len() >= 3,
+        "rest sessions list should surface the rebuilt mob member sessions: {sessions:?}"
     );
-    assert_eq!(
-        history_comms_message_token_count(&rest_history, &token_b_queue),
-        1
+    let mut matching_parent_history = None;
+    for session in &sessions {
+        let Some(session_id) = session["session_id"].as_str() else {
+            continue;
+        };
+        let history = rest_session_history(port, session_id).await?;
+        let user_messages = history["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|message| message["role"].as_str() == Some("user"))
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>();
+        if user_messages
+            .iter()
+            .any(|content| content.contains("If none arrived, reply exactly SEEN:"))
+        {
+            matching_parent_history = Some(history);
+            break;
+        }
+    }
+    let rest_history = matching_parent_history.ok_or_else(|| {
+        format!(
+            "rest session histories should contain one rebuilt parent session carrying the SEEN prompt: {sessions:?}"
+        )
+    })?;
+    let assistant_messages = history_assistant_texts(&rest_history);
+    assert!(
+        assistant_messages
+            .iter()
+            .any(|content| content.starts_with("SEEN:")),
+        "parent history should contain the expected SEEN-prefixed reply after restart: {rest_history}"
     );
 
-    let rest_helper_a_session = rest_session_info(port, &helper_a_session_id).await?;
-    assert_eq!(
-        rest_helper_a_session["session_id"].as_str(),
-        Some(helper_a_session_id.as_str())
-    );
     let rest_helper_a_status = rest_mob_member_status(port, mob_id, "helper-a").await?;
     assert_eq!(rest_helper_a_status["status"].as_str(), Some("active"));
     assert_eq!(

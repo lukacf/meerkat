@@ -134,11 +134,11 @@ graph TD
     SS --> AF
 
     subgraph core["meerkat-core"]
-        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor<br/>TurnExecutionAuthority"]
+        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor"]
     end
 
     subgraph authority["Machine authority layer"]
-        SCHEMA2["meerkat-machine-schema<br/>18 machine definitions"]
+        SCHEMA2["meerkat-machine-schema<br/>2 kernel + perimeter machine definitions"]
         KERNELS2["meerkat-machine-kernels<br/>Generated sealed mutators"]
     end
 
@@ -146,7 +146,7 @@ graph TD
     AGENT -.->|canonical transitions| KERNELS2
     KERNELS2 --> SCHEMA2
 
-    RUNT["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver<br/>OpsLifecycleAuthority / InputLifecycleAuthority"]
+    RUNT["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver<br/>MeerkatMachine"]
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     TOOLS["meerkat-tools<br/>Registry / Dispatch / Validation"]
     STORE["meerkat-store<br/>SQLite / JSONL / Memory"]
@@ -236,9 +236,9 @@ Code generation from machine schema definitions:
 <Accordion title="meerkat-machine-kernels">
 Generated sealed mutator implementations:
 
-- One kernel per canonical machine (e.g., `TurnExecutionKernel`, `OpsLifecycleKernel`, `RuntimeControlKernel`)
+- One kernel per canonical machine (`MeerkatMachineKernel`, `MobMachineKernel`)
 - Each kernel implements a sealed mutator trait that is the **only** code path allowed to mutate canonical state
-- Authority modules in satellite crates (e.g., `TurnExecutionAuthority` in `meerkat-core`, `OpsLifecycleAuthority` in `meerkat-runtime`) wrap the generated kernels with effect execution
+- Authority modules in satellite crates (e.g., `MeerkatMachine` in `meerkat-runtime`, `MobMachine` in `meerkat-mob`) wrap the generated kernels with effect execution
 - Handwritten shell code calls `authority.apply(input)` and handles the returned effects
 
 The seal is enforced at compile time: no handwritten code can implement the mutator trait.
@@ -494,7 +494,7 @@ The `FactoryAgentBuilder` pattern works as follows:
 
 ## Agent loop
 
-The agent executes a state machine loop. The user-facing loop shape is `LoopState` in `meerkat-core/src/state.rs`, while canonical transition legality is enforced by `TurnExecutionAuthority` (the sealed mutator for `TurnExecutionMachine`):
+The agent executes a state machine loop. The user-facing loop shape is `LoopState` in `meerkat-core/src/state.rs`, while canonical transition legality is enforced by `MeerkatMachine` (the unified Meerkat runtime authority in `meerkat-runtime/src/meerkat_machine.rs`):
 
 ```mermaid
 stateDiagram-v2
@@ -526,7 +526,7 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | `CallingLlm` | Sending request to LLM, streaming response |
-| `WaitingForOps` | No LLM work, waiting for machine-owned barrier operations to complete (gated by `barrier_satisfied` in `TurnExecutionMachine`) |
+| `WaitingForOps` | No LLM work, waiting for machine-owned barrier operations to complete (gated by `barrier_satisfied` in `MeerkatMachine`) |
 | `DrainingEvents` | Processing buffered operation events at turn boundary |
 | `Cancelling` | Gracefully stopping after cancel signal or budget exhaustion |
 | `ErrorRecovery` | Attempting recovery from transient LLM error |
@@ -697,11 +697,6 @@ For any canonical domain (turn lifecycle, runtime control, ops lifecycle, mob or
 | `MobMachine` | Multi-agent orchestration: identity-first roster, flow execution, work dispatch, lifecycle (spawn/retire/respawn/reset/destroy), topology | `meerkat-mob` |
 | `ScheduleLifecycleMachine` | Schedule triggers and cron management (perimeter) | `meerkat-schedule` |
 | `OccurrenceLifecycleMachine` | Schedule occurrence dispatch and delivery (perimeter) | `meerkat-schedule` |
-| `MobRuntimeBridgeAnchor` | Runtime-to-mob bridge lifecycle | `meerkat-mob` |
-| `MobWiringAnchor` | Peer wiring topology management | `meerkat-mob` |
-| `FlowRunMachine` | DAG flow execution, step dispatch, completion | `meerkat-mob` |
-
-Plus additional anchor machines for cross-cutting concerns.
 
 ### What handwritten code may and may not do
 
@@ -734,9 +729,9 @@ Single-machine sealed mutators are necessary but not sufficient. Meerkat also ha
 
 ### The three closed seams
 
-1. **Comms drain seam**: `TurnExecutionMachine` emits `SpawnDrainTask`/`AbortDrainTask` effects. The comms drain lifecycle must spawn or abort the actual drain task and feed back `TaskSpawned`/`TaskExited`. Generated protocol helpers (`protocol_comms_drain_spawn.rs`, `protocol_comms_drain_abort.rs`) constrain the obligation and feedback to exactly the allowed inputs.
+1. **Comms drain seam**: `MeerkatMachine` emits `SpawnDrainTask`/`AbortDrainTask` effects. The comms drain lifecycle must spawn or abort the actual drain task and feed back `TaskSpawned`/`TaskExited`. Generated protocol helpers (`protocol_comms_drain_spawn.rs`, `protocol_comms_drain_abort.rs`) constrain the obligation and feedback to exactly the allowed inputs.
 
-2. **Ops barrier seam**: `TurnExecutionMachine` delegates operation tracking to `OpsLifecycleMachine`. The barrier-satisfaction signal (all pending barrier ops complete) flows through `AsyncOpRef` with typed `WaitPolicy` (Barrier vs Detached). The `barrier_satisfied` guard on `ToolCallsResolved` ensures the turn cannot advance until the barrier is met.
+2. **Ops barrier seam**: `MeerkatMachine` tracks operation completions internally. The barrier-satisfaction signal (all pending barrier ops complete) flows through `AsyncOpRef` with typed `WaitPolicy` (Barrier vs Detached). The `barrier_satisfied` guard on `ToolCallsResolved` ensures the turn cannot advance until the barrier is met.
 
 3. **Terminal outcome alignment**: Machine terminal outcomes (`Completed`, `Failed`, `Cancelled`) are the single source of truth for surfaced API results. Generated terminal classification helpers produce exhaustive matches with no default arm, so adding a new terminal outcome is a compile error until all surfaces handle it.
 
@@ -785,10 +780,10 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 | Owner | Owns |
 |-------|------|
 | `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) |
-| `meerkat-core` | Trait contracts, `SessionError`, agent loop, types, `TurnExecutionAuthority` |
-| `meerkat-machine-schema` | Machine definitions, composition ontology, handoff protocols |
+| `meerkat-core` | Trait contracts, `SessionError`, agent loop, types |
+| `meerkat-machine-schema` | Machine definitions (MeerkatMachine, MobMachine, perimeter), composition ontology, handoff protocols |
 | `meerkat-machine-kernels` | Generated sealed mutator implementations |
-| `meerkat-runtime` | Runtime control plane, `RuntimeDriver`, `InputLifecycleAuthority`, `OpsLifecycleAuthority` |
+| `meerkat-runtime` | Runtime control plane, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |

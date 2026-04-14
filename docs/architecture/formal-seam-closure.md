@@ -15,14 +15,13 @@ specific gaps exist:
    `AbortDrainTask` effects, but their realization and feedback flow is not
    protocol-constrained.
 
-2. **Turn barrier seam**: `TurnExecutionMachine` delegates operation completion
-   to `OpsLifecycleMachine`, but the barrier-satisfaction signal (all pending ops
-   complete) flows through ad hoc channels rather than through authority truth.
-   The classification of ops as barrier-blocking vs detached is shell logic, not
-   machine-owned.
+2. **Turn barrier seam**: `MeerkatMachine` tracks operation completion
+   internally, but the barrier-satisfaction signal (all pending ops
+   complete) previously flowed through ad hoc channels rather than through authority truth.
+   The classification of ops as barrier-blocking vs detached is now machine-owned.
 
 3. **Terminal outcome alignment**: `ExtractionExhausted` transitions to
-   `Completed` phase in `TurnExecutionMachine` but semantically represents a
+   `Completed` phase in `MeerkatMachine` but semantically represents a
    validation failure. Shell code independently decides how to surface outcomes,
    creating divergence risk between machine truth and API responses.
 

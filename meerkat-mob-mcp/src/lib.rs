@@ -607,10 +607,10 @@ impl MobMcpState {
         }
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         for mob_id in mob_ids {
-            if let Ok(handle) = self.handle_for(&mob_id).await {
-                if handle.roster().await.has_bridge_session(bridge_session_id) {
-                    return true;
-                }
+            if let Ok(handle) = self.handle_for(&mob_id).await
+                && handle.roster().await.has_bridge_session(bridge_session_id)
+            {
+                return true;
             }
         }
         false

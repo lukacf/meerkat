@@ -1355,8 +1355,8 @@ mod parallel_tools {
 // E2E: SUB-AGENT OPERATIONS
 // ============================================================================
 
-// TODO(0.5): mob member e2e tests need rewrite against SessionService + mob API.
-// The pre-0.5 Agent::fork/spawn/depth APIs no longer exist.
+// TODO(0.6): mob member e2e tests need rewrite against identity-first mob API.
+// The pre-0.6 session_id/MemberRef APIs are now pub(crate); use AgentIdentity.
 
 // ============================================================================
 

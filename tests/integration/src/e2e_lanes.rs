@@ -242,7 +242,7 @@ fn build_commands(
             test_name,
         } => Box::leak(
             vec![
-                "python3",
+                compatible_python_bin().unwrap_or("python3"),
                 "-m",
                 "pytest",
                 "-v",
@@ -366,6 +366,12 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
         }
     }
     for binary in spec.required_bins {
+        if *binary == "python3" {
+            if compatible_python_bin().is_none() {
+                failures.push("missing compatible python >=3.10".to_string());
+            }
+            continue;
+        }
         if *binary == "cargo" {
             if !repo_cargo().exists() {
                 failures.push(format!(
@@ -412,6 +418,11 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
                 .to_string(),
         );
     }
+    if matches!(spec.command, CommandSpec::Pytest { .. })
+        && let Some(python) = compatible_python_bin()
+    {
+        env.insert("MEERKAT_PYTHON_BIN".to_string(), python.to_string());
+    }
     Ok(env.into_iter().collect())
 }
 
@@ -446,6 +457,39 @@ fn repo_cargo() -> &'static Path {
     REPO_CARGO
         .get_or_init(|| workspace_root().join("scripts").join("repo-cargo"))
         .as_path()
+}
+
+fn compatible_python_bin() -> Option<&'static str> {
+    static PYTHON_BIN: OnceLock<Option<String>> = OnceLock::new();
+    PYTHON_BIN
+        .get_or_init(|| {
+            for candidate in ["python3.11", "python3.10", "python3", "python"] {
+                let output = std::process::Command::new(candidate)
+                    .args([
+                        "-c",
+                        "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output();
+                let Ok(output) = output else {
+                    continue;
+                };
+                if !output.status.success() {
+                    continue;
+                }
+                let version = String::from_utf8_lossy(&output.stdout);
+                let mut parts = version.trim().split('.');
+                let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+                let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+                if matches!((major, minor), (Some(major), Some(minor)) if (major, minor) >= (3, 10))
+                {
+                    return Some(candidate.to_string());
+                }
+            }
+            None
+        })
+        .as_deref()
 }
 
 fn cargo_target_dir() -> Result<PathBuf, String> {
@@ -947,7 +991,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 &[
                     "/bin/sh",
                     "-c",
-                    "python3 -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || python3 -m pip install -e \".[dev]\"",
+                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
                 ],
                 &[
                     "cargo",
@@ -979,7 +1023,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 &[
                     "/bin/sh",
                     "-c",
-                    "python3 -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || python3 -m pip install -e \".[dev]\"",
+                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
                 ],
                 &[
                     "cargo",
@@ -1011,7 +1055,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 &[
                     "/bin/sh",
                     "-c",
-                    "python3 -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || python3 -m pip install -e \".[dev]\"",
+                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
                 ],
                 &[
                     "cargo",
@@ -1046,7 +1090,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 &[
                     "/bin/sh",
                     "-c",
-                    "python3 -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || python3 -m pip install -e \".[dev]\"",
+                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
                 ],
                 &[
                     "cargo",

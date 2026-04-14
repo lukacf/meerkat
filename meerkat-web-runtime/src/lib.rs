@@ -1784,6 +1784,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 #[serde(deny_unknown_fields)]
 struct SpawnSpecInput {
     profile: String,
+    #[serde(alias = "meerkat_id")]
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<meerkat_core::types::ContentInput>,
@@ -2699,6 +2700,20 @@ mod tests {
             specs_result.is_err(),
             "legacy resume bridge/session fields should be rejected in 0.6"
         );
+    }
+
+    #[test]
+    fn spawn_spec_input_accepts_legacy_meerkat_id_alias() {
+        let payload = json!([{
+            "profile": "worker",
+            "meerkat_id": "worker-1",
+            "runtime_mode": "turn_driven",
+        }]);
+
+        let specs: Vec<super::SpawnSpecInput> =
+            serde_json::from_value(payload).expect("legacy meerkat_id alias should deserialize");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].agent_identity, "worker-1");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

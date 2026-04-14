@@ -1289,7 +1289,10 @@ pub fn meerkat_machine() -> MachineSchema {
                 to: "Destroyed".into(),
                 emit: vec![runtime_identity_emit("RuntimeDestroyed")],
             },
-        ],
+        ]
+        .into_iter()
+        .chain(absorbed_meerkat_transitions())
+        .collect(),
         ci_step_limit: Some(8),
         effect_dispositions: vec![
             routed_disposition("RuntimeBound", &["MobMachine"]),
@@ -1792,6 +1795,391 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
         variant("ShutdownSurface"),
         variant("RecycleRuntime"),
     ]
+}
+
+fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
+    let mut transitions = Vec::new();
+
+    for (variant, bindings) in [
+        ("EnsureSessionWithExecutor", vec!["session_id"]),
+        ("SetSilentIntents", vec!["session_id", "intents"]),
+        ("ContainsSession", vec!["session_id"]),
+        ("SessionHasExecutor", vec!["session_id"]),
+        ("SessionHasComms", vec!["session_id"]),
+        ("OpsLifecycleRegistry", vec!["session_id"]),
+        ("InputState", vec!["session_id", "input_id"]),
+        ("ListActiveInputs", vec!["session_id"]),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Idle"),
+            "Idle",
+            variant,
+            bindings,
+            vec![],
+            vec![],
+            vec![session_registered_guard()],
+        ));
+    }
+
+    for (variant, bindings) in [
+        ("AbortDrain", vec!["session_id"]),
+        ("WaitDrain", vec!["session_id"]),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Attached"),
+            "Attached",
+            variant,
+            bindings.clone(),
+            vec![],
+            vec![],
+            vec![session_registered_guard()],
+        ));
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Running"),
+            "Running",
+            variant,
+            bindings,
+            vec![],
+            vec![],
+            vec![session_registered_guard()],
+        ));
+    }
+
+    for phase in ["Attached", "Running", "Recovering", "Retired", "Stopped"] {
+        transitions.push(self_loop_transition_with(
+            &format!("AbortAllDrains{phase}"),
+            phase,
+            "AbortAllDrains",
+            vec![],
+            vec![Update::Assign {
+                field: "drain_running".into(),
+                expr: Expr::Bool(false),
+            }],
+            vec![],
+            vec![],
+        ));
+    }
+
+    for phase in ["Attached", "Running"] {
+        transitions.push(self_loop_transition_with(
+            &format!("EnsureDrainRunning{phase}"),
+            phase,
+            "EnsureDrainRunning",
+            vec![],
+            vec![Update::Assign {
+                field: "drain_running".into(),
+                expr: Expr::Bool(true),
+            }],
+            vec![simple_emit("SpawnDrainTask")],
+            vec![
+                session_registered_guard(),
+                Guard {
+                    name: "peer_ingress_configured".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("peer_ingress_configured".into())),
+                        Box::new(Expr::Bool(true)),
+                    ),
+                },
+            ],
+        ));
+    }
+
+    for (variant, bindings, emit_variant) in [
+        ("Ingest", vec!["runtime_id"], Some("ResolveAdmission")),
+        ("PublishEvent", vec!["kind"], Some("IngressNotice")),
+        (
+            "AcceptWithCompletion",
+            vec!["input_id"],
+            Some("IngressAccepted"),
+        ),
+        (
+            "AcceptWithoutWake",
+            vec!["input_id"],
+            Some("IngressAccepted"),
+        ),
+        (
+            "ClassifyExternalEnvelope",
+            vec![],
+            Some("EnqueueClassifiedEntry"),
+        ),
+        ("ClassifyPlainEvent", vec![], Some("EnqueueClassifiedEntry")),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Attached"),
+            "Attached",
+            variant,
+            bindings.clone(),
+            vec![],
+            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![session_registered_guard()],
+        ));
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Running"),
+            "Running",
+            variant,
+            bindings,
+            vec![],
+            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![session_registered_guard()],
+        ));
+    }
+
+    for (variant, bindings) in [
+        ("RuntimeState", vec!["runtime_id"]),
+        ("LoadBoundaryReceipt", vec!["runtime_id", "sequence"]),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Attached"),
+            "Attached",
+            variant,
+            bindings.clone(),
+            vec![],
+            vec![],
+            vec![runtime_is_bound_guard()],
+        ));
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Running"),
+            "Running",
+            variant,
+            bindings,
+            vec![],
+            vec![],
+            vec![runtime_is_bound_guard()],
+        ));
+    }
+
+    for (variant, bindings) in [
+        ("PrepareLegacyRun", vec!["session_id"]),
+        ("StartConversationRun", vec![]),
+        ("StartImmediateAppend", vec![]),
+        ("StartImmediateContext", vec![]),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Attached"),
+            "Attached",
+            variant,
+            bindings,
+            vec![],
+            vec![simple_emit("SubmitRunPrimitive")],
+            vec![session_registered_guard()],
+        ));
+    }
+
+    for (variant, bindings, emit_variant) in [
+        ("CommitLegacyRun", vec!["input_id", "run_id"], None),
+        (
+            "FailLegacyRun",
+            vec!["run_id"],
+            Some("RecordTerminalOutcome"),
+        ),
+        ("AdmitQueued", vec![], Some("ResolveAdmission")),
+        ("AdmitConsumedOnAccept", vec![], Some("ResolveAdmission")),
+        ("StageDrainSnapshot", vec![], None),
+        ("SupersedeQueuedInput", vec![], None),
+        ("CoalesceQueuedInputs", vec![], None),
+        (
+            "SetSilentIntentOverrides",
+            vec![],
+            Some("SilentIntentApplied"),
+        ),
+        ("PrimitiveApplied", vec![], Some("SubmitRunPrimitive")),
+        ("LlmReturnedToolCalls", vec![], None),
+        ("LlmReturnedTerminal", vec![], Some("RecordTerminalOutcome")),
+        ("RegisterPendingOps", vec![], Some("SubmitOpEvent")),
+        ("ToolCallsResolved", vec![], Some("SubmitOpEvent")),
+        ("OpsBarrierSatisfied", vec![], Some("SubmitOpEvent")),
+        ("BoundaryContinue", vec![], None),
+        ("BoundaryComplete", vec![], Some("RecordBoundarySequence")),
+        ("RecoverableFailure", vec![], Some("RecordTerminalOutcome")),
+        ("FatalFailure", vec![], Some("RecordTerminalOutcome")),
+        ("RetryRequested", vec![], Some("SubmitRunPrimitive")),
+        ("CancelNow", vec![], Some("RequestCancellationAtBoundary")),
+        (
+            "CancellationObserved",
+            vec![],
+            Some("RecordTerminalOutcome"),
+        ),
+        ("AcknowledgeTerminal", vec![], None),
+        ("TurnLimitReached", vec![], Some("RecordTerminalOutcome")),
+        ("BudgetExhausted", vec![], Some("RecordTerminalOutcome")),
+        ("TimeBudgetExceeded", vec![], Some("RecordTerminalOutcome")),
+        ("EnterExtraction", vec![], None),
+        ("ExtractionValidationPassed", vec![], None),
+        (
+            "ExtractionValidationFailed",
+            vec![],
+            Some("RecordTerminalOutcome"),
+        ),
+        ("ExtractionStart", vec![], None),
+        (
+            "ForceCancelNoRun",
+            vec![],
+            Some("RequestCancellationAtBoundary"),
+        ),
+        ("RegisterOperation", vec![], Some("SubmitOpEvent")),
+        ("ProvisioningSucceeded", vec![], Some("NotifyOpWatcher")),
+        ("ProvisioningFailed", vec![], Some("NotifyOpWatcher")),
+        ("AbortProvisioning", vec![], Some("NotifyOpWatcher")),
+        ("PeerReady", vec![], Some("ExposeOperationPeer")),
+        ("RegisterWatcher", vec![], Some("NotifyOpWatcher")),
+        ("ProgressReported", vec![], Some("NotifyOpWatcher")),
+        ("CompleteOperation", vec![], Some("CompletionResolved")),
+        ("FailOperation", vec![], Some("CompletionResolved")),
+        ("CancelOperation", vec![], Some("CompletionResolved")),
+        ("RetireRequested", vec![], Some("CheckCompaction")),
+        ("RetireCompleted", vec![], Some("CheckCompaction")),
+        ("CollectTerminal", vec![], Some("CollectCompletedResult")),
+        ("BeginWaitAll", vec![], None),
+        ("CancelWaitAll", vec![], None),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Running"),
+            "Running",
+            variant,
+            bindings,
+            vec![],
+            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![has_active_work_guard()],
+        ));
+    }
+
+    for (variant, bindings, emit_variant) in [
+        ("StageAdd", vec![], Some("EmitExternalToolDelta")),
+        ("StageRemove", vec![], Some("EmitExternalToolDelta")),
+        ("StageReload", vec![], Some("EmitExternalToolDelta")),
+        (
+            "ApplySurfaceBoundary",
+            vec![],
+            Some("ScheduleSurfaceCompletion"),
+        ),
+        ("PendingSucceeded", vec![], Some("EmitExternalToolDelta")),
+        ("PendingFailed", vec![], Some("EmitExternalToolDelta")),
+        ("CallStarted", vec![], None),
+        ("CallFinished", vec![], None),
+        (
+            "FinalizeRemovalClean",
+            vec![],
+            Some("EmitExternalToolDelta"),
+        ),
+        (
+            "FinalizeRemovalForced",
+            vec![],
+            Some("EmitExternalToolDelta"),
+        ),
+        ("SnapshotAligned", vec![], Some("EmitExternalToolDelta")),
+        ("ShutdownSurface", vec![], Some("EmitExternalToolDelta")),
+    ] {
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Attached"),
+            "Attached",
+            variant,
+            bindings.clone(),
+            vec![],
+            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![session_registered_guard()],
+        ));
+        transitions.push(self_loop_transition_with(
+            &format!("{variant}Running"),
+            "Running",
+            variant,
+            bindings,
+            vec![],
+            emit_variant.into_iter().map(simple_emit).collect(),
+            vec![session_registered_guard()],
+        ));
+    }
+
+    transitions.push(TransitionSchema {
+        name: "RecycleRuntime".into(),
+        from: vec![
+            "Attached".into(),
+            "Running".into(),
+            "Recovering".into(),
+            "Retired".into(),
+            "Stopped".into(),
+        ],
+        on: InputMatch {
+            variant: "RecycleRuntime".into(),
+            bindings: vec![],
+        },
+        guards: vec![runtime_is_bound_guard()],
+        updates: vec![
+            Update::Assign {
+                field: "active_runtime_id".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "active_fence_token".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "active_generation".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "active_work_id".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "wake_pending".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "process_pending".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "peer_ingress_configured".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "drain_running".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "interrupt_pending".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "shutdown_pending".into(),
+                expr: Expr::Bool(false),
+            },
+        ],
+        to: "Idle".into(),
+        emit: vec![simple_emit("InitiateRecycle")],
+    });
+
+    transitions
+}
+
+fn self_loop_transition_with(
+    name: &str,
+    phase: &str,
+    variant: &str,
+    bindings: Vec<&str>,
+    updates: Vec<Update>,
+    emit: Vec<EffectEmit>,
+    guards: Vec<Guard>,
+) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: variant.into(),
+            bindings: bindings.into_iter().map(|binding| binding.into()).collect(),
+        },
+        guards,
+        updates,
+        to: phase.into(),
+        emit,
+    }
+}
+
+fn simple_emit(variant: &str) -> EffectEmit {
+    EffectEmit {
+        variant: variant.into(),
+        fields: IndexMap::new(),
+    }
 }
 
 fn absorbed_meerkat_effect_variants() -> Vec<VariantSchema> {

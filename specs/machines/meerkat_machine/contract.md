@@ -442,6 +442,833 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeDestroyed`
 - To: `Destroyed`
 
+### `EnsureSessionWithExecutorIdle`
+- From: `Idle`
+- On: `EnsureSessionWithExecutor`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `SetSilentIntentsIdle`
+- From: `Idle`
+- On: `SetSilentIntents`(session_id, intents)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `ContainsSessionIdle`
+- From: `Idle`
+- On: `ContainsSession`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `SessionHasExecutorIdle`
+- From: `Idle`
+- On: `SessionHasExecutor`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `SessionHasCommsIdle`
+- From: `Idle`
+- On: `SessionHasComms`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `OpsLifecycleRegistryIdle`
+- From: `Idle`
+- On: `OpsLifecycleRegistry`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `InputStateIdle`
+- From: `Idle`
+- On: `InputState`(session_id, input_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `ListActiveInputsIdle`
+- From: `Idle`
+- On: `ListActiveInputs`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `AbortDrainAttached`
+- From: `Attached`
+- On: `AbortDrain`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `AbortDrainRunning`
+- From: `Running`
+- On: `AbortDrain`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `WaitDrainAttached`
+- From: `Attached`
+- On: `WaitDrain`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `WaitDrainRunning`
+- From: `Running`
+- On: `WaitDrain`(session_id)
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `AbortAllDrainsAttached`
+- From: `Attached`
+- On: `AbortAllDrains`()
+- To: `Attached`
+
+### `AbortAllDrainsRunning`
+- From: `Running`
+- On: `AbortAllDrains`()
+- To: `Running`
+
+### `AbortAllDrainsRecovering`
+- From: `Recovering`
+- On: `AbortAllDrains`()
+- To: `Recovering`
+
+### `AbortAllDrainsRetired`
+- From: `Retired`
+- On: `AbortAllDrains`()
+- To: `Retired`
+
+### `AbortAllDrainsStopped`
+- From: `Stopped`
+- On: `AbortAllDrains`()
+- To: `Stopped`
+
+### `EnsureDrainRunningAttached`
+- From: `Attached`
+- On: `EnsureDrainRunning`()
+- Guards:
+  - `session_registered`
+  - `peer_ingress_configured`
+- Emits: `SpawnDrainTask`
+- To: `Attached`
+
+### `EnsureDrainRunningRunning`
+- From: `Running`
+- On: `EnsureDrainRunning`()
+- Guards:
+  - `session_registered`
+  - `peer_ingress_configured`
+- Emits: `SpawnDrainTask`
+- To: `Running`
+
+### `IngestAttached`
+- From: `Attached`
+- On: `Ingest`(runtime_id)
+- Guards:
+  - `session_registered`
+- Emits: `ResolveAdmission`
+- To: `Attached`
+
+### `IngestRunning`
+- From: `Running`
+- On: `Ingest`(runtime_id)
+- Guards:
+  - `session_registered`
+- Emits: `ResolveAdmission`
+- To: `Running`
+
+### `PublishEventAttached`
+- From: `Attached`
+- On: `PublishEvent`(kind)
+- Guards:
+  - `session_registered`
+- Emits: `IngressNotice`
+- To: `Attached`
+
+### `PublishEventRunning`
+- From: `Running`
+- On: `PublishEvent`(kind)
+- Guards:
+  - `session_registered`
+- Emits: `IngressNotice`
+- To: `Running`
+
+### `AcceptWithCompletionAttached`
+- From: `Attached`
+- On: `AcceptWithCompletion`(input_id)
+- Guards:
+  - `session_registered`
+- Emits: `IngressAccepted`
+- To: `Attached`
+
+### `AcceptWithCompletionRunning`
+- From: `Running`
+- On: `AcceptWithCompletion`(input_id)
+- Guards:
+  - `session_registered`
+- Emits: `IngressAccepted`
+- To: `Running`
+
+### `AcceptWithoutWakeAttached`
+- From: `Attached`
+- On: `AcceptWithoutWake`(input_id)
+- Guards:
+  - `session_registered`
+- Emits: `IngressAccepted`
+- To: `Attached`
+
+### `AcceptWithoutWakeRunning`
+- From: `Running`
+- On: `AcceptWithoutWake`(input_id)
+- Guards:
+  - `session_registered`
+- Emits: `IngressAccepted`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`()
+- Guards:
+  - `session_registered`
+- Emits: `EnqueueClassifiedEntry`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`()
+- Guards:
+  - `session_registered`
+- Emits: `EnqueueClassifiedEntry`
+- To: `Running`
+
+### `ClassifyPlainEventAttached`
+- From: `Attached`
+- On: `ClassifyPlainEvent`()
+- Guards:
+  - `session_registered`
+- Emits: `EnqueueClassifiedEntry`
+- To: `Attached`
+
+### `ClassifyPlainEventRunning`
+- From: `Running`
+- On: `ClassifyPlainEvent`()
+- Guards:
+  - `session_registered`
+- Emits: `EnqueueClassifiedEntry`
+- To: `Running`
+
+### `RuntimeStateAttached`
+- From: `Attached`
+- On: `RuntimeState`(runtime_id)
+- Guards:
+  - `runtime_is_bound`
+- To: `Attached`
+
+### `RuntimeStateRunning`
+- From: `Running`
+- On: `RuntimeState`(runtime_id)
+- Guards:
+  - `runtime_is_bound`
+- To: `Running`
+
+### `LoadBoundaryReceiptAttached`
+- From: `Attached`
+- On: `LoadBoundaryReceipt`(runtime_id, sequence)
+- Guards:
+  - `runtime_is_bound`
+- To: `Attached`
+
+### `LoadBoundaryReceiptRunning`
+- From: `Running`
+- On: `LoadBoundaryReceipt`(runtime_id, sequence)
+- Guards:
+  - `runtime_is_bound`
+- To: `Running`
+
+### `PrepareLegacyRunAttached`
+- From: `Attached`
+- On: `PrepareLegacyRun`(session_id)
+- Guards:
+  - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Attached`
+
+### `StartConversationRunAttached`
+- From: `Attached`
+- On: `StartConversationRun`()
+- Guards:
+  - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Attached`
+
+### `StartImmediateAppendAttached`
+- From: `Attached`
+- On: `StartImmediateAppend`()
+- Guards:
+  - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Attached`
+
+### `StartImmediateContextAttached`
+- From: `Attached`
+- On: `StartImmediateContext`()
+- Guards:
+  - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Attached`
+
+### `CommitLegacyRunRunning`
+- From: `Running`
+- On: `CommitLegacyRun`(input_id, run_id)
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `FailLegacyRunRunning`
+- From: `Running`
+- On: `FailLegacyRun`(run_id)
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `AdmitQueuedRunning`
+- From: `Running`
+- On: `AdmitQueued`()
+- Guards:
+  - `has_active_work`
+- Emits: `ResolveAdmission`
+- To: `Running`
+
+### `AdmitConsumedOnAcceptRunning`
+- From: `Running`
+- On: `AdmitConsumedOnAccept`()
+- Guards:
+  - `has_active_work`
+- Emits: `ResolveAdmission`
+- To: `Running`
+
+### `StageDrainSnapshotRunning`
+- From: `Running`
+- On: `StageDrainSnapshot`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `SupersedeQueuedInputRunning`
+- From: `Running`
+- On: `SupersedeQueuedInput`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `CoalesceQueuedInputsRunning`
+- From: `Running`
+- On: `CoalesceQueuedInputs`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `SetSilentIntentOverridesRunning`
+- From: `Running`
+- On: `SetSilentIntentOverrides`()
+- Guards:
+  - `has_active_work`
+- Emits: `SilentIntentApplied`
+- To: `Running`
+
+### `PrimitiveAppliedRunning`
+- From: `Running`
+- On: `PrimitiveApplied`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
+### `LlmReturnedToolCallsRunning`
+- From: `Running`
+- On: `LlmReturnedToolCalls`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `LlmReturnedTerminalRunning`
+- From: `Running`
+- On: `LlmReturnedTerminal`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `RegisterPendingOpsRunning`
+- From: `Running`
+- On: `RegisterPendingOps`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitOpEvent`
+- To: `Running`
+
+### `ToolCallsResolvedRunning`
+- From: `Running`
+- On: `ToolCallsResolved`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitOpEvent`
+- To: `Running`
+
+### `OpsBarrierSatisfiedRunning`
+- From: `Running`
+- On: `OpsBarrierSatisfied`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitOpEvent`
+- To: `Running`
+
+### `BoundaryContinueRunning`
+- From: `Running`
+- On: `BoundaryContinue`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `BoundaryCompleteRunning`
+- From: `Running`
+- On: `BoundaryComplete`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordBoundarySequence`
+- To: `Running`
+
+### `RecoverableFailureRunning`
+- From: `Running`
+- On: `RecoverableFailure`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `FatalFailureRunning`
+- From: `Running`
+- On: `FatalFailure`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `RetryRequestedRunning`
+- From: `Running`
+- On: `RetryRequested`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
+### `CancelNowRunning`
+- From: `Running`
+- On: `CancelNow`()
+- Guards:
+  - `has_active_work`
+- Emits: `RequestCancellationAtBoundary`
+- To: `Running`
+
+### `CancellationObservedRunning`
+- From: `Running`
+- On: `CancellationObserved`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `AcknowledgeTerminalRunning`
+- From: `Running`
+- On: `AcknowledgeTerminal`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `TurnLimitReachedRunning`
+- From: `Running`
+- On: `TurnLimitReached`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `BudgetExhaustedRunning`
+- From: `Running`
+- On: `BudgetExhausted`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `TimeBudgetExceededRunning`
+- From: `Running`
+- On: `TimeBudgetExceeded`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `EnterExtractionRunning`
+- From: `Running`
+- On: `EnterExtraction`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `ExtractionValidationPassedRunning`
+- From: `Running`
+- On: `ExtractionValidationPassed`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `ExtractionValidationFailedRunning`
+- From: `Running`
+- On: `ExtractionValidationFailed`()
+- Guards:
+  - `has_active_work`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `ExtractionStartRunning`
+- From: `Running`
+- On: `ExtractionStart`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `ForceCancelNoRunRunning`
+- From: `Running`
+- On: `ForceCancelNoRun`()
+- Guards:
+  - `has_active_work`
+- Emits: `RequestCancellationAtBoundary`
+- To: `Running`
+
+### `RegisterOperationRunning`
+- From: `Running`
+- On: `RegisterOperation`()
+- Guards:
+  - `has_active_work`
+- Emits: `SubmitOpEvent`
+- To: `Running`
+
+### `ProvisioningSucceededRunning`
+- From: `Running`
+- On: `ProvisioningSucceeded`()
+- Guards:
+  - `has_active_work`
+- Emits: `NotifyOpWatcher`
+- To: `Running`
+
+### `ProvisioningFailedRunning`
+- From: `Running`
+- On: `ProvisioningFailed`()
+- Guards:
+  - `has_active_work`
+- Emits: `NotifyOpWatcher`
+- To: `Running`
+
+### `AbortProvisioningRunning`
+- From: `Running`
+- On: `AbortProvisioning`()
+- Guards:
+  - `has_active_work`
+- Emits: `NotifyOpWatcher`
+- To: `Running`
+
+### `PeerReadyRunning`
+- From: `Running`
+- On: `PeerReady`()
+- Guards:
+  - `has_active_work`
+- Emits: `ExposeOperationPeer`
+- To: `Running`
+
+### `RegisterWatcherRunning`
+- From: `Running`
+- On: `RegisterWatcher`()
+- Guards:
+  - `has_active_work`
+- Emits: `NotifyOpWatcher`
+- To: `Running`
+
+### `ProgressReportedRunning`
+- From: `Running`
+- On: `ProgressReported`()
+- Guards:
+  - `has_active_work`
+- Emits: `NotifyOpWatcher`
+- To: `Running`
+
+### `CompleteOperationRunning`
+- From: `Running`
+- On: `CompleteOperation`()
+- Guards:
+  - `has_active_work`
+- Emits: `CompletionResolved`
+- To: `Running`
+
+### `FailOperationRunning`
+- From: `Running`
+- On: `FailOperation`()
+- Guards:
+  - `has_active_work`
+- Emits: `CompletionResolved`
+- To: `Running`
+
+### `CancelOperationRunning`
+- From: `Running`
+- On: `CancelOperation`()
+- Guards:
+  - `has_active_work`
+- Emits: `CompletionResolved`
+- To: `Running`
+
+### `RetireRequestedRunning`
+- From: `Running`
+- On: `RetireRequested`()
+- Guards:
+  - `has_active_work`
+- Emits: `CheckCompaction`
+- To: `Running`
+
+### `RetireCompletedRunning`
+- From: `Running`
+- On: `RetireCompleted`()
+- Guards:
+  - `has_active_work`
+- Emits: `CheckCompaction`
+- To: `Running`
+
+### `CollectTerminalRunning`
+- From: `Running`
+- On: `CollectTerminal`()
+- Guards:
+  - `has_active_work`
+- Emits: `CollectCompletedResult`
+- To: `Running`
+
+### `BeginWaitAllRunning`
+- From: `Running`
+- On: `BeginWaitAll`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `CancelWaitAllRunning`
+- From: `Running`
+- On: `CancelWaitAll`()
+- Guards:
+  - `has_active_work`
+- To: `Running`
+
+### `StageAddAttached`
+- From: `Attached`
+- On: `StageAdd`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `StageAddRunning`
+- From: `Running`
+- On: `StageAdd`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `StageRemoveAttached`
+- From: `Attached`
+- On: `StageRemove`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `StageRemoveRunning`
+- From: `Running`
+- On: `StageRemove`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `StageReloadAttached`
+- From: `Attached`
+- On: `StageReload`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `StageReloadRunning`
+- From: `Running`
+- On: `StageReload`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `ApplySurfaceBoundaryAttached`
+- From: `Attached`
+- On: `ApplySurfaceBoundary`()
+- Guards:
+  - `session_registered`
+- Emits: `ScheduleSurfaceCompletion`
+- To: `Attached`
+
+### `ApplySurfaceBoundaryRunning`
+- From: `Running`
+- On: `ApplySurfaceBoundary`()
+- Guards:
+  - `session_registered`
+- Emits: `ScheduleSurfaceCompletion`
+- To: `Running`
+
+### `PendingSucceededAttached`
+- From: `Attached`
+- On: `PendingSucceeded`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `PendingSucceededRunning`
+- From: `Running`
+- On: `PendingSucceeded`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `PendingFailedAttached`
+- From: `Attached`
+- On: `PendingFailed`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `PendingFailedRunning`
+- From: `Running`
+- On: `PendingFailed`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `CallStartedAttached`
+- From: `Attached`
+- On: `CallStarted`()
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `CallStartedRunning`
+- From: `Running`
+- On: `CallStarted`()
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `CallFinishedAttached`
+- From: `Attached`
+- On: `CallFinished`()
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `CallFinishedRunning`
+- From: `Running`
+- On: `CallFinished`()
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `FinalizeRemovalCleanAttached`
+- From: `Attached`
+- On: `FinalizeRemovalClean`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `FinalizeRemovalCleanRunning`
+- From: `Running`
+- On: `FinalizeRemovalClean`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `FinalizeRemovalForcedAttached`
+- From: `Attached`
+- On: `FinalizeRemovalForced`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `FinalizeRemovalForcedRunning`
+- From: `Running`
+- On: `FinalizeRemovalForced`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `SnapshotAlignedAttached`
+- From: `Attached`
+- On: `SnapshotAligned`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `SnapshotAlignedRunning`
+- From: `Running`
+- On: `SnapshotAligned`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `ShutdownSurfaceAttached`
+- From: `Attached`
+- On: `ShutdownSurface`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Attached`
+
+### `ShutdownSurfaceRunning`
+- From: `Running`
+- On: `ShutdownSurface`()
+- Guards:
+  - `session_registered`
+- Emits: `EmitExternalToolDelta`
+- To: `Running`
+
+### `RecycleRuntime`
+- From: `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
+- On: `RecycleRuntime`()
+- Guards:
+  - `runtime_is_bound`
+- Emits: `InitiateRecycle`
+- To: `Idle`
+
 ## Coverage
 ### Code Anchors
 - `meerkat-runtime/src/meerkat_machine.rs` — authoritative MeerkatMachine command dispatch and state ownership

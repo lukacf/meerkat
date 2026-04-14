@@ -375,6 +375,60 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
 }
 
 #[test]
+fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
+    let schema = mob_machine();
+    let field_names = schema
+        .state
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    let transition_names = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "pending_spawn_count",
+        "retiring_member_count",
+        "wiring_edge_count",
+        "task_count",
+        "event_subscription_count",
+        "active_frame_count",
+        "active_loop_count",
+        "coordinator_bound",
+        "kickoff_pending",
+    ] {
+        assert!(
+            field_names.iter().any(|name| name == &required),
+            "MobMachine state should retain absorbed field {required}"
+        );
+    }
+
+    for required in [
+        "RetireRunning",
+        "RetireAllRunning",
+        "WireRunning",
+        "UnwireRunning",
+        "StageSpawnRunning",
+        "CompleteSpawnRunning",
+        "TaskCreateRunning",
+        "BindCoordinatorRunning",
+        "StartRootFrameRunning",
+        "StartLoopRunning",
+        "BodyFrameCompletedRunning",
+        "UntilConditionFailedRunning",
+        "SubscribeMobEventsRunning",
+    ] {
+        assert!(
+            transition_names.iter().any(|name| name == &required),
+            "MobMachine should expose absorbed transition {required}"
+        );
+    }
+}
+
+#[test]
 fn meerkat_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs() {
     let schema = meerkat_machine();
     let input_names = schema
@@ -491,6 +545,35 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
                 .iter()
                 .any(|name| name == &intentionally_test_only),
             "MobMachine canonical schema should not publish test-only diagnostic input {intentionally_test_only}"
+        );
+    }
+}
+
+#[test]
+fn every_canonical_input_variant_has_transition_coverage() {
+    for schema in canonical_machine_schemas() {
+        let input_names = schema
+            .inputs
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>();
+        let transitioned_inputs = schema
+            .transitions
+            .iter()
+            .map(|transition| transition.on.variant.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let missing = input_names
+            .into_iter()
+            .filter(|input| !transitioned_inputs.contains(input))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "machine {} should model every input with at least one transition; missing: {:?}",
+            schema.machine,
+            missing
         );
     }
 }

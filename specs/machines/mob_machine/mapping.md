@@ -58,6 +58,321 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveRuntimeDestroyed`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FlowStatusRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `McpServerStatesRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RosterSnapshotRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ListMembersRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ListMembersIncludingRetiringRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ListAllMembersRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberStatusRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TaskListRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TaskGetRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `PollEventsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ReplayAllEventsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordOperatorActionProvenanceRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `GetMemberRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffBarrierSnapshotRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SetSpawnPolicyRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelFlowRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `WireRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ExternalTurnRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `InternalTurnRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StopRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ResumeRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CompleteRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ResetRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TaskCreateRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TaskUpdateRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SubscribeAgentEventsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SubscribeAllAgentEventsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SubscribeMobEventsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `InitializeOrchestratorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BindCoordinatorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `UnbindCoordinatorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StageSpawnRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StopOrchestratorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ResumeOrchestratorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `DestroyOrchestratorRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ForceCancelMemberRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberPeerExposedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberTerminalizedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `OperationPeerTrustedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `PeerInputAdmittedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeWorkAdmittedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffFailedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffCancelledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffForceCancelledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeRunSubmittedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeRunCompletedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeRunFailedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeRunCancelledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RuntimeStopRequestedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `DispatchStepRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CompleteStepRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordStepOutputRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ConditionPassedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ConditionRejectedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FailStepRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SkipStepRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ProjectFrameStepStatusRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelStepRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RegisterTargetsRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordTargetSuccessRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordTargetTerminalFailureRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordTargetCanceledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordTargetFailureRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `NodeExecutionReleasedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TerminalizeCompletedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TerminalizeFailedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `TerminalizeCanceledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CompleteNodeRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecordNodeOutputRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FailNodeRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SkipNodeRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelNodeRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `UntilConditionMetRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ShutdownRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `ForceCancelRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BeginCleanupRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FinishCleanupRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffStartedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `KickoffCallbackPendingRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RunFlowRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StartFlowRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CreateRunRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StartRunRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RegisterReadyFrameRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `UnwireRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RegisterPendingBodyFrameRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CompleteFlowRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StartRootFrameRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StartBodyFrameRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FrameTerminatedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `StartLoopRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BodyFrameStartedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BodyFrameCompletedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BodyFrameFailedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `BodyFrameCanceledRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `UntilConditionFailedRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelLoopRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `FinishRunRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireAllRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CompleteSpawnRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `DestroyRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RespawnRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelWorkRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `CancelAllWorkRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 
 ### Effects
 - `RequestRuntimeBinding`
@@ -189,6 +504,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `active_runtime_has_identity`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `active_frames_require_runs`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `active_loops_require_frames`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `retiring_members_do_not_exceed_active_members`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `kickoff_pending_requires_members`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 

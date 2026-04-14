@@ -2213,38 +2213,43 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     let rest_child = wait_for_rest_server_with_timeout(rest.spawn()?, port, 60).await?;
     eprintln!("[scenario 55] rest started on port {port}");
 
-    let sessions = rest_list_sessions(port, 8).await?;
-    assert!(
-        sessions.len() >= 3,
-        "rest sessions list should surface the rebuilt mob member sessions: {sessions:?}"
-    );
-    let mut matching_parent_history = None;
-    for session in &sessions {
-        let Some(session_id) = session["session_id"].as_str() else {
-            continue;
-        };
-        let history = rest_session_history(port, session_id).await?;
-        let user_messages = history_user_texts(&history);
-        if user_messages
-            .iter()
-            .any(|content| content.contains("If none arrived, reply exactly SEEN:"))
-        {
-            matching_parent_history = Some(history);
-            break;
+    let restore_deadline = Instant::now() + Duration::from_secs(15);
+    let rest_history = loop {
+        let sessions = rest_list_sessions(port, 8).await?;
+        let mut matching_history = None;
+        if sessions.len() >= 3 {
+            for session in &sessions {
+                let Some(session_id) = session["session_id"].as_str() else {
+                    continue;
+                };
+                let history = rest_session_history(port, session_id).await?;
+                let user_messages = history_user_texts(&history);
+                let assistant_messages = history_assistant_texts(&history);
+                let has_seen_prompt = user_messages
+                    .iter()
+                    .any(|content| content.contains("If none arrived, reply exactly SEEN:"));
+                let has_seen_reply = assistant_messages
+                    .iter()
+                    .any(|content| content.starts_with("SEEN:"));
+                if has_seen_prompt && has_seen_reply {
+                    matching_history = Some(history);
+                    break;
+                }
+            }
         }
-    }
-    let rest_history = matching_parent_history.ok_or_else(|| {
-        format!(
-            "rest session histories should contain one rebuilt parent session carrying the SEEN prompt: {sessions:?}"
-        )
-    })?;
-    let assistant_messages = history_assistant_texts(&rest_history);
-    assert!(
-        assistant_messages
-            .iter()
-            .any(|content| content.starts_with("SEEN:")),
-        "parent history should contain the expected SEEN-prefixed reply after restart: {rest_history}"
-    );
+
+        if let Some(history) = matching_history {
+            break history;
+        }
+
+        if Instant::now() >= restore_deadline {
+            return Err(format!(
+                "rest session histories never surfaced the rebuilt parent session with a SEEN reply after restart: {sessions:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
 
     let rest_helper_a_status = rest_mob_member_status(port, mob_id, "helper-a").await?;
     assert_eq!(rest_helper_a_status["status"].as_str(), Some("active"));

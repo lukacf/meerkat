@@ -32,10 +32,17 @@ This checklist tracks the exact-runtime-alphabet normalization needed to make th
 - [x] `cargo test -p meerkat-machine-schema --test schema_contracts --quiet`
 - [x] `cargo test -p meerkat-machine-codegen --quiet`
 - [x] `cargo test -p meerkat-machine-kernels --lib --quiet`
-- [ ] `make machine-check-drift`
-- [ ] `make verify-schema-freshness`
-- [ ] `make rmat-audit`
-- [ ] `make machine-verify`
+- [x] `make machine-check-drift`
+- [x] `make verify-schema-freshness`
+- [x] `make rmat-audit`
+- [x] `make machine-verify`
+
+### Closeout
+- [x] `MeerkatMachine.inputs == runtime manifest`
+- [x] `MobMachine.inputs == runtime manifest - exclusions`
+- [x] every input has transition coverage
+- [x] every signal has transition coverage
+- [x] no undeclared route targets
 
 ## Plan vs Reality
 

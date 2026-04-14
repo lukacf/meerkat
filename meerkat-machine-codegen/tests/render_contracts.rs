@@ -28,6 +28,8 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
         "\"CancelAfterBoundary\"",
         "\"PublishCommittedVisibleSet\"",
         "\"SetPeerIngressContext\"",
+        "\"AcceptWithCompletion\"",
+        "\"AcceptWithoutWake\"",
         "\"AbortAll\"",
         "\"Wait\"",
         "\"Prepare\"",
@@ -42,8 +44,6 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
     for required in [
         "\"Initialize\"",
         "\"SubmitMobWork\"",
-        "\"AcceptWithCompletion\"",
-        "\"AcceptWithoutWake\"",
         "\"StagePersistentFilter\"",
         "\"RequestDeferredTools\"",
     ] {

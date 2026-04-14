@@ -7,6 +7,12 @@ use meerkat::{AgentFactory, Config, FactoryAgentBuilder, PersistenceBundle, Sess
 use meerkat_store::MemoryStore;
 use serde_json::json;
 
+fn fixture_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let mut config = Config::default();
+    config.apply_env_overrides()?;
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = std::env::args()
@@ -17,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let temp = tempfile::tempdir()?;
+    let config = fixture_config()?;
     let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let persistence = PersistenceBundle::new(
         session_store,
@@ -24,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let factory = AgentFactory::new(temp.path().join("sessions"));
-    let builder = FactoryAgentBuilder::new(factory, Config::default());
+    let builder = FactoryAgentBuilder::new(factory, config.clone());
     let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
     let service = Arc::new(service);
     let result = materialize_session(
@@ -32,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &runtime_adapter,
         meerkat::Session::new(),
         meerkat_core::service::CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: config.agent.model.clone(),
             prompt: "".to_string().into(),
             render_metadata: None,
             system_prompt: Some("runtime-backed fixture".to_string()),

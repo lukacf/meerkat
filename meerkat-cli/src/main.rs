@@ -458,18 +458,26 @@ fn resolve_stdin_mode(mode: StdinMode) -> StdinMode {
     }
 }
 
-/// Inject `run` as the default subcommand when the first positional argument
-/// is not a known subcommand. This lets users write `rkat "hello"` instead of
-/// `rkat run "hello"`.
-fn inject_default_run_subcommand(
+fn is_root_flag_with_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-r" | "--realm"
+            | "--instance"
+            | "--realm-backend"
+            | "--state-root"
+            | "--context-root"
+            | "--user-config-root"
+    )
+}
+
+/// Normalize legacy execution shorthands and inject `run` as the default
+/// subcommand when the first positional argument is not a known command.
+fn normalize_cli_args(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
     const SUBCOMMANDS: &[&str] = &[
         "init",
         "run",
-        "resume",
-        "continue",
-        "c",
         "sessions",
         "realms",
         "mcp",
@@ -482,38 +490,70 @@ fn inject_default_run_subcommand(
         "doctor",
         "help",
     ];
-    // Global flags that consume the next argument as a value.
-    const FLAGS_WITH_VALUE: &[&str] = &[
-        "-r",
-        "--realm",
-        "--instance",
-        "--realm-backend",
-        "--state-root",
-        "--context-root",
-        "--user-config-root",
-    ];
     let args: Vec<std::ffi::OsString> = args.into_iter().collect();
     let mut i = 1; // skip binary name
     while i < args.len() {
         let arg_str = args[i].to_str().unwrap_or("");
         if arg_str.starts_with('-') {
-            // Skip boolean flags; skip flag+value for flags that take a value.
-            if FLAGS_WITH_VALUE.contains(&arg_str) {
+            if is_root_flag_with_value(arg_str) {
                 i += 2; // skip flag and its value
             } else {
-                i += 1;
+                break;
             }
         } else {
-            // First positional argument found.
-            if !SUBCOMMANDS.contains(&arg_str) {
+            if arg_str == "resume" {
+                if i + 2 > args.len() - 1 {
+                    return args;
+                }
                 let mut patched = args[..i].to_vec();
                 patched.push("run".into());
-                patched.extend_from_slice(&args[i..]);
+                patched.push("--resume".into());
+                patched.push(args[i + 1].clone());
+                patched.extend_from_slice(&args[(i + 2)..]);
                 return patched;
             }
-            return args; // known subcommand, no injection needed
+            if arg_str == "continue" || arg_str == "c" {
+                let mut patched = args[..i].to_vec();
+                patched.push("run".into());
+                patched.push("--resume".into());
+                patched.push("last".into());
+                patched.extend_from_slice(&args[(i + 1)..]);
+                return patched;
+            }
+            if SUBCOMMANDS.contains(&arg_str) {
+                return args;
+            }
+            let mut patched = args[..i].to_vec();
+            patched.push("run".into());
+            patched.extend_from_slice(&args[i..]);
+            return patched;
         }
     }
+
+    if i < args.len() && args[i].to_string_lossy().starts_with('-') {
+        let mut patched = args[..i].to_vec();
+        patched.push("run".into());
+        patched.extend_from_slice(&args[i..]);
+        if let Some(resume_index) = patched
+            .iter()
+            .position(|arg| arg.to_str() == Some("--resume"))
+        {
+            let remaining_positionals = patched
+                .iter()
+                .skip(resume_index + 1)
+                .filter(|arg| !arg.to_string_lossy().starts_with('-'))
+                .count();
+            let next_is_value = patched
+                .get(resume_index + 1)
+                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'));
+            if !next_is_value || remaining_positionals <= 1 {
+                patched.insert(resume_index + 1, "last".into());
+            }
+        }
+
+        return patched;
+    }
+
     args
 }
 
@@ -699,17 +739,26 @@ enum Commands {
         #[arg(long = "schema", value_name = "SCHEMA")]
         output_schema: Option<String>,
 
-        /// Skills to preload into the system prompt at session creation.
-        #[arg(long = "preload-skill", value_name = "SKILL_ID")]
+        /// Skill IDs or local skill paths to preload for this run. Repeatable.
+        #[arg(long = "skill", value_name = "PATH_OR_ID")]
+        skills: Vec<String>,
+
+        /// Deprecated compatibility alias for --skill.
+        #[arg(long = "preload-skill", value_name = "SKILL_ID", hide = true)]
         preload_skills: Vec<String>,
 
         /// Structured skill refs for this run.
         /// Accepts JSON objects or legacy source_uuid/skill_name strings.
-        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
+        #[arg(
+            long = "skill-ref",
+            value_name = "REF",
+            value_parser = parse_skill_ref_arg,
+            hide = true
+        )]
         skill_refs: Vec<SkillRef>,
 
         /// Legacy compatibility refs for this run.
-        #[arg(long = "skill-reference", value_name = "ID")]
+        #[arg(long = "skill-reference", value_name = "ID", hide = true)]
         skill_references: Vec<String>,
 
         /// Per-turn allow list for tools on the first turn (repeatable).
@@ -761,138 +810,6 @@ enum Commands {
         /// Implied by `--stdin lines` (line-mode stdin requires keep-alive).
         #[arg(long)]
         keep_alive: bool,
-
-        /// How stdin should be handled
-        #[arg(long, value_enum, default_value = "auto")]
-        stdin: StdinMode,
-
-        /// How each stdin line is interpreted in line mode
-        #[arg(long, value_enum, default_value = "text")]
-        line_format: LineFormat,
-    },
-
-    #[command(
-        after_help = "Examples:\n  rkat resume last \"keep going\"\n  rkat resume ~2 \"pick this thread back up\"\n  cat notes.txt | rkat resume last \"merge these notes into the plan\"\n  tail -f app.log | rkat resume last --stdin lines \"watch for new incidents\""
-    )]
-    /// Resume a previous session (supports full UUID, short prefix, `last`, `~N`)
-    Resume {
-        /// Session ID, short prefix, or alias (last, ~1, ~2, ...)
-        session_id: String,
-
-        /// The prompt to continue with
-        prompt: String,
-
-        /// Optional per-request system prompt override.
-        #[arg(long)]
-        system_prompt: Option<String>,
-
-        /// Structured skill refs for this resumed turn.
-        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
-        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
-        skill_refs: Vec<SkillRef>,
-
-        /// Legacy compatibility refs for this resumed turn.
-        #[arg(long = "skill-reference", value_name = "ID")]
-        skill_references: Vec<String>,
-
-        /// Per-turn allow list for tools on this turn (repeatable).
-        #[arg(long = "allow-tool", value_name = "TOOL")]
-        allow_tools: Vec<String>,
-
-        /// Per-turn block list for tools on this turn (repeatable).
-        #[arg(long = "block-tool", value_name = "TOOL")]
-        block_tools: Vec<String>,
-
-        /// Additional instruction section prepended to the turn prompt (repeatable).
-        #[arg(long = "instructions", value_name = "TEXT")]
-        instructions: Vec<String>,
-
-        /// Maximum duration for this resumed run (e.g., "5m", "1h30m").
-        #[arg(long, short = 'd')]
-        max_duration: Option<String>,
-
-        /// Maximum tool calls for this resumed run.
-        #[arg(long)]
-        max_tool_calls: Option<usize>,
-
-        /// Provider-specific parameter (KEY=VALUE). Can be repeated.
-        #[arg(long = "param", value_name = "KEY=VALUE")]
-        params: Vec<String>,
-
-        /// Provider-specific params as a JSON object.
-        #[arg(long = "params-json", value_name = "JSON")]
-        provider_params_json: Option<String>,
-
-        /// Verbose output: show each turn, tool calls, and results as they happen
-        #[arg(long, short = 'v')]
-        verbose: bool,
-
-        /// Stream output
-        #[arg(long, short = 's')]
-        stream: bool,
-
-        /// Disable streaming output
-        #[arg(long)]
-        no_stream: bool,
-
-        /// Wait for all MCP servers to connect before running the resumed turn.
-        #[arg(long)]
-        wait_for_mcp: bool,
-
-        /// How stdin should be handled
-        #[arg(long, value_enum, default_value = "auto")]
-        stdin: StdinMode,
-
-        /// How each stdin line is interpreted in line mode
-        #[arg(long, value_enum, default_value = "text")]
-        line_format: LineFormat,
-    },
-
-    #[command(
-        after_help = "Examples:\n  rkat continue \"keep going\"\n  git diff | rkat continue \"review this patch\"\n  rkat c --stdin off \"ignore the current pipe and continue\""
-    )]
-    /// Continue the most recent session (shortcut for `resume last`)
-    #[command(name = "continue", alias = "c")]
-    Continue {
-        /// The prompt to continue with
-        prompt: String,
-
-        /// Optional per-request system prompt override.
-        #[arg(long)]
-        system_prompt: Option<String>,
-
-        /// Structured skill refs for this continued turn.
-        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
-        #[arg(long = "skill-ref", value_name = "REF", value_parser = parse_skill_ref_arg)]
-        skill_refs: Vec<SkillRef>,
-
-        /// Legacy compatibility refs for this continued turn.
-        #[arg(long = "skill-reference", value_name = "ID")]
-        skill_references: Vec<String>,
-
-        /// Per-turn allow list for tools on this turn (repeatable).
-        #[arg(long = "allow-tool", value_name = "TOOL")]
-        allow_tools: Vec<String>,
-
-        /// Per-turn block list for tools on this turn (repeatable).
-        #[arg(long = "block-tool", value_name = "TOOL")]
-        block_tools: Vec<String>,
-
-        /// Additional instruction section prepended to the turn prompt (repeatable).
-        #[arg(long = "instructions", value_name = "TEXT")]
-        instructions: Vec<String>,
-
-        /// Verbose output
-        #[arg(long, short = 'v')]
-        verbose: bool,
-
-        /// Stream output
-        #[arg(long, short = 's')]
-        stream: bool,
-
-        /// Disable streaming output
-        #[arg(long)]
-        no_stream: bool,
 
         /// How stdin should be handled
         #[arg(long, value_enum, default_value = "auto")]
@@ -1150,6 +1067,27 @@ enum CliTransport {
 
 #[derive(Subcommand)]
 enum SkillsCommands {
+    /// Add a filesystem-backed skill source to the current realm config
+    Add {
+        /// Path to a skill directory, SKILL.md file, or repository root
+        path: String,
+        /// Optional repository name override
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Remove a configured skill source by name, source UUID, or path
+    Remove {
+        /// Configured repository name, source UUID, or path
+        selector: String,
+    },
+    /// Show a configured skill source by name, source UUID, or path
+    Get {
+        /// Configured repository name, source UUID, or path
+        selector: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List available skills with provenance information
     List {
         /// Output as JSON
@@ -1439,7 +1377,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    let cli = Cli::parse_from(inject_default_run_subcommand(std::env::args_os()));
+    let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
 
     let cli_scope = resolve_runtime_scope(&cli)?;
 
@@ -1461,6 +1399,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             params,
             provider_params_json,
             output_schema,
+            skills,
             preload_skills,
             skill_refs,
             skill_references,
@@ -1493,6 +1432,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 params,
                 provider_params_json,
                 output_schema,
+                skills,
                 preload_skills,
                 skill_refs,
                 skill_references,
@@ -1510,86 +1450,6 @@ async fn main() -> anyhow::Result<ExitCode> {
                 line_format,
                 &cli_scope,
             ))
-            .await
-        }
-        Commands::Resume {
-            session_id,
-            prompt,
-            system_prompt,
-            skill_refs,
-            skill_references,
-            allow_tools,
-            block_tools,
-            instructions,
-            max_duration,
-            max_tool_calls,
-            params,
-            provider_params_json,
-            verbose,
-            stream,
-            no_stream,
-            wait_for_mcp,
-            stdin,
-            line_format,
-        } => {
-            resume_session(
-                &session_id,
-                prompt,
-                system_prompt,
-                skill_refs,
-                skill_references,
-                allow_tools,
-                block_tools,
-                instructions,
-                max_duration,
-                max_tool_calls,
-                params,
-                provider_params_json,
-                stream,
-                no_stream,
-                stdin,
-                line_format,
-                &cli_scope,
-                verbose,
-                wait_for_mcp,
-            )
-            .await
-        }
-        Commands::Continue {
-            prompt,
-            system_prompt,
-            skill_refs,
-            skill_references,
-            allow_tools,
-            block_tools,
-            instructions,
-            verbose,
-            stream,
-            no_stream,
-            stdin,
-            line_format,
-        } => {
-            resume_session(
-                "last",
-                prompt,
-                system_prompt,
-                skill_refs,
-                skill_references,
-                allow_tools,
-                block_tools,
-                instructions,
-                None,
-                None,
-                Vec::new(),
-                None,
-                stream,
-                no_stream,
-                stdin,
-                line_format,
-                &cli_scope,
-                verbose,
-                false, // wait_for_mcp
-            )
             .await
         }
         Commands::Sessions { command } => match command {
@@ -1669,6 +1529,7 @@ async fn handle_run_command(
     params: Vec<String>,
     provider_params_json: Option<String>,
     output_schema: Option<String>,
+    skills: Vec<String>,
     preload_skills: Vec<String>,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
@@ -1686,24 +1547,26 @@ async fn handle_run_command(
     line_format: LineFormat,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
+    let legacy_preload_skills = preload_skills;
     if let Some(session_id) = resume {
         if model.is_some()
             || provider.is_some()
             || max_tokens.is_some()
             || output_schema.is_some()
-            || !preload_skills.is_empty()
             || !labels.is_empty()
             || app_context.is_some()
             || keep_alive
         {
             return Err(anyhow::anyhow!(
-                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --preload-skill, --label, --app-context, and --keep-alive are not supported there yet"
+                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, and --keep-alive are not supported there yet"
             ));
         }
         return resume_session(
             &session_id,
             prompt,
             system_prompt,
+            skills,
+            legacy_preload_skills,
             skill_refs,
             skill_references,
             allow_tools,
@@ -1725,6 +1588,8 @@ async fn handle_run_command(
     }
 
     let (config, config_base_dir) = load_config(scope).await?;
+    let (config, runtime_preload_skills) =
+        resolve_runtime_skills(config, skills, legacy_preload_skills).await?;
 
     let model = model.unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
@@ -1786,7 +1651,7 @@ async fn handle_run_command(
                 matches!(stdin, StdinMode::Lines),
                 line_format,
                 &config,
-                preload_skills,
+                runtime_preload_skills,
                 skill_refs,
                 skill_references,
                 allow_tools,
@@ -1867,6 +1732,113 @@ fn merge_provider_params(
             "provider params must be JSON objects after parsing"
         )),
     }
+}
+
+fn looks_like_path(raw: &str) -> bool {
+    raw.starts_with("./")
+        || raw.starts_with("../")
+        || raw.starts_with("~/")
+        || raw.starts_with('/')
+        || std::path::Path::new(raw).exists()
+}
+
+fn expand_path(raw: &str) -> anyhow::Result<PathBuf> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| anyhow::anyhow!("Cannot expand '~' without HOME"))?;
+        return Ok(PathBuf::from(home).join(rest));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+async fn resolve_runtime_skill_path(
+    raw: &str,
+) -> anyhow::Result<(meerkat_core::skills_config::SkillRepositoryConfig, String)> {
+    let input = expand_path(raw)?;
+    let absolute = if input.is_absolute() {
+        input
+    } else {
+        std::env::current_dir()?.join(input)
+    };
+    let canonical = tokio::fs::canonicalize(&absolute)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{}': {e}", raw))?;
+
+    let (repo_root, skill_dir) = if canonical.is_file() {
+        if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            return Err(anyhow::anyhow!(
+                "Skill file paths must point to SKILL.md: {}",
+                canonical.display()
+            ));
+        }
+        let skill_dir = canonical
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Skill file has no parent directory"))?
+            .to_path_buf();
+        let repo_root = skill_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
+            .to_path_buf();
+        (repo_root, skill_dir)
+    } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
+        let repo_root = canonical
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
+            .to_path_buf();
+        (repo_root, canonical)
+    } else {
+        return Err(anyhow::anyhow!(
+            "Runtime --skill paths must point to a skill directory or SKILL.md file: {}",
+            canonical.display()
+        ));
+    };
+
+    let skill_id = skill_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid skill directory name: {}", skill_dir.display()))?
+        .to_string();
+    let source_uuid = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("rkat-runtime-skill:{}", repo_root.display()).as_bytes(),
+    );
+    let source_uuid = meerkat_core::skills::SourceUuid::parse(&source_uuid.to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to derive source UUID: {e}"))?;
+
+    Ok((
+        meerkat_core::skills_config::SkillRepositoryConfig {
+            name: format!("local-{skill_id}"),
+            source_uuid,
+            transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                path: repo_root.display().to_string(),
+            },
+        },
+        skill_id,
+    ))
+}
+
+async fn resolve_runtime_skills(
+    mut config: Config,
+    skills: Vec<String>,
+    legacy_preload_skills: Vec<String>,
+) -> anyhow::Result<(Config, Vec<String>)> {
+    let mut preload = legacy_preload_skills;
+    for skill in skills {
+        if looks_like_path(&skill) {
+            let (repo, skill_id) = resolve_runtime_skill_path(&skill).await?;
+            let already_configured = config.skills.repositories.iter().any(|existing| {
+                existing.source_uuid == repo.source_uuid || existing.name == repo.name
+            });
+            if !already_configured {
+                config.skills.repositories.push(repo);
+            }
+            config.skills.enabled = true;
+            preload.push(skill_id);
+        } else {
+            preload.push(skill);
+        }
+    }
+    Ok((config, preload))
 }
 
 /// Parse output schema from CLI argument.
@@ -3776,6 +3748,8 @@ async fn resume_session(
     session_id: &str,
     mut prompt: String,
     system_prompt: Option<String>,
+    skills: Vec<String>,
+    preload_skills: Vec<String>,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
@@ -3801,6 +3775,8 @@ async fn resume_session(
         &prompt,
         system_prompt,
         HookRunOverrides::default(),
+        skills,
+        preload_skills,
         skill_refs,
         skill_references,
         allow_tools,
@@ -3826,6 +3802,8 @@ async fn resume_session_with_llm_override(
     prompt: &str,
     system_prompt: Option<String>,
     hooks_override: HookRunOverrides,
+    skills: Vec<String>,
+    preload_skills: Vec<String>,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
@@ -3855,6 +3833,8 @@ async fn resume_session_with_llm_override(
 
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
+    let (config, runtime_preload_skills) =
+        resolve_runtime_skills(config, skills, preload_skills).await?;
     let has_max_duration = max_duration.is_some();
     let has_max_tool_calls = max_tool_calls.is_some();
     let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
@@ -4027,7 +4007,12 @@ async fn resume_session_with_llm_override(
         override_mob: meerkat_core::ToolCategoryOverride::Inherit,
         schedule_tools: None,
         mob_tool_authority_context: None,
-        preload_skills: None,
+        preload_skills: (!runtime_preload_skills.is_empty()).then(|| {
+            runtime_preload_skills
+                .into_iter()
+                .map(meerkat_core::skills::SkillId)
+                .collect()
+        }),
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
         realm_id: stored_metadata
             .as_ref()
@@ -5317,6 +5302,109 @@ async fn find_session_matches(
     Ok(matches)
 }
 
+async fn persist_cli_config(config: Config, scope: &RuntimeScope) -> anyhow::Result<()> {
+    let (store, base_dir) = resolve_config_store(scope).await?;
+    let runtime =
+        meerkat_core::ConfigRuntime::new(Arc::clone(&store), base_dir.join("config_state.json"));
+    runtime
+        .set(config, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+    Ok(())
+}
+
+async fn resolve_skill_repo_for_config(
+    raw: &str,
+    name_override: Option<String>,
+) -> anyhow::Result<meerkat_core::skills_config::SkillRepositoryConfig> {
+    let input = expand_path(raw)?;
+    let absolute = if input.is_absolute() {
+        input
+    } else {
+        std::env::current_dir()?.join(input)
+    };
+    let canonical = tokio::fs::canonicalize(&absolute)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve skill path '{}': {e}", raw))?;
+
+    let implied_skill_name = if canonical.is_file() {
+        if canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md") {
+            return Err(anyhow::anyhow!(
+                "Skill file paths must point to SKILL.md: {}",
+                canonical.display()
+            ));
+        }
+        canonical
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
+        canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    } else {
+        None
+    };
+
+    let repo_root = if canonical.is_file() {
+        canonical
+            .parent()
+            .and_then(|dir| dir.parent())
+            .ok_or_else(|| anyhow::anyhow!("Skill file must live under a skill directory"))?
+            .to_path_buf()
+    } else if tokio::fs::try_exists(canonical.join("SKILL.md")).await? {
+        canonical
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Skill directory must have a parent repository root"))?
+            .to_path_buf()
+    } else {
+        canonical
+    };
+
+    let default_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("Invalid skill source path: {}", repo_root.display()))?;
+    let default_name = implied_skill_name.unwrap_or(default_name);
+    let name = name_override.unwrap_or(default_name);
+    let source_uuid = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("rkat-skill-source:{}", repo_root.display()).as_bytes(),
+    );
+    let source_uuid = meerkat_core::skills::SourceUuid::parse(&source_uuid.to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to derive source UUID: {e}"))?;
+
+    Ok(meerkat_core::skills_config::SkillRepositoryConfig {
+        name,
+        source_uuid,
+        transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+            path: repo_root.display().to_string(),
+        },
+    })
+}
+
+async fn repo_matches_selector(
+    repo: &meerkat_core::skills_config::SkillRepositoryConfig,
+    selector: &str,
+) -> anyhow::Result<bool> {
+    if repo.name == selector || repo.source_uuid.to_string() == selector {
+        return Ok(true);
+    }
+    if let meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } = &repo.transport
+        && looks_like_path(selector)
+    {
+        let selector_path = tokio::fs::canonicalize(expand_path(selector)?).await.ok();
+        let repo_path = tokio::fs::canonicalize(path).await.ok();
+        if selector_path.is_some() && selector_path == repo_path {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Handle Skills subcommands
 async fn handle_skills_command(
     command: SkillsCommands,
@@ -5326,6 +5414,81 @@ async fn handle_skills_command(
 
     // Load config from the active realm (not global defaults)
     let (config, realm_root) = load_config(scope).await?;
+
+    match command {
+        SkillsCommands::Add { path, name } => {
+            let mut updated = config.clone();
+            let repo = resolve_skill_repo_for_config(&path, name).await?;
+            if updated.skills.repositories.iter().any(|existing| {
+                existing.name == repo.name || existing.source_uuid == repo.source_uuid
+            }) {
+                return Err(anyhow::anyhow!(
+                    "Skill source '{}' is already configured",
+                    repo.name
+                ));
+            }
+            updated.skills.enabled = true;
+            updated.skills.repositories.push(repo.clone());
+            persist_cli_config(updated, scope).await?;
+            println!(
+                "Added skill source '{}' -> {}",
+                repo.name,
+                match &repo.transport {
+                    meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => path,
+                    _ => unreachable!("skill add only creates filesystem repos"),
+                }
+            );
+            return Ok(());
+        }
+        SkillsCommands::Remove { selector } => {
+            let mut updated = config.clone();
+            let before = updated.skills.repositories.len();
+            let mut kept = Vec::with_capacity(before);
+            let mut removed = Vec::new();
+            for repo in updated.skills.repositories {
+                if repo_matches_selector(&repo, &selector).await? {
+                    removed.push(repo.name.clone());
+                } else {
+                    kept.push(repo);
+                }
+            }
+            if removed.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No configured skill source matched '{selector}'"
+                ));
+            }
+            updated.skills.repositories = kept;
+            persist_cli_config(updated, scope).await?;
+            println!("Removed skill source(s): {}", removed.join(", "));
+            return Ok(());
+        }
+        SkillsCommands::Get { selector, json } => {
+            let mut found = None;
+            for repo in &config.skills.repositories {
+                if repo_matches_selector(repo, &selector).await? {
+                    found = Some(repo.clone());
+                    break;
+                }
+            }
+            let repo = found.ok_or_else(|| {
+                anyhow::anyhow!("No configured skill source matched '{selector}'")
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&repo)?);
+            } else {
+                println!("Name:        {}", repo.name);
+                println!("Source UUID: {}", repo.source_uuid);
+                match repo.transport {
+                    meerkat_core::skills_config::SkillRepoTransport::Filesystem { path } => {
+                        println!("Path:        {path}");
+                    }
+                    _ => unreachable!("skill get currently expects filesystem repos"),
+                }
+            }
+            return Ok(());
+        }
+        SkillsCommands::List { .. } | SkillsCommands::Inspect { .. } => {}
+    }
 
     let factory = {
         let mut f = meerkat::AgentFactory::new(realm_root.clone()).runtime_root(realm_root);
@@ -5420,6 +5583,8 @@ async fn handle_skills_command(
                 println!();
                 println!("{}", doc.body);
             }
+        }
+        SkillsCommands::Add { .. } | SkillsCommands::Remove { .. } | SkillsCommands::Get { .. } => {
         }
     }
     Ok(())
@@ -8165,6 +8330,7 @@ mod tests {
                 prompt,
                 tools,
                 yolo,
+                skills,
                 params,
                 provider_params_json,
                 output_schema,
@@ -8178,6 +8344,7 @@ mod tests {
                 assert_eq!(prompt, "hello");
                 assert!(matches!(tools, ToolPreset::Workspace));
                 assert!(yolo);
+                assert!(skills.is_empty());
                 assert_eq!(params, vec!["temperature=0.2"]);
                 assert_eq!(
                     provider_params_json.as_deref(),
@@ -8248,10 +8415,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resume_and_continue_parse_current_flags() {
+    fn test_run_resume_parses_current_flags() {
         let resume = Cli::try_parse_from([
             "rkat",
-            "resume",
+            "run",
+            "--resume",
             "last",
             "keep going",
             "--stdin",
@@ -8261,56 +8429,36 @@ mod tests {
             "--stream",
             "--allow-tool",
             "search",
+            "--skill",
+            "legacy/skill",
         ])
-        .expect("resume should parse");
+        .expect("run --resume should parse");
         match resume.command {
-            Commands::Resume {
-                session_id,
+            Commands::Run {
+                resume,
                 prompt,
                 stdin,
                 line_format,
                 stream,
                 allow_tools,
+                skills,
                 ..
             } => {
-                assert_eq!(session_id, "last");
+                assert_eq!(resume.as_deref(), Some("last"));
                 assert_eq!(prompt, "keep going");
                 assert!(matches!(stdin, StdinMode::Blob));
                 assert!(matches!(line_format, LineFormat::Text));
                 assert!(stream);
                 assert_eq!(allow_tools, vec!["search"]);
+                assert_eq!(skills, vec!["legacy/skill"]);
             }
-            _ => unreachable!("expected resume"),
-        }
-
-        let cont = Cli::try_parse_from([
-            "rkat",
-            "continue",
-            "next step",
-            "--block-tool",
-            "shell",
-            "--skill-reference",
-            "legacy/skill",
-        ])
-        .expect("continue should parse");
-        match cont.command {
-            Commands::Continue {
-                prompt,
-                block_tools,
-                skill_references,
-                ..
-            } => {
-                assert_eq!(prompt, "next step");
-                assert_eq!(block_tools, vec!["shell"]);
-                assert_eq!(skill_references, vec!["legacy/skill"]);
-            }
-            _ => unreachable!("expected continue"),
+            _ => unreachable!("expected run"),
         }
     }
 
     #[test]
-    fn test_inject_default_run_subcommand() {
-        let args = inject_default_run_subcommand(["rkat", "hello world"].map(Into::into));
+    fn test_normalize_cli_args() {
+        let args = normalize_cli_args(["rkat", "hello world"].map(Into::into));
         assert_eq!(
             args,
             vec!["rkat", "run", "hello world"]
@@ -8319,12 +8467,47 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let args =
-            inject_default_run_subcommand(["rkat", "--realm", "test", "hello"].map(Into::into));
+        let args = normalize_cli_args(["rkat", "--realm", "test", "hello"].map(Into::into));
         assert_eq!(args[3], std::ffi::OsString::from("run"));
         assert_eq!(args[4], std::ffi::OsString::from("hello"));
 
-        let args = inject_default_run_subcommand(["rkat", "init"].map(Into::into));
+        let args = normalize_cli_args(["rkat", "resume", "last", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "last", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "continue", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "last", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "--resume", "last", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "last", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "--resume", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "run", "--resume", "last", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "init"].map(Into::into));
         assert_eq!(
             args,
             vec!["rkat", "init"]

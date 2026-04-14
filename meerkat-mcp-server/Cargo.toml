@@ -53,5 +53,8 @@ schedule = ["meerkat/schedule"]
 [package.metadata.cargo-machete]
 ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

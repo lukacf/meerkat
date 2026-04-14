@@ -110,8 +110,6 @@ pub struct MobMemberListEntry {
     // --- Bridge internals (pub(crate)) ---
     #[serde(skip)]
     pub(crate) meerkat_id: MeerkatId,
-    #[serde(skip)]
-    pub(crate) member_ref: MemberRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -130,11 +128,6 @@ impl MobMemberListEntry {
         self.current_session_id = current_bridge_session_id.clone();
         self.current_bridge_session_id = current_bridge_session_id;
         self
-    }
-
-    /// Bridge session ID from the member reference.
-    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
-        self.member_ref.bridge_session_id()
     }
 }
 
@@ -1248,7 +1241,6 @@ impl MobHandle {
                     fence_token: entry.fence_token,
                     role: entry.role,
                     meerkat_id: entry.meerkat_id,
-                    member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
                     state: entry.state,

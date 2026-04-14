@@ -9943,7 +9943,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let names: std::collections::BTreeSet<String> =
             composed.tools().iter().map(|t| t.name.clone()).collect();
         assert!(names.contains("mob_create"));
-        assert!(names.contains("meerkat_spawn"));
+        assert!(names.contains("mob_spawn_member"));
     }
 
     #[tokio::test]
@@ -10157,7 +10157,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher_a,
             "t-spawn-a",
-            "meerkat_spawn",
+            "mob_spawn_member",
             serde_json::json!({
                 "mob_id": mob_id,
                 "specs": [{"profile": "lead", "agent_identity": "lead-1", "runtime_mode": "turn_driven"}]
@@ -10190,7 +10190,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher_b,
             "t-spawn-b",
-            "meerkat_spawn",
+            "mob_spawn_member",
             serde_json::json!({
                 "mob_id": created["mob_id"].as_str().expect("mob id"),
                 "specs": [{"profile": "worker", "agent_identity": "worker-1", "runtime_mode": "turn_driven"}]
@@ -10227,7 +10227,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         call_tool_json(
             &dispatcher,
             "t-spawn-turn",
-            "meerkat_spawn",
+            "mob_spawn_member",
             serde_json::json!({
                 "mob_id": mob_id,
                 "specs": [{"profile": "lead", "agent_identity": "lead-turn", "runtime_mode": "turn_driven"}]
@@ -10238,7 +10238,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let listed = call_tool_json(
             &dispatcher,
             "t-list-runtime",
-            "meerkat_list",
+            "mob_list_members",
             serde_json::json!({"mob_id": mob_id}),
         )
         .await;

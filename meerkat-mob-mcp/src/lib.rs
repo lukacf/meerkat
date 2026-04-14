@@ -1762,9 +1762,9 @@ impl MobMcpDispatcher {
                 &format!("Cancel an in-flight flow run by run_id. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"run_id":{"type":"string"}},"required":["mob_id","run_id"]}),
             ),
-            // ── Member-level (meerkat_*) ───────────────────────────────
+            // ── Member-level (mob_* member ops) ────────────────────────
             tool(
-                "meerkat_spawn",
+                "mob_spawn_member",
                 &format!("Spawn one or more mob members. Required: mob_id, specs[].profile, specs[].agent_identity. \
                      Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
                      initial_message, labels (key-value map), context (opaque JSON). {COMMON}"),
@@ -1793,17 +1793,17 @@ impl MobMcpDispatcher {
                 }),
             ),
             tool(
-                "meerkat_retire",
+                "mob_retire_member",
                 &format!("Retire a spawned mob member by identity. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
-                "meerkat_list",
-                &format!("List current meerkats in a mob. {COMMON}"),
+                "mob_list_members",
+                &format!("List current members in a mob. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
             ),
             tool(
-                "meerkat_wire",
+                "mob_wire",
                 &format!("Wire or unwire bidirectional trust between a local member and a peer target. \
                      action: wire | unwire. {COMMON}"),
                 json!({
@@ -1848,13 +1848,13 @@ impl MobMcpDispatcher {
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","agent_identity"]}),
             ),
             tool(
-                "meerkat_force_cancel",
+                "mob_force_cancel",
                 &format!("Force-cancel a member's in-flight turn. Unlike retire, this \
                      interrupts immediately without graceful shutdown. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
-                "meerkat_status",
+                "mob_member_status",
                 &format!("Get execution status snapshot for a member. Returns status, \
                      output_preview, tokens_used, and is_final. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
@@ -2203,7 +2203,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 encode(call, json!({"ok": true}))
             }
             // ── Member-level ───────────────────────────────────────────
-            "meerkat_spawn" => {
+            "mob_spawn_member" => {
                 let args: SpawnManyMeerkatsArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -2270,7 +2270,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     encode(call, json!({"results": results}))
                 }
             }
-            "meerkat_retire" => {
+            "mob_retire_member" => {
                 let args: RetireArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -2283,7 +2283,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
-            "meerkat_list" => {
+            "mob_list_members" => {
                 let args: MobIdArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -2294,7 +2294,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"members": rows}))
             }
-            "meerkat_wire" => {
+            "mob_wire" => {
                 let args: WireActionArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -2356,7 +2356,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     Err(e) => return Err(map_mob_err(call, MobError::Internal(e.to_string()))),
                 }
             }
-            "meerkat_force_cancel" => {
+            "mob_force_cancel" => {
                 let args: ForceCancelArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -2369,7 +2369,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"ok": true}))
             }
-            "meerkat_status" => {
+            "mob_member_status" => {
                 let args: MeerkatStatusArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -3263,13 +3263,13 @@ mod tests {
                 "mob_run_flow",
                 "mob_flow_status",
                 "mob_cancel_flow",
-                "meerkat_spawn",
-                "meerkat_retire",
-                "meerkat_list",
-                "meerkat_wire",
+                "mob_spawn_member",
+                "mob_retire_member",
+                "mob_list_members",
+                "mob_wire",
                 "mob_respawn",
-                "meerkat_force_cancel",
-                "meerkat_status",
+                "mob_force_cancel",
+                "mob_member_status",
                 "mob_wait_kickoff",
             ]
         );
@@ -3486,19 +3486,19 @@ mod tests {
 
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": a, "specs":[{"profile":"worker", "agent_identity":"wa", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": b, "specs":[{"profile":"worker", "agent_identity":"wb", "runtime_mode":"turn_driven"}]}),
         )
         .await;
 
-        let la = call_tool(&d, "meerkat_list", json!({"mob_id": a})).await;
-        let lb = call_tool(&d, "meerkat_list", json!({"mob_id": b})).await;
+        let la = call_tool(&d, "mob_list_members", json!({"mob_id": a})).await;
+        let lb = call_tool(&d, "mob_list_members", json!({"mob_id": b})).await;
         assert_eq!(la["members"].as_array().unwrap().len(), 1); // wa
         assert_eq!(lb["members"].as_array().unwrap().len(), 1); // wb
 
@@ -3528,42 +3528,42 @@ mod tests {
             .to_string();
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"lead", "agent_identity":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_wire",
+            "mob_wire",
             json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"wire"}),
         )
         .await;
-        let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
+        let listed = call_tool(&d, "mob_list_members", json!({"mob_id": mob_id})).await;
         assert_eq!(
             listed["members"].as_array().map(std::vec::Vec::len),
             Some(3)
         );
         call_tool(
             &d,
-            "meerkat_wire",
+            "mob_wire",
             json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"unwire"}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_retire",
+            "mob_retire_member",
             json!({"mob_id": mob_id, "agent_identity":"w2"}),
         )
         .await;
@@ -3610,25 +3610,25 @@ mod tests {
             .to_string();
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"lead", "agent_identity":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
-            "meerkat_wire",
+            "mob_wire",
             json!({"mob_id": mob_id, "agent_identity":"w1", "peer":{"local":"w2"}, "action":"wire"}),
         )
         .await;
@@ -3644,7 +3644,7 @@ mod tests {
             json!({"mob_id": mob_id, "action":"resume"}),
         )
         .await;
-        let members = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
+        let members = call_tool(&d, "mob_list_members", json!({"mob_id": mob_id})).await;
         assert_eq!(members["members"].as_array().unwrap().len(), 3); // lead + 2 workers
         let status = call_tool(&d, "mob_list", json!({"mob_id": mob_id})).await;
         assert_eq!(status["status"], "Running");
@@ -3679,7 +3679,7 @@ mod tests {
 
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({"mob_id": mob_id, "specs":[{"profile":"worker", "agent_identity":"w1"}]}),
         )
         .await;
@@ -3813,7 +3813,7 @@ mod tests {
 
         let spawned = call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
@@ -3834,7 +3834,7 @@ mod tests {
 
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [{"profile": "lead", "agent_identity": "lead-default"}]
@@ -3843,7 +3843,7 @@ mod tests {
         .await;
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [{"profile": "worker", "agent_identity": "worker-turn", "runtime_mode": "turn_driven"}]
@@ -3851,7 +3851,7 @@ mod tests {
         )
         .await;
 
-        let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
+        let listed = call_tool(&d, "mob_list_members", json!({"mob_id": mob_id})).await;
         let members = listed["members"].as_array().cloned().unwrap_or_default();
         let lead_mode = members
             .iter()
@@ -3877,7 +3877,7 @@ mod tests {
 
         let spawned = call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [
@@ -3894,7 +3894,7 @@ mod tests {
             "all batch spawn rows should succeed"
         );
 
-        let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
+        let listed = call_tool(&d, "mob_list_members", json!({"mob_id": mob_id})).await;
         let ids = listed["members"]
             .as_array()
             .cloned()
@@ -3916,7 +3916,7 @@ mod tests {
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [
@@ -3955,7 +3955,7 @@ mod tests {
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
-            "meerkat_spawn",
+            "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
                 "specs": [

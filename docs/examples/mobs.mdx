@@ -106,10 +106,10 @@ When `enable_mob` is set, the running agent gets these in-session tools:
 | `mob_run_flow` | `mob_id`, `flow_id`, `params?` | Execute a DAG flow |
 | `mob_flow_status` | `mob_id`, `run_id` | Check flow run status |
 | `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
-| `meerkat_spawn` | `mob_id`, `specs` (array of `{profile, meerkat_id, runtime_mode?, initial_message?}`) | Spawn members (batch) |
-| `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
-| `meerkat_wire` | `mob_id`, `a`, `b` | Establish trusted comms channel |
-| `meerkat_list` | `mob_id` | List mob members and their state |
+| `mob_spawn_member` | `mob_id`, `specs` (array of `{profile, agent_identity, runtime_mode?, initial_message?}`) | Spawn members (batch) |
+| `mob_retire_member` | `mob_id`, `agent_identity` | Remove a member |
+| `mob_wire` | `mob_id`, `agent_identity`, `peer`, `action` | Establish or remove a trusted comms channel |
+| `mob_list_members` | `mob_id` | List mob members and their state |
 
 <Note>
 These are the agent-side `mob_*` tools. Public host surfaces use typed control
@@ -226,26 +226,26 @@ planes instead:
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `meerkat_spawn` tool:
+    Agent calls `mob_spawn_member` tool:
     ```json
     {"mob_id": "my-mob", "specs": [
-      {"profile": "lead", "meerkat_id": "lead-1"},
-      {"profile": "worker", "meerkat_id": "worker-1"},
-      {"profile": "worker", "meerkat_id": "worker-2", "runtime_mode": "turn_driven"}
+      {"profile": "lead", "agent_identity": "lead-1"},
+      {"profile": "worker", "agent_identity": "worker-1"},
+      {"profile": "worker", "agent_identity": "worker-2", "runtime_mode": "turn_driven"}
     ]}
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `meerkat_spawn` tool (same JSON as RPC — mob ops are tool-driven on all session surfaces).
+    Agent calls `mob_spawn_member` tool (same JSON as RPC — mob ops are tool-driven on all session surfaces).
   </Tab>
   <Tab title="MCP">
-    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+    Agent calls `mob_spawn_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="Python">
-    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+    Agent calls `mob_spawn_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `meerkat_spawn` tool (same JSON as RPC).
+    Agent calls `mob_spawn_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="Rust">
     ```rust
@@ -269,22 +269,22 @@ planes instead:
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `meerkat_wire` tool:
+    Agent calls `mob_wire` tool:
     ```json
-    {"mob_id": "my-mob", "member": "lead-1", "peer": {"local": "worker-1"}}
+    {"mob_id": "my-mob", "agent_identity": "lead-1", "peer": {"local": "worker-1"}, "action": "wire"}
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `meerkat_wire` tool (same JSON as RPC).
+    Agent calls `mob_wire` tool (same JSON as RPC).
   </Tab>
   <Tab title="MCP">
-    Agent calls `meerkat_wire` tool (same JSON as RPC).
+    Agent calls `mob_wire` tool (same JSON as RPC).
   </Tab>
   <Tab title="Python">
-    Agent calls `meerkat_wire` tool (same JSON as RPC).
+    Agent calls `mob_wire` tool (same JSON as RPC).
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `meerkat_wire` tool (same JSON as RPC).
+    Agent calls `mob_wire` tool (same JSON as RPC).
   </Tab>
   <Tab title="Rust">
     ```rust
@@ -303,22 +303,22 @@ planes instead:
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `meerkat_retire` tool:
+    Agent calls `mob_retire_member` tool:
     ```json
-    {"mob_id": "my-mob", "meerkat_id": "worker-2"}
+    {"mob_id": "my-mob", "agent_identity": "worker-2"}
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `meerkat_retire` tool (same JSON as RPC).
+    Agent calls `mob_retire_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="MCP">
-    Agent calls `meerkat_retire` tool (same JSON as RPC).
+    Agent calls `mob_retire_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="Python">
-    Agent calls `meerkat_retire` tool (same JSON as RPC).
+    Agent calls `mob_retire_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `meerkat_retire` tool (same JSON as RPC).
+    Agent calls `mob_retire_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="Rust">
     ```rust

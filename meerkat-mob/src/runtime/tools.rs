@@ -452,8 +452,12 @@ impl MobOperatorToolDispatcher {
         })
     }
 
-    fn member_list_entry_result_payload(entry: &MobMemberListEntry) -> serde_json::Value {
-        serde_json::to_value(entry).expect("member list entry should serialize")
+    fn member_list_entry_result_payload(
+        entry: &MobMemberListEntry,
+    ) -> Result<serde_json::Value, ToolError> {
+        serde_json::to_value(entry).map_err(|error| {
+            ToolError::execution_failed(format!("encode member list entry: {error}"))
+        })
     }
 
     async fn spawn_result_payload_for_identity(
@@ -843,7 +847,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 let members = members
                     .into_iter()
                     .map(|entry| Self::member_list_entry_result_payload(&entry))
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, _>>()?;
                 Self::encode_result(call, json!({ "members": members }))
             }
             TOOL_MOB_LIST_FLOWS => {

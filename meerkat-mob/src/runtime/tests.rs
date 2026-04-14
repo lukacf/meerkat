@@ -6613,7 +6613,10 @@ async fn test_spawn_creates_session() {
     assert_eq!(meerkats.len(), 1);
     assert_eq!(meerkats[0].meerkat_id.as_str(), "w-1");
     assert_eq!(meerkats[0].role.as_str(), "worker");
-    assert_eq!(meerkats[0].bridge_session_id(), Some(&session_id));
+    assert_eq!(
+        meerkats[0].current_bridge_session_id.as_ref(),
+        Some(&session_id)
+    );
 }
 
 #[tokio::test]

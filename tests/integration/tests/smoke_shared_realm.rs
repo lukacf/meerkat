@@ -2214,7 +2214,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     eprintln!("[scenario 55] rest started on port {port}");
 
     let restore_deadline = Instant::now() + Duration::from_secs(15);
-    let rest_history = loop {
+    let _rest_history = loop {
         let sessions = rest_list_sessions(port, 8).await?;
         let mut matching_history = None;
         if sessions.len() >= 3 {

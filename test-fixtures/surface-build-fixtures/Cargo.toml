@@ -15,7 +15,7 @@ name = "runtime_backed_min"
 path = "src/bin/runtime_backed_min.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["session-store", "jsonl-store", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "session-store", "jsonl-store", "schedule"] }
 meerkat-core.workspace = true
 meerkat-runtime.workspace = true
 meerkat-store = { workspace = true, features = ["memory"] }

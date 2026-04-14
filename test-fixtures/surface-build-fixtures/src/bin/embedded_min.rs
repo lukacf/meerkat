@@ -5,6 +5,12 @@ use meerkat::{AgentFactory, Config, ScheduleService, ScheduleToolDispatcher};
 use meerkat_core::service::SessionService;
 use serde_json::json;
 
+fn fixture_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let mut config = Config::default();
+    config.apply_env_overrides()?;
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = std::env::args()
@@ -15,16 +21,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let temp = tempfile::tempdir()?;
+    let config = fixture_config()?;
     let factory = AgentFactory::new(temp.path().join("sessions")).schedule(true);
     let schedule_tools = Some(
         Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
         )))) as Arc<dyn meerkat_core::AgentToolDispatcher>,
     );
-    let service = build_embedded_service(factory, Config::default(), 4, schedule_tools);
+    let service = build_embedded_service(factory, config.clone(), 4, schedule_tools);
     let result = service
         .create_session(meerkat_core::service::CreateSessionRequest {
-            model: "gpt-5.2".to_string(),
+            model: config.agent.model.clone(),
             prompt: "Say ok".to_string().into(),
             render_metadata: None,
             system_prompt: None,

@@ -74,3 +74,7 @@ live_suite!(
     "cli-mob-rpc-state-machine-probe"
 );
 live_suite!(e2e_live_cli_structured_output, "cli-structured-output");
+live_suite!(
+    e2e_live_surface_build_fixtures,
+    "surface-build-fixtures-live"
+);

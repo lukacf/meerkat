@@ -18,7 +18,7 @@ use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
     ScheduleToolDispatcher,
 };
-use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
+use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
@@ -58,7 +58,6 @@ use meerkat_core::SessionId;
 use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
-use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
 use std::path::PathBuf;
@@ -93,20 +92,6 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
         .split_once('=')
         .ok_or_else(|| format!("expected key=value, got: {s}"))?;
     Ok((key.to_string(), value.to_string()))
-}
-
-/// Parse a skill reference argument.
-///
-/// Accepts either JSON (`{"source_uuid":"...","skill_name":"..."}`) or a
-/// legacy string (`source_uuid/skill_name`).
-fn parse_skill_ref_arg(s: &str) -> Result<SkillRef, String> {
-    if s.trim().is_empty() {
-        return Err("skill ref cannot be empty".to_string());
-    }
-    match serde_json::from_str::<SkillRef>(s) {
-        Ok(reference) => Ok(reference),
-        Err(_) => Ok(SkillRef::Legacy(s.to_string())),
-    }
 }
 
 /// Spawn a task that handles verbose event output.
@@ -474,8 +459,8 @@ fn is_root_passthrough_flag(arg: &str) -> bool {
     matches!(arg, "-h" | "--help" | "-V" | "--version")
 }
 
-/// Normalize legacy execution shorthands and inject `run` as the default
-/// subcommand when the first positional argument is not a known command.
+/// Inject `run` as the default subcommand when the first positional argument
+/// is not a known command, while preserving top-level help/version handling.
 fn normalize_cli_args(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
@@ -496,6 +481,9 @@ fn normalize_cli_args(
         "models",
         "doctor",
         "help",
+        "resume",
+        "continue",
+        "c",
     ];
     let args: Vec<std::ffi::OsString> = args.into_iter().collect();
     let mut i = 1; // skip binary name
@@ -511,35 +499,6 @@ fn normalize_cli_args(
                 break;
             }
         } else {
-            if arg_str == "models"
-                && args
-                    .get(i + 1)
-                    .and_then(|arg| arg.to_str())
-                    .is_some_and(|next| next == "catalog")
-            {
-                let mut patched = args[..=i].to_vec();
-                patched.extend_from_slice(&args[(i + 2)..]);
-                return patched;
-            }
-            if arg_str == "resume" {
-                if i + 2 > args.len() - 1 {
-                    return args;
-                }
-                let mut patched = args[..i].to_vec();
-                patched.push("run".into());
-                patched.push("--resume".into());
-                patched.push(args[i + 1].clone());
-                patched.extend_from_slice(&args[(i + 2)..]);
-                return patched;
-            }
-            if arg_str == "continue" || arg_str == "c" {
-                let mut patched = args[..i].to_vec();
-                patched.push("run".into());
-                patched.push("--resume".into());
-                patched.push("last".into());
-                patched.extend_from_slice(&args[(i + 1)..]);
-                return patched;
-            }
             if SUBCOMMANDS.contains(&arg_str) {
                 return args;
             }
@@ -834,24 +793,6 @@ enum Commands {
         )]
         skills: Vec<String>,
 
-        /// Deprecated compatibility alias for --skill.
-        #[arg(long = "preload-skill", value_name = "SKILL_ID", hide = true)]
-        preload_skills: Vec<String>,
-
-        /// Structured skill refs for this run.
-        /// Accepts JSON objects or legacy source_uuid/skill_name strings.
-        #[arg(
-            long = "skill-ref",
-            value_name = "REF",
-            value_parser = parse_skill_ref_arg,
-            hide = true
-        )]
-        skill_refs: Vec<SkillRef>,
-
-        /// Legacy compatibility refs for this run.
-        #[arg(long = "skill-reference", value_name = "ID", hide = true)]
-        skill_references: Vec<String>,
-
         /// Per-turn allow list for tools on the first turn (repeatable).
         #[arg(
             long = "allow-tool",
@@ -949,7 +890,7 @@ enum Commands {
     },
 
     /// Session management
-    #[command(name = "session", visible_alias = "sessions")]
+    #[command(name = "session")]
     Sessions {
         #[command(subcommand)]
         command: SessionCommands,
@@ -962,7 +903,7 @@ enum Commands {
     },
 
     /// Realm lifecycle management
-    #[command(name = "realm", visible_alias = "realms")]
+    #[command(name = "realm")]
     Realms {
         #[command(subcommand)]
         command: RealmCommands,
@@ -986,7 +927,7 @@ enum Commands {
         command: MobCommands,
     },
 
-    #[command(name = "skill", alias = "skills")]
+    #[command(name = "skill")]
     /// Skill introspection and realm-local skill resources
     Skills {
         #[command(subcommand)]
@@ -1521,9 +1462,6 @@ async fn main() -> anyhow::Result<ExitCode> {
             provider_params_json,
             output_schema,
             skills,
-            preload_skills,
-            skill_refs,
-            skill_references,
             allow_tools,
             block_tools,
             labels,
@@ -1554,9 +1492,6 @@ async fn main() -> anyhow::Result<ExitCode> {
                 provider_params_json,
                 output_schema,
                 skills,
-                preload_skills,
-                skill_refs,
-                skill_references,
                 allow_tools,
                 block_tools,
                 labels,
@@ -1649,9 +1584,6 @@ async fn handle_run_command(
     provider_params_json: Option<String>,
     output_schema: Option<String>,
     skills: Vec<String>,
-    preload_skills: Vec<String>,
-    skill_refs: Vec<SkillRef>,
-    skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     labels: Vec<(String, String)>,
@@ -1666,7 +1598,6 @@ async fn handle_run_command(
     line_format: LineFormat,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    let legacy_preload_skills = preload_skills;
     if let Some(session_id) = resume {
         if model.is_some()
             || provider.is_some()
@@ -1685,9 +1616,6 @@ async fn handle_run_command(
             prompt,
             system_prompt,
             skills,
-            legacy_preload_skills,
-            skill_refs,
-            skill_references,
             allow_tools,
             block_tools,
             instructions,
@@ -1707,8 +1635,7 @@ async fn handle_run_command(
     }
 
     let (config, config_base_dir) = load_config(scope).await?;
-    let (config, runtime_preload_skills) =
-        resolve_runtime_skills(config, skills, legacy_preload_skills).await?;
+    let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
 
     let model = model.unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
@@ -1771,8 +1698,6 @@ async fn handle_run_command(
                 line_format,
                 &config,
                 runtime_preload_skills,
-                skill_refs,
-                skill_references,
                 allow_tools,
                 block_tools,
                 labels,
@@ -1939,9 +1864,8 @@ async fn resolve_runtime_skill_path(
 async fn resolve_runtime_skills(
     mut config: Config,
     skills: Vec<String>,
-    legacy_preload_skills: Vec<String>,
 ) -> anyhow::Result<(Config, Vec<String>)> {
-    let mut preload = legacy_preload_skills;
+    let mut preload = Vec::new();
     for skill in skills {
         if looks_like_path(&skill) {
             let (repo, skill_id) = resolve_runtime_skill_path(&skill).await?;
@@ -3267,7 +3191,7 @@ fn session_err_to_anyhow(e: meerkat_core::service::SessionError) -> anyhow::Erro
 fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Result<SessionId> {
     SessionLocator::resolve_for_realm(input, &scope.locator.realm_id).map_err(|err| match err {
         SessionLocatorError::RealmMismatch { provided, active } => anyhow::anyhow!(
-            "Session belongs to realm '{provided}', but active realm is '{active}'. Use --realm {provided} or `rkat sessions locate {input}`."
+            "Session belongs to realm '{provided}', but active realm is '{active}'. Use --realm {provided} or switch to the matching realm before running session commands."
         ),
         other => anyhow::anyhow!("Invalid session locator '{input}': {other}"),
     })
@@ -3365,33 +3289,6 @@ fn short_session_id(sid: &SessionId) -> String {
     s[..8.min(s.len())].to_string()
 }
 
-fn canonical_skill_keys(
-    config: &Config,
-    skill_refs: Vec<SkillRef>,
-    skill_references: Vec<String>,
-) -> anyhow::Result<Option<Vec<SkillKey>>> {
-    let registry = config
-        .skills
-        .build_source_identity_registry()
-        .map_err(|e| anyhow::anyhow!("Invalid skills config: {e}"))?;
-    let params = SkillsParams {
-        preload_skills: None,
-        skill_refs: if skill_refs.is_empty() {
-            None
-        } else {
-            Some(skill_refs)
-        },
-        skill_references: if skill_references.is_empty() {
-            None
-        } else {
-            Some(skill_references)
-        },
-    };
-    params
-        .canonical_skill_keys_with_registry(&registry)
-        .map_err(|e| anyhow::anyhow!("Invalid skill refs: {e}"))
-}
-
 fn build_flow_tool_overlay(
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
@@ -3439,8 +3336,6 @@ async fn run_agent(
     line_format: LineFormat,
     config: &Config,
     preload_skills: Vec<String>,
-    skill_refs: Vec<SkillRef>,
-    skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     labels: Vec<(String, String)>,
@@ -3452,9 +3347,7 @@ async fn run_agent(
 ) -> anyhow::Result<()> {
     let keep_alive = resolve_keep_alive(keep_alive)?;
     let effective_mob = enable_mob || config.tools.mob_enabled;
-    let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
-    let run_initial_turn_during_create = flow_tool_overlay.is_none();
     let preload_skills = if preload_skills.is_empty() {
         None
     } else {
@@ -3647,11 +3540,7 @@ async fn run_agent(
         max_tokens: Some(max_tokens),
         event_tx: output_pipeline.event_sender(),
 
-        skill_references: if run_initial_turn_during_create {
-            canonical_skill_refs.clone()
-        } else {
-            None
-        },
+        skill_references: None,
         // Always defer — the runtime adapter handles execution.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -3717,7 +3606,7 @@ async fn run_agent(
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     keep_alive: if keep_alive { Some(true) } else { None },
-                    skill_references: canonical_skill_refs,
+                    skill_references: None,
                     flow_tool_overlay,
                     additional_instructions: None,
                     ..Default::default()
@@ -3868,9 +3757,6 @@ async fn resume_session(
     mut prompt: String,
     system_prompt: Option<String>,
     skills: Vec<String>,
-    preload_skills: Vec<String>,
-    skill_refs: Vec<SkillRef>,
-    skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     instructions: Vec<String>,
@@ -3895,9 +3781,6 @@ async fn resume_session(
         system_prompt,
         HookRunOverrides::default(),
         skills,
-        preload_skills,
-        skill_refs,
-        skill_references,
         allow_tools,
         block_tools,
         instructions,
@@ -3922,9 +3805,6 @@ async fn resume_session_with_llm_override(
     system_prompt: Option<String>,
     hooks_override: HookRunOverrides,
     skills: Vec<String>,
-    preload_skills: Vec<String>,
-    skill_refs: Vec<SkillRef>,
-    skill_references: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     instructions: Vec<String>,
@@ -3952,8 +3832,7 @@ async fn resume_session_with_llm_override(
 
     log_stage("load_config");
     let (config, _config_base_dir) = load_config(scope).await?;
-    let (config, runtime_preload_skills) =
-        resolve_runtime_skills(config, skills, preload_skills).await?;
+    let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
     let has_max_duration = max_duration.is_some();
     let has_max_tool_calls = max_tool_calls.is_some();
     let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
@@ -3978,9 +3857,7 @@ async fn resume_session_with_llm_override(
     // Resolve session identifier (full UUID, short prefix, or relative alias).
     log_stage("resolve_session_id");
     let session_id = resolve_flexible_session_id(session_id, scope, &config).await?;
-    let canonical_skill_refs = canonical_skill_keys(&config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
-    let run_initial_turn_during_create = flow_tool_overlay.is_none();
     log_stage("create_session_store");
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let store = persistence.session_store();
@@ -4184,11 +4061,7 @@ async fn resume_session_with_llm_override(
                 max_tokens: Some(max_tokens),
                 event_tx: output_pipeline.event_sender(),
 
-                skill_references: if run_initial_turn_during_create {
-                    canonical_skill_refs.clone()
-                } else {
-                    None
-                },
+                skill_references: None,
                 // Always defer — runtime adapter handles execution.
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -4222,7 +4095,7 @@ async fn resume_session_with_llm_override(
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     keep_alive: if keep_alive { Some(true) } else { None },
-                    skill_references: canonical_skill_refs,
+                    skill_references: None,
                     flow_tool_overlay,
                     additional_instructions,
                     ..Default::default()
@@ -8599,24 +8472,6 @@ mod tests {
         assert_eq!(args[3], std::ffi::OsString::from("run"));
         assert_eq!(args[4], std::ffi::OsString::from("hello"));
 
-        let args = normalize_cli_args(["rkat", "resume", "last", "hello"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "run", "--resume", "last", "hello"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-
-        let args = normalize_cli_args(["rkat", "continue", "hello"].map(Into::into));
-        assert_eq!(
-            args,
-            vec!["rkat", "run", "--resume", "last", "hello"]
-                .into_iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>()
-        );
-
         let args = normalize_cli_args(["rkat", "--resume", "last", "hello"].map(Into::into));
         assert_eq!(
             args,
@@ -8644,10 +8499,28 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        let args = normalize_cli_args(["rkat", "resume", "last", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "resume", "last", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let args = normalize_cli_args(["rkat", "continue", "hello"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "continue", "hello"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
         let args = normalize_cli_args(["rkat", "models", "catalog"].map(Into::into));
         assert_eq!(
             args,
-            vec!["rkat", "models"]
+            vec!["rkat", "models", "catalog"]
                 .into_iter()
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
@@ -8655,11 +8528,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sessions_list_parses_current_flags() {
+    fn test_session_list_parses_current_flags() {
         let cli = Cli::try_parse_from([
-            "rkat", "sessions", "list", "--limit", "10", "--label", "env=dev",
+            "rkat", "session", "list", "--limit", "10", "--label", "env=dev",
         ])
-        .expect("sessions list should parse");
+        .expect("session list should parse");
         match cli.command {
             Commands::Sessions {
                 command: SessionCommands::List { limit, labels, .. },
@@ -8667,14 +8540,14 @@ mod tests {
                 assert_eq!(limit, 10);
                 assert_eq!(labels, vec![("env".to_string(), "dev".to_string())]);
             }
-            _ => unreachable!("expected sessions list command"),
+            _ => unreachable!("expected session list command"),
         }
     }
 
     #[test]
-    fn test_singular_alias_commands_parse() {
+    fn test_canonical_commands_parse() {
         let session_cli =
-            Cli::try_parse_from(["rkat", "session", "list"]).expect("session alias should parse");
+            Cli::try_parse_from(["rkat", "session", "list"]).expect("session should parse");
         match session_cli.command {
             Commands::Sessions {
                 command: SessionCommands::List { .. },
@@ -8682,8 +8555,7 @@ mod tests {
             _ => unreachable!("expected session list command"),
         }
 
-        let realm_cli =
-            Cli::try_parse_from(["rkat", "realm", "list"]).expect("realm alias should parse");
+        let realm_cli = Cli::try_parse_from(["rkat", "realm", "list"]).expect("realm should parse");
         match realm_cli.command {
             Commands::Realms {
                 command: RealmCommands::List,
@@ -8696,6 +8568,16 @@ mod tests {
             Commands::Models => {}
             _ => unreachable!("expected models command"),
         }
+    }
+
+    #[test]
+    fn test_legacy_command_names_no_longer_parse() {
+        assert!(Cli::try_parse_from(["rkat", "sessions", "list"]).is_err());
+        assert!(Cli::try_parse_from(["rkat", "realms", "list"]).is_err());
+        assert!(Cli::try_parse_from(["rkat", "skills", "list"]).is_err());
+        assert!(Cli::try_parse_from(["rkat", "resume", "last", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["rkat", "continue", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["rkat", "models", "catalog"]).is_err());
     }
 
     #[test]
@@ -10697,54 +10579,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         assert_eq!(json["seed"], "42");
         assert_eq!(json["custom_flag"], "true");
         Ok(())
-    }
-
-    #[test]
-    fn test_parse_skill_ref_arg_accepts_legacy_string() {
-        let parsed = parse_skill_ref_arg("legacy/email").expect("legacy ref should parse");
-        assert_eq!(parsed, SkillRef::Legacy("legacy/email".to_string()));
-    }
-
-    #[test]
-    fn test_parse_skill_ref_arg_accepts_structured_json() {
-        let parsed = parse_skill_ref_arg(
-            r#"{"source_uuid":"dc256086-0d2f-4f61-a307-320d4148107f","skill_name":"email-extractor"}"#,
-        )
-        .expect("structured ref should parse");
-        assert!(matches!(parsed, SkillRef::Structured(_)));
-        if let SkillRef::Structured(key) = parsed {
-            assert_eq!(
-                key.source_uuid.to_string(),
-                "dc256086-0d2f-4f61-a307-320d4148107f"
-            );
-            assert_eq!(key.skill_name.to_string(), "email-extractor");
-        }
-    }
-
-    #[test]
-    fn test_canonical_skill_keys_accepts_structured_and_legacy_forms() {
-        let config = Config::default();
-        let structured = canonical_skill_keys(
-            &config,
-            vec![SkillRef::Structured(SkillKey {
-                source_uuid: meerkat_core::skills::SourceUuid::parse(
-                    "dc256086-0d2f-4f61-a307-320d4148107f",
-                )
-                .expect("uuid"),
-                skill_name: meerkat_core::skills::SkillName::parse("email-extractor")
-                    .expect("skill"),
-            })],
-            vec![],
-        )
-        .expect("structured refs should canonicalize");
-        let legacy = canonical_skill_keys(
-            &config,
-            vec![],
-            vec!["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor".to_string()],
-        )
-        .expect("legacy refs should canonicalize");
-
-        assert_eq!(structured, legacy);
     }
 
     #[test]

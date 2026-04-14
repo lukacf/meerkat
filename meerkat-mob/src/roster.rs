@@ -350,10 +350,6 @@ impl Roster {
         }
     }
 
-    pub(crate) fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        self.wire(a, b);
-    }
-
     pub fn wire_external_peer(
         &mut self,
         local: &MeerkatId,
@@ -413,14 +409,6 @@ impl Roster {
         }
     }
 
-    pub(crate) fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        self.unwire(a, b);
-    }
-
-    pub(crate) fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
-        self.unwire_external(local, peer_name);
-    }
-
     /// Returns `true` when every projected edge is reciprocal and endpoint-present.
     pub fn is_wiring_projection_consistent(&self) -> bool {
         self.wiring_projection_inconsistencies().is_empty()
@@ -460,7 +448,8 @@ impl Roster {
     }
 
     /// Get a roster entry by meerkat ID (bridge lookup).
-    pub(crate) fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
+    #[doc(hidden)]
+    pub fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
         let identity = self.meerkat_index.get(meerkat_id)?;
         self.entries.get(identity)
     }
@@ -491,10 +480,6 @@ impl Roster {
             return true;
         }
         false
-    }
-
-    pub(crate) fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
-        self.set_bridge_session_id(meerkat_id, session_id)
     }
 
     /// Update the resolved comms peer id for an existing meerkat.
@@ -590,23 +575,6 @@ impl Roster {
         self.find_by_bridge_session_id(session_id).is_some()
     }
 
-    /// Look up the current bridge session ID for a meerkat.
-    pub(crate) fn bridge_session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
-        self.get(meerkat_id)?.member_ref.bridge_session_id()
-    }
-
-    pub(crate) fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
-        self.bridge_session_id(meerkat_id)
-    }
-
-    /// Get the set of peer identities wired to a given meerkat.
-    pub(crate) fn wired_peers_of(
-        &self,
-        meerkat_id: &MeerkatId,
-    ) -> Option<&BTreeSet<AgentIdentity>> {
-        self.get(meerkat_id).map(|e| &e.wired_to)
-    }
-
     /// Number of active members in the roster.
     pub fn len(&self) -> usize {
         self.entries
@@ -659,22 +627,15 @@ impl Roster {
 }
 
 impl RosterEntry {
-    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
+    /// Bridge session ID for this entry's backing session.
+    #[doc(hidden)]
+    pub fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()
-    }
-
-    pub(crate) fn session_id(&self) -> Option<&SessionId> {
-        self.bridge_session_id()
     }
 
     /// Bridge-internal peer ID for comms wiring.
     pub fn peer_id(&self) -> Option<&str> {
         self.peer_id.as_deref()
-    }
-
-    /// Bridge-internal meerkat ID.
-    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
-        &self.meerkat_id
     }
 }
 
@@ -883,16 +844,16 @@ mod tests {
 
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
 
-        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
         assert!(peers_a.contains(&AgentIdentity::from("b")));
-        let peers_b = roster.wired_peers_of(&MeerkatId::from("b")).unwrap();
+        let peers_b = &roster.get(&MeerkatId::from("b")).unwrap().wired_to;
         assert!(peers_b.contains(&AgentIdentity::from("a")));
 
         roster.unwire(&MeerkatId::from("a"), &MeerkatId::from("b"));
 
-        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
         assert!(peers_a.is_empty());
-        let peers_b = roster.wired_peers_of(&MeerkatId::from("b")).unwrap();
+        let peers_b = &roster.get(&MeerkatId::from("b")).unwrap().wired_to;
         assert!(peers_b.is_empty());
     }
 
@@ -917,7 +878,7 @@ mod tests {
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
         roster.wire(&MeerkatId::from("a"), &MeerkatId::from("b"));
 
-        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
         assert_eq!(peers_a.len(), 1); // No duplicates (BTreeSet)
     }
 
@@ -943,7 +904,7 @@ mod tests {
             .expect("valid trusted peer spec"),
         );
 
-        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
         assert!(peers_a.contains(&AgentIdentity::from("remote-mob/worker/agent-b")));
         assert!(
             roster
@@ -1043,7 +1004,7 @@ mod tests {
         ];
         let roster = Roster::project(&events);
         assert_eq!(roster.len(), 2);
-        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        let peers_a = &roster.get(&MeerkatId::from("a")).unwrap().wired_to;
         assert!(peers_a.contains(&AgentIdentity::from("b")));
     }
 
@@ -1078,7 +1039,7 @@ mod tests {
         let roster = Roster::project(&events);
         assert_eq!(roster.len(), 1);
         assert!(roster.get(&MeerkatId::from("a")).is_none());
-        let peers_b = roster.wired_peers_of(&MeerkatId::from("b")).unwrap();
+        let peers_b = &roster.get(&MeerkatId::from("b")).unwrap().wired_to;
         assert!(peers_b.is_empty());
     }
 
@@ -1308,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_id_convenience_session_member() {
+    fn test_bridge_session_id_via_entry_session_member() {
         let mut roster = Roster::new();
         let sid = session_id();
         add_member(
@@ -1318,12 +1279,13 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(sid.clone()),
         );
-        assert_eq!(roster.bridge_session_id(&MeerkatId::from("a")), Some(&sid));
-        assert_eq!(roster.session_id(&MeerkatId::from("a")), Some(&sid));
+        let entry = roster.get(&MeerkatId::from("a")).unwrap();
+        assert_eq!(entry.bridge_session_id(), Some(&sid));
+        assert!(roster.find_by_bridge_session_id(&sid).is_some());
     }
 
     #[test]
-    fn test_session_id_convenience_backend_peer_with_bridge() {
+    fn test_bridge_session_id_via_entry_backend_peer_with_bridge() {
         let mut roster = Roster::new();
         let sid = session_id();
         add_member(
@@ -1337,15 +1299,12 @@ mod tests {
                 session_id: Some(sid.clone()),
             },
         );
-        assert_eq!(
-            roster.bridge_session_id(&MeerkatId::from("ext-1")),
-            Some(&sid)
-        );
-        assert_eq!(roster.session_id(&MeerkatId::from("ext-1")), Some(&sid));
+        let entry = roster.get(&MeerkatId::from("ext-1")).unwrap();
+        assert_eq!(entry.bridge_session_id(), Some(&sid));
     }
 
     #[test]
-    fn test_session_id_convenience_backend_peer_no_bridge() {
+    fn test_bridge_session_id_via_entry_backend_peer_no_bridge() {
         let mut roster = Roster::new();
         add_member(
             &mut roster,
@@ -1358,13 +1317,15 @@ mod tests {
                 session_id: None,
             },
         );
-        assert_eq!(roster.session_id(&MeerkatId::from("ext-2")), None);
+        let entry = roster.get(&MeerkatId::from("ext-2")).unwrap();
+        assert_eq!(entry.bridge_session_id(), None);
     }
 
     #[test]
-    fn test_session_id_convenience_not_found() {
+    fn test_find_by_bridge_session_id_not_found() {
         let roster = Roster::new();
-        assert_eq!(roster.session_id(&MeerkatId::from("nonexistent")), None);
+        let sid = session_id();
+        assert!(roster.find_by_bridge_session_id(&sid).is_none());
     }
 
     #[test]

@@ -30,7 +30,7 @@ fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
         "PeerDirectoryReachabilityMachine",
     ] {
         assert!(
-            !names.iter().any(|name| name == &absorbed),
+            !names.iter().any(|name| name == absorbed),
             "{absorbed} should be absorbed into canonical kernels, not published separately"
         );
     }

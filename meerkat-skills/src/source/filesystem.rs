@@ -178,6 +178,22 @@ fn default_source_uuid(scope: SkillScope) -> SourceUuid {
 /// further (they act as collection/namespace directories).
 async fn find_skill_files(root: &Path, dir: &Path) -> Vec<(String, PathBuf)> {
     let mut results = Vec::new();
+    let root_skill_file = root.join("SKILL.md");
+    if tokio::fs::try_exists(&root_skill_file)
+        .await
+        .unwrap_or(false)
+    {
+        if let Some(root_name) = root.file_name().and_then(|name| name.to_str()) {
+            results.push((root_name.to_string(), root_skill_file));
+        } else {
+            tracing::warn!(
+                "Skipping non-UTF-8 root skill directory: {}",
+                root.display()
+            );
+        }
+        return results;
+    }
+
     let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current) = stack.pop() {
@@ -568,6 +584,21 @@ mod tests {
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id.0, "a/b/c");
+    }
+
+    #[tokio::test]
+    async fn test_root_skill_directory_is_listed_as_leaf_skill() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("demo-skill");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        create_skill(tmp.path(), "demo-skill", "demo-skill").await;
+        create_skill(&root, "nested/child", "child").await;
+
+        let source = FilesystemSkillSource::new(root, SkillScope::Project);
+        let skills = source.list(&SkillFilter::default()).await.unwrap();
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id.0, "demo-skill");
     }
 
     #[tokio::test]

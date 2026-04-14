@@ -1181,7 +1181,8 @@ async fn e2e_scenario_50_rest_cli_shared_realm_roundtrip() -> Result<(), Box<dyn
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id,
         "What are my codename and favorite bird? Reply in one sentence.",
     ];
@@ -1496,7 +1497,8 @@ async fn e2e_scenario_52_cli_rpc_shared_realm_roundtrip() -> Result<(), Box<dyn 
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id,
         "What is my codename now? Reply with just the codename.",
     ];
@@ -1624,7 +1626,8 @@ async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id,
         "Confirm the codename one more time.",
     ];
@@ -1892,7 +1895,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "sessions",
+        "session",
         "list",
         "--limit",
         "20",

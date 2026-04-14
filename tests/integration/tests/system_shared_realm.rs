@@ -653,7 +653,8 @@ async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id.to_string(),
         "Continue from CLI again.",
     ];
@@ -746,7 +747,8 @@ async fn cli_rest_cli_default_sqlite_shared_realm_roundtrip()
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id.to_string(),
         "Continue from CLI again.",
     ];

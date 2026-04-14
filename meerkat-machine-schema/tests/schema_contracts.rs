@@ -676,6 +676,109 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
 }
 
 #[test]
+fn every_query_runtime_command_is_explicitly_classified() {
+    let meerkat_queries = [
+        "ContainsSession",
+        "SessionHasExecutor",
+        "SessionHasComms",
+        "OpsLifecycleRegistry",
+        "InputState",
+        "ListActiveInputs",
+        "RuntimeState",
+        "LoadBoundaryReceipt",
+        "Wait",
+    ];
+    let meerkat_coordination_queries = ["OpsLifecycleRegistry", "Wait"];
+    let meerkat_pure_queries = [
+        "ContainsSession",
+        "SessionHasExecutor",
+        "SessionHasComms",
+        "InputState",
+        "ListActiveInputs",
+        "RuntimeState",
+        "LoadBoundaryReceipt",
+    ];
+
+    let mob_queries = [
+        "FlowStatus",
+        "TaskList",
+        "TaskGet",
+        "McpServerStates",
+        "RosterSnapshot",
+        "ListMembers",
+        "ListMembersIncludingRetiring",
+        "ListAllMembers",
+        "MemberStatus",
+        "PollEvents",
+        "ReplayAllEvents",
+        "GetMember",
+        "KickoffBarrierSnapshot",
+    ];
+    let mob_coordination_queries = ["PollEvents", "ReplayAllEvents", "KickoffBarrierSnapshot"];
+    let mob_pure_queries = [
+        "FlowStatus",
+        "TaskList",
+        "TaskGet",
+        "McpServerStates",
+        "RosterSnapshot",
+        "ListMembers",
+        "ListMembersIncludingRetiring",
+        "ListAllMembers",
+        "MemberStatus",
+        "GetMember",
+    ];
+
+    let mut classified = std::collections::BTreeSet::new();
+    for query in meerkat_coordination_queries
+        .into_iter()
+        .chain(meerkat_pure_queries)
+        .chain(mob_coordination_queries)
+        .chain(mob_pure_queries)
+    {
+        assert!(
+            classified.insert(query),
+            "query command {query} should not be classified twice"
+        );
+    }
+
+    for query in meerkat_queries.into_iter().chain(mob_queries) {
+        assert!(
+            classified.contains(query),
+            "query command {query} must be explicitly classified as pure or coordination-bearing"
+        );
+    }
+}
+
+#[test]
+fn every_coordination_query_has_transition_coverage() {
+    let meerkat = meerkat_machine();
+    let meerkat_transitioned = meerkat
+        .transitions
+        .iter()
+        .map(|transition| transition.on.variant.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for required in ["OpsLifecycleRegistry", "Wait"] {
+        assert!(
+            meerkat_transitioned.contains(required),
+            "MeerkatMachine coordination query {required} should have transition coverage"
+        );
+    }
+
+    let mob = mob_machine();
+    let mob_transitioned = mob
+        .transitions
+        .iter()
+        .map(|transition| transition.on.variant.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for required in ["PollEvents", "ReplayAllEvents", "KickoffBarrierSnapshot"] {
+        assert!(
+            mob_transitioned.contains(required),
+            "MobMachine coordination query {required} should have transition coverage"
+        );
+    }
+}
+
+#[test]
 fn every_canonical_input_variant_has_transition_coverage() {
     for schema in canonical_machine_schemas() {
         let input_names = schema

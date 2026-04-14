@@ -1,8 +1,17 @@
 # Runtime/Schema Parity Checklist
 
-This checklist tracks **state-altering runtime commands** that must be modeled by
-the canonical two-kernel machine schemas. Query/read-only surfaces are listed
-separately and are intentionally excluded from the mutating-command parity bar.
+This checklist tracks the canonical runtime/schema parity contract for the
+two-kernel machine schemas.
+
+It is split into three classes:
+- **mutating commands**: must be modeled by canonical schema transitions
+- **coordination / lock-bearing queries**: observational on paper, but they can
+  participate in scheduling, lock ownership, wait semantics, or other behavior
+  that can interfere with authoritative operations; they must be explicitly
+  modeled and classified
+- **pure observation queries**: observational projections only; they must be
+  explicitly accounted for, but they are excluded from the mutating-command
+  parity bar
 
 ## MeerkatMachine
 
@@ -42,16 +51,18 @@ Absorbed domains included in the merged kernel:
 - [x] `Commit`
 - [x] `Fail`
 
-### Read-only/query commands intentionally excluded from the mutating bar
-- [ ] `ContainsSession`
-- [ ] `SessionHasExecutor`
-- [ ] `SessionHasComms`
-- [ ] `OpsLifecycleRegistry`
-- [ ] `InputState`
-- [ ] `ListActiveInputs`
-- [ ] `RuntimeState`
-- [ ] `LoadBoundaryReceipt`
-- [ ] `Wait`
+### Coordination / lock-bearing queries
+- [x] `OpsLifecycleRegistry`
+- [x] `Wait`
+
+### Pure observation queries
+- [x] `ContainsSession`
+- [x] `SessionHasExecutor`
+- [x] `SessionHasComms`
+- [x] `InputState`
+- [x] `ListActiveInputs`
+- [x] `RuntimeState`
+- [x] `LoadBoundaryReceipt`
 
 ## MobMachine
 
@@ -92,20 +103,22 @@ Absorbed domains included in the merged kernel:
 - [x] `Shutdown`
 - [x] `ForceCancel`
 
-### Read-only/query commands intentionally excluded from the mutating bar
-- [ ] `FlowStatus`
-- [ ] `TaskList`
-- [ ] `TaskGet`
-- [ ] `McpServerStates`
-- [ ] `RosterSnapshot`
-- [ ] `ListMembers`
-- [ ] `ListMembersIncludingRetiring`
-- [ ] `ListAllMembers`
-- [ ] `MemberStatus`
-- [ ] `PollEvents`
-- [ ] `ReplayAllEvents`
-- [ ] `GetMember`
-- [ ] `KickoffBarrierSnapshot`
+### Coordination / lock-bearing queries
+- [x] `PollEvents`
+- [x] `ReplayAllEvents`
+- [x] `KickoffBarrierSnapshot`
+
+### Pure observation queries
+- [x] `FlowStatus`
+- [x] `TaskList`
+- [x] `TaskGet`
+- [x] `McpServerStates`
+- [x] `RosterSnapshot`
+- [x] `ListMembers`
+- [x] `ListMembersIncludingRetiring`
+- [x] `ListAllMembers`
+- [x] `MemberStatus`
+- [x] `GetMember`
 
 ### Test-only diagnostics intentionally excluded from canonical schema publication
 - [ ] `FlowTrackerCounts`

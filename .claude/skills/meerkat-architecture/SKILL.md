@@ -286,7 +286,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 - `AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, and `mob_unwire`.
 - `mob_wire`/`mob_unwire` create and remove comms trust relationships between mob members (local or external peers). Reuses `MobMcpState::mob_wire()` / `mob_unwire()` state API.
-- `owner_session_id` and `is_implicit` on `MobDefinition` are canonical for session-scoped access control, resume lookup, and cleanup.
+- `owner_bridge_session_id` and `is_implicit` on `MobDefinition` are canonical for session-scoped access control, resume lookup, and cleanup.
 - `destroy_session_mobs()` is the canonical archive cleanup seam. Tool building and cleanup must share the same hydrated `MobMcpState`; parallel shadow registries are a bug.
 - Operator capabilities are runtime-injected. `MobToolAccessContext::OperatorCapabilitiesPresent` / `override_mob == Some(true)` is the authoritative signal; ambient mob enablement alone must not resurrect operator tools on resume.
 
@@ -295,7 +295,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 - `retire_member(id)` — archive session, remove from roster
 - `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
 - `respawn(id, initial_message)` — helper convenience: retire old bridge/runtime binding → enqueue spawn with same identity/profile/wiring/labels → new runtime incarnation/fence (not machine-owned)
-- `member_status(id)` → `MobMemberSnapshot` (status, output, error, timestamps, tokens, is_final, peer_metadata)
+- `member_status(id)` → `MobMemberSnapshot` (status, agent_runtime_id, fence_token, output_preview, error, tokens_used, is_final, peer_connectivity, kickoff)
 - `wait_one(id)`, `wait_all(ids)`, `collect_completed()`
 
 ### Provisioning
@@ -366,7 +366,7 @@ MobActor is composed of narrowly-scoped service objects:
 Use this as the first regression checklist when touching post-`v0.5.0` architecture:
 
 - Prefabs are gone. `MobDefinition` is the only creation input.
-- "Delegate" / "sub-agent" UX is mob-backed and session-owned. Use canonical `owner_session_id`, `is_implicit`, and `destroy_session_mobs()` seams.
+- "Delegate" / "sub-agent" UX is mob-backed and session-owned. Use canonical `owner_bridge_session_id`, `is_implicit`, and `destroy_session_mobs()` seams.
 - Persist `ToolCategoryOverride` intent; never flatten `Inherit` into a resolved bool on save/resume paths.
 - Background-op wake is runtime-owned via `DetachedWakeState` + `ContinuationInput`; surfaces must not spawn bespoke waker loops.
 - Only actionable peer inputs may carry `handling_mode`; response progress/terminal traffic must fall back to kind-based policy.
@@ -427,7 +427,7 @@ than reintroducing script-owned truth.
 - `meerkat-runtime/src/silent_intent.rs` — silent intent override
 - `meerkat-session/src/ephemeral.rs` — EphemeralSessionService
 - `meerkat-tools/src/builtin/sqlite_store.rs` — session-scoped `SqliteTaskStore`
-- `meerkat-mob/src/definition.rs` — `MobDefinition`, `FrameSpec`, `RepeatUntilSpec`, `owner_session_id`, `is_implicit`
+- `meerkat-mob/src/definition.rs` — `MobDefinition`, `FrameSpec`, `RepeatUntilSpec`, `owner_bridge_session_id`, `is_implicit`
 - `meerkat-mob/src/build.rs` — mob profile → `AgentBuildConfig`, operator capability gating
 - `meerkat-mob/src/launch.rs` — MemberLaunchMode, ForkContext, BudgetSplitPolicy
 - `meerkat-mob/src/storage.rs` — `MobStorage`, SQLite/custom storage seams

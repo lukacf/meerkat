@@ -1218,7 +1218,10 @@ describe("Mob member host ingress", () => {
       calls.push({ method, params });
       return {
         agent_identity: "reviewer-1",
-        agent_runtime_id: "reviewer-1:4",
+        agent_runtime_id: {
+          identity: "reviewer-1",
+          generation: 4,
+        },
         fence_token: 4,
         handling_mode: "steer",
       };

@@ -500,12 +500,20 @@ pub struct MobMemberSendParams {
 /// Response payload for host-side mob member delivery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireAgentRuntimeId {
+    pub identity: String,
+    pub generation: u64,
+}
+
+/// Response payload for host-side mob member delivery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberSendResult {
     pub mob_id: String,
     /// Identity-native member identity (0.6).
     pub agent_identity: String,
     /// Identity-native runtime ID for this incarnation (0.6).
-    pub agent_runtime_id: String,
+    pub agent_runtime_id: WireAgentRuntimeId,
     /// Fence token for the current incarnation (0.6).
     pub fence_token: u64,
     pub handling_mode: WireHandlingMode,

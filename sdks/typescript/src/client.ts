@@ -27,6 +27,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -36,6 +37,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
@@ -328,9 +330,21 @@ export class MeerkatClient {
       this.rl.close();
       this.rl = null;
     }
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
+    const process = this.process;
+    this.process = null;
+    if (process) {
+      process.stdin?.end();
+      const closed = once(process, "close").catch(() => []);
+      process.kill();
+      const timeout = delay(5000).then(() => "timeout");
+      const outcome = await Promise.race([closed, timeout]);
+      if (outcome === "timeout" && process.exitCode == null && process.signalCode == null) {
+        process.kill("SIGKILL");
+        await closed.catch(() => {});
+      }
+      process.stdin?.destroy();
+      process.stdout?.destroy();
+      process.stderr?.destroy();
     }
     for (const [, pending] of this.pendingRequests) {
       pending.reject(new MeerkatError("CLIENT_CLOSED", "Client closed"));

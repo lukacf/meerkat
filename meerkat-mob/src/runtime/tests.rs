@@ -4273,6 +4273,47 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
 }
 
 #[tokio::test]
+async fn test_list_members_returns_after_respawn_without_hanging() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("respawn-list-members");
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original member");
+
+    let receipt = handle
+        .respawn(
+            AgentIdentity::from(member_id.as_str()),
+            Some("refresh listing".into()),
+        )
+        .await
+        .expect("respawn succeeds");
+
+    let members = tokio::time::timeout(std::time::Duration::from_secs(2), handle.list_members())
+        .await
+        .expect("list_members should not hang after respawn");
+    let listed = members
+        .into_iter()
+        .find(|entry| entry.agent_identity == AgentIdentity::from(member_id.as_str()))
+        .expect("respawned member remains listed");
+
+    assert_eq!(listed.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(listed.fence_token, receipt.fence_token);
+    assert_eq!(listed.state, crate::roster::MemberState::Active);
+    assert_eq!(
+        listed.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+}
+
+#[tokio::test]
 async fn test_wait_one_returns_terminal_unknown_for_missing_member() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let snapshot = handle

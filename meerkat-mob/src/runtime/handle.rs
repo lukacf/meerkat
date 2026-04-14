@@ -33,6 +33,7 @@ enum PeerConnectivityProjection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionObservationProjection {
+    Omit,
     LiveOnly,
     Full,
 }
@@ -917,15 +918,19 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::RosterSnapshot(roster))
             }
             MobMachineCommand::ListMembers => {
-                let members = self
-                    .project_member_list(self.roster.read().await.list())
-                    .await;
+                let entries: Vec<_> = {
+                    let roster = self.roster.read().await;
+                    roster.list().cloned().collect()
+                };
+                let members = self.project_member_list(entries.iter()).await;
                 Ok(MobMachineCommandResult::ListMembers(members))
             }
             MobMachineCommand::ListMembersIncludingRetiring => {
-                let members = self
-                    .project_member_list(self.roster.read().await.list_all())
-                    .await;
+                let entries: Vec<_> = {
+                    let roster = self.roster.read().await;
+                    roster.list_all().cloned().collect()
+                };
+                let members = self.project_member_list(entries.iter()).await;
                 Ok(MobMachineCommandResult::ListMembersIncludingRetiring(
                     members,
                 ))
@@ -1301,7 +1306,7 @@ impl MobHandle {
         self.canonical_member_material(
             meerkat_id,
             PeerConnectivityProjection::Omit,
-            SessionObservationProjection::LiveOnly,
+            SessionObservationProjection::Omit,
         )
         .await
     }
@@ -1411,6 +1416,9 @@ impl MobHandle {
             }
             (Some(roster_state), Some(bridge_session_id)) => {
                 let (output_preview, tokens_used, observation) = match observation {
+                    SessionObservationProjection::Omit => {
+                        (None, 0, CanonicalSessionObservation::Unknown)
+                    }
                     SessionObservationProjection::LiveOnly => {
                         match self
                             .session_service

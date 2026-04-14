@@ -2828,6 +2828,8 @@ mod tests {
             .unwrap();
         let sent = result_value(&send_resp);
         assert_eq!(sent["agent_identity"], "worker-1");
+        assert_eq!(sent["agent_runtime_id"]["identity"], "worker-1");
+        assert_eq!(sent["agent_runtime_id"]["generation"], 0);
         assert_eq!(sent["handling_mode"], "queue");
     }
 

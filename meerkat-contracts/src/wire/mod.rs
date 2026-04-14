@@ -27,8 +27,9 @@ pub use mob::{
     MobRepeatUntilInput, MobRoleWiringRuleInput, MobSkillSourceInput, MobSpawnPolicyInput,
     MobStepOutputFormatInput, MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput,
     MobTopologySpecInput, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
-    MobWiringRulesInput, WireHandlingMode, WireMobBackendKind, WireMobRuntimeMode, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerSpec,
+    MobWiringRulesInput, WireAgentRuntimeId, WireHandlingMode, WireMobBackendKind,
+    WireMobRuntimeMode, WireRenderClass, WireRenderMetadata, WireRenderSalience,
+    WireRuntimeBinding, WireTrustedPeerSpec,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,

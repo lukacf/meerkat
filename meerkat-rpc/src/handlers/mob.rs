@@ -11,7 +11,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
-use meerkat_contracts::{MobCreateParams, MobCreateResult};
+use meerkat_contracts::{MobCreateParams, MobCreateResult, WireAgentRuntimeId};
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
@@ -512,7 +512,10 @@ pub async fn handle_member_send(
             MobMemberSendResult {
                 mob_id: mob_id.to_string(),
                 agent_identity: receipt.identity.to_string(),
-                agent_runtime_id: receipt.agent_runtime_id.to_string(),
+                agent_runtime_id: WireAgentRuntimeId {
+                    identity: receipt.agent_runtime_id.identity.to_string(),
+                    generation: receipt.agent_runtime_id.generation.get(),
+                },
                 fence_token: receipt.fence_token.get(),
                 handling_mode: receipt.handling_mode.into(),
             },

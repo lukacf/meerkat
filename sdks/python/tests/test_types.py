@@ -1230,7 +1230,10 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
         calls.append((method, params))
         return {
             "agent_identity": "agent-a",
-            "agent_runtime_id": "agent-a:1",
+            "agent_runtime_id": {
+                "identity": "agent-a",
+                "generation": 1,
+            },
             "fence_token": 13,
             "handling_mode": "steer",
         }
@@ -1248,6 +1251,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
     assert receipt == {
         "agent_identity": "agent-a",
         "agent_runtime_id": "agent-a:1",
+        "generation": 1,
         "fence_token": 13,
         "handling_mode": "steer",
     }

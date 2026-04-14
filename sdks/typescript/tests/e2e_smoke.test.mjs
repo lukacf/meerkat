@@ -72,6 +72,36 @@ function includeScenario(id) {
   return true;
 }
 
+function logScenarioStep(scenario, step) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${scenario}: ${step}`);
+}
+
+async function withStepTimeout(scenario, step, promise, timeoutMs = 60000) {
+  logScenarioStep(scenario, `start ${step}`);
+  let timer = null;
+  try {
+    const result = await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${scenario}: timed out after ${timeoutMs}ms during ${step}`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    logScenarioStep(scenario, `done ${step}`);
+    return result;
+  } catch (error) {
+    logScenarioStep(scenario, `fail ${step}: ${String(error)}`);
+    throw error;
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function waitFor(fetch, predicate, { timeoutMs = 60000, intervalMs = 200 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastValue;
@@ -259,8 +289,13 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       "Scenario 44: mixed-provider swarm probe through the packaged SDK",
       { skip: !(hasAnthropicKey() && hasOpenAIKey()) },
       async () => {
-      const client = await connectClient({ isolated: true });
-      const mob = await client.createMob({
+      const scenario = "Scenario 44";
+      const client = await withStepTimeout(
+        scenario,
+        "connect isolated client",
+        connectClient({ isolated: true }),
+      );
+      const mob = await withStepTimeout(scenario, "create mob", client.createMob({
         definition: {
           id: `ts-sdk-swarm-${Date.now()}`,
           orchestrator: { profile: "lead" },
@@ -285,20 +320,20 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
             },
           },
         },
-      });
+      }));
 
-      const lead = await mob.spawn({
+      const lead = await withStepTimeout(scenario, "spawn lead", mob.spawn({
         profile: "lead",
         agentIdentity: "lead-1",
         initialMessage: "Acknowledge the lead role in one sentence.",
         runtimeMode: "autonomous_host",
-      });
-      const reviewer = await mob.spawn({
+      }));
+      const reviewer = await withStepTimeout(scenario, "spawn reviewer", mob.spawn({
         profile: "reviewer",
         agentIdentity: "reviewer-1",
         initialMessage: "Acknowledge the reviewer role in one sentence.",
         runtimeMode: "turn_driven",
-      });
+      }));
       assert.equal(lead.agentIdentity, "lead-1");
       assert.ok(lead.agentRuntimeId);
       assert.ok(Number.isInteger(lead.fenceToken));
@@ -306,48 +341,80 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       assert.ok(reviewer.agentRuntimeId);
       assert.ok(Number.isInteger(reviewer.fenceToken));
 
-      await mob.wire("lead-1", "reviewer-1");
-      const append = await mob.appendSystemContext(
+      await withStepTimeout(scenario, "wire lead -> reviewer", mob.wire("lead-1", "reviewer-1"));
+      const append = await withStepTimeout(scenario, "append reviewer system context", mob.appendSystemContext(
         "reviewer-1",
         "Remember the swarm marker [TS-SWARM].",
         { source: "typescript-sdk", idempotencyKey: "ts-swarm-marker" },
-      );
+      ));
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(append.status)));
       if (append.agent_identity != null) {
         assert.equal(append.agent_identity, "reviewer-1");
       }
 
-      const subscription = await mob.subscribeMemberEvents("reviewer-1");
+      const subscription = await withStepTimeout(
+        scenario,
+        "subscribe reviewer member events",
+        mob.subscribeMemberEvents("reviewer-1"),
+      );
       try {
-        await mob.member("reviewer-1").send(
+        const reviewerReceipt = await withStepTimeout(
+          scenario,
+          "send reviewer ready turn",
+          mob.member("reviewer-1").send(
           "Repeat the swarm marker and say reviewer ready.",
-        );
-        const iterator = subscription[Symbol.asyncIterator]();
-        const firstEvent = await Promise.race([
-          iterator.next(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("timed out waiting for reviewer event")), 60000),
           ),
-        ]);
+        );
+        assert.equal(reviewerReceipt.agentIdentity, "reviewer-1");
+        assert.equal(reviewerReceipt.agentRuntimeId, reviewer.agentRuntimeId);
+        assert.equal(reviewerReceipt.fenceToken, reviewer.fenceToken);
+        const iterator = subscription[Symbol.asyncIterator]();
+        let firstEventTimer = null;
+        const firstEvent = await withStepTimeout(scenario, "receive first reviewer event", Promise.race([
+          iterator.next(),
+          new Promise((_, reject) => {
+            firstEventTimer = setTimeout(
+              () => reject(new Error("timed out waiting for reviewer event")),
+              60000,
+            );
+          }),
+        ]).finally(() => {
+          if (firstEventTimer !== null) {
+            clearTimeout(firstEventTimer);
+          }
+        }));
         assert.equal(firstEvent.done, false);
       } finally {
-        await subscription.close();
+        await withStepTimeout(scenario, "close reviewer member event subscription", subscription.close());
       }
 
-      const members = await mob.listMembers();
+      const reviewerState = await waitFor(
+        async () => withStepTimeout(scenario, "poll reviewer member status", mob.memberStatus("reviewer-1")),
+        (state) => (state.outputPreview || "").toLowerCase().includes("reviewer ready"),
+        { timeoutMs: 120000, intervalMs: 500 },
+      );
+      const reviewerText = (reviewerState.outputPreview || "").toLowerCase();
+      assert.ok(reviewerText.includes("reviewer ready"));
+      assert.ok(reviewerText.includes("ts-swarm"));
+
+      const members = await withStepTimeout(scenario, "list members before respawn", mob.listMembers());
       const memberIds = members.map((member) => member.agentIdentity);
       assert.ok(memberIds.includes("lead-1"));
       assert.ok(memberIds.includes("reviewer-1"));
 
-      await mob.respawn(
+      const respawn = await withStepTimeout(scenario, "respawn reviewer", mob.respawn(
         "reviewer-1",
         "Come back online and say REVIEWER_RESPAWN_44.",
-      );
+      ));
+      assert.equal(respawn.receipt.agentIdentity, "reviewer-1");
+      assert.ok(respawn.receipt.agentRuntimeId);
       const membersAfterRespawn = await waitFor(
-        async () => mob.listMembers(),
+        async () => withStepTimeout(scenario, "poll members after respawn", mob.listMembers()),
         (items) => items.some(
           (member) =>
             member.agentIdentity === "reviewer-1"
+            && member.agentRuntimeId === respawn.receipt.agentRuntimeId
+            && member.fenceToken === respawn.receipt.fenceToken
             && member.state === "Active",
         ),
         { timeoutMs: 60000, intervalMs: 200 },
@@ -357,30 +424,45 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         (member) => member.agentIdentity === "reviewer-1",
       );
       assert.ok(respawnedReviewer?.agentRuntimeId);
-      const respawnReceipt = await mob.member("reviewer-1").send(
+      const respawnReceipt = await withStepTimeout(
+        scenario,
+        "send respawn reviewer turn",
+        mob.member("reviewer-1").send(
         "Reply with REVIEWER_RESPAWN_44.",
+        ),
       );
       assert.equal(respawnReceipt.agentIdentity, "reviewer-1");
-      assert.ok(respawnReceipt.agentRuntimeId);
+      assert.equal(respawnReceipt.agentRuntimeId, respawn.receipt.agentRuntimeId);
+      assert.equal(respawnReceipt.fenceToken, respawn.receipt.fenceToken);
+      const respawnedState = await waitFor(
+        async () => withStepTimeout(scenario, "poll reviewer status after respawn send", mob.memberStatus("reviewer-1")),
+        (state) => (state.outputPreview || "").toLowerCase().includes("reviewer_respawn_44"),
+        { timeoutMs: 120000, intervalMs: 500 },
+      );
+      assert.ok((respawnedState.outputPreview || "").toLowerCase().includes("reviewer_respawn_44"));
 
-      await mob.retire("reviewer-1");
+      await withStepTimeout(scenario, "retire reviewer", mob.retire("reviewer-1"));
       const membersAfterRetire = await waitFor(
-        async () => mob.listMembers(),
+        async () => withStepTimeout(scenario, "poll members after retire", mob.listMembers()),
         (items) => items.every((member) => member.agentIdentity !== "reviewer-1"),
         { timeoutMs: 60000, intervalMs: 200 },
       );
       assert.ok(membersAfterRetire.every((member) => member.agentIdentity !== "reviewer-1"));
 
       try {
-        const broken = await mob.spawn({
+        const broken = await withStepTimeout(scenario, "spawn broken member", mob.spawn({
           profile: "broken",
           agentIdentity: "broken-1",
           runtimeMode: "turn_driven",
-        });
+        }));
         assert.ok(broken.agentRuntimeId);
         await assert.rejects(
-          () => mob.member("broken-1").send(
+          () => withStepTimeout(
+            scenario,
+            "send broken member turn",
+            mob.member("broken-1").send(
             "This turn must fail because the member model is invalid.",
+          ),
           ),
         );
       } catch (error) {

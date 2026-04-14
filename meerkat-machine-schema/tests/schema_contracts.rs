@@ -594,7 +594,6 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
         "ReplayAllEvents",
         "RecordOperatorActionProvenance",
         "GetMember",
-        "KickoffBarrierSnapshot",
         "SetSpawnPolicy",
         "Shutdown",
         "ForceCancel",
@@ -747,7 +746,6 @@ fn every_query_runtime_command_has_transition_coverage() {
         "PollEvents",
         "ReplayAllEvents",
         "GetMember",
-        "KickoffBarrierSnapshot",
     ] {
         assert!(
             mob_transitioned.contains(required),

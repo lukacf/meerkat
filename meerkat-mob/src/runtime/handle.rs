@@ -1021,15 +1021,6 @@ impl MobHandle {
                     .await?;
                 Ok(MobMachineCommandResult::OrchestratorSnapshot(snapshot))
             }
-            MobMachineCommand::KickoffBarrierSnapshot { meerkat_ids } => {
-                let waiters = self
-                    .send_actor_command(|reply_tx| MobCommand::KickoffBarrierSnapshot {
-                        meerkat_ids,
-                        reply_tx,
-                    })
-                    .await?;
-                Ok(MobMachineCommandResult::KickoffBarrierSnapshot(waiters))
-            }
             MobMachineCommand::SetSpawnPolicy { policy } => {
                 self.send_actor_command(|reply_tx| MobCommand::SetSpawnPolicy { policy, reply_tx })
                     .await?;

@@ -106,10 +106,6 @@ pub(super) enum MobCommand {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
-    KickoffBarrierSnapshot {
-        meerkat_ids: Vec<MeerkatId>,
-        reply_tx: oneshot::Sender<Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>>,
-    },
     KickoffOutcomeResolved {
         meerkat_id: MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,

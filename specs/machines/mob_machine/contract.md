@@ -61,7 +61,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplayAllEvents`
 - `RecordOperatorActionProvenance`
 - `GetMember`
-- `KickoffBarrierSnapshot`
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
@@ -605,31 +604,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `GetMemberDestroyed`
 - From: `Destroyed`
 - On: `GetMember`()
-- To: `Destroyed`
-
-### `KickoffBarrierSnapshotCreating`
-- From: `Creating`
-- On: `KickoffBarrierSnapshot`()
-- To: `Creating`
-
-### `KickoffBarrierSnapshotRunning`
-- From: `Running`
-- On: `KickoffBarrierSnapshot`()
-- To: `Running`
-
-### `KickoffBarrierSnapshotStopped`
-- From: `Stopped`
-- On: `KickoffBarrierSnapshot`()
-- To: `Stopped`
-
-### `KickoffBarrierSnapshotCompleted`
-- From: `Completed`
-- On: `KickoffBarrierSnapshot`()
-- To: `Completed`
-
-### `KickoffBarrierSnapshotDestroyed`
-- From: `Destroyed`
-- On: `KickoffBarrierSnapshot`()
 - To: `Destroyed`
 
 ### `SetSpawnPolicyCreating`

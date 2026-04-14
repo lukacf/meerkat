@@ -793,7 +793,6 @@ fn is_mob_runtime_input_variant(variant: &str) -> bool {
             | "ReplayAllEvents"
             | "RecordOperatorActionProvenance"
             | "GetMember"
-            | "KickoffBarrierSnapshot"
             | "SetSpawnPolicy"
             | "Shutdown"
             | "ForceCancel"
@@ -848,7 +847,6 @@ fn absorbed_mob_input_variants() -> Vec<VariantSchema> {
         variant("ReplayAllEvents"),
         variant("RecordOperatorActionProvenance"),
         variant("GetMember"),
-        variant("KickoffBarrierSnapshot"),
         variant("SetSpawnPolicy"),
         variant("Shutdown"),
         variant("ForceCancel"),
@@ -944,7 +942,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         "ReplayAllEvents",
         "RecordOperatorActionProvenance",
         "GetMember",
-        "KickoffBarrierSnapshot",
         "SetSpawnPolicy",
     ] {
         for phase in &all_phases {

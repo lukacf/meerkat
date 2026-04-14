@@ -29,26 +29,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
 ///
-/// The `JoinHandle` is for abort on stop/dispose. The `completion_rx` is for
-/// barrier waiters. The `watch::Sender` lives inside the spawned task — when
-/// the task completes (normally or panic), the sender drops, closing the
-/// channel and unblocking all waiters.
+/// The `JoinHandle` is for abort on stop/dispose.
 pub(super) struct InitialTurnHandle {
     handle: tokio::task::JoinHandle<()>,
-    completion_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl InitialTurnHandle {
-    fn is_finished(&self) -> bool {
-        self.handle.is_finished()
-    }
-
     fn abort(self) {
         self.handle.abort();
-    }
-
-    fn completion_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.completion_rx.clone()
     }
 }
 
@@ -855,10 +843,7 @@ impl MobActor {
                     ))
                 })?;
 
-            // Spawn background task for completion wait + barrier signal.
-            // The watch::Sender lives inside the task — drops on completion
-            // or panic, closing the channel for barrier waiters.
-            let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
+            // Spawn background task for completion wait.
             let log_id = meerkat_id.clone();
             let completion_command_tx = self.command_tx.clone();
             let handle = tokio::spawn(async move {
@@ -882,17 +867,12 @@ impl MobActor {
                         let _ = ack_rx.await;
                     }
                 }
-                let _ = completion_tx.send(true);
-                // completion_tx drops here (normal) or on panic (unwind).
             });
 
-            self.autonomous_initial_turns.lock().await.insert(
-                meerkat_id.clone(),
-                InitialTurnHandle {
-                    handle,
-                    completion_rx,
-                },
-            );
+            self.autonomous_initial_turns
+                .lock()
+                .await
+                .insert(meerkat_id.clone(), InitialTurnHandle { handle });
         }
 
         tracing::debug!(meerkat_id = %meerkat_id, "autonomous member started");
@@ -1133,22 +1113,6 @@ impl MobActor {
         self.stop_autonomous_member(&entry.meerkat_id, &entry.member_ref)
             .await
             .map_err(|error| (entry.meerkat_id, error))
-    }
-
-    async fn snapshot_kickoff_barrier_state(
-        &self,
-        meerkat_ids: &[MeerkatId],
-    ) -> Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)> {
-        let mut turns = self.autonomous_initial_turns.lock().await;
-        turns.retain(|_, entry| !entry.is_finished());
-        meerkat_ids
-            .iter()
-            .filter_map(|id| {
-                turns
-                    .get(id)
-                    .map(|entry| (id.clone(), entry.completion_receiver()))
-            })
-            .collect()
     }
 
     /// Ensure all autonomous roster members have their runtime ready.
@@ -1405,13 +1369,6 @@ impl MobActor {
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
-                }
-                MobCommand::KickoffBarrierSnapshot {
-                    meerkat_ids,
-                    reply_tx,
-                } => {
-                    let snapshot = self.snapshot_kickoff_barrier_state(&meerkat_ids).await;
-                    let _ = reply_tx.send(snapshot);
                 }
                 MobCommand::KickoffOutcomeResolved {
                     meerkat_id,

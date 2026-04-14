@@ -131,11 +131,6 @@ pub(crate) enum MobMachineCommand {
     FlowTrackerCounts,
     #[cfg(test)]
     OrchestratorSnapshot,
-    #[allow(dead_code)]
-    // Kept for dispatch pipeline; construction removed by kickoff barrier rewrite
-    KickoffBarrierSnapshot {
-        meerkat_ids: Vec<MeerkatId>,
-    },
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
     },
@@ -173,8 +168,6 @@ pub(crate) enum MobMachineCommandResult {
     FlowTrackerCounts((usize, usize)),
     #[cfg(test)]
     OrchestratorSnapshot(MobOrchestratorSnapshot),
-    #[allow(dead_code)]
-    KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
 }
 
 #[doc(hidden)]

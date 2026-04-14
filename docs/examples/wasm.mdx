@@ -78,8 +78,8 @@ const mobId = await mob_create(JSON.stringify({
 
 // Spawn members
 await mob_spawn(mobId, JSON.stringify([
-  { profile: "lead", meerkat_id: "lead-1" },
-  { profile: "worker", meerkat_id: "worker-1" },
+  { profile: "lead", agent_identity: "lead-1" },
+  { profile: "worker", agent_identity: "worker-1" },
 ]));
 
 // Wire peers

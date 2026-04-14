@@ -114,18 +114,18 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `mob.lifecycle(action)` | Stop, resume, complete, destroy, or reset the mob |
 | `mob.spawn(spec)` | Spawn a member |
 | `mob.spawnMany(specs)` | Batch-spawn members |
-| `mob.retire(meerkatId)` | Retire a member |
-| `mob.respawn(meerkatId)` | Respawn a member |
+| `mob.retire(agentIdentity)` | Retire a member |
+| `mob.respawn(agentIdentity)` | Respawn a member |
 | `mob.wire(a, b)` | Wire two members |
 | `mob.unwire(a, b)` | Remove wiring |
 | `mob.listMembers()` | List mob members |
-| `mob.member(meerkatId).send(content, handlingMode?)` | Send work to a member |
+| `mob.member(agentIdentity).send(content, handlingMode?)` | Send work to a member |
 | `mob.readEvents(options?)` | Read mob event history (`mob/events`) |
 | `mob.listFlows()` | List available flows |
 | `mob.runFlow(flowId, params)` | Start a flow run |
 | `mob.flowStatus(runId)` | Get flow run status |
 | `mob.cancelFlow(runId)` | Cancel a flow run |
-| `mob.subscribeMemberEvents(meerkatId)` | Subscribe to member events; returns `EventSubscription<AgentEventEnvelope>` |
+| `mob.subscribeMemberEvents(agentIdentity)` | Subscribe to member events; returns `EventSubscription<AgentEventEnvelope>` |
 | `mob.subscribeEvents()` | Subscribe to mob-wide events; returns `EventSubscription<AttributedMobEvent>` |
 
 ---

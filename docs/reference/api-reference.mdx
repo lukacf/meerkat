@@ -77,7 +77,7 @@ Mob runtime APIs live primarily in:
 | `MobSessionService` | Session-service bridge trait required by mob runtime |
 | `MobState` | Lifecycle state (`Creating`, `Running`, `Stopped`, `Completed`, `Destroyed`) |
 | `MobRun` | Persisted flow run aggregate |
-| `SpawnMemberSpec` | Batch spawn input contract (`profile_name`, `meerkat_id`, `initial_message`, `runtime_mode`, `backend`) |
+| `SpawnMemberSpec` | Batch spawn input contract (`profile_name`, `agent_identity`, `initial_message`, `runtime_mode`, `backend`) |
 
 ### `MobBuilder` methods
 
@@ -98,7 +98,7 @@ Mob runtime APIs live primarily in:
 |------|---------|
 | `status()` | Current lifecycle state |
 | `roster().await` / `list_members().await` | Membership inspection |
-| `spawn(...).await` | Spawn member (returns `MemberRef`) |
+| `spawn(...).await` | Spawn member (returns `SpawnResult`) |
 | `spawn_many(Vec<SpawnMemberSpec>).await` | Batch spawn members in parallel (results preserve input order) |
 | `spawn_with_backend(...).await` | Spawn member with explicit backend override |
 | `spawn_with_options(...).await` | Spawn member with runtime mode and backend overrides |

@@ -230,7 +230,7 @@ impl AgentRuntimeId {
 
 impl fmt::Display for AgentRuntimeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@gen{}", self.identity, self.generation)
+        write!(f, "{}:{}", self.identity, self.generation.get())
     }
 }
 
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_agent_runtime_id_display() {
         let rid = AgentRuntimeId::new(AgentIdentity::from("coder"), Generation::new(2));
-        assert_eq!(rid.to_string(), "coder@gen2");
+        assert_eq!(rid.to_string(), "coder:2");
     }
 
     #[test]

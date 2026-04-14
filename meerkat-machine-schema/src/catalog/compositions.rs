@@ -1,6 +1,6 @@
 use crate::{
     ActorKind, ActorSchema, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionTransactionPlan, CompositionWitness, EntryInput, Expr,
+    CompositionStateLimits, CompositionTransactionPlan, CompositionWitness, EntryInput,
     MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget,
 };
 
@@ -391,14 +391,6 @@ fn bind(to_field: &str, from_field: &str) -> RouteFieldBinding {
             from_field: from_field.into(),
             allow_named_alias: false,
         },
-    }
-}
-
-#[allow(dead_code)]
-fn literal_string(to_field: &str, value: &str) -> RouteFieldBinding {
-    RouteFieldBinding {
-        to_field: to_field.into(),
-        source: RouteBindingSource::Literal(Expr::String(value.into())),
     }
 }
 

@@ -318,8 +318,6 @@ struct RuntimeState {
     /// Opaque browser-local handles mapped to runtime-owned sessions.
     sessions: BTreeMap<u32, RuntimeHandleSession>,
     next_handle: u32,
-    #[allow(dead_code)]
-    model: String,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
 }
@@ -1168,7 +1166,6 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
-        model: model.clone(),
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1228,7 +1225,6 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         session_service,
         sessions: BTreeMap::new(),
         next_handle: 1,
-        model: model.clone(),
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });

@@ -52,7 +52,7 @@ Start ==
     /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, inflight_work_id, active_member_count, active_run_count, pending_spawn_count, retiring_member_count, wiring_edge_count, task_count, event_subscription_count, active_frame_count, active_loop_count, coordinator_bound, kickoff_pending >>
 
 
-SpawnMember(agent_identity, agent_runtime_id, fence_token, generation) ==
+Spawn(agent_identity, agent_runtime_id, fence_token, generation) ==
     /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -1130,7 +1130,7 @@ CancelAllWorkRunning ==
 
 Next ==
     \/ Start
-    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : SpawnMember(agent_identity, agent_runtime_id, fence_token, generation)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : Spawn(agent_identity, agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeReady(agent_runtime_id, fence_token)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : SubmitWork(agent_runtime_id, fence_token, work_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E work_id \in WorkIdValues : ObserveWorkCompleted(agent_runtime_id, fence_token, work_id)

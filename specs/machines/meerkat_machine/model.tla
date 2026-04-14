@@ -389,7 +389,7 @@ RunCancelled(work_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-RecoverRuntime ==
+Recover ==
     /\ phase = "Idle" \/ phase = "Stopped" \/ phase = "Retired"
     /\ phase' = "Recovering"
     /\ model_step_count' = model_step_count + 1
@@ -406,7 +406,7 @@ RetireRequestedFromIdle ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-ResetRuntime ==
+Reset ==
     /\ phase = "Attached" \/ phase = "Retired" \/ phase = "Stopped" \/ phase = "Recovering"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
@@ -433,7 +433,7 @@ StopRuntimeExecutor ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, resolved_peer_keys, peer_reachability, peer_last_reason, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-DestroyRuntime ==
+Destroy ==
     /\ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
     /\ (active_runtime_id # None)
     /\ phase' = "Destroyed"
@@ -511,7 +511,7 @@ ListActiveInputsIdle(arg_session_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortDrainAttached(arg_session_id) ==
+AbortAttached(arg_session_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ phase' = "Attached"
@@ -519,7 +519,7 @@ AbortDrainAttached(arg_session_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortDrainRunning(arg_session_id) ==
+AbortRunning(arg_session_id) ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ phase' = "Running"
@@ -527,7 +527,7 @@ AbortDrainRunning(arg_session_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-WaitDrainAttached(arg_session_id) ==
+WaitAttached(arg_session_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ phase' = "Attached"
@@ -535,7 +535,7 @@ WaitDrainAttached(arg_session_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-WaitDrainRunning(arg_session_id) ==
+WaitRunning(arg_session_id) ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ phase' = "Running"
@@ -543,7 +543,7 @@ WaitDrainRunning(arg_session_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortAllDrainsAttached ==
+AbortAllAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
@@ -551,7 +551,7 @@ AbortAllDrainsAttached ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortAllDrainsRunning ==
+AbortAllRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -559,7 +559,7 @@ AbortAllDrainsRunning ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortAllDrainsRecovering ==
+AbortAllRecovering ==
     /\ phase = "Recovering"
     /\ phase' = "Recovering"
     /\ model_step_count' = model_step_count + 1
@@ -567,7 +567,7 @@ AbortAllDrainsRecovering ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortAllDrainsRetired ==
+AbortAllRetired ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
@@ -575,7 +575,7 @@ AbortAllDrainsRetired ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-AbortAllDrainsStopped ==
+AbortAllStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -731,7 +731,7 @@ LoadBoundaryReceiptRunning(runtime_id, sequence) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-PrepareLegacyRunAttached(arg_session_id) ==
+PrepareAttached(arg_session_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ phase' = "Attached"
@@ -763,7 +763,7 @@ StartImmediateContextAttached ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-CommitLegacyRunRunning(input_id, run_id) ==
+CommitRunning(input_id, run_id) ==
     /\ phase = "Running"
     /\ (active_work_id # None)
     /\ phase' = "Running"
@@ -771,7 +771,7 @@ CommitLegacyRunRunning(input_id, run_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-FailLegacyRunRunning(run_id) ==
+FailRunning(run_id) ==
     /\ phase = "Running"
     /\ (active_work_id # None)
     /\ phase' = "Running"
@@ -1315,7 +1315,7 @@ ShutdownSurfaceRunning ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, resolved_peer_keys, peer_reachability, peer_last_reason, interrupt_pending, shutdown_pending, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-RecycleRuntime ==
+Recycle ==
     /\ phase = "Attached" \/ phase = "Running" \/ phase = "Recovering" \/ phase = "Retired" \/ phase = "Stopped"
     /\ (active_runtime_id # None)
     /\ phase' = "Idle"
@@ -1362,11 +1362,11 @@ Next ==
     \/ \E work_id \in WorkIdValues : RunCompleted(work_id)
     \/ \E work_id \in WorkIdValues : RunFailed(work_id)
     \/ \E work_id \in WorkIdValues : RunCancelled(work_id)
-    \/ RecoverRuntime
+    \/ Recover
     \/ RetireRequestedFromIdle
-    \/ ResetRuntime
+    \/ Reset
     \/ StopRuntimeExecutor
-    \/ DestroyRuntime
+    \/ Destroy
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsIdle(arg_session_id, intents)
     \/ \E arg_session_id \in SessionIdValues : ContainsSessionIdle(arg_session_id)
@@ -1375,15 +1375,15 @@ Next ==
     \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateIdle(arg_session_id, input_id)
     \/ \E arg_session_id \in SessionIdValues : ListActiveInputsIdle(arg_session_id)
-    \/ \E arg_session_id \in SessionIdValues : AbortDrainAttached(arg_session_id)
-    \/ \E arg_session_id \in SessionIdValues : AbortDrainRunning(arg_session_id)
-    \/ \E arg_session_id \in SessionIdValues : WaitDrainAttached(arg_session_id)
-    \/ \E arg_session_id \in SessionIdValues : WaitDrainRunning(arg_session_id)
-    \/ AbortAllDrainsAttached
-    \/ AbortAllDrainsRunning
-    \/ AbortAllDrainsRecovering
-    \/ AbortAllDrainsRetired
-    \/ AbortAllDrainsStopped
+    \/ \E arg_session_id \in SessionIdValues : AbortAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : AbortRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : WaitAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : WaitRunning(arg_session_id)
+    \/ AbortAllAttached
+    \/ AbortAllRunning
+    \/ AbortAllRecovering
+    \/ AbortAllRetired
+    \/ AbortAllStopped
     \/ EnsureDrainRunningAttached
     \/ EnsureDrainRunningRunning
     \/ \E runtime_id \in StringValues : IngestAttached(runtime_id)
@@ -1402,12 +1402,12 @@ Next ==
     \/ \E runtime_id \in StringValues : RuntimeStateRunning(runtime_id)
     \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptAttached(runtime_id, sequence)
     \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptRunning(runtime_id, sequence)
-    \/ \E arg_session_id \in SessionIdValues : PrepareLegacyRunAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : PrepareAttached(arg_session_id)
     \/ StartConversationRunAttached
     \/ StartImmediateAppendAttached
     \/ StartImmediateContextAttached
-    \/ \E input_id \in InputIdValues : \E run_id \in RunIdValues : CommitLegacyRunRunning(input_id, run_id)
-    \/ \E run_id \in RunIdValues : FailLegacyRunRunning(run_id)
+    \/ \E input_id \in InputIdValues : \E run_id \in RunIdValues : CommitRunning(input_id, run_id)
+    \/ \E run_id \in RunIdValues : FailRunning(run_id)
     \/ AdmitQueuedRunning
     \/ AdmitConsumedOnAcceptRunning
     \/ StageDrainSnapshotRunning
@@ -1475,7 +1475,7 @@ Next ==
     \/ SnapshotAlignedRunning
     \/ ShutdownSurfaceAttached
     \/ ShutdownSurfaceRunning
-    \/ RecycleRuntime
+    \/ Recycle
     \/ TerminalStutter
 
 running_has_active_work == ((phase # "Running") \/ (active_work_id # None))

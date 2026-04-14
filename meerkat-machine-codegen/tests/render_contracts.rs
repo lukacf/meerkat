@@ -51,7 +51,9 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     assert!(rendered.contains(
         "STATE\n  phase : {\"Creating\", \"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}"
     ));
-    assert!(rendered.contains("INPUTS\n  MobMachineInput = {\"Start\", \"SpawnMember\", \"ObserveRuntimeReady\", \"SubmitWork\""));
+    assert!(rendered.contains(
+        "INPUTS\n  MobMachineInput = {\"Start\", \"Spawn\", \"ObserveRuntimeReady\", \"SubmitWork\""
+    ));
     assert!(rendered.contains("AgentIdentity"));
     assert!(!rendered.contains("MeerkatId"));
 }

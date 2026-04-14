@@ -251,11 +251,11 @@ pub fn meerkat_machine() -> MachineSchema {
                         name: "RunCancelled".into(),
                         fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
                     },
-                    variant("RecoverRuntime"),
-                    variant("RetireRuntime"),
-                    variant("ResetRuntime"),
+                    variant("Recover"),
+                    variant("Retire"),
+                    variant("Reset"),
                     variant("StopRuntimeExecutor"),
-                    variant("DestroyRuntime"),
+                    variant("Destroy"),
                 ];
                 variants.extend(absorbed_meerkat_input_variants());
                 variants
@@ -1140,10 +1140,10 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![work_identity_emit("WorkCancelled", "work_id")],
             },
             TransitionSchema {
-                name: "RecoverRuntime".into(),
+                name: "Recover".into(),
                 from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
                 on: InputMatch {
-                    variant: "RecoverRuntime".into(),
+                    variant: "Recover".into(),
                     bindings: vec![],
                 },
                 guards: vec![],
@@ -1155,7 +1155,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RetireRequestedFromIdle".into(),
                 from: vec!["Attached".into(), "Running".into()],
                 on: InputMatch {
-                    variant: "RetireRuntime".into(),
+                    variant: "Retire".into(),
                     bindings: vec![],
                 },
                 guards: vec![],
@@ -1164,7 +1164,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![runtime_identity_emit("RuntimeRetired")],
             },
             TransitionSchema {
-                name: "ResetRuntime".into(),
+                name: "Reset".into(),
                 from: vec![
                     "Attached".into(),
                     "Retired".into(),
@@ -1172,7 +1172,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Recovering".into(),
                 ],
                 on: InputMatch {
-                    variant: "ResetRuntime".into(),
+                    variant: "Reset".into(),
                     bindings: vec![],
                 },
                 guards: vec![],
@@ -1247,7 +1247,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("stop", "runtime executor stopped")],
             },
             TransitionSchema {
-                name: "DestroyRuntime".into(),
+                name: "Destroy".into(),
                 from: vec![
                     "Attached".into(),
                     "Running".into(),
@@ -1256,7 +1256,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Stopped".into(),
                 ],
                 on: InputMatch {
-                    variant: "DestroyRuntime".into(),
+                    variant: "Destroy".into(),
                     bindings: vec![],
                 },
                 guards: vec![runtime_is_bound_guard()],
@@ -1682,12 +1682,12 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
             fields: vec![field("session_id", named("SessionId"))],
         },
         VariantSchema {
-            name: "AbortDrain".into(),
+            name: "Abort".into(),
             fields: vec![field("session_id", named("SessionId"))],
         },
-        variant("AbortAllDrains"),
+        variant("AbortAll"),
         VariantSchema {
-            name: "WaitDrain".into(),
+            name: "Wait".into(),
             fields: vec![field("session_id", named("SessionId"))],
         },
         VariantSchema {
@@ -1718,18 +1718,18 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
             fields: vec![field("input_id", named("InputId"))],
         },
         VariantSchema {
-            name: "PrepareLegacyRun".into(),
+            name: "Prepare".into(),
             fields: vec![field("session_id", named("SessionId"))],
         },
         VariantSchema {
-            name: "CommitLegacyRun".into(),
+            name: "Commit".into(),
             fields: vec![
                 field("input_id", named("InputId")),
                 field("run_id", named("RunId")),
             ],
         },
         VariantSchema {
-            name: "FailLegacyRun".into(),
+            name: "Fail".into(),
             fields: vec![field("run_id", named("RunId"))],
         },
         variant("AdmitQueued"),
@@ -1793,7 +1793,7 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
         variant("FinalizeRemovalForced"),
         variant("SnapshotAligned"),
         variant("ShutdownSurface"),
-        variant("RecycleRuntime"),
+        variant("Recycle"),
     ]
 }
 
@@ -1821,10 +1821,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    for (variant, bindings) in [
-        ("AbortDrain", vec!["session_id"]),
-        ("WaitDrain", vec!["session_id"]),
-    ] {
+    for (variant, bindings) in [("Abort", vec!["session_id"]), ("Wait", vec!["session_id"])] {
         transitions.push(self_loop_transition_with(
             &format!("{variant}Attached"),
             "Attached",
@@ -1847,9 +1844,9 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
 
     for phase in ["Attached", "Running", "Recovering", "Retired", "Stopped"] {
         transitions.push(self_loop_transition_with(
-            &format!("AbortAllDrains{phase}"),
+            &format!("AbortAll{phase}"),
             phase,
-            "AbortAllDrains",
+            "AbortAll",
             vec![],
             vec![Update::Assign {
                 field: "drain_running".into(),
@@ -1949,7 +1946,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     }
 
     for (variant, bindings) in [
-        ("PrepareLegacyRun", vec!["session_id"]),
+        ("Prepare", vec!["session_id"]),
         ("StartConversationRun", vec![]),
         ("StartImmediateAppend", vec![]),
         ("StartImmediateContext", vec![]),
@@ -1966,12 +1963,8 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     }
 
     for (variant, bindings, emit_variant) in [
-        ("CommitLegacyRun", vec!["input_id", "run_id"], None),
-        (
-            "FailLegacyRun",
-            vec!["run_id"],
-            Some("RecordTerminalOutcome"),
-        ),
+        ("Commit", vec!["input_id", "run_id"], None),
+        ("Fail", vec!["run_id"], Some("RecordTerminalOutcome")),
         ("AdmitQueued", vec![], Some("ResolveAdmission")),
         ("AdmitConsumedOnAccept", vec![], Some("ResolveAdmission")),
         ("StageDrainSnapshot", vec![], None),
@@ -2090,7 +2083,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     }
 
     transitions.push(TransitionSchema {
-        name: "RecycleRuntime".into(),
+        name: "Recycle".into(),
         from: vec![
             "Attached".into(),
             "Running".into(),
@@ -2099,7 +2092,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             "Stopped".into(),
         ],
         on: InputMatch {
-            variant: "RecycleRuntime".into(),
+            variant: "Recycle".into(),
             bindings: vec![],
         },
         guards: vec![runtime_is_bound_guard()],

@@ -19,7 +19,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Start`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `SpawnMember`
+- `Spawn`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ObserveRuntimeReady`

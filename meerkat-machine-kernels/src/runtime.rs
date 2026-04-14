@@ -1141,7 +1141,7 @@ mod tests {
             .transition(
                 &running.next_state,
                 &KernelInput {
-                    variant: "SpawnMember".into(),
+                    variant: "Spawn".into(),
                     fields: BTreeMap::from([
                         (
                             "agent_identity".into(),
@@ -1157,7 +1157,7 @@ mod tests {
                 },
             )
             .expect("spawn member");
-        assert_eq!(spawned.transition, "SpawnMember");
+        assert_eq!(spawned.transition, "Spawn");
         assert_eq!(spawned.next_state.phase, "Running");
         assert!(
             spawned

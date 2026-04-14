@@ -184,7 +184,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             EntryInput {
                 name: "spawn_member".into(),
                 machine: "mob".into(),
-                input_variant: "SpawnMember".into(),
+                input_variant: "Spawn".into(),
             },
             EntryInput {
                 name: "submit_work".into(),
@@ -232,7 +232,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "RequestRuntimeRetire",
                 "meerkat",
-                "RetireRuntime",
+                "Retire",
                 &[],
             ),
             route(
@@ -240,7 +240,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "RequestRuntimeDestroy",
                 "meerkat",
-                "DestroyRuntime",
+                "Destroy",
                 &[],
             ),
             route(

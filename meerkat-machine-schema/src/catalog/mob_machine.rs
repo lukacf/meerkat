@@ -87,7 +87,7 @@ pub fn mob_machine() -> MachineSchema {
                 let mut variants = vec![
                     variant("Start"),
                     VariantSchema {
-                        name: "SpawnMember".into(),
+                        name: "Spawn".into(),
                         fields: identity_runtime_fields(),
                     },
                     VariantSchema {
@@ -272,10 +272,10 @@ pub fn mob_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
-                name: "SpawnMember".into(),
+                name: "Spawn".into(),
                 from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
                 on: InputMatch {
-                    variant: "SpawnMember".into(),
+                    variant: "Spawn".into(),
                     bindings: vec![
                         "agent_identity".into(),
                         "agent_runtime_id".into(),

@@ -9,8 +9,8 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Routes
 - `binding_request_reaches_meerkat`: `mob`.`RequestRuntimeBinding` -> `meerkat`.`PrepareBindings` [Immediate]
 - `member_work_reaches_meerkat`: `mob`.`SubmitMemberWork` -> `meerkat`.`SubmitMobWork` [Immediate]
-- `retire_request_reaches_meerkat`: `mob`.`RequestRuntimeRetire` -> `meerkat`.`RetireRuntime` [Immediate]
-- `destroy_request_reaches_meerkat`: `mob`.`RequestRuntimeDestroy` -> `meerkat`.`DestroyRuntime` [Immediate]
+- `retire_request_reaches_meerkat`: `mob`.`RequestRuntimeRetire` -> `meerkat`.`Retire` [Immediate]
+- `destroy_request_reaches_meerkat`: `mob`.`RequestRuntimeDestroy` -> `meerkat`.`Destroy` [Immediate]
 - `runtime_bound_reaches_mob`: `meerkat`.`RuntimeBound` -> `mob`.`ObserveRuntimeReady` [Immediate]
 - `runtime_retired_reaches_mob`: `meerkat`.`RuntimeRetired` -> `mob`.`ObserveRuntimeRetired` [Immediate]
 - `runtime_destroyed_reaches_mob`: `meerkat`.`RuntimeDestroyed` -> `mob`.`ObserveRuntimeDestroyed` [Immediate]

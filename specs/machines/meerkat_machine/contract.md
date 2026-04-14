@@ -52,11 +52,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunCompleted`(work_id: WorkId)
 - `RunFailed`(work_id: WorkId)
 - `RunCancelled`(work_id: WorkId)
-- `RecoverRuntime`
-- `RetireRuntime`
-- `ResetRuntime`
+- `Recover`
+- `Retire`
+- `Reset`
 - `StopRuntimeExecutor`
-- `DestroyRuntime`
+- `Destroy`
 - `EnsureSessionWithExecutor`(session_id: SessionId)
 - `SetSilentIntents`(session_id: SessionId, intents: Set<String>)
 - `ContainsSession`(session_id: SessionId)
@@ -65,18 +65,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OpsLifecycleRegistry`(session_id: SessionId)
 - `InputState`(session_id: SessionId, input_id: InputId)
 - `ListActiveInputs`(session_id: SessionId)
-- `AbortDrain`(session_id: SessionId)
-- `AbortAllDrains`
-- `WaitDrain`(session_id: SessionId)
+- `Abort`(session_id: SessionId)
+- `AbortAll`
+- `Wait`(session_id: SessionId)
 - `Ingest`(runtime_id: String)
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId)
 - `AcceptWithoutWake`(input_id: InputId)
-- `PrepareLegacyRun`(session_id: SessionId)
-- `CommitLegacyRun`(input_id: InputId, run_id: RunId)
-- `FailLegacyRun`(run_id: RunId)
+- `Prepare`(session_id: SessionId)
+- `Commit`(input_id: InputId, run_id: RunId)
+- `Fail`(run_id: RunId)
 - `AdmitQueued`
 - `AdmitConsumedOnAccept`
 - `StageDrainSnapshot`
@@ -138,7 +138,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinalizeRemovalForced`
 - `SnapshotAligned`
 - `ShutdownSurface`
-- `RecycleRuntime`
+- `Recycle`
 
 ## Effects
 - `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
@@ -410,21 +410,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WorkCancelled`
 - To: `Attached`
 
-### `RecoverRuntime`
+### `Recover`
 - From: `Idle`, `Stopped`, `Retired`
-- On: `RecoverRuntime`()
+- On: `Recover`()
 - Emits: `RuntimeNotice`
 - To: `Recovering`
 
 ### `RetireRequestedFromIdle`
 - From: `Attached`, `Running`
-- On: `RetireRuntime`()
+- On: `Retire`()
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
-### `ResetRuntime`
+### `Reset`
 - From: `Attached`, `Retired`, `Stopped`, `Recovering`
-- On: `ResetRuntime`()
+- On: `Reset`()
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
@@ -434,9 +434,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
-### `DestroyRuntime`
+### `Destroy`
 - From: `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
-- On: `DestroyRuntime`()
+- On: `Destroy`()
 - Guards:
   - `runtime_is_bound`
 - Emits: `RuntimeDestroyed`
@@ -498,57 +498,57 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - To: `Idle`
 
-### `AbortDrainAttached`
+### `AbortAttached`
 - From: `Attached`
-- On: `AbortDrain`(session_id)
+- On: `Abort`(session_id)
 - Guards:
   - `session_registered`
 - To: `Attached`
 
-### `AbortDrainRunning`
+### `AbortRunning`
 - From: `Running`
-- On: `AbortDrain`(session_id)
+- On: `Abort`(session_id)
 - Guards:
   - `session_registered`
 - To: `Running`
 
-### `WaitDrainAttached`
+### `WaitAttached`
 - From: `Attached`
-- On: `WaitDrain`(session_id)
+- On: `Wait`(session_id)
 - Guards:
   - `session_registered`
 - To: `Attached`
 
-### `WaitDrainRunning`
+### `WaitRunning`
 - From: `Running`
-- On: `WaitDrain`(session_id)
+- On: `Wait`(session_id)
 - Guards:
   - `session_registered`
 - To: `Running`
 
-### `AbortAllDrainsAttached`
+### `AbortAllAttached`
 - From: `Attached`
-- On: `AbortAllDrains`()
+- On: `AbortAll`()
 - To: `Attached`
 
-### `AbortAllDrainsRunning`
+### `AbortAllRunning`
 - From: `Running`
-- On: `AbortAllDrains`()
+- On: `AbortAll`()
 - To: `Running`
 
-### `AbortAllDrainsRecovering`
+### `AbortAllRecovering`
 - From: `Recovering`
-- On: `AbortAllDrains`()
+- On: `AbortAll`()
 - To: `Recovering`
 
-### `AbortAllDrainsRetired`
+### `AbortAllRetired`
 - From: `Retired`
-- On: `AbortAllDrains`()
+- On: `AbortAll`()
 - To: `Retired`
 
-### `AbortAllDrainsStopped`
+### `AbortAllStopped`
 - From: `Stopped`
-- On: `AbortAllDrains`()
+- On: `AbortAll`()
 - To: `Stopped`
 
 ### `EnsureDrainRunningAttached`
@@ -693,9 +693,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_is_bound`
 - To: `Running`
 
-### `PrepareLegacyRunAttached`
+### `PrepareAttached`
 - From: `Attached`
-- On: `PrepareLegacyRun`(session_id)
+- On: `Prepare`(session_id)
 - Guards:
   - `session_registered`
 - Emits: `SubmitRunPrimitive`
@@ -725,16 +725,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitRunPrimitive`
 - To: `Attached`
 
-### `CommitLegacyRunRunning`
+### `CommitRunning`
 - From: `Running`
-- On: `CommitLegacyRun`(input_id, run_id)
+- On: `Commit`(input_id, run_id)
 - Guards:
   - `has_active_work`
 - To: `Running`
 
-### `FailLegacyRunRunning`
+### `FailRunning`
 - From: `Running`
-- On: `FailLegacyRun`(run_id)
+- On: `Fail`(run_id)
 - Guards:
   - `has_active_work`
 - Emits: `RecordTerminalOutcome`
@@ -1261,9 +1261,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
-### `RecycleRuntime`
+### `Recycle`
 - From: `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
-- On: `RecycleRuntime`()
+- On: `Recycle`()
 - Guards:
   - `runtime_is_bound`
 - Emits: `InitiateRecycle`

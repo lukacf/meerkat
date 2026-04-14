@@ -26,7 +26,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `Start`
-- `SpawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
 - `ObserveWorkCompleted`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
@@ -202,9 +202,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Start`()
 - To: `Running`
 
-### `SpawnMember`
+### `Spawn`
 - From: `Creating`, `Running`, `Stopped`
-- On: `SpawnMember`(agent_identity, agent_runtime_id, fence_token, generation)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation)
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 

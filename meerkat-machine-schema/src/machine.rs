@@ -986,7 +986,7 @@ mod tests {
             schema
                 .transitions
                 .iter()
-                .any(|transition| transition.name == "DestroyRuntime")
+                .any(|transition| transition.name == "Destroy")
         );
         assert_eq!(schema.state.terminal_phases, vec!["Destroyed"]);
         assert_eq!(schema.validate(), Ok(()));

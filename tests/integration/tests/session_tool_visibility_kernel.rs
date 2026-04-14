@@ -85,9 +85,9 @@ fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
 #[test]
 fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state() {
     let attached = prepared_meerkat_state();
-    let requested = meerkat::transition_signal(
+    let requested = meerkat::transition(
         &attached,
-        &signal(
+        &input(
             "RequestDeferredTools",
             vec![
                 (

@@ -40,6 +40,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `NotifyDrainExited`(reason: String)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(revision: u64)
 - `Recover`
 - `Retire`
@@ -70,8 +72,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Signals
 - `Initialize`
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `BoundaryApplied`(revision: u64)
 - `RunCompleted`(work_id: WorkId)
 - `RunFailed`(work_id: WorkId)

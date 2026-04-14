@@ -114,7 +114,7 @@ fn renders_machine_mapping_coverage_with_named_items() {
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Transitions"));
     assert!(rendered.contains("- `PrepareBindingsIdle`"));
-    assert!(rendered.contains("- `running_has_active_work`"));
+    assert!(rendered.contains("- `destroyed_has_no_active_work`"));
 }
 
 #[test]

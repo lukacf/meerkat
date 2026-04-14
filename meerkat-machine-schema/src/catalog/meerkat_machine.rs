@@ -1648,6 +1648,8 @@ fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
             | "Prepare"
             | "Commit"
             | "Fail"
+            | "StagePersistentFilter"
+            | "RequestDeferredTools"
     )
 }
 

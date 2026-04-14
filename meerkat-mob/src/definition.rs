@@ -598,6 +598,7 @@ impl MobDefinition {
         self.mark_owner_bridge_session_indexed(bridge_session_id);
     }
 
+    #[doc(hidden)]
     pub fn clear_internal_lifecycle_flags(&mut self) {
         self.is_implicit = false;
         self.session_cleanup_policy = SessionCleanupPolicy::Manual;

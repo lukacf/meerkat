@@ -1142,7 +1142,20 @@ function buildPhaseStats(phases, transitions, inputNames) {
 }
 
 function renderPosterHtml(poster) {
-  const totalWidth = poster.layout.plate.width + 780;
+  const outerPad = 28;
+  const leftRail = 340;
+  const rightRail = 380;
+  const railGap = 24;
+  const headerHeight = 188;
+  const footerHeight = 340;
+  const canvasWidth =
+    outerPad * 2 + leftRail + railGap + poster.layout.plate.width + railGap + rightRail;
+  const canvasHeight = headerHeight + poster.layout.plate.height + footerHeight;
+  const schematicX = outerPad + leftRail + railGap;
+  const schematicY = headerHeight;
+  const leftX = outerPad;
+  const rightX = canvasWidth - outerPad - rightRail;
+  const bottomY = schematicY + poster.layout.plate.height + 18;
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1154,7 +1167,7 @@ function renderPosterHtml(poster) {
   <body>
     <main class="page-shell">
       <a class="page-index-link" href="./index.html">← Poster index</a>
-      <article class="architectural-plate" style="--poster-width:${totalWidth}px; --plate-width:${poster.layout.plate.width}px; --plate-height:${poster.layout.plate.height}px;">
+      <article class="architectural-plate" style="--canvas-width:${canvasWidth}px; --canvas-height:${canvasHeight}px;">
         <header class="plate-header">
           <div class="title-plaque">
             <div class="eyebrow">Canonical machine plate / generated from TLA + contract artifacts</div>
@@ -1172,41 +1185,42 @@ function renderPosterHtml(poster) {
               </div>
             </section>
             <section class="legend-plaque__section">
-              <div class="section-label">Legend + density</div>
+              <div class="section-label">Legend</div>
               <div class="legend-grid">
                 <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>input</strong><span>runtime command alphabet</span></div>
-                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>signal</strong><span>formal seam / internal trigger</span></div>
+                <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>signal</strong><span>formal seam / derived trigger</span></div>
                 <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>effect</strong><span>local / external / routed exits</span></div>
-              </div>
-              <div class="stat-band">
-                ${renderStatChip("phases", poster.contract.phases.length)}
-                ${renderStatChip("domains", poster.groupedTriggers.length)}
-                ${renderStatChip("inputs", poster.contract.inputs.length)}
-                ${renderStatChip("signals", poster.contract.signals.length)}
-                ${renderStatChip("effects", poster.contract.effects.length)}
-                ${renderStatChip("invariants", poster.invariants.length)}
-                ${renderStatChip("state vars", poster.contract.stateFields.length)}
               </div>
             </section>
           </div>
         </header>
 
-        <section class="poster-grid">
-          <aside class="sidebar">
-          ${poster.statePanels.left.map((panel) => renderStatePanel(panel)).join("")}
+        <section class="canvas-surface">
+          <section class="metrics-rack">
+            ${renderStatChip("phases", poster.contract.phases.length)}
+            ${renderStatChip("domains", poster.groupedTriggers.length)}
+            ${renderStatChip("inputs", poster.contract.inputs.length)}
+            ${renderStatChip("signals", poster.contract.signals.length)}
+            ${renderStatChip("effects", poster.contract.effects.length)}
+            ${renderStatChip("invariants", poster.invariants.length)}
+            ${renderStatChip("state vars", poster.contract.stateFields.length)}
+          </section>
+
+          <aside class="sidebar sidebar--left" style="left:${leftX}px; top:${schematicY}px; width:${leftRail}px;">
+            ${poster.statePanels.left.map((panel) => renderStatePanel(panel)).join("")}
           </aside>
 
-          <section class="schematic-column">
+          <section class="schematic-column" style="left:${schematicX}px; top:${schematicY}px; width:${poster.layout.plate.width}px;">
             ${renderSchematicPlate(poster)}
           </section>
 
-          <aside class="sidebar">
+          <aside class="sidebar sidebar--right" style="left:${rightX}px; top:${schematicY}px; width:${rightRail}px;">
             ${poster.statePanels.right.map((panel) => renderStatePanel(panel)).join("")}
           </aside>
-        </section>
 
-        <section class="bottom-band">
-          <section class="effect-panel">
+          <section class="effect-panel effect-panel--canvas" style="left:${leftX}px; top:${bottomY}px; width:${Math.round(
+            canvasWidth * 0.58,
+          ) - leftX}px;">
             <div class="section-label">Effect bus</div>
             <div class="effect-lanes">
               ${renderEffectLane("routed", "Routed effects", poster.effectBus.routed)}
@@ -1215,7 +1229,10 @@ function renderPosterHtml(poster) {
               ${poster.effectBus.unknown.length > 0 ? renderEffectLane("unknown", "Unknown disposition", poster.effectBus.unknown) : ""}
             </div>
           </section>
-          <section class="invariant-panel">
+
+          <section class="invariant-panel invariant-panel--canvas" style="left:${Math.round(
+            canvasWidth * 0.58,
+          )}px; top:${bottomY}px; width:${canvasWidth - Math.round(canvasWidth * 0.58) - outerPad}px;">
             <div class="section-label">Invariant plate</div>
             <div class="invariant-grid">
               ${poster.invariants
@@ -1230,7 +1247,7 @@ function renderPosterHtml(poster) {
           </section>
         </section>
 
-        <footer class="footer-note">
+        <footer class="footer-note footer-note--plate">
           <div>Complexity target: central lifecycle spine, radial transition halos, sidecar subsystems, effect bus, invariant plate.</div>
           <div>Regenerate with <code>node scripts/machine-posters/generate-machine-posters.mjs</code>.</div>
         </footer>
@@ -1631,10 +1648,10 @@ function renderStyles(poster) {
       text-transform: uppercase;
     }
     .architectural-plate {
-      width: max(calc(var(--poster-width) * 1px), 96vw);
+      width: max(calc(var(--canvas-width) * 1px), 96vw);
       max-width: 3520px;
       margin: 0 auto;
-      padding: 24px 26px 28px;
+      padding: 24px 26px 20px;
       background:
         linear-gradient(180deg, rgba(255,255,255,0.02), transparent 24%),
         linear-gradient(90deg, rgba(255,255,255,0.01), transparent 22%, transparent 78%, rgba(255,255,255,0.01)),
@@ -1762,17 +1779,18 @@ function renderStyles(poster) {
       grid-template-columns: repeat(7, minmax(140px, 1fr));
       gap: 10px;
     }
-    .poster-grid {
-      display: grid;
-      grid-template-columns: 330px minmax(calc(var(--plate-width) * 1px), 1fr) 360px;
-      gap: 20px;
-      align-items: start;
+    .canvas-surface {
+      position: relative;
+      width: calc(var(--canvas-width) * 1px - 52px);
+      height: calc(var(--canvas-height) * 1px - 244px);
       margin-top: 18px;
     }
     .sidebar {
+      position: absolute;
       display: grid;
       gap: 16px;
       align-content: start;
+      z-index: 4;
     }
     .state-panel,
     .effect-panel,
@@ -1800,30 +1818,32 @@ function renderStyles(poster) {
     }
     .state-field-list {
       display: grid;
-      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
     }
     .state-field {
-      padding: 11px 12px;
+      min-height: 54px;
+      padding: 9px 10px;
       border-radius: 10px;
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(255,255,255,0.06);
     }
     .state-field strong {
       display: block;
-      font-size: 14px;
+      font-size: 12px;
       line-height: 1.3;
     }
     .state-field span {
       display: block;
       margin-top: 4px;
       color: var(--muted);
-      font-size: 11px;
+      font-size: 10px;
       line-height: 1.4;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .schematic-column {
-      overflow-x: auto;
-      padding-bottom: 6px;
+      position: absolute;
+      z-index: 3;
     }
     .schematic-plate {
       position: relative;
@@ -2034,10 +2054,7 @@ function renderStyles(poster) {
       color: var(--muted);
     }
     .bottom-band {
-      display: grid;
-      grid-template-columns: 1.35fr 1fr;
-      gap: 18px;
-      margin-top: 18px;
+      display: none;
     }
     .effect-lanes {
       display: grid;
@@ -2062,6 +2079,7 @@ function renderStyles(poster) {
     .effect-lane--local { border-left: 4px solid var(--local); }
     .invariant-grid {
       display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
       margin-top: 14px;
     }
@@ -2095,6 +2113,24 @@ function renderStyles(poster) {
       font-size: 12px;
       line-height: 1.5;
     }
+    .footer-note--plate {
+      margin-top: 10px;
+    }
+    .metrics-rack {
+      position: absolute;
+      top: 0;
+      left: 0;
+      display: grid;
+      grid-template-columns: repeat(7, minmax(84px, 1fr));
+      gap: 10px;
+      width: 700px;
+      z-index: 5;
+    }
+    .effect-panel--canvas,
+    .invariant-panel--canvas {
+      position: absolute;
+      z-index: 4;
+    }
     @media (max-width: 2200px) {
       .meta-grid {
         grid-template-columns: 1fr 1fr;
@@ -2111,14 +2147,9 @@ function renderStyles(poster) {
       .meta-grid {
         width: 100%;
       }
-      .poster-grid {
-        grid-template-columns: 1fr;
-      }
-      .sidebar {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-      .bottom-band {
-        grid-template-columns: 1fr;
+      .canvas-surface {
+        overflow-x: auto;
+        overflow-y: hidden;
       }
     }`;
 }

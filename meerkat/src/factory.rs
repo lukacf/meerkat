@@ -1775,7 +1775,7 @@ impl AgentFactory {
 
         // Resolve model profile for capability gating and runtime defaults.
         let model_profile = registry.profile_for(&model);
-        let image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
+        let _image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
 
         if let Some(profile) = model_profile.as_ref() {
             let has_canonical_visibility_state = session
@@ -1849,7 +1849,7 @@ impl AgentFactory {
                         build_config.shell_env.take(),
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
-                        image_tool_results,
+                        _image_tool_results,
                     )
                     .await?
                 }

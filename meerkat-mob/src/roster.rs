@@ -110,16 +110,6 @@ pub struct RosterEntry {
 
 /// Directed projection presence state for an undirected peer edge.
 ///
-/// This reflects only roster-projected `wired_to` membership; it does not
-/// imply comms trust/runtime side effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WiringEdgeState {
-    Absent,
-    AOnly,
-    BOnly,
-    Bidirectional,
-}
-
 /// Parameters for adding a new member to the roster.
 pub(crate) struct RosterAddEntry {
     pub(crate) agent_identity: AgentIdentity,
@@ -272,14 +262,14 @@ impl Roster {
     }
 
     /// Remove a member by legacy MeerkatId (bridge lookup).
-    pub fn remove_by_meerkat_id(&mut self, meerkat_id: &MeerkatId) {
+    pub(crate) fn remove_by_meerkat_id(&mut self, meerkat_id: &MeerkatId) {
         if let Some(identity) = self.meerkat_index.remove(meerkat_id) {
             self.remove_by_identity(&identity);
         }
     }
 
     /// Remove a member — delegates to bridge-based removal.
-    pub fn remove(&mut self, meerkat_id: &MeerkatId) {
+    pub(crate) fn remove(&mut self, meerkat_id: &MeerkatId) {
         self.remove_by_meerkat_id(meerkat_id);
     }
 
@@ -305,7 +295,7 @@ impl Roster {
     /// Wire two members in the roster projection (bidirectional set update).
     ///
     /// Uses MeerkatId bridge lookup, then applies wiring at the identity level.
-    pub fn wire(&mut self, a: &MeerkatId, b: &MeerkatId) {
+    pub(crate) fn wire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         let id_a = self.meerkat_index.get(a).cloned();
         let id_b = self.meerkat_index.get(b).cloned();
         if let (Some(ref id_a), Some(ref id_b)) = (id_a, id_b) {
@@ -360,7 +350,7 @@ impl Roster {
         }
     }
 
-    pub fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
+    pub(crate) fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
         self.wire(a, b);
     }
 
@@ -374,7 +364,7 @@ impl Roster {
     }
 
     /// Unwire two members in the roster projection (bidirectional set update).
-    pub fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
+    pub(crate) fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         let id_a = self.meerkat_index.get(a).cloned();
         let id_b = self.meerkat_index.get(b).cloned();
         if let (Some(ref id_a), Some(ref id_b)) = (id_a, id_b) {
@@ -398,7 +388,7 @@ impl Roster {
     }
 
     /// Unwire a local member from an external peer.
-    pub fn unwire_external(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
+    pub(crate) fn unwire_external(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
         let local_id = self.meerkat_index.get(local).cloned();
         if let Some(ref local_id) = local_id {
             let peer_identity = AgentIdentity::from(peer_name.as_str());
@@ -410,7 +400,11 @@ impl Roster {
     }
 
     /// Remove the projected external peer edge from an identity.
-    pub fn unwire_external_identity(&mut self, local: &AgentIdentity, peer_name: &MeerkatId) {
+    pub(crate) fn unwire_external_identity(
+        &mut self,
+        local: &AgentIdentity,
+        peer_name: &MeerkatId,
+    ) {
         if let Some(entry) = self.entries.get_mut(local) {
             entry
                 .wired_to
@@ -419,37 +413,12 @@ impl Roster {
         }
     }
 
-    pub fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
+    pub(crate) fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
         self.unwire(a, b);
     }
 
-    pub fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
+    pub(crate) fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
         self.unwire_external(local, peer_name);
-    }
-
-    /// Returns true if both members currently have reciprocal projected edges.
-    pub fn has_bidirectional_edge(&self, a: &MeerkatId, b: &MeerkatId) -> bool {
-        matches!(self.wiring_edge_state(a, b), WiringEdgeState::Bidirectional)
-    }
-
-    /// Returns the directed projection presence state for edge `(a, b)`.
-    pub fn wiring_edge_state(&self, a: &MeerkatId, b: &MeerkatId) -> WiringEdgeState {
-        let id_a = self.meerkat_index.get(a);
-        let id_b = self.meerkat_index.get(b);
-        let a_has_b = id_a
-            .and_then(|ia| self.entries.get(ia))
-            .zip(id_b)
-            .is_some_and(|(entry, ib)| entry.wired_to.contains(ib));
-        let b_has_a = id_b
-            .and_then(|ib| self.entries.get(ib))
-            .zip(id_a)
-            .is_some_and(|(entry, ia)| entry.wired_to.contains(ia));
-        match (a_has_b, b_has_a) {
-            (false, false) => WiringEdgeState::Absent,
-            (true, false) => WiringEdgeState::AOnly,
-            (false, true) => WiringEdgeState::BOnly,
-            (true, true) => WiringEdgeState::Bidirectional,
-        }
     }
 
     /// Returns `true` when every projected edge is reciprocal and endpoint-present.
@@ -491,7 +460,7 @@ impl Roster {
     }
 
     /// Get a roster entry by meerkat ID (bridge lookup).
-    pub fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
+    pub(crate) fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
         let identity = self.meerkat_index.get(meerkat_id)?;
         self.entries.get(identity)
     }
@@ -503,7 +472,7 @@ impl Roster {
     }
 
     /// Update the bridge session ID while preserving backend-specific identity.
-    pub fn set_bridge_session_id(
+    pub(crate) fn set_bridge_session_id(
         &mut self,
         meerkat_id: &MeerkatId,
         bridge_session_id: SessionId,
@@ -524,12 +493,12 @@ impl Roster {
         false
     }
 
-    pub fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
+    pub(crate) fn set_session_id(&mut self, meerkat_id: &MeerkatId, session_id: SessionId) -> bool {
         self.set_bridge_session_id(meerkat_id, session_id)
     }
 
     /// Update the resolved comms peer id for an existing meerkat.
-    pub fn set_peer_id(&mut self, meerkat_id: &MeerkatId, peer_id: Option<String>) -> bool {
+    pub(crate) fn set_peer_id(&mut self, meerkat_id: &MeerkatId, peer_id: Option<String>) -> bool {
         if let Some(entry) = self.get_mut(meerkat_id) {
             entry.peer_id = peer_id;
             return true;
@@ -607,17 +576,34 @@ impl Roster {
         })
     }
 
+    /// Find the first entry whose bridge session matches `session_id`.
+    pub fn find_by_bridge_session_id(&self, session_id: &SessionId) -> Option<&RosterEntry> {
+        self.entries.values().find(|e| {
+            e.member_ref
+                .bridge_session_id()
+                .is_some_and(|sid| sid == session_id)
+        })
+    }
+
+    /// Returns `true` if any entry has a matching bridge session ID.
+    pub fn has_bridge_session(&self, session_id: &SessionId) -> bool {
+        self.find_by_bridge_session_id(session_id).is_some()
+    }
+
     /// Look up the current bridge session ID for a meerkat.
-    pub fn bridge_session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
+    pub(crate) fn bridge_session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
         self.get(meerkat_id)?.member_ref.bridge_session_id()
     }
 
-    pub fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
+    pub(crate) fn session_id(&self, meerkat_id: &MeerkatId) -> Option<&SessionId> {
         self.bridge_session_id(meerkat_id)
     }
 
     /// Get the set of peer identities wired to a given meerkat.
-    pub fn wired_peers_of(&self, meerkat_id: &MeerkatId) -> Option<&BTreeSet<AgentIdentity>> {
+    pub(crate) fn wired_peers_of(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Option<&BTreeSet<AgentIdentity>> {
         self.get(meerkat_id).map(|e| &e.wired_to)
     }
 
@@ -639,7 +625,7 @@ impl Roster {
 
     /// Mark a member as `Retiring`. Returns `true` if the member was found and
     /// transitioned (i.e. it was `Active`); `false` otherwise.
-    pub fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool {
+    pub(crate) fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool {
         if let Some(entry) = self.get_mut(meerkat_id)
             && entry.state == MemberState::Active
         {
@@ -673,11 +659,11 @@ impl Roster {
 }
 
 impl RosterEntry {
-    pub fn bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()
     }
 
-    pub fn session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn session_id(&self) -> Option<&SessionId> {
         self.bridge_session_id()
     }
 
@@ -687,7 +673,7 @@ impl RosterEntry {
     }
 
     /// Bridge-internal meerkat ID.
-    pub fn meerkat_id(&self) -> &MeerkatId {
+    pub(crate) fn meerkat_id(&self) -> &MeerkatId {
         &self.meerkat_id
     }
 }

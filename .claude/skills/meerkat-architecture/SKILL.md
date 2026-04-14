@@ -31,7 +31,7 @@ The short version:
 3. **Shell owns mechanics, not meaning** — shell may execute IO, hold handles, and rebuild projections; it may not invent lifecycle truth or terminal meaning.
 4. **One semantic condition, one terminal path** — loop-top vs in-call detection must not create divergent terminalization.
 5. **Typed truth, never string folklore** — no JSON `"kind"` classifiers or error-text parsing where typed reasons are required.
-6. **App-facing APIs expose domain handles** — public control nouns should be `job_id`, `MemberRef`, `member_id`, etc., not raw infra IDs.
+6. **App-facing APIs expose domain handles** — public control nouns should be `job_id`, `AgentIdentity`, `AgentRuntimeId`, etc., not raw infra IDs.
 7. **Raw infra identity must be canonical** — if raw operation identity escapes, it must resolve in the real owning registry.
 8. **`Option` must not hide ownership uncertainty** — if owner context is required, require it in the type.
 9. **Inherit / disable / set are different facts** — when all three meanings matter, use a tri-state override type.

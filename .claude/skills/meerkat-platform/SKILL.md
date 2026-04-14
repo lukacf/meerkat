@@ -68,7 +68,7 @@ Use this mental model when helping users:
 - `MobBackendKind` (definition/profile level): `Session` or `External` — declares what kind of backend a mob uses
 - `RuntimeBinding` (spawn/provision level): `Session` or `External { peer_id, address }` — binds a specific member to a concrete runtime
 
-External members must provide `RuntimeBinding::External` at spawn time with the real process comms identity. The provisioner uses this for `MemberRef::BackendPeer.peer_id` and `.address` instead of deriving from the placeholder session.
+External members must provide `RuntimeBinding::External` at spawn time with the real process comms identity. The provisioner uses that backend peer binding for the concrete `peer_id` and `address` instead of deriving them from the placeholder session.
 
 The bridge session (placeholder) still exists for lifecycle transport (notifications, kickoff events) within the orchestrator process. `trusted_peer_spec` uses the bridge key for transport trust, not `BackendPeer.peer_id` (which is the real identity).
 

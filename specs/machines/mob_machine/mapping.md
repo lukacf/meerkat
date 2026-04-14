@@ -83,7 +83,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `destroyed_has_no_active_runtime`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `identity_and_runtime_move_together`
+- `active_runtime_has_identity`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 

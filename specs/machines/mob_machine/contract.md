@@ -41,7 +41,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `active_work_requires_runtime`
 - `destroyed_has_no_active_runtime`
-- `identity_and_runtime_move_together`
+- `active_runtime_has_identity`
 
 ## Transitions
 ### `Start`

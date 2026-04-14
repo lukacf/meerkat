@@ -99,7 +99,7 @@ CancelAfterBoundary ==
 
 
 BoundaryApplied(revision) ==
-    /\ phase = "Running" \/ phase = "Attached"
+    /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ committed_visibility_revision' = revision

@@ -173,14 +173,14 @@ pub fn mob_machine() -> MachineSchema {
                 ]),
             },
             InvariantSchema {
-                name: "identity_and_runtime_move_together".into(),
+                name: "active_runtime_has_identity".into(),
                 expr: Expr::Or(vec![
                     Expr::Eq(
-                        Box::new(Expr::Field("active_identity".into())),
+                        Box::new(Expr::Field("active_runtime_id".into())),
                         Box::new(Expr::None),
                     ),
                     Expr::Neq(
-                        Box::new(Expr::Field("active_runtime_id".into())),
+                        Box::new(Expr::Field("active_identity".into())),
                         Box::new(Expr::None),
                     ),
                 ]),
@@ -448,8 +448,28 @@ pub fn mob_machine() -> MachineSchema {
                 guards: vec![],
                 updates: vec![
                     Update::Assign {
+                        field: "active_identity".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "active_runtime_id".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "active_fence_token".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "current_generation".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
                         field: "inflight_work_id".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "active_member_count".into(),
+                        expr: Expr::U64(0),
                     },
                     Update::Assign {
                         field: "active_run_count".into(),
@@ -474,11 +494,23 @@ pub fn mob_machine() -> MachineSchema {
                 guards: vec![],
                 updates: vec![
                     Update::Assign {
+                        field: "active_identity".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
                         field: "active_runtime_id".into(),
                         expr: Expr::None,
                     },
                     Update::Assign {
                         field: "active_fence_token".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "current_generation".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "inflight_work_id".into(),
                         expr: Expr::None,
                     },
                     Update::Assign {

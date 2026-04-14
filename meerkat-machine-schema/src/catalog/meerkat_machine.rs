@@ -350,7 +350,7 @@ pub fn meerkat_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "BoundaryApplied".into(),
-                from: vec!["Running".into(), "Attached".into()],
+                from: vec!["Running".into()],
                 on: InputMatch {
                     variant: "BoundaryApplied".into(),
                     bindings: vec!["revision".into()],

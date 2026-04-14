@@ -331,7 +331,7 @@ meerkat_BoundaryApplied(arg_revision) ==
        /\ packet.variant = "BoundaryApplied"
        /\ packet.payload.revision = arg_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
-       /\ meerkat_phase = "Running" \/ meerkat_phase = "Attached"
+       /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
        /\ meerkat_committed_visibility_revision' = packet.payload.revision
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, mob_phase, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, witness_current_script_input, witness_remaining_script_inputs >>
@@ -792,14 +792,19 @@ mob_DestroyMob ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Creating" \/ mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed"
        /\ mob_phase' = "Destroyed"
+       /\ mob_active_identity' = None
+       /\ mob_active_runtime_id' = None
+       /\ mob_active_fence_token' = None
+       /\ mob_current_generation' = None
        /\ mob_inflight_work_id' = None
+       /\ mob_active_member_count' = 0
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_committed_visibility_revision, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_active_member_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_committed_visibility_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "DestroyRuntime", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "destroy_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeDestroy", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "DestroyRuntime", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "destroy_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeDestroy", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes \cup { [route |-> "destroy_request_reaches_meerkat", source_machine |-> "mob", effect |-> "RequestRuntimeDestroy", target_machine |-> "meerkat", target_input |-> "DestroyRuntime", payload |-> [tag |-> "unit"], actor |-> "meerkat_kernel", effect_id |-> (model_step_count + 1), source_transition |-> "DestroyMob"] }
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "RequestRuntimeDestroy", payload |-> [agent_runtime_id |-> mob_active_runtime_id, fence_token |-> mob_active_fence_token], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyMob"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "RequestRuntimeDestroy", payload |-> [agent_runtime_id |-> None, fence_token |-> None], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyMob"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "DestroyMob", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -813,23 +818,26 @@ mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token) ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed" \/ mob_phase = "Destroyed"
        /\ mob_phase' = "Destroyed"
+       /\ mob_active_identity' = None
        /\ mob_active_runtime_id' = None
        /\ mob_active_fence_token' = None
+       /\ mob_current_generation' = None
+       /\ mob_inflight_work_id' = None
        /\ mob_active_member_count' = 0
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_committed_visibility_revision, mob_active_identity, mob_current_generation, mob_inflight_work_id, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_committed_visibility_revision, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [agent_identity |-> mob_active_identity, kind |-> "destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveRuntimeDestroyed"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "EmitMemberLifecycleNotice", payload |-> [agent_identity |-> None, kind |-> "destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveRuntimeDestroyed"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ObserveRuntimeDestroyed", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Destroyed"]}
        /\ model_step_count' = model_step_count + 1
 
 
 mob_active_work_requires_runtime == ((mob_inflight_work_id = None) \/ (mob_active_runtime_id # None))
 mob_destroyed_has_no_active_runtime == ((mob_phase # "Destroyed") \/ (mob_active_runtime_id = None))
-mob_identity_and_runtime_move_together == ((mob_active_identity = None) \/ (mob_active_runtime_id # None))
+mob_active_runtime_has_identity == ((mob_active_runtime_id = None) \/ (mob_active_identity # None))
 
 Inject_spawn_member(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation) ==
     /\ ~([machine |-> "mob", variant |-> "SpawnMember", payload |-> [agent_identity |-> arg_agent_identity, agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token, generation |-> arg_generation], source_kind |-> "entry", source_route |-> "spawn_member", source_machine |-> "external_entry", source_effect |-> "SpawnMember", effect_id |-> 0] \in SeqElements(pending_inputs))
@@ -999,6 +1007,6 @@ THEOREM Spec => []meerkat_bound_runtime_has_fence
 THEOREM Spec => []meerkat_destroyed_has_no_active_work
 THEOREM Spec => []mob_active_work_requires_runtime
 THEOREM Spec => []mob_destroyed_has_no_active_runtime
-THEOREM Spec => []mob_identity_and_runtime_move_together
+THEOREM Spec => []mob_active_runtime_has_identity
 
 =============================================================================

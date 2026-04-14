@@ -100,7 +100,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - To: `Running`
 
 ### `BoundaryApplied`
-- From: `Running`, `Attached`
+- From: `Running`
 - On: `BoundaryApplied`(revision)
 - Emits: `CommittedVisibleSetPublished`
 - To: `Running`

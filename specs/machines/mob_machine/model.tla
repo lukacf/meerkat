@@ -153,20 +153,26 @@ DestroyMob ==
     /\ phase = "Creating" \/ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
+    /\ active_identity' = None
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ current_generation' = None
     /\ inflight_work_id' = None
+    /\ active_member_count' = 0
     /\ active_run_count' = 0
-    /\ UNCHANGED << active_identity, active_runtime_id, active_fence_token, current_generation, active_member_count >>
 
 
 ObserveRuntimeDestroyed(agent_runtime_id, fence_token) ==
     /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed" \/ phase = "Destroyed"
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
+    /\ active_identity' = None
     /\ active_runtime_id' = None
     /\ active_fence_token' = None
+    /\ current_generation' = None
+    /\ inflight_work_id' = None
     /\ active_member_count' = 0
     /\ active_run_count' = 0
-    /\ UNCHANGED << active_identity, current_generation, inflight_work_id >>
 
 
 Next ==
@@ -188,7 +194,7 @@ Next ==
 
 active_work_requires_runtime == ((inflight_work_id = None) \/ (active_runtime_id # None))
 destroyed_has_no_active_runtime == ((phase # "Destroyed") \/ (active_runtime_id = None))
-identity_and_runtime_move_together == ((active_identity = None) \/ (active_runtime_id # None))
+active_runtime_has_identity == ((active_runtime_id = None) \/ (active_identity # None))
 
 CiStateConstraint == /\ model_step_count <= 6
 DeepStateConstraint == /\ model_step_count <= 8
@@ -197,6 +203,6 @@ Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []active_work_requires_runtime
 THEOREM Spec => []destroyed_has_no_active_runtime
-THEOREM Spec => []identity_and_runtime_move_together
+THEOREM Spec => []active_runtime_has_identity
 
 =============================================================================

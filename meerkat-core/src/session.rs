@@ -111,6 +111,9 @@ pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
 /// Metadata key used to store durable session-local tool visibility intent.
 pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_state_v1";
 
+/// Canonical tool name gated by `image_tool_results` capability.
+pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
+
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 
@@ -183,6 +186,15 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// Derive the machine-owned capability base filter from the current image-tool-results support.
+pub fn capability_base_filter_for_image_tool_results(image_tool_results: bool) -> ToolFilter {
+    if image_tool_results {
+        ToolFilter::All
+    } else {
+        ToolFilter::Deny([VIEW_IMAGE_TOOL_NAME.to_string()].into_iter().collect())
+    }
+}
+
 /// Persisted witness for a durable tool-visibility name.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -197,6 +209,8 @@ pub struct ToolVisibilityWitness {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionToolVisibilityState {
+    #[serde(default, skip_serializing_if = "is_tool_filter_all")]
+    pub capability_base_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]
     pub inherited_base_filter: ToolFilter,
     #[serde(default, skip_serializing_if = "is_tool_filter_all")]

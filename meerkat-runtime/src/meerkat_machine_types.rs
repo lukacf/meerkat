@@ -23,6 +23,7 @@ use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
 use meerkat_core::{CommsDrainMode, CommsDrainPhase};
 use meerkat_machine_derive::CommandManifest;
+use serde::{Deserialize, Serialize};
 
 use crate::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
@@ -33,7 +34,112 @@ use crate::input_state::InputTerminalOutcome;
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_ingress_authority::{ContentShape, IngressPhase, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
-use crate::traits::{DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport};
+use crate::traits::{
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeDriverError,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionLlmReconfigureRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLlmCapabilitySurfaceStatus {
+    Resolved,
+    #[default]
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionLlmCapabilitySurface {
+    pub supports_temperature: bool,
+    pub supports_thinking: bool,
+    pub supports_reasoning: bool,
+    pub inline_video: bool,
+    pub vision: bool,
+    pub image_tool_results: bool,
+    pub supports_web_search: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLlmCapabilityDelta {
+    pub previous: Option<SessionLlmCapabilitySurface>,
+    pub current: Option<SessionLlmCapabilitySurface>,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToolVisibilityDelta {
+    pub previous_capability_base_filter: meerkat_core::ToolFilter,
+    pub current_capability_base_filter: meerkat_core::ToolFilter,
+    pub committed_visible_set_changed: bool,
+    pub revision_bumped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionLlmReconfigureReport {
+    pub previous_identity: meerkat_core::SessionLlmIdentity,
+    pub new_identity: meerkat_core::SessionLlmIdentity,
+    pub capability_delta: SessionLlmCapabilityDelta,
+    pub tool_visibility_delta: SessionToolVisibilityDelta,
+    pub rollback_occurred: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HydratedSessionLlmState {
+    pub current_identity: meerkat_core::SessionLlmIdentity,
+    pub current_visibility_state: meerkat_core::SessionToolVisibilityState,
+    pub current_capability_surface: Option<SessionLlmCapabilitySurface>,
+    pub capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+    pub base_tool_names: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSessionLlmReconfigure {
+    pub target_identity: meerkat_core::SessionLlmIdentity,
+    pub target_capability_surface: SessionLlmCapabilitySurface,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait SessionLlmReconfigureHost: Send + Sync {
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError>;
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError>;
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError>;
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError>;
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
+}
 
 /// Public Meerkat lifecycle/control mutations that now route through the
 /// top-level Meerkat machine seam instead of bespoke adapter entrypoints.
@@ -85,6 +191,10 @@ pub(crate) enum MeerkatMachineSessionCommand {
     ListActiveInputs {
         session_id: SessionId,
     },
+    ReconfigureSessionLlmIdentity {
+        session_id: SessionId,
+        request: Box<SessionLlmReconfigureRequest>,
+    },
     StagePersistentFilter {
         session_id: SessionId,
         filter: meerkat_core::ToolFilter,
@@ -115,6 +225,7 @@ pub(crate) enum MeerkatMachineSessionCommandResult {
     Bindings(meerkat_core::SessionRuntimeBindings),
     InputState(Option<InputState>),
     ActiveInputs(Vec<InputId>),
+    LlmReconfigured(SessionLlmReconfigureReport),
     VisibilityRevision(meerkat_core::ToolScopeRevision),
     VisibilityPublished(meerkat_core::SessionToolVisibilityState),
 }

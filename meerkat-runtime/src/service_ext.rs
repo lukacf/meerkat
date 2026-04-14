@@ -11,6 +11,7 @@ use crate::accept::AcceptOutcome;
 use crate::completion::CompletionHandle;
 use crate::input::Input;
 use crate::input_state::InputState;
+use crate::meerkat_machine_types::{SessionLlmReconfigureReport, SessionLlmReconfigureRequest};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
@@ -78,6 +79,13 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<InputId>, RuntimeDriverError>;
+
+    /// Canonically reconfigure the LLM identity for a registered live session.
+    async fn reconfigure_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        request: SessionLlmReconfigureRequest,
+    ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError>;
 }
 
 #[cfg(test)]

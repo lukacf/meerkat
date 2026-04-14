@@ -16,6 +16,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `process_pending`: `Bool`
 - `peer_ingress_configured`: `Bool`
 - `drain_running`: `Bool`
+- `current_llm_identity`: `Option<SessionLlmIdentity>`
+- `current_capability_surface`: `Option<SessionLlmCapabilitySurface>`
+- `capability_surface_status`: `SessionLlmCapabilitySurfaceStatus`
+- `capability_base_filter`: `ToolFilter`
 - `inherited_base_filter`: `ToolFilter`
 - `active_filter`: `ToolFilter`
 - `staged_filter`: `ToolFilter`
@@ -30,6 +34,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId)
+- `ReconfigureSessionLlmIdentity`(model: Option<String>, provider: Option<String>, provider_params: Option<JsonValue>)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
@@ -208,6 +213,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_matches_current`
 - To: `Idle`
+
+### `ReconfigureSessionLlmIdentityAttached`
+- From: `Attached`
+- On: `ReconfigureSessionLlmIdentity`(model, provider, provider_params)
+- Guards:
+  - `session_registered`
+  - `runtime_is_bound`
+- To: `Attached`
+
+### `ReconfigureSessionLlmIdentityRunning`
+- From: `Running`
+- On: `ReconfigureSessionLlmIdentity`(model, provider, provider_params)
+- Guards:
+  - `session_registered`
+  - `runtime_is_bound`
+- To: `Running`
 
 ### `StagePersistentFilterAttached`
 - From: `Attached`

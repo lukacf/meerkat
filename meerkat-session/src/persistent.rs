@@ -1016,6 +1016,16 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .await
     }
 
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .set_session_tool_visibility_state(id, state)
+            .await
+    }
+
     async fn set_session_tool_filter(
         &self,
         id: &SessionId,

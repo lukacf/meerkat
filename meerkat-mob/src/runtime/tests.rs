@@ -9786,12 +9786,11 @@ async fn test_internal_turn_unknown_meerkat_fails() {
 }
 
 // -----------------------------------------------------------------------
-// Phase 0 CHOKE-001 red test:
-// autonomous dispatch must route via injector (currently not wired yet).
+// Autonomous member sends should prefer runtime-owned durable ingress.
 // -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
+async fn test_external_turn_autonomous_mode_avoids_live_injector_dispatch() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
         .spawn_with_options(
@@ -9812,13 +9811,14 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
         .await
         .expect("external turn should execute");
 
-    // Runtime adapter path: spawn uses accept_input_with_completion (1 keep-alive),
-    // send() uses inject (1).
+    // Runtime adapter path: spawn uses accept_input_with_completion for the
+    // kickoff turn, while send() admits a durable runtime input instead of
+    // pushing directly into the live injector.
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "autonomous dispatch must use event injector for send() (1 send)"
+        0,
+        "autonomous dispatch must avoid the live injector when runtime admission is available"
     );
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
@@ -9828,7 +9828,7 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
 }
 
 #[tokio::test]
-async fn test_external_turn_autonomous_mode_keeps_injector_dispatch_after_kickoff_completion() {
+async fn test_external_turn_autonomous_mode_keeps_runtime_dispatch_after_kickoff_completion() {
     let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
     handle
@@ -9859,13 +9859,65 @@ async fn test_external_turn_autonomous_mode_keeps_injector_dispatch_after_kickof
 
     assert_eq!(
         service.keep_alive_start_turn_call_count(),
-        baseline_keep_alive_turns,
-        "idle autonomous dispatch must not restart a new kickoff turn after the original one completed"
+        baseline_keep_alive_turns + 1,
+        "idle autonomous dispatch should re-enter the runtime-backed host loop for the admitted peer input"
     );
-    assert!(
-        service.inject_call_count() > baseline_injects,
-        "idle autonomous dispatch should still route through the live injector"
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "idle autonomous dispatch should stay on the runtime-backed path instead of the live injector"
     );
+}
+
+#[tokio::test]
+async fn test_runtime_backed_autonomous_member_send_reaches_runtime_apply_after_kickoff_completion()
+{
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let session_id = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-runtime-send"),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let baseline_prompts = service.applied_runtime_prompts(&session_id).await.len();
+
+    handle
+        .member(&AgentIdentity::from("l-runtime-send"))
+        .await
+        .expect("member handle")
+        .send(
+            "runtime admitted member send",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("member send should execute");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&session_id).await;
+            if prompts.iter().skip(baseline_prompts).any(|prompt| {
+                prompt
+                    .text_content()
+                    .contains("runtime admitted member send")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for runtime-backed autonomous member send");
 }
 
 #[tokio::test]

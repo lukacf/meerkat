@@ -453,13 +453,13 @@ impl SessionRuntime {
         build_config.backend = create.backend.clone().or_else(|| self.backend.clone());
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
-        build_config.config_generation = if let Some(runtime) = &self.config_runtime {
+        build_config.config_generation = if let Some(runtime) = self.config_runtime() {
             runtime.get().await.ok().map(|snapshot| snapshot.generation)
         } else {
             create.config_generation
         };
         if build_config.llm_client_override.is_none()
-            && let Some(default_llm_client) = self.default_llm_client.clone()
+            && let Some(default_llm_client) = self.default_llm_client()
         {
             build_config.llm_client_override = Some(default_llm_client);
         }

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -10361,4 +10362,814 @@ async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
         .publish_committed_visible_set(&session_id, state)
         .await;
     result.expect("publish should succeed when active_revision >= staged_revision");
+}
+
+#[derive(Clone)]
+struct TestLlmReconfigureHost {
+    current_identity: Arc<std::sync::Mutex<meerkat_core::SessionLlmIdentity>>,
+    current_visibility_state: Arc<std::sync::Mutex<meerkat_core::SessionToolVisibilityState>>,
+    target_identity: meerkat_core::SessionLlmIdentity,
+    current_capability_surface: Option<SessionLlmCapabilitySurface>,
+    target_capability_surface: SessionLlmCapabilitySurface,
+    base_tool_names: std::collections::BTreeSet<String>,
+    fail_persist: bool,
+}
+
+#[async_trait::async_trait]
+impl SessionLlmReconfigureHost for TestLlmReconfigureHost {
+    async fn hydrate_session_llm_state(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        Ok(HydratedSessionLlmState {
+            current_identity: self
+                .current_identity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            current_visibility_state: self
+                .current_visibility_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            current_capability_surface: self.current_capability_surface.clone(),
+            capability_surface_status: if self.current_capability_surface.is_some() {
+                SessionLlmCapabilitySurfaceStatus::Resolved
+            } else {
+                SessionLlmCapabilitySurfaceStatus::Unresolved
+            },
+            base_tool_names: self.base_tool_names.clone(),
+        })
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        _current_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        if request.provider.is_some() && request.model.is_none() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "provider override requires model on an existing session".to_string(),
+            });
+        }
+        Ok(crate::ResolvedSessionLlmReconfigure {
+            target_identity: self.target_identity.clone(),
+            target_capability_surface: self.target_capability_surface.clone(),
+        })
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        *self
+            .current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity.clone();
+        Ok(())
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        _session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        *self
+            .current_visibility_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            visibility_state.unwrap_or_default();
+        Ok(())
+    }
+
+    async fn persist_live_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        if self.fail_persist {
+            Err(RuntimeDriverError::Internal(
+                "injected persist failure".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn discard_live_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        Ok(())
+    }
+}
+
+fn test_llm_capability_surface(image_tool_results: bool) -> SessionLlmCapabilitySurface {
+    SessionLlmCapabilitySurface {
+        supports_temperature: true,
+        supports_thinking: true,
+        supports_reasoning: true,
+        inline_video: false,
+        vision: true,
+        image_tool_results,
+        supports_web_search: true,
+        call_timeout_secs: Some(60),
+    }
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_rejects_idle_session() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+
+    let err = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect_err("idle session should reject live reconfiguration");
+    assert!(
+        matches!(
+            err,
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle
+            }
+        ),
+        "expected Idle rejection, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_bindings_keeps_session_idle_until_executor_attaches() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+
+    let phase = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist after preparing bindings")
+        .control
+        .phase;
+    assert_eq!(
+        phase,
+        RuntimeState::Idle,
+        "prepare_bindings must not advertise a live attached runtime before an executor is attached"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_attached_session() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::clone(&current_identity),
+        current_visibility_state: Arc::clone(&current_visibility_state),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+
+    let report = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
+            },
+        )
+        .await
+        .expect("attached session should reconfigure");
+
+    assert_eq!(report.previous_identity.model, "claude-sonnet-4-5");
+    assert_eq!(report.new_identity.model, "gpt-5.2");
+    assert!(
+        report.tool_visibility_delta.committed_visible_set_changed,
+        "capability-owned view_image removal should change the committed visible set"
+    );
+    let owner_state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert_eq!(
+        owner_state.capability_base_filter,
+        meerkat_core::capability_base_filter_for_image_tool_results(false)
+    );
+    assert_eq!(
+        owner_state.active_revision, 1,
+        "committed visibility revision should advance when the visible set changes"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_does_not_bump_revision_when_visible_set_is_unchanged() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity,
+        current_visibility_state,
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: false,
+    }));
+
+    let report = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect("attached session should reconfigure");
+
+    assert!(
+        !report.tool_visibility_delta.committed_visible_set_changed,
+        "no committed tool visibility change should be reported when the relevant tool is absent"
+    );
+    assert!(
+        !report.tool_visibility_delta.revision_bumped,
+        "visibility revision must not bump when the committed visible set is unchanged"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner
+            .visibility_state()
+            .expect("owner state should remain readable")
+            .active_revision,
+        0,
+        "active visibility revision should remain stable on a visibility no-op"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_succeeds_while_running() {
+    struct BlockingExecutor {
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::clone(&current_identity),
+        current_visibility_state: Arc::clone(&current_visibility_state),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+
+    let (outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("hold running"))
+        .await
+        .expect("running input should be accepted");
+    assert!(outcome.is_accepted(), "running input should be accepted");
+    let completion_handle = completion_handle.expect("running input should yield completion");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("executor should enter apply");
+
+    let phase_while_running = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist while running")
+        .control
+        .phase;
+    assert_eq!(
+        phase_while_running,
+        RuntimeState::Running,
+        "session should be Running before reconfigure"
+    );
+
+    let report = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect("running session should reconfigure");
+    assert_eq!(report.previous_identity.model, "claude-sonnet-4-5");
+    assert_eq!(report.new_identity.model, "gpt-5.2");
+
+    let owner_state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable while running");
+    assert_eq!(
+        owner_state.capability_base_filter,
+        meerkat_core::capability_base_filter_for_image_tool_results(false)
+    );
+
+    let phase_after_reconfigure = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should still exist after running reconfigure")
+        .control
+        .phase;
+    assert_eq!(
+        phase_after_reconfigure,
+        RuntimeState::Running,
+        "reconfigure should be a self-loop while apply remains active"
+    );
+
+    allow_finish.notify_waiters();
+    let completion = completion_handle.wait().await;
+    assert!(
+        matches!(completion, CompletionOutcome::CompletedWithoutResult),
+        "running turn should still complete normally after reconfigure: {completion:?}"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::clone(&current_identity),
+        current_visibility_state: Arc::clone(&current_visibility_state),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: true,
+    }));
+
+    let err = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect_err("persist failure should abort the transition");
+    assert!(
+        matches!(err, RuntimeDriverError::Internal(ref message) if message.contains("injected persist failure")),
+        "expected injected persist failure, got {err:?}"
+    );
+    assert_eq!(
+        current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model,
+        "claude-sonnet-4-5",
+        "live identity should roll back to the previous value"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner
+            .visibility_state()
+            .expect("owner state should be readable")
+            .capability_base_filter,
+        meerkat_core::ToolFilter::All,
+        "machine-owned visibility should roll back with the failed transition"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fails() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    struct RollbackFailingHost {
+        current_identity: Arc<std::sync::Mutex<meerkat_core::SessionLlmIdentity>>,
+        current_visibility_state: Arc<std::sync::Mutex<meerkat_core::SessionToolVisibilityState>>,
+        identity_apply_calls: AtomicUsize,
+        discarded: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionLlmReconfigureHost for RollbackFailingHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: self
+                    .current_identity
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                current_visibility_state: self
+                    .current_visibility_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                    .into_iter()
+                    .collect(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Ok(crate::ResolvedSessionLlmReconfigure {
+                target_identity: meerkat_core::SessionLlmIdentity {
+                    model: "gpt-5.2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                },
+                target_capability_surface: test_llm_capability_surface(false),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), RuntimeDriverError> {
+            let call = self.identity_apply_calls.fetch_add(1, Ordering::SeqCst);
+            if call >= 1 {
+                return Err(RuntimeDriverError::Internal(
+                    "injected rollback identity failure".to_string(),
+                ));
+            }
+            *self
+                .current_identity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = identity.clone();
+            Ok(())
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            *self
+                .current_visibility_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                visibility_state.unwrap_or_default();
+            Ok(())
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "injected persist failure".to_string(),
+            ))
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            self.discarded.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+
+    let host = Arc::new(RollbackFailingHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(
+            meerkat_core::SessionToolVisibilityState::default(),
+        )),
+        identity_apply_calls: AtomicUsize::new(0),
+        discarded: AtomicBool::new(false),
+    });
+    adapter.set_session_llm_reconfigure_host(host.clone());
+
+    let err = adapter
+        .reconfigure_session_llm_identity(
+            &session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect_err("rollback failure should abort and discard");
+    assert!(
+        matches!(err, RuntimeDriverError::Internal(ref message) if message.contains("failed to rollback live llm reconfiguration")),
+        "expected structured rollback failure, got {err:?}"
+    );
+    assert!(
+        host.discarded.load(Ordering::SeqCst),
+        "rollback failure should discard the live session"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner
+            .visibility_state()
+            .expect("owner state should remain readable")
+            .capability_base_filter,
+        meerkat_core::ToolFilter::All,
+        "machine-owned visibility should clear back to unresolved/default state on discard"
+    );
 }

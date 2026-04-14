@@ -49,6 +49,7 @@ pub struct ToolScopeRevision(pub u64);
 pub struct ToolScopeSnapshot {
     pub known_base_names: Vec<String>,
     pub visible_names: Vec<String>,
+    pub capability_base_filter: ToolFilter,
     pub base_filter: ToolFilter,
     pub active_external_filter: ToolFilter,
     pub active_turn_allow: Option<Vec<String>>,
@@ -457,6 +458,7 @@ impl ToolScope {
         Some(ToolScopeSnapshot {
             known_base_names: sorted_names(&state.known_base_names),
             visible_names: Self::visible_names_for_state(&state, &visibility_state),
+            capability_base_filter: visibility_state.capability_base_filter.clone(),
             base_filter: visibility_state.inherited_base_filter.clone(),
             active_external_filter: visibility_state.active_filter.clone(),
             active_turn_allow: state.active_turn_allow.as_ref().map(sorted_names),
@@ -488,11 +490,15 @@ impl ToolScope {
                 )
             })
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+        // Capture pre-promotion visibility state for change detection,
+        // then promote staged → active.
+        let pre_promotion = self.visibility_owner.visibility_state()?;
         let visibility_state = self.promote_staged_visibility()?;
-        self.apply_staged_projection(
+        self.apply_staged_projection_with_previous(
             new_base_tools,
             control_tool_names,
             deferred_tool_names,
+            &pre_promotion,
             &visibility_state,
         )
     }
@@ -512,6 +518,24 @@ impl ToolScope {
         deferred_tool_names: HashSet<String>,
         visibility_state: &SessionToolVisibilityState,
     ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        let previous_visibility_state = self.visibility_owner.visibility_state()?;
+        self.apply_staged_projection_with_previous(
+            new_base_tools,
+            control_tool_names,
+            deferred_tool_names,
+            &previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    fn apply_staged_projection_with_previous(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: HashSet<String>,
+        deferred_tool_names: HashSet<String>,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
         if self
             .fail_next_boundary_apply
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -523,11 +547,10 @@ impl ToolScope {
             .state
             .write()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
-        let previous_visibility_state = self.visibility_owner.visibility_state()?;
 
         let previous_base_names = state.known_base_names.clone();
         let previous_visible_names =
-            Self::visible_names_for_state(&state, &previous_visibility_state);
+            Self::visible_names_for_state(&state, previous_visibility_state);
         let previous_active_revision = ToolScopeRevision(previous_visibility_state.active_revision);
 
         state.base_tools = new_base_tools;
@@ -632,6 +655,11 @@ impl ToolScope {
         visibility_state: &SessionToolVisibilityState,
     ) -> ComposedToolFilter {
         let mut filters = vec![
+            Self::effective_filter_for_current_projection(
+                state,
+                visibility_state,
+                &visibility_state.capability_base_filter,
+            ),
             Self::effective_filter_for_current_projection(
                 state,
                 visibility_state,
@@ -786,6 +814,11 @@ impl ToolScope {
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let visibility_state = self.visibility_owner.visibility_state()?;
         Ok(Self::compose(&[
+            Self::effective_filter_for_current_projection(
+                &state,
+                &visibility_state,
+                &visibility_state.capability_base_filter,
+            ),
             Self::effective_filter_for_current_projection(
                 &state,
                 &visibility_state,

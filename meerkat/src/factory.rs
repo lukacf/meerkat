@@ -1773,11 +1773,29 @@ impl AgentFactory {
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
 
-        // Resolve model profile for capability gating (e.g., hiding view_image
-        // when the model cannot process image blocks in tool results).
-        let image_tool_results = registry
-            .profile_for(&model)
-            .is_none_or(|p| p.image_tool_results);
+        // Resolve model profile for capability gating and runtime defaults.
+        let model_profile = registry.profile_for(&model);
+        #[allow(unused_variables)] // used by non-WASM tool dispatch builder
+        let image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
+
+        if let Some(profile) = model_profile.as_ref() {
+            let has_canonical_visibility_state = session
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
+            let capability_base_filter =
+                meerkat_core::capability_base_filter_for_image_tool_results(
+                    profile.image_tool_results,
+                );
+            let mut visibility_state = session.tool_visibility_state().unwrap_or_default();
+            if !has_canonical_visibility_state
+                || visibility_state.capability_base_filter != capability_base_filter
+            {
+                visibility_state.capability_base_filter = capability_base_filter;
+                session
+                    .set_tool_visibility_state(visibility_state)
+                    .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+            }
+        }
         // Resolve ops lifecycle registry via RuntimeBuildMode.
         use meerkat_core::runtime_epoch::RuntimeBuildMode;
 
@@ -2421,21 +2439,6 @@ impl AgentFactory {
             agent.set_mob_authority_handle(handle);
         }
 
-        // 13b. Stage initial external filter to hide view_image when the model
-        // cannot process image blocks in tool results. For resumed sessions,
-        // the persisted filter is already restored by the builder — only gate
-        // fresh sessions.
-        if !image_tool_results {
-            // Applied to both fresh and resumed sessions — old sessions without
-            // filter metadata would otherwise expose view_image on models that
-            // can't handle image tool results.
-            let deny = std::collections::HashSet::from(["view_image".to_string()]);
-            if let Err(err) = agent.stage_external_tool_filter(meerkat_core::ToolFilter::Deny(deny))
-            {
-                tracing::warn!(error = %err, "failed to stage initial view_image deny filter");
-            }
-        }
-
         // 14. Set SessionMetadata
         //
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
@@ -2995,6 +2998,36 @@ mod prompt_tests {
         assert!(
             visible_names.contains("secret_lookup"),
             "the session-plane tool should remain inline until adaptive deferred mode activates"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_persists_canonical_visibility_state_for_capable_models_without_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.resume_session = Some(meerkat_core::Session::new());
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let session = agent.session();
+        let visibility_state = session
+            .tool_visibility_state()
+            .expect("capable model rebuild should persist canonical visibility state");
+
+        assert_eq!(
+            visibility_state.capability_base_filter,
+            meerkat_core::ToolFilter::All,
+            "capable models should persist an explicit canonical capability filter even when it resolves to All"
+        );
+        assert!(
+            session
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
+            "canonical visibility metadata should be written for upgraded sessions"
         );
     }
 }

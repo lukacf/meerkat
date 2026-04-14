@@ -190,7 +190,8 @@ pub use session::{
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
     SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
     SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
-    ToolCategoryOverride, ToolVisibilityWitness,
+    ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
+    capability_base_filter_for_image_tool_results,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

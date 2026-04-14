@@ -560,6 +560,7 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.retire(identity).await
     }
 
+    #[doc(hidden)]
     pub async fn retire_member_by_bridge_session_id(
         &self,
         bridge_session_id: &SessionId,
@@ -600,6 +601,7 @@ impl MobMcpState {
         self.mob_retire(&mob_id, identity).await
     }
 
+    #[doc(hidden)]
     pub async fn owns_live_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         if !self
             .ensure_restored_best_effort("owns_live_bridge_session")
@@ -623,6 +625,7 @@ impl MobMcpState {
         false
     }
 
+    #[doc(hidden)]
     pub async fn owns_persisted_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         let Some(session) = self
             .session_service()
@@ -885,6 +888,7 @@ impl MobMcpState {
     /// `is_implicit == true` and an owner bridge-session index matching the
     /// given bridge session ID.
     /// Does NOT match explicit mobs that merely share the same owner.
+    #[doc(hidden)]
     pub async fn find_implicit_mob_for_bridge_session(
         &self,
         bridge_session_id: &str,
@@ -919,6 +923,7 @@ impl MobMcpState {
 
     /// Find all mobs indexed to the given owner bridge session
     /// (both implicit and explicit).
+    #[doc(hidden)]
     pub async fn find_mobs_for_bridge_session(&self, bridge_session_id: &str) -> Vec<MobId> {
         if !self
             .ensure_restored_best_effort("find_mobs_for_bridge_session")
@@ -1037,6 +1042,7 @@ impl MobMcpState {
     /// caller creates the mob, concurrent callers block and receive the same
     /// mob ID. The mob is indexed to the owning bridge session and marked
     /// bridge-session-scoped.
+    #[doc(hidden)]
     pub async fn get_or_create_implicit_mob_for_bridge_session(
         &self,
         bridge_session_id: &str,
@@ -1051,6 +1057,7 @@ impl MobMcpState {
     ///
     /// Called during session archive to clean up mobs whose cleanup truth is
     /// `DestroyOnOwnerArchive`. Owner indexing alone is not sufficient.
+    #[doc(hidden)]
     pub async fn destroy_bridge_session_mobs(
         &self,
         bridge_session_id: &str,

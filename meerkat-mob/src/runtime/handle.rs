@@ -1536,6 +1536,7 @@ impl MobHandle {
     /// This is an internal routing helper for surfaces that need to call
     /// `SessionService` methods on a member's backing session. Returns `None`
     /// if the member is not found or has no bridge session binding.
+    #[doc(hidden)]
     pub async fn resolve_bridge_session_id(&self, identity: &AgentIdentity) -> Option<SessionId> {
         self.get_member(identity)
             .await

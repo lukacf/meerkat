@@ -582,22 +582,10 @@ fn runtime_binding_emit(variant: &str) -> EffectEmit {
     EffectEmit {
         variant: variant.into(),
         fields: IndexMap::from([
-            (
-                "agent_identity".into(),
-                Expr::Field("active_identity".into()),
-            ),
-            (
-                "agent_runtime_id".into(),
-                Expr::Field("active_runtime_id".into()),
-            ),
-            (
-                "fence_token".into(),
-                Expr::Field("active_fence_token".into()),
-            ),
-            (
-                "generation".into(),
-                Expr::Field("current_generation".into()),
-            ),
+            ("agent_identity".into(), option_value("active_identity")),
+            ("agent_runtime_id".into(), option_value("active_runtime_id")),
+            ("fence_token".into(), option_value("active_fence_token")),
+            ("generation".into(), option_value("current_generation")),
         ]),
     }
 }
@@ -606,14 +594,8 @@ fn runtime_observation_emit(variant: &str) -> EffectEmit {
     EffectEmit {
         variant: variant.into(),
         fields: IndexMap::from([
-            (
-                "agent_runtime_id".into(),
-                Expr::Field("active_runtime_id".into()),
-            ),
-            (
-                "fence_token".into(),
-                Expr::Field("active_fence_token".into()),
-            ),
+            ("agent_runtime_id".into(), option_value("active_runtime_id")),
+            ("fence_token".into(), option_value("active_fence_token")),
         ]),
     }
 }
@@ -636,10 +618,7 @@ fn lifecycle_notice_emit(kind: &str) -> EffectEmit {
     EffectEmit {
         variant: "EmitMemberLifecycleNotice".into(),
         fields: IndexMap::from([
-            (
-                "agent_identity".into(),
-                Expr::Field("active_identity".into()),
-            ),
+            ("agent_identity".into(), option_value("active_identity")),
             ("kind".into(), Expr::String(kind.into())),
         ]),
     }
@@ -683,6 +662,13 @@ fn assign_some(field: &str, binding: &str) -> Update {
     Update::Assign {
         field: field.into(),
         expr: Expr::Some(Box::new(Expr::Binding(binding.into()))),
+    }
+}
+
+fn option_value(field: &str) -> Expr {
+    Expr::MapGet {
+        map: Box::new(Expr::Field(field.into())),
+        key: Box::new(Expr::String("value".into())),
     }
 }
 

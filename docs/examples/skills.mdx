@@ -142,12 +142,14 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
 
 ## Inject skills on session create
 
-Pass `skill_references` to resolve and inject skill content into the system prompt when a session starts.
+Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces, to resolve and inject skill content into the system prompt when a session starts.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run "Extract emails" --skill-refs "/email-extractor" "/formatting/markdown"
+    rkat run "Extract emails" \
+      --skill /email-extractor \
+      --skill /formatting/markdown
     ```
   </Tab>
   <Tab title="JSON-RPC">

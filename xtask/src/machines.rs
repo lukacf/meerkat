@@ -105,6 +105,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     mismatches.extend(collect_machine_inventory_mismatches(&root)?);
     mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
     mismatches.extend(collect_authority_language_mismatches(&root)?);
+    mismatches.extend(collect_stale_cfg_mismatches(&root)?);
 
     if !mismatches.is_empty() {
         bail!(
@@ -303,6 +304,7 @@ fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     mismatches.extend(collect_machine_inventory_mismatches(root)?);
     mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
     mismatches.extend(collect_authority_language_mismatches(root)?);
+    mismatches.extend(collect_stale_cfg_mismatches(root)?);
 
     if !mismatches.is_empty() {
         bail!(
@@ -632,6 +634,26 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
         mismatches.push(format!(
             "untracked canonical machine directory {}",
             specs_machine_root.join(slug).display()
+        ));
+    }
+
+    let specs_composition_root = root.join("specs/compositions");
+    let actual_composition_dirs = canonical_machine_dirs(&specs_composition_root)?;
+    let expected_composition_dirs: BTreeSet<String> = registry
+        .compositions
+        .iter()
+        .map(|c| composition_slug(&c.name))
+        .collect();
+    for slug in expected_composition_dirs.difference(&actual_composition_dirs) {
+        mismatches.push(format!(
+            "missing canonical composition artifact directory {}",
+            specs_composition_root.join(slug).display()
+        ));
+    }
+    for slug in actual_composition_dirs.difference(&expected_composition_dirs) {
+        mismatches.push(format!(
+            "untracked canonical composition directory {}",
+            specs_composition_root.join(slug).display()
         ));
     }
 
@@ -1597,12 +1619,12 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot",
+            filter: "peer_directory_reachability_kernel_reconcile_signal_removed",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
+            filter: "peer_directory_reachability_kernel_fields_removed_from_state",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
@@ -2010,6 +2032,76 @@ fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistr
     }
 
     Ok(())
+}
+
+pub fn collect_stale_cfg_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let mut mismatches = Vec::new();
+
+    let valid_machine_cfgs: BTreeSet<&str> = ["ci.cfg", "deep.cfg", "audit.cfg"]
+        .iter()
+        .copied()
+        .collect();
+    let specs_machine_root = root.join("specs/machines");
+    if specs_machine_root.exists() {
+        for machine in &registry.machines {
+            let slug = machine_slug(&machine.machine);
+            let machine_dir = specs_machine_root.join(&slug);
+            if !machine_dir.exists() {
+                continue;
+            }
+            for entry in fs::read_dir(&machine_dir)
+                .with_context(|| format!("read {}", machine_dir.display()))?
+            {
+                let entry = entry.with_context(|| format!("iterate {}", machine_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("cfg") {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !valid_machine_cfgs.contains(name) {
+                    mismatches.push(format!("stale cfg {}", path.display()));
+                }
+            }
+        }
+    }
+
+    let specs_composition_root = root.join("specs/compositions");
+    if specs_composition_root.exists() {
+        for composition in &registry.compositions {
+            let slug = composition_slug(&composition.name);
+            let comp_dir = specs_composition_root.join(&slug);
+            if !comp_dir.exists() {
+                continue;
+            }
+            let mut valid_comp_cfgs: BTreeSet<String> = BTreeSet::new();
+            valid_comp_cfgs.insert("ci.cfg".into());
+            valid_comp_cfgs.insert("deep.cfg".into());
+            valid_comp_cfgs.insert("audit.cfg".into());
+            for witness in &composition.witnesses {
+                valid_comp_cfgs.insert(composition_witness_cfg_name(&witness.name));
+            }
+            for entry in
+                fs::read_dir(&comp_dir).with_context(|| format!("read {}", comp_dir.display()))?
+            {
+                let entry = entry.with_context(|| format!("iterate {}", comp_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("cfg") {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !valid_comp_cfgs.contains(name) {
+                    mismatches.push(format!("stale cfg {}", path.display()));
+                }
+            }
+        }
+    }
+
+    Ok(mismatches)
 }
 
 fn generated_kernel_module_slug(machine_name: &str) -> String {

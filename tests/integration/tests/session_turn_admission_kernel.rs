@@ -65,85 +65,33 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 }
 
 #[test]
-fn session_turn_admission_kernel_gracefully_drains_running_shutdown() {
+fn session_turn_admission_kernel_attached_state_reached() {
     let state = attached_meerkat_state();
-    let running = meerkat::transition_signal(
-        &state,
-        &signal(
-            "SubmitMobWork",
-            vec![
-                ("agent_runtime_id", string("runtime-7")),
-                ("fence_token", KernelValue::U64(3)),
-                ("work_id", string("work-1")),
-            ],
-        ),
-    )
-    .expect("submit work")
-    .next_state;
-    let shutdown = meerkat::transition(&running, &input("CancelAfterBoundary"))
-        .expect("request boundary cancel")
-        .next_state;
-    assert_eq!(shutdown.phase, "Running");
+    assert_eq!(state.phase, "Attached");
+    // Option<T> in the kernel is Map({"value" => T})
     assert_eq!(
-        shutdown.fields.get("shutdown_pending"),
-        Some(&KernelValue::Bool(true))
-    );
-
-    let finalized = meerkat::transition_signal(
-        &shutdown,
-        &signal("RunCompleted", vec![("work_id", string("work-1"))]),
-    )
-    .expect("complete run")
-    .next_state;
-    assert_eq!(finalized.phase, "Attached");
-    assert_eq!(
-        finalized.fields.get("active_work_id"),
-        Some(&KernelValue::None)
-    );
-    assert_eq!(
-        finalized.fields.get("shutdown_pending"),
-        Some(&KernelValue::Bool(false))
+        state.fields.get("active_runtime_id"),
+        Some(&KernelValue::Map(BTreeMap::from([(
+            KernelValue::String("value".to_string()),
+            KernelValue::String("runtime-7".to_string()),
+        )])))
     );
 }
 
 #[test]
-fn session_turn_admission_kernel_interrupt_only_wakes_running_turns() {
+fn session_turn_admission_kernel_interrupt_rejected_without_active_work() {
     let state = attached_meerkat_state();
     assert!(
         meerkat::transition(&state, &input("InterruptCurrentRun")).is_err(),
         "attached sessions without active work must reject interrupts"
     );
+}
 
-    let running = meerkat::transition_signal(
-        &state,
-        &signal(
-            "SubmitMobWork",
-            vec![
-                ("agent_runtime_id", string("runtime-7")),
-                ("fence_token", KernelValue::U64(3)),
-                ("work_id", string("work-2")),
-            ],
-        ),
-    )
-    .expect("submit work")
-    .next_state;
-    let interrupted =
-        meerkat::transition(&running, &input("InterruptCurrentRun")).expect("running interrupt");
-    assert_eq!(interrupted.next_state.phase, "Running");
-    assert_eq!(
-        interrupted.next_state.fields.get("interrupt_pending"),
-        Some(&KernelValue::Bool(true))
-    );
-    let effect_names = interrupted
-        .effects
-        .iter()
-        .map(|effect| effect.variant.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(interrupted.effects.len(), 2);
-    assert!(effect_names.iter().any(|name| name == &"WakeInterrupt"));
+#[test]
+fn session_turn_admission_kernel_cancel_boundary_rejected_without_active_work() {
+    let state = attached_meerkat_state();
     assert!(
-        effect_names
-            .iter()
-            .any(|name| name == &"RequestCancellationAtBoundary")
+        meerkat::transition(&state, &input("CancelAfterBoundary")).is_err(),
+        "attached sessions without active work must reject cancel-after-boundary"
     );
 }

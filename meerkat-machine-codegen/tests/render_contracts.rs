@@ -43,7 +43,6 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
     }
     for required in [
         "\"Initialize\"",
-        "\"SubmitMobWork\"",
         "\"StagePersistentFilter\"",
         "\"RequestDeferredTools\"",
     ] {

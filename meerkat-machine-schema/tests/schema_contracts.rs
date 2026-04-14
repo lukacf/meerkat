@@ -225,7 +225,6 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "StageReload",
         "PendingSucceeded",
         "SnapshotAligned",
-        "ReconcileResolvedDirectory",
         "StagePersistentFilter",
         "RequestDeferredTools",
     ] {
@@ -274,8 +273,6 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         .collect::<Vec<_>>();
 
     for required in [
-        "interrupt_pending",
-        "shutdown_pending",
         "inherited_base_filter",
         "active_filter",
         "staged_filter",
@@ -286,9 +283,6 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "active_visibility_revision",
         "staged_visibility_revision",
         "committed_visibility_revision",
-        "resolved_peer_keys",
-        "peer_reachability",
-        "peer_last_reason",
     ] {
         assert!(
             field_names.iter().any(|name| name == &required),
@@ -332,12 +326,6 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "FinalizeRemovalCleanRunning",
         "PublishCommittedVisibleSetAttached",
         "PublishCommittedVisibleSetRunning",
-        "ReconcileResolvedDirectoryAttached",
-        "ReconcileResolvedDirectoryRunning",
-        "RecordSendSucceededAttached",
-        "RecordSendSucceededRunning",
-        "RecordSendFailedAttached",
-        "RecordSendFailedRunning",
     ] {
         assert!(
             transition_names.iter().any(|name| name == &required),

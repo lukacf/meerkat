@@ -40,14 +40,17 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     TypeRef::Option(Box::new(TypeRef::U64)),
                 ),
                 field("claimed_at_utc_ms", TypeRef::Option(Box::new(TypeRef::U64))),
-                field("claim_token", TypeRef::Option(Box::new(TypeRef::String))),
+                field(
+                    "claim_token",
+                    TypeRef::Option(Box::new(TypeRef::Named("ClaimToken".into()))),
+                ),
                 field(
                     "delivery_correlation_id",
                     TypeRef::Option(Box::new(TypeRef::String)),
                 ),
                 field(
-                    "last_receipt_stage",
-                    TypeRef::Option(Box::new(TypeRef::Enum("DeliveryReceiptStage".into()))),
+                    "last_receipt",
+                    TypeRef::Option(Box::new(TypeRef::Named("DeliveryReceipt".into()))),
                 ),
                 field(
                     "failure_class",
@@ -82,7 +85,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     init("claimed_at_utc_ms", Expr::None),
                     init("claim_token", Expr::None),
                     init("delivery_correlation_id", Expr::None),
-                    init("last_receipt_stage", Expr::None),
+                    init("last_receipt", Expr::None),
                     init("failure_class", Expr::None),
                     init("failure_detail", Expr::None),
                     init("dispatched_at_utc_ms", Expr::None),
@@ -108,7 +111,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                         field("owner_id", TypeRef::String),
                         field("at_utc_ms", TypeRef::U64),
                         field("lease_expires_at_utc_ms", TypeRef::U64),
-                        field("claim_token", TypeRef::String),
+                        field("claim_token", TypeRef::Named("ClaimToken".into())),
                     ],
                 },
                 VariantSchema {
@@ -125,10 +128,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 VariantSchema {
                     name: "Complete".into(),
                     fields: vec![
-                        field(
-                            "receipt_stage",
-                            TypeRef::Enum("DeliveryReceiptStage".into()),
-                        ),
+                        field("receipt", TypeRef::Named("DeliveryReceipt".into())),
                         field("at_utc_ms", TypeRef::U64),
                     ],
                 },
@@ -169,8 +169,8 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     name: "DeliveryFailed".into(),
                     fields: vec![
                         field(
-                            "receipt_stage",
-                            TypeRef::Option(Box::new(TypeRef::Enum("DeliveryReceiptStage".into()))),
+                            "receipt",
+                            TypeRef::Option(Box::new(TypeRef::Named("DeliveryReceipt".into()))),
                         ),
                         field(
                             "failure_class",
@@ -305,7 +305,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
-                        field: "last_receipt_stage".into(),
+                        field: "last_receipt".into(),
                         expr: Expr::None,
                     },
                     Update::Assign {
@@ -376,13 +376,13 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 on: InputMatch {
                     kind: TriggerKind::Input,
                     variant: "Complete".into(),
-                    bindings: vec!["receipt_stage".into(), "at_utc_ms".into()],
+                    bindings: vec!["receipt".into(), "at_utc_ms".into()],
                 },
                 guards: vec![],
                 updates: vec![
                     Update::Assign {
-                        field: "last_receipt_stage".into(),
-                        expr: Expr::Some(Box::new(Expr::Binding("receipt_stage".into()))),
+                        field: "last_receipt".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("receipt".into()))),
                     },
                     Update::Assign {
                         field: "completed_at_utc_ms".into(),
@@ -442,7 +442,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     kind: TriggerKind::Input,
                     variant: "DeliveryFailed".into(),
                     bindings: vec![
-                        "receipt_stage".into(),
+                        "receipt".into(),
                         "failure_class".into(),
                         "detail".into(),
                         "at_utc_ms".into(),
@@ -451,8 +451,8 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 guards: vec![],
                 updates: vec![
                     Update::Assign {
-                        field: "last_receipt_stage".into(),
-                        expr: Expr::Binding("receipt_stage".into()),
+                        field: "last_receipt".into(),
+                        expr: Expr::Binding("receipt".into()),
                     },
                     Update::Assign {
                         field: "failure_class".into(),
@@ -516,6 +516,22 @@ fn terminal_transition(
             Update::Assign {
                 field: "completed_at_utc_ms".into(),
                 expr: Expr::Some(Box::new(Expr::Binding("at_utc_ms".into()))),
+            },
+            Update::Assign {
+                field: "claimed_by".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "lease_expires_at_utc_ms".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "claim_token".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "delivery_correlation_id".into(),
+                expr: Expr::None,
             },
         ],
         to: to.into(),

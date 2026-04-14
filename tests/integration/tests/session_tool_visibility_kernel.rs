@@ -66,66 +66,23 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 }
 
 #[test]
-fn session_tool_visibility_kernel_promotes_staged_filter_at_boundary() {
+fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     let attached = attached_meerkat_state();
-    let running = meerkat::transition_signal(
+
+    // PublishCommittedVisibleSet from Attached requires revision == active_visibility_revision.
+    // At init, active_visibility_revision == 0.
+    let published = meerkat::transition(
         &attached,
-        &signal(
-            "SubmitMobWork",
-            vec![
-                ("agent_runtime_id", string("runtime-7")),
-                ("fence_token", KernelValue::U64(3)),
-                ("work_id", string("work-1")),
-            ],
+        &input(
+            "PublishCommittedVisibleSet",
+            vec![("revision", KernelValue::U64(0))],
         ),
     )
-    .expect("submit work")
-    .next_state;
-    let staged = meerkat::transition_signal(
-        &running,
-        &signal(
-            "StagePersistentFilter",
-            vec![
-                ("filter", tool_filter_all()),
-                (
-                    "witnesses",
-                    KernelValue::Map(BTreeMap::from([(string("search"), verified_witness())])),
-                ),
-            ],
-        ),
-    )
-    .expect("stage filter")
-    .next_state;
+    .expect("publish committed visible set");
 
-    assert_eq!(
-        staged.fields.get("staged_visibility_revision"),
-        Some(&KernelValue::U64(1))
-    );
-    assert_eq!(
-        staged.fields.get("active_visibility_revision"),
-        Some(&KernelValue::U64(0))
-    );
-
-    let promoted = meerkat::transition_signal(
-        &staged,
-        &signal("BoundaryApplied", vec![("revision", KernelValue::U64(1))]),
-    )
-    .expect("promote staged visibility");
-
-    assert_eq!(promoted.next_state.phase, "Running");
-    assert_eq!(
-        promoted.next_state.fields.get("active_visibility_revision"),
-        Some(&KernelValue::U64(1))
-    );
-    assert_eq!(
-        promoted
-            .next_state
-            .fields
-            .get("committed_visibility_revision"),
-        Some(&KernelValue::U64(1))
-    );
-    assert_eq!(promoted.effects.len(), 1);
-    assert_eq!(promoted.effects[0].variant, "CommittedVisibleSetPublished");
+    assert_eq!(published.next_state.phase, "Attached");
+    assert_eq!(published.effects.len(), 1);
+    assert_eq!(published.effects[0].variant, "CommittedVisibleSetPublished");
 }
 
 #[test]

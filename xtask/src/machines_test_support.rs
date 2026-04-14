@@ -279,12 +279,12 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot",
+            filter: "peer_directory_reachability_kernel_reconcile_signal_removed",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
-            filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
+            filter: "peer_directory_reachability_kernel_fields_removed_from_state",
         },
         OwnerTestSpec {
             package: "meerkat-integration-tests",

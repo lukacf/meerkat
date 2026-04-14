@@ -27,6 +27,7 @@ fn can_transition(from: &RuntimeState, next: &RuntimeState) -> bool {
             )
             | (Recovering, Idle | Attached | Running | Stopped | Destroyed)
             | (Retired, Running | Stopped | Destroyed)
+            | (Stopped, Destroyed)
     )
 }
 
@@ -55,8 +56,11 @@ pub enum RuntimeState {
 
 impl RuntimeState {
     /// Check if this is a terminal state.
+    ///
+    /// Only `Destroyed` is terminal. `Stopped` allows transitions like
+    /// `RegisterSession`, `UnregisterSession`, `PrepareBindings`, and `Destroy`.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Stopped | Self::Destroyed)
+        matches!(self, Self::Destroyed)
     }
 
     /// Check if the runtime can accept new input in this state.
@@ -110,7 +114,7 @@ mod tests {
 
     #[test]
     fn terminal_states() {
-        assert!(RuntimeState::Stopped.is_terminal());
+        assert!(!RuntimeState::Stopped.is_terminal());
         assert!(RuntimeState::Destroyed.is_terminal());
         assert!(!RuntimeState::Initializing.is_terminal());
         assert!(!RuntimeState::Idle.is_terminal());

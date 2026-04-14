@@ -1167,13 +1167,20 @@ impl MeerkatMachine {
                 let (_session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
-                if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
-                ) {
-                    return Err(RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    });
+                let state = Self::driver_runtime_state(&driver).await;
+                if matches!(state, RuntimeState::Destroyed) {
+                    return Err(RuntimeControlPlaneError::InvalidState { state });
+                }
+
+                // Guard: runtime_is_bound — reject Destroy if the runtime was
+                // never bound via PrepareBindings. The driver's Initializing
+                // state means Initialize hasn't even been called. Beyond that,
+                // the ephemeral driver transitions through PrepareBindings ->
+                // Attached, so Initializing is the only state where the runtime
+                // is definitely unbound. (The schema field `active_runtime_id`
+                // maps to "has PrepareBindings been called and not reset".)
+                if matches!(state, RuntimeState::Initializing) {
+                    return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
 
                 let mut drv = driver.lock().await;

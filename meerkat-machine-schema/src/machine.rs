@@ -1055,11 +1055,12 @@ mod tests {
     }
 
     #[test]
-    fn validates_meerkat_machine_embeds_peer_directory_region() {
+    fn validates_meerkat_machine_without_peer_directory_region() {
         let schema = meerkat_machine();
 
+        // Peer directory region was removed (unimplemented).
         assert!(
-            schema
+            !schema
                 .transitions
                 .iter()
                 .any(|transition| transition.name == "RecordSendFailedAttached")

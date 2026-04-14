@@ -1244,8 +1244,9 @@ mod tests {
             )
             .expect("submit work");
         assert_eq!(submitted.transition, "SubmitWork");
+        // SubmitMemberWork effect was removed (unimplemented route to MeerkatMachine).
         assert!(
-            submitted
+            !submitted
                 .effects
                 .iter()
                 .any(|effect| effect.variant == "SubmitMemberWork")

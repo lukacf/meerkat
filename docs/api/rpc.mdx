@@ -1209,7 +1209,7 @@ When a mob event stream is open (via `mob/stream_open`), the server emits `mob/s
 }
 ```
 
-For mob-wide streams the event is an `AttributedEvent` (source + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`.
+For mob-wide streams the event is an `AttributedEvent` (`source` runtime id + `source_fence_token` + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`.
 
 ## Error codes
 

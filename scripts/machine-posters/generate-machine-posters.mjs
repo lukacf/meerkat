@@ -1167,7 +1167,7 @@ function renderPosterHtml(poster) {
   <body>
     <main class="page-shell">
       <a class="page-index-link" href="./index.html">← Poster index</a>
-      <article class="architectural-plate" style="--canvas-width:${canvasWidth}px; --canvas-height:${canvasHeight}px;">
+      <article class="architectural-plate" style="--canvas-width:${canvasWidth}; --canvas-height:${canvasHeight};">
         <header class="plate-header">
           <div class="title-plaque">
             <div class="eyebrow">Canonical machine plate / generated from TLA + contract artifacts</div>

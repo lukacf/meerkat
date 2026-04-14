@@ -132,10 +132,6 @@ impl MobMemberListEntry {
         self
     }
 
-    pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
-        self.current_bridge_session_id.as_ref()
-    }
-
     /// Bridge session ID from the member reference.
     pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         self.member_ref.bridge_session_id()

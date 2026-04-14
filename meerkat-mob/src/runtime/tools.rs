@@ -176,13 +176,13 @@ impl MobOperatorToolDispatcher {
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
         if enable_mob {
             defs.push(tool_def(
-                TOOL_SPAWN_MEERKAT,
-                "Spawn a meerkat from a profile. Supports fresh, resume, or fork launch modes.",
+                TOOL_SPAWN_MEMBER,
+                "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.",
                 json!({
                     "type": "object",
                     "properties": {
                         "profile": {"type": "string"},
-                        "meerkat_id": {"type": "string"},
+                        "member_id": {"type": "string"},
                         "initial_message": content_input_schema(),
                         "resume_bridge_session_id": {"type": "string", "description": "Preferred compatibility field for resume bridge bindings when launch_mode is omitted"},
                         "resume_session_id": {"type": "string", "description": "Deprecated: use resume_bridge_session_id or launch_mode.resume instead"},
@@ -202,13 +202,13 @@ impl MobOperatorToolDispatcher {
                         },
                         "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"}
                     },
-                    "required": ["profile", "meerkat_id"]
+                    "required": ["profile", "member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_SPAWN_MANY_MEERKATS,
-                "Spawn multiple meerkats in one call. Returns per-item results in input order.",
+                TOOL_SPAWN_MANY_MEMBERS,
+                "Spawn multiple mob members in one call. Returns per-item results in input order.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -218,14 +218,14 @@ impl MobOperatorToolDispatcher {
                                 "type": "object",
                                 "properties": {
                                     "profile": {"type": "string"},
-                                    "meerkat_id": {"type": "string"},
+                                    "member_id": {"type": "string"},
                                     "initial_message": content_input_schema(),
                                     "resume_bridge_session_id": {"type": "string"},
                                     "resume_session_id": {"type": "string"},
                                     "backend": {"type": "string", "enum": ["session", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                                 },
-                                "required": ["profile", "meerkat_id"]
+                                "required": ["profile", "member_id"]
                             }
                         }
                     },
@@ -234,38 +234,44 @@ impl MobOperatorToolDispatcher {
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_RETIRE_MEERKAT,
-                "Retire a meerkat and archive its session",
+                TOOL_RETIRE_MEMBER,
+                "Retire a member and archive its session.",
                 json!({
                     "type": "object",
-                    "properties": {"meerkat_id": {"type": "string"}},
-                    "required": ["meerkat_id"]
+                    "properties": {"member_id": {"type": "string"}},
+                    "required": ["member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_WIRE_PEERS,
-                "Wire two meerkats with bidirectional trust",
+                TOOL_WIRE_MEMBERS,
+                "Wire two mob members with bidirectional trust.",
                 json!({
                     "type": "object",
-                    "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
-                    "required": ["a", "b"]
+                    "properties": {
+                        "member_id": {"type": "string"},
+                        "peer_member_id": {"type": "string"}
+                    },
+                    "required": ["member_id", "peer_member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_UNWIRE_PEERS,
-                "Unwire two meerkats and revoke bidirectional trust",
+                TOOL_UNWIRE_MEMBERS,
+                "Unwire two mob members and revoke bidirectional trust.",
                 json!({
                     "type": "object",
-                    "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
-                    "required": ["a", "b"]
+                    "properties": {
+                        "member_id": {"type": "string"},
+                        "peer_member_id": {"type": "string"}
+                    },
+                    "required": ["member_id", "peer_member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_LIST_MEERKATS,
-                "List all active meerkats. Response includes meerkat_id, profile, member_ref, peer_id, session_id, wired_to, external_peer_specs.",
+                TOOL_LIST_MEMBERS,
+                "List all active mob members. Response includes identity-native lifecycle and runtime fields.",
                 json!({
                     "type": "object",
                     "properties": {}
@@ -319,26 +325,26 @@ impl MobOperatorToolDispatcher {
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_FORCE_CANCEL_MEERKAT,
-                "Force-cancel a meerkat's in-flight turn. Does not retire the member.",
+                TOOL_FORCE_CANCEL_MEMBER,
+                "Force-cancel a member's in-flight turn. Does not retire the member.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "meerkat_id": {"type": "string"}
+                        "member_id": {"type": "string"}
                     },
-                    "required": ["meerkat_id"]
+                    "required": ["member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
             defs.push(tool_def(
-                TOOL_MEERKAT_STATUS,
-                "Get a meerkat's execution status snapshot including output preview and token usage.",
+                TOOL_MEMBER_STATUS,
+                "Get a member's execution status snapshot including output preview and token usage.",
                 json!({
                     "type": "object",
                     "properties": {
-                        "meerkat_id": {"type": "string"}
+                        "member_id": {"type": "string"}
                     },
-                    "required": ["meerkat_id"]
+                    "required": ["member_id"]
                 }),
                 ToolSourceKind::Mob,
             ));
@@ -438,15 +444,6 @@ impl MobOperatorToolDispatcher {
         })
     }
 
-    fn member_ref_result_payload(member_ref: &MemberRef) -> serde_json::Value {
-        let bridge_session_id = member_ref.bridge_session_id().cloned();
-        json!({
-            "member_ref": member_ref,
-            "session_id": bridge_session_id,
-            "bridge_session_id": bridge_session_id,
-        })
-    }
-
     fn spawn_result_payload(result: &super::SpawnResult) -> serde_json::Value {
         json!({
             "agent_identity": result.agent_identity,
@@ -456,24 +453,23 @@ impl MobOperatorToolDispatcher {
     }
 
     fn member_list_entry_result_payload(entry: &MobMemberListEntry) -> serde_json::Value {
-        let bridge_session_id = entry.bridge_session_id().cloned();
-        let current_bridge_session_id = entry.current_bridge_session_id().cloned();
-        json!({
-            "meerkat_id": entry.meerkat_id,
-            "profile": entry.role,
-            "runtime_mode": entry.runtime_mode,
-            "member_ref": entry.member_ref,
-            "peer_id": entry.peer_id,
-            "session_id": bridge_session_id,
-            "bridge_session_id": bridge_session_id,
-            "wired_to": entry.wired_to,
-            "external_peer_specs": entry.external_peer_specs,
-            "status": entry.status,
-            "error": entry.error,
-            "is_final": entry.is_final,
-            "current_session_id": current_bridge_session_id,
-            "current_bridge_session_id": current_bridge_session_id,
-        })
+        serde_json::to_value(entry).expect("member list entry should serialize")
+    }
+
+    async fn spawn_result_payload_for_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<serde_json::Value, MobError> {
+        let entry = self.handle.get_member(identity).await.ok_or_else(|| {
+            MobError::Internal(format!(
+                "spawn succeeded but roster entry missing for '{identity}'"
+            ))
+        })?;
+        Ok(Self::spawn_result_payload(&super::SpawnResult::new(
+            entry.agent_identity,
+            entry.agent_runtime_id,
+            entry.fence_token,
+        )))
     }
 
     async fn record_successful_operator_action(&self, tool_name: &str) {
@@ -542,9 +538,9 @@ fn content_input_schema() -> serde_json::Value {
 }
 
 #[derive(Deserialize)]
-struct SpawnMeerkatArgs {
+struct SpawnMemberArgs {
     profile: String,
-    meerkat_id: String,
+    member_id: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
     #[serde(default)]
@@ -567,28 +563,28 @@ struct SpawnMeerkatArgs {
 
 #[derive(Deserialize)]
 struct ForceCancelArgs {
-    meerkat_id: String,
+    member_id: String,
 }
 
 #[derive(Deserialize)]
-struct MeerkatStatusArgs {
-    meerkat_id: String,
+struct MemberStatusArgs {
+    member_id: String,
 }
 
 #[derive(Deserialize)]
-struct SpawnManyMeerkatsArgs {
-    specs: Vec<SpawnMeerkatArgs>,
+struct SpawnManyMembersArgs {
+    specs: Vec<SpawnMemberArgs>,
 }
 
 #[derive(Deserialize)]
-struct RetireMeerkatArgs {
-    meerkat_id: String,
+struct RetireMemberArgs {
+    member_id: String,
 }
 
 #[derive(Deserialize)]
-struct WirePeersArgs {
-    a: String,
-    b: String,
+struct WireMembersArgs {
+    member_id: String,
+    peer_member_id: String,
 }
 
 #[derive(Deserialize)]
@@ -638,13 +634,14 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
             self.ensure_current_mob_scope(call.name)?;
         }
         match call.name {
-            TOOL_SPAWN_MEERKAT => {
-                let args: SpawnMeerkatArgs = call
+            TOOL_SPAWN_MEMBER => {
+                let args: SpawnMemberArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let agent_identity = AgentIdentity::from(args.member_id.as_str());
                 let mut spec = SpawnMemberSpec::from_wire(
                     args.profile,
-                    args.meerkat_id,
+                    args.member_id,
                     args.initial_message,
                     args.runtime_mode,
                     args.backend,
@@ -681,7 +678,10 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             )
                             .await
                             .map_err(|error| Self::map_mob_error(call, error))?;
-                        let result = Self::member_ref_result_payload(&receipt.member_ref);
+                        let result = self
+                            .spawn_result_payload_for_identity(&agent_identity)
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
                         (result, vec![AsyncOpRef::detached(receipt.operation_id)])
                     }
                     _ => {
@@ -697,17 +697,22 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, result, async_ops)
             }
-            TOOL_SPAWN_MANY_MEERKATS => {
-                let args: SpawnManyMeerkatsArgs = call
+            TOOL_SPAWN_MANY_MEMBERS => {
+                let args: SpawnManyMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let identities = args
+                    .specs
+                    .iter()
+                    .map(|spec| AgentIdentity::from(spec.member_id.as_str()))
+                    .collect::<Vec<_>>();
                 let specs = args
                     .specs
                     .into_iter()
                     .map(|spec| {
                         let mut spawn_spec = SpawnMemberSpec::from_wire(
                             spec.profile,
-                            spec.meerkat_id,
+                            spec.member_id,
                             spec.initial_message,
                             spec.runtime_mode,
                             spec.backend,
@@ -749,21 +754,25 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                             .filter_map(|result| result.as_ref().ok())
                             .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
                             .collect::<Vec<_>>();
-                        let results = receipts
-                            .into_iter()
-                            .map(|result| match result {
-                                Ok(receipt) => {
-                                    let mut payload =
-                                        Self::member_ref_result_payload(&receipt.member_ref);
+                        let mut results = Vec::with_capacity(receipts.len());
+                        for (result, identity) in receipts.into_iter().zip(identities.into_iter()) {
+                            match result {
+                                Ok(_receipt) => {
+                                    let mut payload = self
+                                        .spawn_result_payload_for_identity(&identity)
+                                        .await
+                                        .map_err(|error| Self::map_mob_error(call, error))?;
                                     payload["ok"] = json!(true);
-                                    payload
+                                    results.push(payload);
                                 }
-                                Err(error) => json!({
-                                    "ok": false,
-                                    "error": error.to_string(),
-                                }),
-                            })
-                            .collect::<Vec<_>>();
+                                Err(error) => {
+                                    results.push(json!({
+                                        "ok": false,
+                                        "error": error.to_string(),
+                                    }));
+                                }
+                            }
+                        }
                         (results, async_ops)
                     }
                     _ => {
@@ -790,46 +799,52 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
-            TOOL_RETIRE_MEERKAT => {
-                let args: RetireMeerkatArgs = call
+            TOOL_RETIRE_MEMBER => {
+                let args: RetireMemberArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .retire(AgentIdentity::from(args.meerkat_id))
+                    .retire(AgentIdentity::from(args.member_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
-            TOOL_WIRE_PEERS => {
-                let args: WirePeersArgs = call
+            TOOL_WIRE_MEMBERS => {
+                let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .wire(AgentIdentity::from(args.a), MeerkatId::from(args.b))
+                    .wire(
+                        AgentIdentity::from(args.member_id),
+                        AgentIdentity::from(args.peer_member_id),
+                    )
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
-            TOOL_UNWIRE_PEERS => {
-                let args: WirePeersArgs = call
+            TOOL_UNWIRE_MEMBERS => {
+                let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .unwire(AgentIdentity::from(args.a), MeerkatId::from(args.b))
+                    .unwire(
+                        AgentIdentity::from(args.member_id),
+                        AgentIdentity::from(args.peer_member_id),
+                    )
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
-            TOOL_LIST_MEERKATS => {
-                let meerkats = self.handle.list_members().await;
-                let meerkats = meerkats
+            TOOL_LIST_MEMBERS => {
+                let members = self.handle.list_members().await;
+                let members = members
                     .into_iter()
                     .map(|entry| Self::member_list_entry_result_payload(&entry))
                     .collect::<Vec<_>>();
-                Self::encode_result(call, json!({ "meerkats": meerkats }))
+                Self::encode_result(call, json!({ "members": members }))
             }
             TOOL_MOB_LIST_FLOWS => {
                 let flows = self.handle.list_flows();
@@ -921,24 +936,24 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!({ "task": task }))
             }
-            TOOL_FORCE_CANCEL_MEERKAT => {
+            TOOL_FORCE_CANCEL_MEMBER => {
                 let args: ForceCancelArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .force_cancel_member(AgentIdentity::from(args.meerkat_id))
+                    .force_cancel_member(AgentIdentity::from(args.member_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
-            TOOL_MEERKAT_STATUS => {
-                let args: MeerkatStatusArgs = call
+            TOOL_MEMBER_STATUS => {
+                let args: MemberStatusArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 let snapshot = self
                     .handle
-                    .member_status(&AgentIdentity::from(args.meerkat_id))
+                    .member_status(&AgentIdentity::from(args.member_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!(snapshot))
@@ -972,14 +987,14 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
     }
 }
 
-const TOOL_SPAWN_MEERKAT: &str = "spawn_meerkat";
-const TOOL_SPAWN_MANY_MEERKATS: &str = "spawn_many_meerkats";
-const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
-const TOOL_FORCE_CANCEL_MEERKAT: &str = "force_cancel_meerkat";
-const TOOL_MEERKAT_STATUS: &str = "meerkat_status";
-const TOOL_WIRE_PEERS: &str = "wire_peers";
-const TOOL_UNWIRE_PEERS: &str = "unwire_peers";
-const TOOL_LIST_MEERKATS: &str = "list_meerkats";
+const TOOL_SPAWN_MEMBER: &str = "spawn_member";
+const TOOL_SPAWN_MANY_MEMBERS: &str = "spawn_many_members";
+const TOOL_RETIRE_MEMBER: &str = "retire_member";
+const TOOL_FORCE_CANCEL_MEMBER: &str = "force_cancel_member";
+const TOOL_MEMBER_STATUS: &str = "member_status";
+const TOOL_WIRE_MEMBERS: &str = "wire_members";
+const TOOL_UNWIRE_MEMBERS: &str = "unwire_members";
+const TOOL_LIST_MEMBERS: &str = "list_members";
 const TOOL_MOB_LIST_FLOWS: &str = "mob_list_flows";
 const TOOL_MOB_RUN_FLOW: &str = "mob_run_flow";
 const TOOL_MOB_FLOW_STATUS: &str = "mob_flow_status";

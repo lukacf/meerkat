@@ -3800,12 +3800,12 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
 
     let tool_names = service.external_tool_names(&sid_1).await;
     for required in [
-        "spawn_meerkat",
-        "spawn_many_meerkats",
-        "retire_meerkat",
-        "wire_peers",
-        "unwire_peers",
-        "list_meerkats",
+        "spawn_member",
+        "spawn_many_members",
+        "retire_member",
+        "wire_members",
+        "unwire_members",
+        "list_members",
     ] {
         assert!(
             !tool_names.contains(&required.to_string()),
@@ -3816,11 +3816,11 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
     let spawn_err = service
         .dispatch_external_tool_outcome(
             &sid_1,
-            "spawn_meerkat",
-            serde_json::json!({"profile": "worker", "meerkat_id": "w-2"}),
+            "spawn_member",
+            serde_json::json!({"profile": "worker", "member_id": "w-2"}),
         )
         .await
-        .expect_err("spawn_meerkat tool should be unavailable");
+        .expect_err("spawn_member tool should be unavailable");
     assert!(matches!(spawn_err, ToolError::NotFound { .. }));
     assert!(
         handle
@@ -3863,7 +3863,7 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>();
     assert!(
-        tool_names.contains(&"list_meerkats"),
+        tool_names.contains(&"list_members"),
         "tool visibility should depend on injected authority presence, not scope success"
     );
 
@@ -3871,7 +3871,7 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
     let error = dispatcher
         .dispatch(ToolCallView {
             id: "call-1",
-            name: "list_meerkats",
+            name: "list_members",
             args: &args,
         })
         .await
@@ -3909,7 +3909,7 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
     let error = dispatcher
         .dispatch(ToolCallView {
             id: "call-2",
-            name: "spawn_meerkat",
+            name: "spawn_member",
             args: &args,
         })
         .await
@@ -3918,7 +3918,7 @@ async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_m
 }
 
 #[tokio::test]
-async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently() {
+async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() {
     let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
     let mob_id = handle.definition().id.to_string();
     let profile = handle
@@ -3947,7 +3947,7 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
     let spawn_args = RawValue::from_string(
         serde_json::json!({
             "profile": "worker",
-            "meerkat_id": "w-bridge"
+            "member_id": "w-bridge"
         })
         .to_string(),
     )
@@ -3955,11 +3955,11 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
     let spawn_result = dispatcher
         .dispatch(ToolCallView {
             id: "call-bridge-spawn",
-            name: "spawn_meerkat",
+            name: "spawn_member",
             args: &spawn_args,
         })
         .await
-        .expect("spawn_meerkat should dispatch");
+        .expect("spawn_member should dispatch");
     let spawn_payload: serde_json::Value =
         serde_json::from_str(&spawn_result.result.text_content()).expect("spawn payload");
     assert!(
@@ -3979,27 +3979,34 @@ async fn test_visible_mob_operator_tools_emit_bridge_session_fields_consistently
     let list_result = dispatcher
         .dispatch(ToolCallView {
             id: "call-bridge-list",
-            name: "list_meerkats",
+            name: "list_members",
             args: &list_args,
         })
         .await
-        .expect("list_meerkats should dispatch");
+        .expect("list_members should dispatch");
     let list_payload: serde_json::Value =
         serde_json::from_str(&list_result.result.text_content()).expect("list payload");
-    let meerkat = list_payload["meerkats"]
+    let member = list_payload["members"]
         .as_array()
-        .expect("meerkats array")
+        .expect("members array")
         .iter()
-        .find(|entry| entry["meerkat_id"] == "w-bridge")
-        .expect("spawned meerkat should appear in list");
-    assert_eq!(
-        meerkat["session_id"], meerkat["bridge_session_id"],
-        "compatibility bridge binding fields must stay aligned in list output"
+        .find(|entry| entry["agent_identity"] == "w-bridge")
+        .expect("spawned member should appear in list");
+    assert_eq!(member["agent_identity"], "w-bridge");
+    assert!(
+        member["agent_runtime_id"].is_object(),
+        "list output should surface agent_runtime_id"
     );
-    assert_eq!(
-        meerkat["current_session_id"], meerkat["current_bridge_session_id"],
-        "current bridge binding compatibility fields must stay aligned in list output"
+    assert!(
+        member["fence_token"].is_number(),
+        "list output should surface fence_token"
     );
+    assert_eq!(member["role"], "worker");
+    assert!(member.get("member_ref").is_none());
+    assert!(member.get("session_id").is_none());
+    assert!(member.get("bridge_session_id").is_none());
+    assert!(member.get("current_session_id").is_none());
+    assert!(member.get("current_bridge_session_id").is_none());
 }
 
 #[tokio::test]
@@ -4806,7 +4813,7 @@ async fn test_flow_step_tool_overlay_changes_runtime_visible_tools_and_restores_
 }
 
 #[tokio::test]
-async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
+async fn test_spawn_member_tool_dispatches_backend_selection() {
     let mut definition = sample_definition_with_mob_tools();
     definition.backend.external = Some(crate::definition::ExternalBackendConfig {
         address_base: "https://backend.example.invalid/mesh".to_string(),
@@ -4823,10 +4830,10 @@ async fn test_spawn_meerkat_tool_dispatches_backend_selection() {
     let err = service
         .dispatch_external_tool(
             &sid_1,
-            "spawn_meerkat",
+            "spawn_member",
             serde_json::json!({
                 "profile": "worker",
-                "meerkat_id": "w-ext",
+                "member_id": "w-ext",
                 "backend": "external"
             }),
         )
@@ -4896,8 +4903,8 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
 
     let names = service.external_tool_names(&sid).await;
     assert!(
-        !names.iter().any(|name| name == "spawn_meerkat"),
-        "tools.mob=false should hide spawn_meerkat"
+        !names.iter().any(|name| name == "spawn_member"),
+        "tools.mob=false should hide spawn_member"
     );
     assert!(
         !names.iter().any(|name| name == "mob_task_create"),
@@ -4907,8 +4914,8 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
     let spawn_err = service
         .dispatch_external_tool(
             &sid,
-            "spawn_meerkat",
-            serde_json::json!({"profile": "worker", "meerkat_id": "w-2"}),
+            "spawn_member",
+            serde_json::json!({"profile": "worker", "member_id": "w-2"}),
         )
         .await
         .expect_err("spawn tool must be unavailable");
@@ -5187,7 +5194,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
 
     let names = service.external_tool_names(&restored_sid).await;
     assert!(
-        !names.contains(&"spawn_meerkat".to_string()),
+        !names.contains(&"spawn_member".to_string()),
         "restored sessions must not regain mob operator tools without runtime-injected context"
     );
     assert!(
@@ -5986,7 +5993,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 meerkat_core::PeerMeta::default()
                     .with_label("mob_id", "test-mob")
                     .with_label("role", "worker")
-                    .with_label("meerkat_id", "w-1"),
+                    .with_label("member_id", "w-1"),
             ),
             realm_id: Some("mob:test-mob".to_string()),
             instance_id: None,
@@ -14770,7 +14777,7 @@ async fn test_record_operator_action_provenance_round_trips_through_machine_comm
         .with_audit_invocation_id("audit-machine-surface");
 
     handle
-        .record_operator_action_provenance("spawn_meerkat", &authority)
+        .record_operator_action_provenance("spawn_member", &authority)
         .await
         .expect("record operator action");
 
@@ -14782,7 +14789,7 @@ async fn test_record_operator_action_provenance_round_trips_through_machine_comm
                 tool_name,
                 audit_invocation_id,
                 ..
-            } if tool_name == "spawn_meerkat"
+            } if tool_name == "spawn_member"
                 && audit_invocation_id.as_deref() == Some("audit-machine-surface")
         )),
         "operator action provenance should be appended through the machine command surface"
@@ -15294,11 +15301,11 @@ async fn test_external_tools_provider_called_per_spawn() {
 
 #[tokio::test]
 async fn test_external_tools_name_collision_profile_wins() {
-    // Provider returns a dispatcher with tool "spawn_meerkat". Without operator
+    // Provider returns a dispatcher with tool "spawn_member". Without operator
     // context, the callback tool should pass through unchanged.
     let provider: crate::ExternalToolsProvider = Arc::new(|| {
         Some(
-            Arc::new(MultiToolDispatcher::new(&["spawn_meerkat", "my_callback"]))
+            Arc::new(MultiToolDispatcher::new(&["spawn_member", "my_callback"]))
                 as Arc<dyn AgentToolDispatcher>,
         )
     });
@@ -15325,11 +15332,11 @@ async fn test_external_tools_name_collision_profile_wins() {
         .clone();
     let tool_names = service.external_tool_names(&session_id).await;
 
-    // Without operator context there is no mob-owned spawn_meerkat, so the callback
+    // Without operator context there is no mob-owned spawn_member, so the callback
     // tool should remain visible.
     assert!(
-        tool_names.contains(&"spawn_meerkat".to_string()),
-        "callback spawn_meerkat should be present when operator tools are hidden"
+        tool_names.contains(&"spawn_member".to_string()),
+        "callback spawn_member should be present when operator tools are hidden"
     );
     // callback's unique tool should still be present
     assert!(
@@ -15337,15 +15344,15 @@ async fn test_external_tools_name_collision_profile_wins() {
         "non-colliding callback tool should be present"
     );
 
-    // Dispatch spawn_meerkat — should hit the callback dispatcher directly.
-    let raw_args = serde_json::json!({"profile": "worker", "meerkat_id": "w-test"});
+    // Dispatch spawn_member — should hit the callback dispatcher directly.
+    let raw_args = serde_json::json!({"profile": "worker", "member_id": "w-test"});
     let result = service
-        .dispatch_external_tool_outcome(&session_id, "spawn_meerkat", raw_args)
+        .dispatch_external_tool_outcome(&session_id, "spawn_member", raw_args)
         .await
-        .expect("callback spawn_meerkat should dispatch");
+        .expect("callback spawn_member should dispatch");
     let payload: serde_json::Value =
         serde_json::from_str(&result.result.text_content()).expect("callback result json");
-    assert_eq!(payload["tool"], "spawn_meerkat");
+    assert_eq!(payload["tool"], "spawn_member");
 }
 
 #[tokio::test]

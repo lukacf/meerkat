@@ -2268,24 +2268,9 @@ mod tests {
             }),
         );
 
-        MobDefinition {
-            id: MobId::from(mob_id),
-            orchestrator: None,
-            profiles,
-            mcp_servers: std::collections::BTreeMap::new(),
-            wiring: Default::default(),
-            skills: std::collections::BTreeMap::new(),
-            backend: Default::default(),
-            flows: std::collections::BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit(MobId::from(mob_id));
+        definition.profiles = profiles;
+        definition
     }
 
     #[test]
@@ -2626,7 +2611,7 @@ mod tests {
             .expect("created mob handle");
         let created_definition = created_handle.definition();
         assert_eq!(
-            created_definition.owner_bridge_session_id.as_deref(),
+            created_definition.owner_bridge_session_index(),
             Some(expected_session_id.as_str()),
             "mob_create must rebind bridge-session indexing to the current owner bridge session"
         );

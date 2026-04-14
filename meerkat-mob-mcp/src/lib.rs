@@ -4262,24 +4262,9 @@ mod tests {
                 provider_params: None,
             }),
         );
-        MobDefinition {
-            id: MobId::from(mob_id),
-            orchestrator: None,
-            profiles: explicit_profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: meerkat_mob::definition::WiringRules::default(),
-            skills: BTreeMap::new(),
-            backend: meerkat_mob::definition::BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_bridge_session_id: None,
-            session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-            is_implicit: false,
-        }
+        let mut definition = MobDefinition::explicit(MobId::from(mob_id));
+        definition.profiles = explicit_profiles;
+        definition
     }
 
     fn sample_realm_profile(model: &str) -> meerkat_mob::Profile {
@@ -4455,7 +4440,7 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mut manual = explicit_definition("manual-owner-index");
-        manual.owner_bridge_session_id = Some(sid.clone());
+        manual.set_owner_bridge_session_lookup_index(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
@@ -4554,7 +4539,7 @@ mod tests {
 
         // Also create a manual owner-indexed explicit mob that should survive scavenging.
         let mut manual = explicit_definition("manual-owner-index");
-        manual.owner_bridge_session_id = Some(sid.clone());
+        manual.set_owner_bridge_session_lookup_index(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
             .await
@@ -4646,7 +4631,7 @@ mod tests {
             "implicit mob must have auto_wire_orchestrator set"
         );
         assert_eq!(
-            handle.definition().owner_bridge_session_id.as_deref(),
+            handle.definition().owner_bridge_session_index(),
             Some(sid.as_str()),
             "implicit mob must have correct owner_bridge_session_id"
         );

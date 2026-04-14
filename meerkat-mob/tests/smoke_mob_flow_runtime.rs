@@ -449,34 +449,24 @@ fn flow_definition(models: &FlowSmokeModels) -> MobDefinition {
         build_persisted_branch_dual_loops_audit_flow(),
     );
 
-    MobDefinition {
-        id: MobId::from("flow-runtime-smoke"),
-        orchestrator: Some(OrchestratorConfig {
-            profile: ProfileName::from("lead"),
-        }),
-        profiles,
-        mcp_servers: BTreeMap::new(),
-        wiring: WiringRules::default(),
-        skills: BTreeMap::new(),
-        backend: BackendConfig::default(),
-        flows,
-        topology: None,
-        supervisor: None,
-        limits: Some(LimitsSpec {
-            max_flow_duration_ms: Some(300_000),
-            max_step_retries: Some(0),
-            max_orphaned_turns: Some(8),
-            cancel_grace_timeout_ms: Some(1_500),
-            max_active_nodes: Some(4),
-            max_active_frames: Some(4),
-            max_frame_depth: Some(4),
-        }),
-        spawn_policy: None,
-        event_router: None,
-        owner_bridge_session_id: None,
-        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-        is_implicit: false,
-    }
+    let mut definition = MobDefinition::explicit(MobId::from("flow-runtime-smoke"));
+    definition.orchestrator = Some(OrchestratorConfig {
+        profile: ProfileName::from("lead"),
+    });
+    definition.profiles = profiles;
+    definition.wiring = WiringRules::default();
+    definition.backend = BackendConfig::default();
+    definition.flows = flows;
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: Some(300_000),
+        max_step_retries: Some(0),
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: Some(1_500),
+        max_active_nodes: Some(4),
+        max_active_frames: Some(4),
+        max_frame_depth: Some(4),
+    });
+    definition
 }
 
 fn build_fanout_review_loop_flow() -> FlowSpec {

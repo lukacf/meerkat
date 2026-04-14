@@ -14,8 +14,9 @@ use meerkat_core::types::HandlingMode;
 use meerkat_mob::definition::{OrchestratorConfig, WiringRules};
 use meerkat_mob::runtime::MobMemberListEntry;
 use meerkat_mob::{
-    MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
-    MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, ToolConfig,
+    AgentIdentity, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
+    MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec,
+    ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, StoreAdapter};
@@ -160,38 +161,25 @@ fn joke_mob_definition(model: String) -> MobDefinition {
         }),
     );
 
-    MobDefinition {
-        id: MobId::from("joke-smoke"),
-        orchestrator: Some(OrchestratorConfig {
-            profile: ProfileName::from("lead"),
-        }),
-        profiles,
-        mcp_servers: BTreeMap::new(),
-        wiring: WiringRules {
-            auto_wire_orchestrator: true,
-            role_wiring: vec![],
-        },
-        skills: BTreeMap::new(),
-        backend: Default::default(),
-        flows: Default::default(),
-        topology: None,
-        supervisor: None,
-        limits: None,
-        spawn_policy: None,
-        event_router: None,
-        owner_bridge_session_id: None,
-        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-        is_implicit: false,
-    }
+    let mut definition = MobDefinition::explicit(MobId::from("joke-smoke"));
+    definition.orchestrator = Some(OrchestratorConfig {
+        profile: ProfileName::from("lead"),
+    });
+    definition.profiles = profiles;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: true,
+        role_wiring: vec![],
+    };
+    definition
 }
 
-async fn member_entry(handle: &MobHandle, meerkat_id: &str) -> MobMemberListEntry {
+async fn member_entry(handle: &MobHandle, agent_identity: &str) -> MobMemberListEntry {
     handle
         .list_members()
         .await
         .into_iter()
-        .find(|entry| entry.meerkat_id == MeerkatId::from(meerkat_id))
-        .unwrap_or_else(|| panic!("member {meerkat_id} missing from list_members"))
+        .find(|entry| entry.agent_identity == AgentIdentity::from(agent_identity))
+        .unwrap_or_else(|| panic!("member {agent_identity} missing from list_members"))
 }
 
 async fn history_blob(service: &dyn MobSessionService, session_id: &meerkat::SessionId) -> String {
@@ -234,12 +222,13 @@ async fn send_and_wait(
     prompt: impl Into<String>,
     needles: &[&str],
 ) {
-    let session_id = member_entry(handle, member_id)
+    let identity = AgentIdentity::from(member_id);
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
         .await
-        .current_session_id
         .expect("member session id");
     handle
-        .member(&MeerkatId::from(member_id))
+        .member(&identity)
         .await
         .expect("member handle")
         .send(prompt.into(), HandlingMode::Queue)
@@ -269,30 +258,30 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
         .expect("create persistent joke mob");
 
     handle_1
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
         .await
         .expect("spawn lead");
     handle_1
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("w-1")))
         .await
         .expect("spawn worker 1");
     handle_1
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("w-2")))
         .await
         .expect("spawn worker 2");
 
-    let lead_before = member_entry(&handle_1, "lead-1").await;
-    let w1_before = member_entry(&handle_1, "w-1").await;
-    let w2_before = member_entry(&handle_1, "w-2").await;
-    let lead_sid = lead_before
-        .current_session_id
-        .clone()
+    let lead_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+        .await
         .expect("lead session id");
-    let w1_sid = w1_before.current_session_id.clone().expect("w1 session id");
-    let w2_sid = w2_before.current_session_id.clone().expect("w2 session id");
-    let lead_peer = lead_before.peer_id.clone().expect("lead peer id");
-    let w1_peer = w1_before.peer_id.clone().expect("w1 peer id");
-    let w2_peer = w2_before.peer_id.clone().expect("w2 peer id");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+        .await
+        .expect("w1 session id");
+    let w2_sid = handle_1
+        .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+        .await
+        .expect("w2 session id");
 
     send_and_wait(
         &handle_1,
@@ -361,16 +350,26 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
     let w2_after_resume = member_entry(&handle_2, "w-2").await;
 
     assert_eq!(lead_after_resume.status, MobMemberStatus::Active);
-    assert_eq!(lead_after_resume.current_session_id, Some(lead_sid.clone()));
     assert_eq!(
-        lead_after_resume.peer_id.as_deref(),
-        Some(lead_peer.as_str())
+        handle_2
+            .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+            .await,
+        Some(lead_sid.clone())
     );
     assert_eq!(w1_after_resume.status, MobMemberStatus::Active);
-    assert_eq!(w1_after_resume.current_session_id, Some(w1_sid.clone()));
-    assert_eq!(w1_after_resume.peer_id.as_deref(), Some(w1_peer.as_str()));
+    assert_eq!(
+        handle_2
+            .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+            .await,
+        Some(w1_sid.clone())
+    );
     assert_eq!(w2_after_resume.status, MobMemberStatus::Broken);
-    assert_eq!(w2_after_resume.current_session_id, Some(w2_sid.clone()));
+    assert_eq!(
+        handle_2
+            .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+            .await,
+        Some(w2_sid.clone())
+    );
     assert!(
         w2_after_resume
             .error
@@ -419,26 +418,17 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
     .await;
 
     let repair = handle_2
-        .respawn(MeerkatId::from("w-2"), None)
+        .respawn(AgentIdentity::from("w-2"), None)
         .await
         .expect("respawn broken worker 2");
-    let new_w2_sid = repair
-        .new_session_id
-        .clone()
+    assert_eq!(repair.identity, AgentIdentity::from("w-2"));
+    let new_w2_sid = handle_2
+        .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+        .await
         .expect("new worker 2 session id");
-    assert_ne!(repair.old_session_id, repair.new_session_id);
     let w2_after_respawn = member_entry(&handle_2, "w-2").await;
-    let new_w2_peer = w2_after_respawn
-        .peer_id
-        .clone()
-        .expect("new worker 2 peer id");
     assert_eq!(w2_after_respawn.status, MobMemberStatus::Active);
-    assert_eq!(
-        w2_after_respawn.current_session_id,
-        Some(new_w2_sid.clone())
-    );
     assert_ne!(new_w2_sid, w2_sid);
-    assert_ne!(new_w2_peer, w2_peer);
 
     send_and_wait(
         &handle_2,
@@ -487,17 +477,26 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
     let w1_after_second = member_entry(&handle_3, "w-1").await;
     let w2_after_second = member_entry(&handle_3, "w-2").await;
 
-    assert_eq!(lead_after_second.current_session_id, Some(lead_sid.clone()));
+    assert_eq!(lead_after_second.status, MobMemberStatus::Active);
+    assert_eq!(w1_after_second.status, MobMemberStatus::Active);
+    assert_eq!(w2_after_second.status, MobMemberStatus::Active);
     assert_eq!(
-        lead_after_second.peer_id.as_deref(),
-        Some(lead_peer.as_str())
+        handle_3
+            .resolve_bridge_session_id(&AgentIdentity::from("lead-1"))
+            .await,
+        Some(lead_sid.clone())
     );
-    assert_eq!(w1_after_second.current_session_id, Some(w1_sid.clone()));
-    assert_eq!(w1_after_second.peer_id.as_deref(), Some(w1_peer.as_str()));
-    assert_eq!(w2_after_second.current_session_id, Some(new_w2_sid.clone()));
     assert_eq!(
-        w2_after_second.peer_id.as_deref(),
-        Some(new_w2_peer.as_str())
+        handle_3
+            .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
+            .await,
+        Some(w1_sid.clone())
+    );
+    assert_eq!(
+        handle_3
+            .resolve_bridge_session_id(&AgentIdentity::from("w-2"))
+            .await,
+        Some(new_w2_sid.clone())
     );
     wait_for_history_contains_all(
         service_3.as_ref(),

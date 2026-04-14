@@ -79,32 +79,21 @@ fn owner_test_config() -> FlowRunConfig {
         }),
     );
 
-    let definition = MobDefinition {
-        id: MobId::from("mob-owner-test"),
-        orchestrator: Some(OrchestratorConfig {
-            profile: ProfileName::from("lead"),
-        }),
-        profiles,
-        mcp_servers: BTreeMap::new(),
-        wiring: WiringRules::default(),
-        skills: BTreeMap::new(),
-        backend: BackendConfig::default(),
-        flows,
-        topology: None,
-        supervisor: None,
-        limits: Some(LimitsSpec {
-            max_flow_duration_ms: Some(60_000),
-            max_step_retries: Some(1),
-            max_orphaned_turns: Some(8),
-            cancel_grace_timeout_ms: None,
-            ..Default::default()
-        }),
-        spawn_policy: None,
-        event_router: None,
-        owner_bridge_session_id: None,
-        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-        is_implicit: false,
-    };
+    let mut definition = MobDefinition::explicit(MobId::from("mob-owner-test"));
+    definition.orchestrator = Some(OrchestratorConfig {
+        profile: ProfileName::from("lead"),
+    });
+    definition.profiles = profiles;
+    definition.wiring = WiringRules::default();
+    definition.backend = BackendConfig::default();
+    definition.flows = flows;
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: Some(60_000),
+        max_step_retries: Some(1),
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
+        ..Default::default()
+    });
 
     FlowRunConfig::from_definition(FlowId::from("demo"), &definition).expect("flow config")
 }

@@ -385,7 +385,7 @@ pub struct MobDefinition {
     pub event_router: Option<EventRouterConfig>,
     /// Canonical identity-first owner bridge session binding for lookup/indexing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_bridge_session_id: Option<String>,
+    pub(crate) owner_bridge_session_id: Option<String>,
     /// Canonical cleanup policy for session-indexed mobs.
     #[serde(default, skip_serializing_if = "SessionCleanupPolicy::is_manual")]
     pub session_cleanup_policy: SessionCleanupPolicy,
@@ -440,6 +440,28 @@ struct TomlDefinition {
 }
 
 impl MobDefinition {
+    /// Create a minimal explicit mob definition with manual cleanup semantics.
+    pub fn explicit(id: impl Into<MobId>) -> Self {
+        Self {
+            id: id.into(),
+            orchestrator: None,
+            profiles: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            wiring: WiringRules::default(),
+            skills: BTreeMap::new(),
+            backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
+            spawn_policy: None,
+            event_router: None,
+            owner_bridge_session_id: None,
+            session_cleanup_policy: SessionCleanupPolicy::Manual,
+            is_implicit: false,
+        }
+    }
+
     /// Create a minimal implicit delegation mob indexed to the given bridge session.
     ///
     /// The mob is tagged with `owner_bridge_session_id` for
@@ -525,6 +547,16 @@ impl MobDefinition {
         self.owner_bridge_session_id.as_deref()
     }
 
+    /// Assign bridge-session lookup ownership without changing cleanup semantics.
+    pub fn set_owner_bridge_session_lookup_index(&mut self, bridge_session_id: impl Into<String>) {
+        self.owner_bridge_session_id = Some(bridge_session_id.into());
+    }
+
+    /// Clear any bridge-session lookup ownership without changing other flags.
+    pub fn clear_owner_bridge_session_lookup_index(&mut self) {
+        self.owner_bridge_session_id = None;
+    }
+
     pub fn has_owner_bridge_session_index(&self, bridge_session_id: &str) -> bool {
         self.owner_bridge_session_index() == Some(bridge_session_id)
     }
@@ -539,7 +571,7 @@ impl MobDefinition {
     }
 
     pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: &str) {
-        self.owner_bridge_session_id = Some(bridge_session_id.to_string());
+        self.set_owner_bridge_session_lookup_index(bridge_session_id.to_string());
         self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
     }
 

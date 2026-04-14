@@ -140,53 +140,39 @@ fn pictionary_definition() -> MobDefinition {
         )),
     );
 
-    MobDefinition {
-        id: MobId::from("pictionary"),
-        orchestrator: None,
-        profiles,
-        mcp_servers: BTreeMap::new(),
-        wiring: WiringRules {
-            auto_wire_orchestrator: false,
-            role_wiring: vec![
-                // Full mesh: every profile can talk to every other
-                RoleWiringRule {
-                    a: ProfileName::from("artist"),
-                    b: ProfileName::from("guesser-a"),
-                },
-                RoleWiringRule {
-                    a: ProfileName::from("artist"),
-                    b: ProfileName::from("guesser-b"),
-                },
-                RoleWiringRule {
-                    a: ProfileName::from("artist"),
-                    b: ProfileName::from("guesser-c"),
-                },
-                RoleWiringRule {
-                    a: ProfileName::from("guesser-a"),
-                    b: ProfileName::from("guesser-b"),
-                },
-                RoleWiringRule {
-                    a: ProfileName::from("guesser-a"),
-                    b: ProfileName::from("guesser-c"),
-                },
-                RoleWiringRule {
-                    a: ProfileName::from("guesser-b"),
-                    b: ProfileName::from("guesser-c"),
-                },
-            ],
-        },
-        skills: BTreeMap::new(),
-        backend: Default::default(),
-        flows: BTreeMap::new(),
-        topology: None,
-        supervisor: None,
-        limits: None,
-        spawn_policy: None,
-        event_router: None,
-        owner_bridge_session_id: None,
-        session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
-        is_implicit: false,
-    }
+    let mut definition = MobDefinition::explicit(MobId::from("pictionary"));
+    definition.profiles = profiles;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![
+            // Full mesh: every profile can talk to every other
+            RoleWiringRule {
+                a: ProfileName::from("artist"),
+                b: ProfileName::from("guesser-a"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("artist"),
+                b: ProfileName::from("guesser-b"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("artist"),
+                b: ProfileName::from("guesser-c"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("guesser-a"),
+                b: ProfileName::from("guesser-b"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("guesser-a"),
+                b: ProfileName::from("guesser-c"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("guesser-b"),
+                b: ProfileName::from("guesser-c"),
+            },
+        ],
+    };
+    definition
 }
 
 async fn setup_mob()

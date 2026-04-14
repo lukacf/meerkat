@@ -26,65 +26,63 @@ use std::convert::TryFrom;
 /// The public wire contract owns the accepted shape; this conversion is an
 /// explicit mechanical mapping into `meerkat_mob::MobDefinition`.
 pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefinition, String> {
-    Ok(MobDefinition {
-        id: MobId::from(input.id),
-        orchestrator: input.orchestrator.map(|orchestrator| OrchestratorConfig {
-            profile: ProfileName::from(orchestrator.profile),
-        }),
-        profiles: input
-            .profiles
+    let mut definition = MobDefinition::explicit(MobId::from(input.id));
+    definition.orchestrator = input.orchestrator.map(|orchestrator| OrchestratorConfig {
+        profile: ProfileName::from(orchestrator.profile),
+    });
+    definition.profiles = input
+        .profiles
+        .into_iter()
+        .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
+        .collect::<Result<_, _>>()?;
+    definition.mcp_servers = input
+        .mcp_servers
+        .into_iter()
+        .map(|(name, config)| {
+            Ok((
+                name,
+                McpServerConfig {
+                    command: config.command,
+                    url: config.url,
+                    env: config.env,
+                },
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
+        role_wiring: input
+            .wiring
+            .role_wiring
             .into_iter()
-            .map(|(profile_name, binding)| decode_profile_binding(profile_name, binding))
-            .collect::<Result<_, _>>()?,
-        mcp_servers: input
-            .mcp_servers
-            .into_iter()
-            .map(|(name, config)| {
-                Ok((
-                    name,
-                    McpServerConfig {
-                        command: config.command,
-                        url: config.url,
-                        env: config.env,
-                    },
-                ))
+            .map(|rule| RoleWiringRule {
+                a: ProfileName::from(rule.a),
+                b: ProfileName::from(rule.b),
             })
-            .collect::<Result<_, String>>()?,
-        wiring: WiringRules {
-            auto_wire_orchestrator: input.wiring.auto_wire_orchestrator,
-            role_wiring: input
-                .wiring
-                .role_wiring
-                .into_iter()
-                .map(|rule| RoleWiringRule {
-                    a: ProfileName::from(rule.a),
-                    b: ProfileName::from(rule.b),
-                })
-                .collect(),
-        },
-        skills: input
-            .skills
-            .into_iter()
-            .map(|(name, source)| Ok((name, decode_skill_source(source))))
-            .collect::<Result<_, String>>()?,
-        backend: decode_backend(input.backend),
-        flows: input
-            .flows
-            .into_iter()
-            .map(|(flow_id, flow)| decode_flow_spec(flow_id, flow))
-            .collect::<Result<_, _>>()?,
-        topology: input.topology.map(decode_topology),
-        supervisor: input.supervisor.map(|supervisor| SupervisorSpec {
-            role: ProfileName::from(supervisor.role),
-            escalation_threshold: supervisor.escalation_threshold,
-        }),
-        limits: input.limits.map(decode_limits),
-        spawn_policy: input.spawn_policy.map(decode_spawn_policy),
-        event_router: input.event_router.map(decode_event_router),
-        owner_bridge_session_id: None,
-        session_cleanup_policy: SessionCleanupPolicy::Manual,
-        is_implicit: false,
-    })
+            .collect(),
+    };
+    definition.skills = input
+        .skills
+        .into_iter()
+        .map(|(name, source)| Ok((name, decode_skill_source(source))))
+        .collect::<Result<_, String>>()?;
+    definition.backend = decode_backend(input.backend);
+    definition.flows = input
+        .flows
+        .into_iter()
+        .map(|(flow_id, flow)| decode_flow_spec(flow_id, flow))
+        .collect::<Result<_, _>>()?;
+    definition.topology = input.topology.map(decode_topology);
+    definition.supervisor = input.supervisor.map(|supervisor| SupervisorSpec {
+        role: ProfileName::from(supervisor.role),
+        escalation_threshold: supervisor.escalation_threshold,
+    });
+    definition.limits = input.limits.map(decode_limits);
+    definition.spawn_policy = input.spawn_policy.map(decode_spawn_policy);
+    definition.event_router = input.event_router.map(decode_event_router);
+    definition.session_cleanup_policy = SessionCleanupPolicy::Manual;
+    definition.is_implicit = false;
+    Ok(definition)
 }
 
 fn decode_profile_binding(

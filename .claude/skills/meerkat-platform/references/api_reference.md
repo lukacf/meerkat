@@ -385,9 +385,9 @@ Session methods:
 Mob methods:
 
 - `Mob.status()` / `Mob.lifecycle(action)`
-- `Mob.spawn(spec)` / `Mob.retire(meerkatId)` / `Mob.respawn(meerkatId)`
-- `Mob.wire(a, b)` / `Mob.unwire(a, b)`
-- `Mob.listMembers()` / `Mob.sendMessage(meerkatId, message)`
+- `Mob.spawn(spec)` / `Mob.retire(agentIdentity)` / `Mob.respawn(agentIdentity)`
+- `Mob.wire(a, b)` / `Mob.unwire(a, b)` — identity-keyed
+- `Mob.listMembers()` / `Mob.sendMessage(agentIdentity, message)`
 - `Mob.listFlows()` / `Mob.runFlow(flowId, params)` / `Mob.flowStatus(runId)` / `Mob.cancelFlow(runId)`
 - `Mob.subscribeMemberEvents(meerkatId)` → `EventSubscription<AgentEventEnvelope>`
 - `Mob.subscribeEvents()` → `EventSubscription<AttributedMobEvent>`

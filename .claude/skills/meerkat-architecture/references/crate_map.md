@@ -170,10 +170,10 @@ MobHandle::spawn(spec)
   ├── add to roster, compute wiring targets
   └── do_wire() for each target pair
 
-MobHandle::respawn(meerkat_id)
+MobHandle::respawn(identity: AgentIdentity)
   ├── retire existing member (archive session, remove from roster)
   ├── enqueue spawn with same identity/profile/labels/mode
-  └── new session ID, peer wiring needs re-establishment
+  └── new FenceToken issued, peer wiring needs re-establishment
 
 MobHandle::run_flow(flow_id, params)
   ├── create MobRun record

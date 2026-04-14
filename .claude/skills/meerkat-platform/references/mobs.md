@@ -95,7 +95,7 @@ Primary crates:
 ### `MobHandle` API
 
 - inspection: `status()`, `definition()`, `mob_id()`, `roster()`, `list_members()`, `list_all_members()`, `get_member()`, `events()`, `mcp_server_states()`
-- membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_spec()`, `spawn_many()`, `retire()`, `respawn()`, `retire_all()`, `set_spawn_policy()`
+- membership: `spawn_spec(spec)`, `spawn_many(specs)`, `retire(identity)`, `respawn(identity)`, `retire_all()`, `set_spawn_policy()` — all identity-keyed via `AgentIdentity`
 - graph: `wire()`, `unwire()`
 - turns: `member(id).send(...)`, `internal_turn()`
 - lifecycle: `stop()`, `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`

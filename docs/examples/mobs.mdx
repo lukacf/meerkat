@@ -249,12 +249,13 @@ planes instead:
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.spawn("lead".into(), "lead-1".into(), None).await?;
-    handle.spawn_with_options(
-        "worker".into(), "worker-1".into(), None,
-        Some(MobRuntimeMode::TurnDriven), None,
-    ).await?;
-    handle.spawn("worker".into(), "worker-2".into(), None).await?;
+    use meerkat_mob::{AgentIdentity, SpawnMemberSpec};
+
+    handle.spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1"))).await?;
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("worker-1"));
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await?;
+    handle.spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("worker-2"))).await?;
     ```
   </Tab>
 </Tabs>

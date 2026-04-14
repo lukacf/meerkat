@@ -65,7 +65,7 @@ pub use ids::{
     LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin, WorkRef,
     WorkSpec,
 };
-pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
+pub use launch::{BudgetSplitPolicy, ForkContext};
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{

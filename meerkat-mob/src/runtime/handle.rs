@@ -457,7 +457,7 @@ pub struct SpawnMemberSpec {
     /// Application-defined labels for this member.
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     /// How this member should be launched (fresh, resume, or fork).
-    pub launch_mode: crate::launch::MemberLaunchMode,
+    pub(crate) launch_mode: crate::launch::MemberLaunchMode,
     /// Tool access policy for this member.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// How to split budget from the orchestrator to this member.
@@ -535,14 +535,17 @@ impl SpawnMemberSpec {
     }
 
     /// Set launch mode to resume an existing bridge session.
-    pub fn with_resume_bridge_session_id(mut self, id: meerkat_core::types::SessionId) -> Self {
+    pub(crate) fn with_resume_bridge_session_id(
+        mut self,
+        id: meerkat_core::types::SessionId,
+    ) -> Self {
         self.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: id,
         };
         self
     }
 
-    pub fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
+    pub(crate) fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
         self.launch_mode = mode;
         self
     }
@@ -579,11 +582,6 @@ impl SpawnMemberSpec {
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
         spec
-    }
-
-    /// Extract the resume bridge session ID if the launch mode is `Resume`.
-    pub fn resume_bridge_session_id(&self) -> Option<&meerkat_core::types::SessionId> {
-        self.launch_mode.resume_bridge_session_id()
     }
 }
 
@@ -2856,7 +2854,7 @@ mod tests {
         let spec =
             SpawnMemberSpec::new("worker", "worker-1").with_resume_bridge_session_id(sid.clone());
 
-        assert_eq!(spec.resume_bridge_session_id(), Some(&sid));
-        assert_eq!(spec.resume_bridge_session_id(), Some(&sid));
+        assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
+        assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
     }
 }

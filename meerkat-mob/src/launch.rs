@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum MemberLaunchMode {
+pub(crate) enum MemberLaunchMode {
     /// Start with a brand-new session (default).
     #[default]
     Fresh,
@@ -33,7 +33,7 @@ pub enum MemberLaunchMode {
 }
 
 impl MemberLaunchMode {
-    pub fn resume_bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn resume_bridge_session_id(&self) -> Option<&SessionId> {
         match self {
             Self::Resume { bridge_session_id } => Some(bridge_session_id),
             _ => None,

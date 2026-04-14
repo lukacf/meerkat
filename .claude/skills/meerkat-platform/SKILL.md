@@ -108,7 +108,7 @@ Primary CLI usage is tool-driven through `run`/`resume`:
 
 ```bash
 rkat run "create a mob with a lead and workers, then wire and report status"
-rkat resume <session_id> "retire worker-2 and add worker-4"
+rkat run --resume <session_id> "retire worker-2 and add worker-4"
 ```
 
 Where needed, direct lifecycle commands are available as operational compatibility surface:
@@ -320,10 +320,9 @@ rkat "What is Rust?"                     # "run" is the default subcommand
 rkat run "What is Rust?"                 # equivalent explicit form
 rkat --realm team-alpha run "Create a todo app" --tools workspace --stream -v
 # Global flags: --realm, --isolated, --instance, --realm-backend, --state-root, --context-root, --user-config-root
-rkat resume last "keep going"             # resume most recent session
-rkat resume 019c8b99 "continue"          # resume by short prefix
-rkat continue "next step"                # shortcut for resume last
-rkat --realm team-alpha resume sid_abc123 "Now add error handling"
+rkat run --resume "keep going"           # resume most recent session
+rkat run --resume 019c8b99 "continue"    # resume by short prefix
+rkat --realm team-alpha run --resume sid_abc123 "Now add error handling"
 # Batch context: pipe finite content as context
 cat document.txt | rkat run "Summarize this document"
 git diff | rkat run "Review these changes" --tools safe
@@ -445,7 +444,7 @@ Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`)
 
 The `meerkat-models` crate provides a curated model catalog queryable from all surfaces:
 
-- CLI: `rkat models catalog`
+- CLI: `rkat models`
 - RPC: `models/catalog`
 - REST: `GET /models/catalog`
 - MCP: `meerkat_models_catalog`
@@ -522,7 +521,7 @@ Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`
 
 **Skill introspection** surfaces are available on all surfaces:
 
-- CLI: `rkat skills list [--json]`, `rkat skills inspect <id> [--source <name>] [--json]`
+- CLI: `rkat skill list [--json]`, `rkat skill inspect <id> [--source <name>] [--json]`
 - RPC: `skills/list`, `skills/inspect`
 - REST: `GET /skills`, `GET /skills/{id}`
 - MCP: `meerkat_skills` tool (`action: "list"` / `"inspect"`)

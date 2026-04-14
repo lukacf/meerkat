@@ -310,7 +310,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
   <Tab title="CLI">
     ```bash
     # Allow-list specific tools for this turn
-    rkat resume --session 01936f8a-... \
+    rkat run --resume 01936f8a-... \
       --allow-tool shell --allow-tool read_file \
       --block-tool task_create \
       "Execute the next step"

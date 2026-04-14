@@ -470,6 +470,10 @@ fn is_root_flag_with_value(arg: &str) -> bool {
     )
 }
 
+fn is_root_passthrough_flag(arg: &str) -> bool {
+    matches!(arg, "-h" | "--help" | "-V" | "--version")
+}
+
 /// Normalize legacy execution shorthands and inject `run` as the default
 /// subcommand when the first positional argument is not a known command.
 fn normalize_cli_args(
@@ -478,7 +482,10 @@ fn normalize_cli_args(
     const SUBCOMMANDS: &[&str] = &[
         "init",
         "run",
+        "session",
         "sessions",
+        "blob",
+        "realm",
         "realms",
         "mcp",
         "skill",
@@ -495,12 +502,25 @@ fn normalize_cli_args(
     while i < args.len() {
         let arg_str = args[i].to_str().unwrap_or("");
         if arg_str.starts_with('-') {
+            if is_root_passthrough_flag(arg_str) {
+                return args;
+            }
             if is_root_flag_with_value(arg_str) {
                 i += 2; // skip flag and its value
             } else {
                 break;
             }
         } else {
+            if arg_str == "models"
+                && args
+                    .get(i + 1)
+                    .and_then(|arg| arg.to_str())
+                    .is_some_and(|next| next == "catalog")
+            {
+                let mut patched = args[..=i].to_vec();
+                patched.extend_from_slice(&args[(i + 2)..]);
+                return patched;
+            }
             if arg_str == "resume" {
                 if i + 2 > args.len() - 1 {
                     return args;
@@ -623,29 +643,66 @@ async fn init_project_config() -> anyhow::Result<()> {
 #[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
 #[command(
-    after_help = "Examples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> --help` for more details."
+    after_help = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, mcp, config, realm\n  Deployment:   mob\n  Utility:      session, blob, models, capabilities, doctor\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> -h` for the basic view and `rkat <command> --help` for all options."
 )]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
-    #[arg(long, short = 'r', global = true)]
+    #[arg(
+        long,
+        short = 'r',
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     realm: Option<String>,
     /// Start in isolated mode (new generated realm).
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     isolated: bool,
     /// Optional instance ID inside a realm.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     instance: Option<String>,
     /// Realm backend when creating a new realm.
-    #[arg(long, global = true, value_enum)]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     realm_backend: Option<RealmBackendArg>,
     /// Override state root (directory that contains realms).
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     state_root: Option<PathBuf>,
     /// Convention context root for skills/hooks/AGENTS/MCP config.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     context_root: Option<PathBuf>,
     /// Optional user-global convention root.
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        hide_short_help = true,
+        help_heading = "Realm options"
+    )]
     user_config_root: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -684,63 +741,97 @@ enum Commands {
 
         /// Resume an existing session instead of starting a new one.
         /// Omitting the value resumes `last`.
-        #[arg(long, value_name = "SESSION", num_args = 0..=1, default_missing_value = "last")]
+        #[arg(long, value_name = "SESSION", num_args = 0..=1, default_missing_value = "last", help_heading = "Common options")]
         resume: Option<String>,
 
         /// Optional per-request system prompt override.
-        #[arg(long = "system")]
+        #[arg(
+            long = "system",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         system_prompt: Option<String>,
 
         /// Model to use (defaults to config when omitted)
-        #[arg(long, short = 'm')]
+        #[arg(long, short = 'm', help_heading = "Common options")]
         model: Option<String>,
 
         /// LLM provider (anthropic, openai, gemini). Inferred from model name if not specified.
-        #[arg(long, short = 'p', value_enum)]
+        #[arg(
+            long,
+            short = 'p',
+            value_enum,
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         provider: Option<Provider>,
 
         /// Maximum tokens per turn (defaults to config when omitted)
-        #[arg(long)]
+        #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         max_tokens: Option<u32>,
 
         /// Maximum duration for the run (e.g., "5m", "1h30m")
-        #[arg(long, short = 'd')]
+        #[arg(long, short = 'd', help_heading = "Common options")]
         max_duration: Option<String>,
 
         /// Maximum tool calls for the run
-        #[arg(long)]
+        #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         max_tool_calls: Option<usize>,
 
         /// Output format (text, json)
-        #[arg(long, short = 'o', default_value = "text")]
+        #[arg(
+            long,
+            short = 'o',
+            default_value = "text",
+            help_heading = "Common options"
+        )]
         output: String,
 
         /// Convenience alias for --output json
-        #[arg(long)]
+        #[arg(long, help_heading = "Common options")]
         json: bool,
 
         /// Stream LLM response tokens to stdout as they arrive
-        #[arg(long, short = 's')]
+        #[arg(long, short = 's', help_heading = "Common options")]
         stream: bool,
 
         /// Disable streaming output
-        #[arg(long)]
+        #[arg(long, help_heading = "Common options")]
         no_stream: bool,
 
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
-        #[arg(long = "param", value_name = "KEY=VALUE")]
+        #[arg(
+            long = "param",
+            value_name = "KEY=VALUE",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         params: Vec<String>,
 
         /// Provider-specific params as a JSON object.
-        #[arg(long = "params-json", value_name = "JSON")]
+        #[arg(
+            long = "params-json",
+            value_name = "JSON",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         provider_params_json: Option<String>,
 
         /// Structured output schema (wrapper or raw JSON schema; file path OR inline JSON)
-        #[arg(long = "schema", value_name = "SCHEMA")]
+        #[arg(
+            long = "schema",
+            value_name = "SCHEMA",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         output_schema: Option<String>,
 
         /// Skill IDs or local skill paths to preload for this run. Repeatable.
-        #[arg(long = "skill", value_name = "PATH_OR_ID")]
+        #[arg(
+            long = "skill",
+            value_name = "PATH_OR_ID",
+            help_heading = "Common options"
+        )]
         skills: Vec<String>,
 
         /// Deprecated compatibility alias for --skill.
@@ -762,43 +853,69 @@ enum Commands {
         skill_references: Vec<String>,
 
         /// Per-turn allow list for tools on the first turn (repeatable).
-        #[arg(long = "allow-tool", value_name = "TOOL")]
+        #[arg(
+            long = "allow-tool",
+            value_name = "TOOL",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         allow_tools: Vec<String>,
 
         /// Per-turn block list for tools on the first turn (repeatable).
-        #[arg(long = "block-tool", value_name = "TOOL")]
+        #[arg(
+            long = "block-tool",
+            value_name = "TOOL",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         block_tools: Vec<String>,
 
         /// Session label (key=value, repeatable). Attached at creation for filtering.
-        #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
+        #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label, hide_short_help = true, help_heading = "Advanced options")]
         labels: Vec<(String, String)>,
 
         /// Additional instruction section appended to the system prompt (repeatable).
-        #[arg(long = "instructions", value_name = "TEXT")]
+        #[arg(
+            long = "instructions",
+            value_name = "TEXT",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         instructions: Vec<String>,
 
         /// Opaque application context (JSON). Passed through to custom builders.
-        #[arg(long = "app-context", value_name = "JSON")]
+        #[arg(
+            long = "app-context",
+            value_name = "JSON",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         app_context: Option<String>,
 
         /// Tool preset
-        #[arg(long, short = 't', value_enum, default_value = "safe")]
+        #[arg(
+            long,
+            short = 't',
+            value_enum,
+            default_value = "safe",
+            help_heading = "Common options"
+        )]
         tools: ToolPreset,
 
         /// Alias for --tools full
-        #[arg(long)]
+        #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         yolo: bool,
 
         /// Wait for all MCP servers to connect before running the first prompt.
         /// By default MCP servers connect in the background and their tools
         /// become available as each server is ready. Use this flag when the
         /// first prompt requires MCP tools to be available.
-        #[arg(long)]
+        #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         wait_for_mcp: bool,
 
         // === Output verbosity ===
         /// Verbose output: show each turn, tool calls, and results as they happen
-        #[arg(long, short = 'v')]
+        #[arg(long, short = 'v', help_heading = "Common options")]
         verbose: bool,
 
         /// Keep the session alive after the initial turn completes.
@@ -808,19 +925,31 @@ enum Commands {
         /// exits after the agent's response.
         ///
         /// Implied by `--stdin lines` (line-mode stdin requires keep-alive).
-        #[arg(long)]
+        #[arg(long, help_heading = "Common options")]
         keep_alive: bool,
 
         /// How stdin should be handled
-        #[arg(long, value_enum, default_value = "auto")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "auto",
+            help_heading = "Common options"
+        )]
         stdin: StdinMode,
 
         /// How each stdin line is interpreted in line mode
-        #[arg(long, value_enum, default_value = "text")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "text",
+            hide_short_help = true,
+            help_heading = "Advanced options"
+        )]
         line_format: LineFormat,
     },
 
     /// Session management
+    #[command(name = "session", visible_alias = "sessions")]
     Sessions {
         #[command(subcommand)]
         command: SessionCommands,
@@ -833,6 +962,7 @@ enum Commands {
     },
 
     /// Realm lifecycle management
+    #[command(name = "realm", visible_alias = "realms")]
     Realms {
         #[command(subcommand)]
         command: RealmCommands,
@@ -876,19 +1006,10 @@ enum Commands {
     Capabilities,
 
     /// Show model catalog and provider information
-    Models {
-        #[command(subcommand)]
-        command: ModelsCommands,
-    },
+    Models,
 
     /// Check local setup and common prerequisites
     Doctor,
-}
-
-#[derive(Subcommand)]
-enum ModelsCommands {
-    /// Show the compiled-in model catalog with provider grouping and tiers
-    Catalog,
 }
 
 #[derive(Subcommand)]
@@ -1487,9 +1608,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             } => handle_config_patch(file, json, expected_generation, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
-        Commands::Models { command } => match command {
-            ModelsCommands::Catalog => handle_models_catalog(&cli_scope).await,
-        },
+        Commands::Models => handle_models_catalog(&cli_scope).await,
         Commands::Doctor => handle_doctor(&cli_scope).await,
     };
 
@@ -8458,6 +8577,15 @@ mod tests {
 
     #[test]
     fn test_normalize_cli_args() {
+        let args = normalize_cli_args(["rkat", "-h"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "-h"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
         let args = normalize_cli_args(["rkat", "hello world"].map(Into::into));
         assert_eq!(
             args,
@@ -8515,6 +8643,15 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .collect::<Vec<_>>()
         );
+
+        let args = normalize_cli_args(["rkat", "models", "catalog"].map(Into::into));
+        assert_eq!(
+            args,
+            vec!["rkat", "models"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -8531,6 +8668,33 @@ mod tests {
                 assert_eq!(labels, vec![("env".to_string(), "dev".to_string())]);
             }
             _ => unreachable!("expected sessions list command"),
+        }
+    }
+
+    #[test]
+    fn test_singular_alias_commands_parse() {
+        let session_cli =
+            Cli::try_parse_from(["rkat", "session", "list"]).expect("session alias should parse");
+        match session_cli.command {
+            Commands::Sessions {
+                command: SessionCommands::List { .. },
+            } => {}
+            _ => unreachable!("expected session list command"),
+        }
+
+        let realm_cli =
+            Cli::try_parse_from(["rkat", "realm", "list"]).expect("realm alias should parse");
+        match realm_cli.command {
+            Commands::Realms {
+                command: RealmCommands::List,
+            } => {}
+            _ => unreachable!("expected realm list command"),
+        }
+
+        let models_cli = Cli::try_parse_from(["rkat", "models"]).expect("models should parse");
+        match models_cli.command {
+            Commands::Models => {}
+            _ => unreachable!("expected models command"),
         }
     }
 

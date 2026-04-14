@@ -709,13 +709,13 @@ impl FlowRunKernel {
     async fn verify_terminal_run_steps(&self, run_id: &RunId) -> Result<(), MobError> {
         let steps = self.ordered_steps(run_id).await?;
         for step_id in &steps {
-            if let Some(status) = self.step_status(run_id, step_id).await? {
-                if !status.is_terminal() {
-                    return Err(MobError::Internal(format!(
-                        "TerminalRunStepInvariant violated: run '{run_id}' is terminal but \
-                         step '{step_id}' has non-terminal status {status:?}"
-                    )));
-                }
+            if let Some(status) = self.step_status(run_id, step_id).await?
+                && !status.is_terminal()
+            {
+                return Err(MobError::Internal(format!(
+                    "TerminalRunStepInvariant violated: run '{run_id}' is terminal but \
+                     step '{step_id}' has non-terminal status {status:?}"
+                )));
             }
             // None means the step was never dispatched — that's implicitly terminal
             // (the TLA+ model treats absent step status as not-yet-started, which is

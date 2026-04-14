@@ -1174,9 +1174,8 @@ async fn e2e_scenario_21_mob_callback_tools() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
-    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
 
-    // 5. Start a turn that must discover, load, and then call the deferred tool.
+    // 5. Start a turn using mob/turn_start (identity-native routing).
     let secret_code = "MEERKAT-42";
     let id = next_id();
     send_request(
@@ -1184,9 +1183,10 @@ async fn e2e_scenario_21_mob_callback_tools() {
         &serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "method": "turn/start",
+            "method": "mob/turn_start",
             "params": {
-                "session_id": session_id,
+                "mob_id": mob_id,
+                "agent_identity": "w1",
                 "prompt": "Find the deferred tool that can retrieve a secret code for key 'alpha'. First call tool_catalog_search with a query about secret lookup, then call tool_catalog_load for the matching tool, then call the loaded tool with key 'alpha'. The answer is not knowable without calling the loaded tool. Reply with only the secret code."
             }
         }),
@@ -1218,6 +1218,12 @@ async fn e2e_scenario_21_mob_callback_tools() {
         text.contains(secret_code),
         "Expected response to contain '{secret_code}' from callback tool result, got: {text}"
     );
+
+    // Extract session_id from the turn response for subsequent session-level queries.
+    let session_id = turn_resp["result"]["session_id"]
+        .as_str()
+        .expect("mob/turn_start response should include session_id from delegated turn/start")
+        .to_string();
 
     let history_id = next_id();
     let history_resp =
@@ -1483,7 +1489,6 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     .await;
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
-    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
 
     // 4. Register the callback tool AFTER the member already exists.
     let id = next_id();
@@ -1532,9 +1537,10 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
         &serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "method": "turn/start",
+            "method": "mob/turn_start",
             "params": {
-                "session_id": session_id,
+                "mob_id": mob_id,
+                "agent_identity": "w1",
                 "prompt": "A deferred callback tool for secret lookup was registered after this member already existed. Use tool_catalog_search to find a tool for secret lookup, use tool_catalog_load to load it, then call the loaded tool with key 'beta'. The answer is not knowable without the tool call. Reply with only the secret code."
             }
         }),
@@ -1567,6 +1573,12 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
         text.contains(secret_code),
         "Expected response to contain '{secret_code}' from late-registered callback tool, got: {text}"
     );
+
+    // Extract session_id from the turn response for session-level history query.
+    let session_id = turn_resp["result"]["session_id"]
+        .as_str()
+        .expect("mob/turn_start response should include session_id")
+        .to_string();
 
     let history_id = next_id();
     let history_resp =

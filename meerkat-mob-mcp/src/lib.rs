@@ -911,6 +911,7 @@ impl MobMcpState {
     /// Check whether the given mob is an implicit delegation mob.
     ///
     /// Checks the canonical `is_implicit` field on the mob definition.
+    #[doc(hidden)]
     pub async fn is_implicit_mob(&self, mob_id: &MobId) -> bool {
         if !self.ensure_restored_best_effort("is_implicit_mob").await {
             return false;
@@ -992,6 +993,7 @@ impl MobMcpState {
     /// This is the sole owner of implicit-mob model reconciliation. Tool
     /// surfaces may provide a cached mob-id hint for the fast path, but they
     /// must not destroy or recreate mobs themselves.
+    #[doc(hidden)]
     pub async fn ensure_implicit_mob_for_model(
         &self,
         bridge_session_id: &str,
@@ -1092,6 +1094,7 @@ impl MobMcpState {
     /// `DestroyOnOwnerArchive`, checks whether the indexed owning bridge session
     /// still exists. If not, destroys the mob. Returns the list of scavenged
     /// mob IDs.
+    #[doc(hidden)]
     pub async fn scavenge_orphaned_bridge_session_scoped_mobs(&self) -> Vec<MobId> {
         if !self
             .ensure_restored_best_effort("scavenge_orphaned_bridge_session_scoped_mobs")

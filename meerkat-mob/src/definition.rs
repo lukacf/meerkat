@@ -468,6 +468,7 @@ impl MobDefinition {
     /// bridge-session-indexed lookup and marked session-scoped for cleanup. It
     /// also has `auto_wire_orchestrator = true` so spawned members are
     /// automatically wired to the lead agent.
+    #[doc(hidden)]
     pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
@@ -543,46 +544,56 @@ impl MobDefinition {
         })
     }
 
+    #[doc(hidden)]
     pub fn owner_bridge_session_index(&self) -> Option<&str> {
         self.owner_bridge_session_id.as_deref()
     }
 
     /// Assign bridge-session lookup ownership without changing cleanup semantics.
+    #[doc(hidden)]
     pub fn set_owner_bridge_session_lookup_index(&mut self, bridge_session_id: impl Into<String>) {
         self.owner_bridge_session_id = Some(bridge_session_id.into());
     }
 
     /// Clear any bridge-session lookup ownership without changing other flags.
+    #[doc(hidden)]
     pub fn clear_owner_bridge_session_lookup_index(&mut self) {
         self.owner_bridge_session_id = None;
     }
 
+    #[doc(hidden)]
     pub fn has_owner_bridge_session_index(&self, bridge_session_id: &str) -> bool {
         self.owner_bridge_session_index() == Some(bridge_session_id)
     }
 
+    #[doc(hidden)]
     pub fn is_indexed_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
     }
 
+    #[doc(hidden)]
     pub fn is_cleanup_scoped_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
             && self.session_cleanup_policy == SessionCleanupPolicy::DestroyOnOwnerArchive
     }
 
+    #[doc(hidden)]
     pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: &str) {
         self.set_owner_bridge_session_lookup_index(bridge_session_id.to_string());
         self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
     }
 
+    #[doc(hidden)]
     pub fn is_owned_by_bridge_session(&self, bridge_session_id: &str) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
     }
 
+    #[doc(hidden)]
     pub fn is_bridge_session_scoped_to(&self, bridge_session_id: &str) -> bool {
         self.is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
     }
 
+    #[doc(hidden)]
     pub fn mark_bridge_session_scoped(&mut self, bridge_session_id: &str) {
         self.mark_owner_bridge_session_indexed(bridge_session_id);
     }

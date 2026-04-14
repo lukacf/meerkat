@@ -20,7 +20,8 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::RwLock as StdRwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use meerkat_core::BlobStore;
 use meerkat_core::comms_drain_lifecycle_authority::{
@@ -31,6 +32,10 @@ use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
+use meerkat_core::{
+    SessionToolVisibilityState, ToolFilter, ToolScopeApplyError, ToolScopeRevision,
+    ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
+};
 
 use crate::accept::AcceptOutcome;
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
@@ -272,6 +277,97 @@ impl DriverEntry {
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
 pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::CompletionRegistry>>;
 
+#[derive(Debug, Default)]
+struct MachineToolVisibilityOwner {
+    state: StdRwLock<SessionToolVisibilityState>,
+    next_revision: AtomicU64,
+}
+
+impl MachineToolVisibilityOwner {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ToolVisibilityOwner for MachineToolVisibilityOwner {
+    fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        self.state
+            .read()
+            .map(|state| state.clone())
+            .map_err(|_| ToolScopeApplyError::Owner {
+                message: "machine visibility state lock poisoned".to_string(),
+            })
+    }
+
+    fn replace_visibility_state(
+        &self,
+        visibility_state: SessionToolVisibilityState,
+    ) -> Result<(), ToolScopeApplyError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let next_revision = visibility_state
+            .active_revision
+            .max(visibility_state.staged_revision);
+        *state = visibility_state;
+        self.next_revision.store(next_revision, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stage_persistent_filter(
+        &self,
+        filter: ToolFilter,
+        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_filter = filter;
+        state.filter_witnesses.extend(witnesses);
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn stage_requested_deferred_names(
+        &self,
+        names: std::collections::BTreeSet<String>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_requested_deferred_names = names;
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn request_deferred_tools(
+        &self,
+        names: std::collections::BTreeSet<String>,
+        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
+        state.staged_requested_deferred_names.extend(names);
+        state.requested_witnesses.extend(witnesses);
+        state.staged_revision = revision.0;
+        Ok(revision)
+    }
+
+    fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        state.active_filter = state.staged_filter.clone();
+        state.active_requested_deferred_names = state.staged_requested_deferred_names.clone();
+        state.active_revision = state.staged_revision;
+        Ok(state.clone())
+    }
+}
+
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
@@ -284,6 +380,8 @@ struct RuntimeSessionEntry {
     cursor_state: Arc<meerkat_core::EpochCursorState>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
+    /// Canonical durable visibility owner for this session.
+    tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
     /// Registration phase — explicit type-level distinction between
     /// "registered but inert" and "executor attached."
     phase: RegistrationPhase,
@@ -734,6 +832,8 @@ impl MeerkatMachine {
                         ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
                             as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
                         cursor_state: Arc::clone(&entry.cursor_state),
+                        tool_visibility_owner: Arc::clone(&entry.tool_visibility_owner)
+                            as Arc<dyn meerkat_core::ToolVisibilityOwner>,
                     },
                 ))
             }
@@ -768,6 +868,74 @@ impl MeerkatMachine {
                 let driver = driver.lock().await;
                 Ok(MeerkatMachineSessionCommandResult::ActiveInputs(
                     driver.as_driver().active_input_ids(),
+                ))
+            }
+            MeerkatMachineSessionCommand::StagePersistentFilter {
+                session_id,
+                filter,
+                witnesses,
+            } => {
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                let owner = {
+                    let sessions = self.sessions.read().await;
+                    Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    )
+                };
+                let revision = owner
+                    .stage_persistent_filter(filter, witnesses)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                Ok(MeerkatMachineSessionCommandResult::VisibilityRevision(
+                    revision,
+                ))
+            }
+            MeerkatMachineSessionCommand::RequestDeferredTools {
+                session_id,
+                names,
+                witnesses,
+            } => {
+                if !self.sessions.read().await.contains_key(&session_id) {
+                    return Err(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    });
+                }
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                let owner = {
+                    let sessions = self.sessions.read().await;
+                    Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    )
+                };
+                let revision = owner
+                    .request_deferred_tools(names, witnesses)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                Ok(MeerkatMachineSessionCommandResult::VisibilityRevision(
+                    revision,
                 ))
             }
             MeerkatMachineSessionCommand::PublishCommittedVisibleSet {
@@ -805,6 +973,21 @@ impl MeerkatMachine {
                             visibility_state.active_revision, visibility_state.staged_revision,
                         ),
                     });
+                }
+
+                {
+                    let sessions = self.sessions.read().await;
+                    let owner = Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    );
+                    owner
+                        .replace_visibility_state(*visibility_state.clone())
+                        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
                 }
 
                 Ok(MeerkatMachineSessionCommandResult::VisibilityPublished(
@@ -1618,6 +1801,7 @@ impl MeerkatMachine {
             epoch_id,
             cursor_state,
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
+            tool_visibility_owner: Arc::new(MachineToolVisibilityOwner::new()),
             phase: RegistrationPhase::Queuing,
             detached_wake: None,
         };
@@ -1764,6 +1948,7 @@ impl MeerkatMachine {
                             epoch_id: recovered_epoch,
                             cursor_state: recovered_cursors,
                             completions: completions.clone(),
+                            tool_visibility_owner: Arc::new(MachineToolVisibilityOwner::new()),
                             phase: RegistrationPhase::Queuing,
                             detached_wake: None,
                         },
@@ -2078,6 +2263,54 @@ impl MeerkatMachine {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Stage a durable session visibility filter through the machine-owned visibility state.
+    pub async fn stage_persistent_filter(
+        &self,
+        session_id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::StagePersistentFilter {
+                    session_id: session_id.clone(),
+                    filter,
+                    witnesses,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::VisibilityRevision(revision) => Ok(revision),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for stage_persistent_filter: {other:?}"
+            ))),
+        }
+    }
+
+    /// Record durable deferred-tool visibility intent through the machine seam.
+    pub async fn request_deferred_tools(
+        &self,
+        session_id: &SessionId,
+        names: std::collections::BTreeSet<String>,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_session_command(
+                MeerkatMachineSessionCommand::RequestDeferredTools {
+                    session_id: session_id.clone(),
+                    names,
+                    witnesses,
+                },
+            )
+            .await?
+        {
+            MeerkatMachineSessionCommandResult::VisibilityRevision(revision) => Ok(revision),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineSessionCommandResult for request_deferred_tools: {other:?}"
+            ))),
+        }
     }
 
     /// Publish the committed visible tool set through the machine dispatch.

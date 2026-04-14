@@ -848,6 +848,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             epoch_id: meerkat_core::RuntimeEpochId::new(),
                             ops_lifecycle,
                             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+                            tool_visibility_owner: Arc::new(
+                                meerkat_core::LocalToolVisibilityOwner::new(),
+                            ),
                         },
                     )
                 })

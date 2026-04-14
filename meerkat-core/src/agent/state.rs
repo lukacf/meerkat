@@ -675,10 +675,21 @@ where
                                 std::collections::HashSet::new(),
                             ),
                         };
+                        let visibility_state = match self.tool_scope.promote_staged_visibility() {
+                            Ok(state) => state,
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "failed to promote staged tool visibility state at boundary"
+                                );
+                                self.tool_scope.visibility_state().unwrap_or_default()
+                            }
+                        };
                         match self.tool_scope.apply_staged_projection(
                             dispatcher_tools.clone(),
                             control_tool_names,
                             deferred_tool_names,
+                            &visibility_state,
                         ) {
                             Ok(applied) => {
                                 if let Err(err) = self.publish_committed_visible_set() {

@@ -6,7 +6,7 @@ use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
-use crate::session::{PendingSystemContextAppend, SESSION_TOOL_VISIBILITY_STATE_KEY, Session};
+use crate::session::{PendingSystemContextAppend, Session};
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -45,14 +45,19 @@ where
         &mut self,
         filter: ToolFilter,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        // Durable visibility intent is machine-owned (or owned by the local
+        // fallback owner for standalone builds). ToolScope only routes the
+        // staging request and rebuilds the visible-tool projection.
         let handle = self.tool_scope.handle();
         let revision = handle.stage_external_filter(filter)?;
         let _ = handle.staged_revision();
-        if let Ok(visibility_state) = self.tool_scope.visibility_state()
-            && let Ok(value) = serde_json::to_value(visibility_state)
-        {
-            self.session
-                .set_metadata(SESSION_TOOL_VISIBILITY_STATE_KEY, value);
+        if let Ok(visibility_state) = self.tool_scope.visibility_state() {
+            if let Err(err) = self.session.set_tool_visibility_state(visibility_state) {
+                tracing::warn!(
+                    error = %err,
+                    "failed to persist staged canonical tool visibility state"
+                );
+            }
             self.session
                 .remove_metadata(EXTERNAL_TOOL_FILTER_METADATA_KEY);
         }
@@ -190,6 +195,8 @@ where
 
     /// Persist the currently committed visible tool set into canonical session metadata.
     pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
+        // Session metadata is a durable projection/export of the canonical
+        // visibility owner state so checkpoint/recovery stays aligned.
         let visibility_state = self.tool_scope.visibility_state().map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to snapshot canonical tool visibility state: {err}"

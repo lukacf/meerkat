@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::ops_lifecycle::OpsLifecycleRegistry;
+use crate::tool_scope::ToolVisibilityOwner;
 use crate::types::SessionId;
 
 /// Unique identifier for a runtime epoch (UUID v7 for time-ordering).
@@ -151,6 +152,8 @@ pub struct SessionRuntimeBindings {
     pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
     /// Shared consumer cursor state for this epoch.
     pub cursor_state: Arc<EpochCursorState>,
+    /// Canonical durable tool-visibility owner for this session/runtime binding.
+    pub tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -160,6 +163,7 @@ impl Clone for SessionRuntimeBindings {
             epoch_id: self.epoch_id.clone(),
             ops_lifecycle: Arc::clone(&self.ops_lifecycle),
             cursor_state: Arc::clone(&self.cursor_state),
+            tool_visibility_owner: Arc::clone(&self.tool_visibility_owner),
         }
     }
 }
@@ -171,6 +175,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("epoch_id", &self.epoch_id)
             .field("ops_lifecycle", &"<dyn OpsLifecycleRegistry>")
             .field("cursor_state", &self.cursor_state)
+            .field("tool_visibility_owner", &"<dyn ToolVisibilityOwner>")
             .finish()
     }
 }

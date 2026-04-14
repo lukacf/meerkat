@@ -85,6 +85,16 @@ pub(crate) enum MeerkatMachineSessionCommand {
     ListActiveInputs {
         session_id: SessionId,
     },
+    StagePersistentFilter {
+        session_id: SessionId,
+        filter: meerkat_core::ToolFilter,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    },
+    RequestDeferredTools {
+        session_id: SessionId,
+        names: std::collections::BTreeSet<String>,
+        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+    },
     /// Publish the committed visible tool set through the machine dispatch.
     ///
     /// TLA+ source: VisibleSurfacesMatchAppliedStateInvariant —
@@ -105,6 +115,7 @@ pub(crate) enum MeerkatMachineSessionCommandResult {
     Bindings(meerkat_core::SessionRuntimeBindings),
     InputState(Option<InputState>),
     ActiveInputs(Vec<InputId>),
+    VisibilityRevision(meerkat_core::ToolScopeRevision),
     VisibilityPublished(meerkat_core::SessionToolVisibilityState),
 }
 

@@ -10164,7 +10164,10 @@ async fn spine_invariants_hold_after_steered_input() {
 async fn publish_committed_visible_set_succeeds_for_registered_session() {
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    adapter.register_session(session_id.clone()).await;
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
 
     let state = meerkat_core::SessionToolVisibilityState {
         active_revision: 1,
@@ -10179,6 +10182,105 @@ async fn publish_committed_visible_set_succeeds_for_registered_session() {
         published.active_revision, state.active_revision,
         "returned state should match the submitted state"
     );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner
+            .visibility_state()
+            .expect("owner state should be readable"),
+        state,
+        "publish must replace the machine-owned visibility state"
+    );
+}
+
+#[tokio::test]
+async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+    let witnesses = [(
+        "secret".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:test".to_string()),
+            last_seen_provenance: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let revision = adapter
+        .stage_persistent_filter(&session_id, filter.clone(), witnesses)
+        .await
+        .expect("stage should succeed");
+    let state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert_eq!(state.staged_filter, filter);
+    assert_eq!(state.staged_revision, revision.0);
+    assert_eq!(state.active_revision, 0);
+}
+
+#[tokio::test]
+async fn request_deferred_tools_updates_machine_owned_visibility_state() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let names = ["deferred_tool".to_string()].into_iter().collect();
+    let witnesses = [(
+        "deferred_tool".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:test".to_string()),
+            last_seen_provenance: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let revision = adapter
+        .request_deferred_tools(&session_id, names, witnesses)
+        .await
+        .expect("request should succeed");
+    let state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert!(
+        state
+            .staged_requested_deferred_names
+            .contains("deferred_tool"),
+        "requested deferred tools must be staged on the machine-owned state"
+    );
+    assert_eq!(state.staged_revision, revision.0);
+}
+
+#[tokio::test]
+async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let filter = meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect());
+
+    adapter
+        .stage_persistent_filter(&session_id, filter.clone(), Default::default())
+        .await
+        .expect("stage should succeed");
+    let promoted = bindings
+        .tool_visibility_owner
+        .boundary_applied()
+        .expect("boundary promotion should succeed");
+    assert_eq!(promoted.active_filter, filter);
+    assert_eq!(promoted.active_filter, promoted.staged_filter);
+    assert_eq!(promoted.active_revision, promoted.staged_revision);
 }
 
 #[tokio::test]

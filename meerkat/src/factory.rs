@@ -2380,6 +2380,8 @@ impl AgentFactory {
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
         if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
             builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
+            builder =
+                builder.with_tool_visibility_owner(Arc::clone(&bindings.tool_visibility_owner));
         }
 
         // 12h. Wire completion feed + enrichment for cursor-based delivery

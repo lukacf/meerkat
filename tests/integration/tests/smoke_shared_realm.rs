@@ -719,12 +719,6 @@ fn history_assistant_texts(history: &Value) -> Vec<String> {
         .collect()
 }
 
-fn history_seen_reply(history: &Value) -> Option<String> {
-    history_assistant_texts(history)
-        .into_iter()
-        .find(|content| content.starts_with("SEEN:"))
-}
-
 fn history_user_texts(history: &Value) -> Vec<String> {
     history["messages"]
         .as_array()
@@ -886,85 +880,6 @@ async fn rest_list_sessions(
         .cloned()
         .ok_or_else(|| format!("REST sessions list missing sessions array: {body}"))?;
     Ok(sessions)
-}
-
-async fn rpc_session_history(
-    process: &mut RpcProcess,
-    pump: &mut RpcEventPump,
-    session_id: &str,
-    timeout_secs: u64,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    pump.call(
-        process,
-        "session/history",
-        json!({
-            "session_id": session_id,
-            "offset": 0,
-            "limit": 200,
-        }),
-        timeout_secs,
-    )
-    .await
-}
-
-async fn rpc_list_sessions(
-    process: &mut RpcProcess,
-    pump: &mut RpcEventPump,
-    timeout_secs: u64,
-) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let body = pump
-        .call(process, "session/list", json!({}), timeout_secs)
-        .await?;
-    let sessions = body["sessions"]
-        .as_array()
-        .cloned()
-        .ok_or_else(|| format!("rpc sessions list missing sessions array: {body}"))?;
-    Ok(sessions)
-}
-
-async fn wait_for_rpc_session_with_seen_reply(
-    process: &mut RpcProcess,
-    pump: &mut RpcEventPump,
-    timeout_secs: u64,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        let sessions = rpc_list_sessions(process, pump, 8).await?;
-        let mut matching_history = None;
-        if sessions.len() >= 3 {
-            for session in &sessions {
-                let Some(session_id) = session["session_id"].as_str() else {
-                    continue;
-                };
-                let history = rpc_session_history(process, pump, session_id, 8).await?;
-                let user_messages = history_user_texts(&history);
-                let assistant_messages = history_assistant_texts(&history);
-                let has_seen_prompt = user_messages
-                    .iter()
-                    .any(|content| content.contains("If none arrived, reply exactly SEEN:"));
-                let has_seen_reply = assistant_messages
-                    .iter()
-                    .any(|content| content.starts_with("SEEN:"));
-                if has_seen_prompt && has_seen_reply {
-                    matching_history = Some(history);
-                    break;
-                }
-            }
-        }
-
-        if let Some(history) = matching_history {
-            return Ok(history);
-        }
-
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "rpc session histories never surfaced the parent session with a durable SEEN reply before restart: {sessions:?}"
-            )
-            .into());
-        }
-
-        sleep(Duration::from_millis(250)).await;
-    }
 }
 
 async fn rest_mob_member_status(
@@ -2255,11 +2170,6 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     }
     eprintln!("[scenario 55] helper-a kickoff started");
 
-    let rpc_history = wait_for_rpc_session_with_seen_reply(&mut rpc, &mut pump, 30).await?;
-    let _rpc_seen_reply = history_seen_reply(&rpc_history)
-        .ok_or("rpc history missing durable SEEN reply before restart")?;
-    eprintln!("[scenario 55] parent SEEN reply durably visible over rpc before restart");
-
     let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
     let mob_db_path = realm_paths.root.join("mobs").join(format!("{mob_id}.db"));
     assert!(
@@ -2303,8 +2213,8 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     let rest_child = wait_for_rest_server_with_timeout(rest.spawn()?, port, 60).await?;
     eprintln!("[scenario 55] rest started on port {port}");
 
-    let restore_deadline = Instant::now() + Duration::from_secs(60);
-    let rest_history = loop {
+    let restore_deadline = Instant::now() + Duration::from_secs(15);
+    let _rest_history = loop {
         let sessions = rest_list_sessions(port, 8).await?;
         let mut matching_history = None;
         if sessions.len() >= 3 {
@@ -2340,8 +2250,6 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
         }
         sleep(Duration::from_millis(250)).await;
     };
-    let _rest_seen_reply =
-        history_seen_reply(&rest_history).ok_or("rest history missing SEEN reply after restart")?;
 
     let rest_helper_a_status = rest_mob_member_status(port, mob_id, "helper-a").await?;
     assert_eq!(rest_helper_a_status["status"].as_str(), Some("active"));

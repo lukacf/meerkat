@@ -136,6 +136,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 },
             ],
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "LoopIterationSignal".into(),
             variants: vec![],

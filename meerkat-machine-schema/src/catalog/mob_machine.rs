@@ -22,7 +22,6 @@ pub fn mob_machine() -> MachineSchema {
             phase: EnumSchema {
                 name: "MobPhase".into(),
                 variants: vec![
-                    variant("Creating"),
                     variant("Running"),
                     variant("Stopped"),
                     variant("Completed"),
@@ -57,13 +56,10 @@ pub fn mob_machine() -> MachineSchema {
                 field("wiring_edge_count", TypeRef::U32),
                 field("task_count", TypeRef::U32),
                 field("event_subscription_count", TypeRef::U32),
-                field("active_frame_count", TypeRef::U32),
-                field("active_loop_count", TypeRef::U32),
                 field("coordinator_bound", TypeRef::Bool),
-                field("kickoff_pending", TypeRef::Bool),
             ],
             init: InitSchema {
-                phase: "Creating".into(),
+                phase: "Running".into(),
                 fields: vec![
                     init("active_identity", Expr::None),
                     init("active_runtime_id", Expr::None),
@@ -77,10 +73,7 @@ pub fn mob_machine() -> MachineSchema {
                     init("wiring_edge_count", Expr::U64(0)),
                     init("task_count", Expr::U64(0)),
                     init("event_subscription_count", Expr::U64(0)),
-                    init("active_frame_count", Expr::U64(0)),
-                    init("active_loop_count", Expr::U64(0)),
                     init("coordinator_bound", Expr::Bool(false)),
-                    init("kickoff_pending", Expr::Bool(false)),
                 ],
             },
             terminal_phases: vec!["Destroyed".into()],
@@ -89,6 +82,20 @@ pub fn mob_machine() -> MachineSchema {
             name: "MobMachineInput".into(),
             variants: input_variants,
         },
+        surface_only_inputs: vec![
+            "FlowStatus".into(),
+            "TaskList".into(),
+            "TaskGet".into(),
+            "McpServerStates".into(),
+            "RosterSnapshot".into(),
+            "ListMembers".into(),
+            "ListMembersIncludingRetiring".into(),
+            "ListAllMembers".into(),
+            "MemberStatus".into(),
+            "PollEvents".into(),
+            "ReplayAllEvents".into(),
+            "GetMember".into(),
+        ],
         signals: EnumSchema {
             name: "MobMachineSignal".into(),
             variants: signal_variants,
@@ -164,103 +171,16 @@ pub fn mob_machine() -> MachineSchema {
                 ]),
             },
             InvariantSchema {
-                name: "active_frames_require_runs".into(),
-                expr: Expr::Or(vec![
-                    Expr::Eq(
-                        Box::new(Expr::Field("active_frame_count".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                    Expr::Gt(
-                        Box::new(Expr::Field("active_run_count".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                ]),
-            },
-            InvariantSchema {
-                name: "active_loops_require_frames".into(),
-                expr: Expr::Or(vec![
-                    Expr::Eq(
-                        Box::new(Expr::Field("active_loop_count".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                    Expr::Gt(
-                        Box::new(Expr::Field("active_frame_count".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                ]),
-            },
-            InvariantSchema {
                 name: "retiring_members_do_not_exceed_active_members".into(),
                 expr: Expr::Lte(
                     Box::new(Expr::Field("retiring_member_count".into())),
                     Box::new(Expr::Field("active_member_count".into())),
                 ),
             },
-            InvariantSchema {
-                name: "kickoff_pending_requires_members".into(),
-                expr: Expr::Or(vec![
-                    Expr::Eq(
-                        Box::new(Expr::Field("kickoff_pending".into())),
-                        Box::new(Expr::Bool(false)),
-                    ),
-                    Expr::Gt(
-                        Box::new(Expr::Field("active_member_count".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                ]),
-            },
         ],
         transitions: vec![
-            TransitionSchema {
-                name: "Start".into(),
-                from: vec!["Creating".into(), "Stopped".into()],
-                on: InputMatch {
-                    kind: mob_trigger_kind("Start"),
-                    variant: "Start".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Running".into(),
-                emit: vec![],
-            },
-            // Spawn is a per-phase self-loop: runtime does require_state
-            // but never applies a lifecycle transition. Creating→Creating
-            // and Running→Running are both valid.
-            TransitionSchema {
-                name: "SpawnCreating".into(),
-                from: vec!["Creating".into()],
-                on: InputMatch {
-                    kind: mob_trigger_kind("Spawn"),
-                    variant: "Spawn".into(),
-                    bindings: vec![
-                        "agent_identity".into(),
-                        "agent_runtime_id".into(),
-                        "fence_token".into(),
-                        "generation".into(),
-                    ],
-                },
-                guards: vec![],
-                updates: {
-                    let mut updates = reset_member_runtime_updates();
-                    updates.extend(vec![
-                        assign_some("active_identity", "agent_identity"),
-                        assign_some("active_runtime_id", "agent_runtime_id"),
-                        assign_some("active_fence_token", "fence_token"),
-                        assign_some("current_generation", "generation"),
-                        Update::Assign {
-                            field: "active_member_count".into(),
-                            expr: Expr::U64(1),
-                        },
-                    ]);
-                    updates
-                },
-                to: "Creating".into(),
-                emit: vec![
-                    runtime_binding_emit("RequestRuntimeBinding"),
-                    lifecycle_notice_emit("spawned"),
-                ],
-            },
+            // Spawn is a Running self-loop: the real runtime starts in Running
+            // and does not expose a durable pre-start top-level phase.
             TransitionSchema {
                 name: "SpawnRunning".into(),
                 from: vec!["Running".into()],
@@ -308,38 +228,9 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
-            // SubmitWork: per-phase self-loop. Runtime does
-            // require_state([Running, Creating]) with no lifecycle change.
-            TransitionSchema {
-                name: "SubmitWorkCreating".into(),
-                from: vec!["Creating".into()],
-                on: InputMatch {
-                    kind: mob_trigger_kind("SubmitWork"),
-                    variant: "SubmitWork".into(),
-                    bindings: vec![
-                        "agent_runtime_id".into(),
-                        "fence_token".into(),
-                        "work_id".into(),
-                    ],
-                },
-                guards: vec![Guard {
-                    name: "runtime_is_bound".into(),
-                    expr: Expr::Neq(
-                        Box::new(Expr::Field("active_runtime_id".into())),
-                        Box::new(Expr::None),
-                    ),
-                }],
-                updates: vec![
-                    assign_some("inflight_work_id", "work_id"),
-                    Update::Increment {
-                        field: "active_run_count".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Creating".into(),
-                // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
-                emit: vec![],
-            },
+            // SubmitWork is a Running self-loop in the formal model. The
+            // runtime still tolerates a transient Creating authority state
+            // internally, but fresh/resumed mobs surface Running.
             TransitionSchema {
                 name: "SubmitWorkRunning".into(),
                 from: vec!["Running".into()],
@@ -499,7 +390,7 @@ pub fn mob_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "RespawnMember".into(),
-                from: vec!["Creating".into(), "Running".into()],
+                from: vec!["Running".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("RespawnMember"),
                     variant: "RespawnMember".into(),
@@ -552,12 +443,7 @@ pub fn mob_machine() -> MachineSchema {
             },
             TransitionSchema {
                 name: "DestroyMob".into(),
-                from: vec![
-                    "Creating".into(),
-                    "Running".into(),
-                    "Stopped".into(),
-                    "Completed".into(),
-                ],
+                from: vec!["Running".into(), "Stopped".into(), "Completed".into()],
                 on: InputMatch {
                     kind: mob_trigger_kind("DestroyMob"),
                     variant: "DestroyMob".into(),
@@ -742,7 +628,6 @@ fn routed_disposition(effect_variant: &str, consumers: &[&str]) -> EffectDisposi
 
 fn direct_mob_trigger_variants() -> Vec<VariantSchema> {
     vec![
-        variant("Start"),
         VariantSchema {
             name: "Spawn".into(),
             fields: identity_runtime_fields(),
@@ -920,54 +805,7 @@ fn absorbed_mob_input_variants() -> Vec<VariantSchema> {
         variant("MemberTerminalized"),
         variant("OperationPeerTrusted"),
         variant("PeerInputAdmitted"),
-        variant("RuntimeWorkAdmitted"),
-        variant("KickoffStarted"),
-        variant("KickoffCallbackPending"),
-        variant("KickoffFailed"),
-        variant("KickoffCancelled"),
-        variant("KickoffForceCancelled"),
-        variant("RuntimeRunSubmitted"),
-        variant("RuntimeRunCompleted"),
-        variant("RuntimeRunFailed"),
-        variant("RuntimeRunCancelled"),
-        variant("RuntimeStopRequested"),
         variant("CreateRun"),
-        variant("DispatchStep"),
-        variant("CompleteStep"),
-        variant("RecordStepOutput"),
-        variant("ConditionPassed"),
-        variant("ConditionRejected"),
-        variant("FailStep"),
-        variant("SkipStep"),
-        variant("ProjectFrameStepStatus"),
-        variant("CancelStep"),
-        variant("RegisterTargets"),
-        variant("RecordTargetSuccess"),
-        variant("RecordTargetTerminalFailure"),
-        variant("RecordTargetCanceled"),
-        variant("RecordTargetFailure"),
-        variant("RegisterReadyFrame"),
-        variant("RegisterPendingBodyFrame"),
-        variant("NodeExecutionReleased"),
-        variant("FrameTerminated"),
-        variant("TerminalizeCompleted"),
-        variant("TerminalizeFailed"),
-        variant("TerminalizeCanceled"),
-        variant("StartRootFrame"),
-        variant("StartBodyFrame"),
-        variant("CompleteNode"),
-        variant("RecordNodeOutput"),
-        variant("FailNode"),
-        variant("SkipNode"),
-        variant("CancelNode"),
-        variant("StartLoop"),
-        variant("BodyFrameStarted"),
-        variant("BodyFrameCompleted"),
-        variant("BodyFrameFailed"),
-        variant("BodyFrameCanceled"),
-        variant("UntilConditionMet"),
-        variant("UntilConditionFailed"),
-        variant("CancelLoop"),
     ]
 }
 
@@ -975,26 +813,11 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
     let mut transitions = Vec::new();
 
     // Read-only / observation commands: no phase guard in runtime — work from any state.
-    let all_phases: Vec<String> = ["Creating", "Running", "Stopped", "Completed", "Destroyed"]
+    let all_phases: Vec<String> = ["Running", "Stopped", "Completed", "Destroyed"]
         .iter()
         .map(|p| (*p).into())
         .collect();
-    for variant in [
-        "FlowStatus",
-        "McpServerStates",
-        "RosterSnapshot",
-        "ListMembers",
-        "ListMembersIncludingRetiring",
-        "ListAllMembers",
-        "MemberStatus",
-        "TaskList",
-        "TaskGet",
-        "PollEvents",
-        "ReplayAllEvents",
-        "RecordOperatorActionProvenance",
-        "GetMember",
-        "SetSpawnPolicy",
-    ] {
+    for variant in ["RecordOperatorActionProvenance", "SetSpawnPolicy"] {
         for phase in &all_phases {
             transitions.push(mob_self_loop_transition(
                 variant,
@@ -1069,7 +892,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
     });
 
-    // --- Multi-phase self-loops (Creating + Running) ---
+    // --- Running self-loops ---
     for (variant, emit_variant, updates) in [
         (
             "Wire",
@@ -1096,16 +919,14 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             clear_runtime_projection_updates(),
         ),
     ] {
-        for phase in ["Creating", "Running"] {
-            transitions.push(mob_self_loop_transition(
-                variant,
-                phase,
-                variant,
-                vec![],
-                updates.clone(),
-                emit_variant.into_iter().map(simple_emit).collect(),
-            ));
-        }
+        transitions.push(mob_self_loop_transition(
+            variant,
+            "Running",
+            variant,
+            vec![],
+            updates.clone(),
+            emit_variant.into_iter().map(simple_emit).collect(),
+        ));
     }
 
     // --- Subscribe commands: no phase guard in runtime ---
@@ -1158,7 +979,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         to: "Stopped".into(),
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
     });
-    for phase in ["Creating", "Stopped", "Completed"] {
+    for phase in ["Stopped", "Completed"] {
         transitions.push(mob_self_loop_transition(
             "Shutdown",
             phase,
@@ -1241,92 +1062,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ),
         ("OperationPeerTrusted", Some("AdmitPeerInput"), vec![]),
         ("PeerInputAdmitted", Some("AdmitPeerInput"), vec![]),
-        ("RuntimeWorkAdmitted", Some("AdmitStepWork"), vec![]),
-        (
-            "KickoffFailed",
-            Some("EmitMemberTerminalNotice"),
-            vec![Update::Assign {
-                field: "kickoff_pending".into(),
-                expr: Expr::Bool(false),
-            }],
-        ),
-        (
-            "KickoffCancelled",
-            Some("EmitMemberTerminalNotice"),
-            vec![Update::Assign {
-                field: "kickoff_pending".into(),
-                expr: Expr::Bool(false),
-            }],
-        ),
-        (
-            "KickoffForceCancelled",
-            Some("EmitMemberTerminalNotice"),
-            vec![Update::Assign {
-                field: "kickoff_pending".into(),
-                expr: Expr::Bool(false),
-            }],
-        ),
-        (
-            "RuntimeRunSubmitted",
-            Some("EmitRunLifecycleNotice"),
-            vec![],
-        ),
-        (
-            "RuntimeRunCompleted",
-            Some("EmitRunLifecycleNotice"),
-            clear_work_updates(),
-        ),
-        (
-            "RuntimeRunFailed",
-            Some("EmitRunLifecycleNotice"),
-            clear_work_updates(),
-        ),
-        (
-            "RuntimeRunCancelled",
-            Some("EmitRunLifecycleNotice"),
-            clear_work_updates(),
-        ),
-        (
-            "RuntimeStopRequested",
-            Some("EmitRunLifecycleNotice"),
-            vec![],
-        ),
-        ("DispatchStep", Some("AdmitStepWork"), vec![]),
-        ("CompleteStep", Some("EmitStepNotice"), vec![]),
-        ("RecordStepOutput", Some("PersistStepOutput"), vec![]),
-        ("ConditionPassed", Some("EmitStepNotice"), vec![]),
-        ("ConditionRejected", Some("EmitStepNotice"), vec![]),
-        ("FailStep", Some("EmitStepNotice"), vec![]),
-        ("SkipStep", Some("EmitStepNotice"), vec![]),
-        ("ProjectFrameStepStatus", Some("EmitStepNotice"), vec![]),
-        ("CancelStep", Some("EmitStepNotice"), vec![]),
-        ("RegisterTargets", Some("NotifyCoordinator"), vec![]),
-        ("RecordTargetSuccess", Some("ProjectTargetSuccess"), vec![]),
-        (
-            "RecordTargetTerminalFailure",
-            Some("ProjectTargetFailure"),
-            vec![],
-        ),
-        (
-            "RecordTargetCanceled",
-            Some("ProjectTargetCanceled"),
-            vec![],
-        ),
-        ("RecordTargetFailure", Some("ProjectTargetFailure"), vec![]),
-        (
-            "NodeExecutionReleased",
-            Some("NodeExecutionReleased"),
-            vec![],
-        ),
-        ("TerminalizeCompleted", Some("RootFrameCompleted"), vec![]),
-        ("TerminalizeFailed", Some("RootFrameFailed"), vec![]),
-        ("TerminalizeCanceled", Some("RootFrameCanceled"), vec![]),
-        ("CompleteNode", Some("EmitStepNotice"), vec![]),
-        ("RecordNodeOutput", Some("PersistStepOutput"), vec![]),
-        ("FailNode", Some("EmitStepNotice"), vec![]),
-        ("SkipNode", Some("EmitStepNotice"), vec![]),
-        ("CancelNode", Some("EmitStepNotice"), vec![]),
-        ("UntilConditionMet", Some("EvaluateUntilCondition"), vec![]),
     ] {
         transitions.push(mob_self_loop_transition(
             variant,
@@ -1384,52 +1119,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         updates: vec![],
         to: "Stopped".into(),
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "KickoffStartedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("KickoffStarted"),
-            variant: "KickoffStarted".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_members_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_member_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Assign {
-            field: "kickoff_pending".into(),
-            expr: Expr::Bool(true),
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("AdmitKickoffTurn")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "KickoffCallbackPendingRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("KickoffCallbackPending"),
-            variant: "KickoffCallbackPending".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_members_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_member_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Assign {
-            field: "kickoff_pending".into(),
-            expr: Expr::Bool(true),
-        }],
-        to: "Running".into(),
-        emit: vec![],
     });
 
     transitions.push(TransitionSchema {
@@ -1500,76 +1189,29 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
     });
 
+    // Unwire: Running self-loop
+    let phase = "Running";
     transitions.push(TransitionSchema {
-        name: "RegisterReadyFrameRunning".into(),
-        from: vec!["Running".into()],
+        name: format!("Unwire{phase}"),
+        from: vec![phase.into()],
         on: InputMatch {
-            kind: mob_trigger_kind("RegisterReadyFrame"),
-            variant: "RegisterReadyFrame".into(),
+            kind: mob_trigger_kind("Unwire"),
+            variant: "Unwire".into(),
             bindings: vec![],
         },
         guards: vec![Guard {
-            name: "active_runs_present".into(),
+            name: "wired_edges_present".into(),
             expr: Expr::Gt(
-                Box::new(Expr::Field("active_run_count".into())),
+                Box::new(Expr::Field("wiring_edge_count".into())),
                 Box::new(Expr::U64(0)),
             ),
         }],
-        updates: vec![Update::Increment {
-            field: "active_frame_count".into(),
+        updates: vec![Update::Decrement {
+            field: "wiring_edge_count".into(),
             amount: 1,
         }],
-        to: "Running".into(),
-        emit: vec![],
-    });
-
-    // Unwire: per-phase self-loops for Creating and Running
-    for phase in ["Creating", "Running"] {
-        transitions.push(TransitionSchema {
-            name: format!("Unwire{phase}"),
-            from: vec![phase.into()],
-            on: InputMatch {
-                kind: mob_trigger_kind("Unwire"),
-                variant: "Unwire".into(),
-                bindings: vec![],
-            },
-            guards: vec![Guard {
-                name: "wired_edges_present".into(),
-                expr: Expr::Gt(
-                    Box::new(Expr::Field("wiring_edge_count".into())),
-                    Box::new(Expr::U64(0)),
-                ),
-            }],
-            updates: vec![Update::Decrement {
-                field: "wiring_edge_count".into(),
-                amount: 1,
-            }],
-            to: phase.into(),
-            emit: vec![simple_emit("NotifyCoordinator")],
-        });
-    }
-
-    transitions.push(TransitionSchema {
-        name: "RegisterPendingBodyFrameRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("RegisterPendingBodyFrame"),
-            variant: "RegisterPendingBodyFrame".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_runs_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_run_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Increment {
-            field: "active_frame_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("RequestBodyFrameStart")],
+        to: phase.into(),
+        emit: vec![simple_emit("NotifyCoordinator")],
     });
 
     // CompleteFlow: runtime orchestrator authority accepts from Running|Completed -> Running.
@@ -1593,269 +1235,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("FlowTerminalized")],
     });
 
-    transitions.push(TransitionSchema {
-        name: "StartRootFrameRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("StartRootFrame"),
-            variant: "StartRootFrame".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_runs_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_run_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Increment {
-            field: "active_frame_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "StartBodyFrameRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("StartBodyFrame"),
-            variant: "StartBodyFrame".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_runs_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_run_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Increment {
-            field: "active_frame_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("RequestBodyFrameStart")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "FrameTerminatedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("FrameTerminated"),
-            variant: "FrameTerminated".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_frames_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_frame_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![
-            Update::Decrement {
-                field: "active_frame_count".into(),
-                amount: 1,
-            },
-            Update::Assign {
-                field: "active_loop_count".into(),
-                expr: Expr::U64(0),
-            },
-        ],
-        to: "Running".into(),
-        emit: vec![],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "StartLoopRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("StartLoop"),
-            variant: "StartLoop".into(),
-            bindings: vec![],
-        },
-        guards: vec![
-            Guard {
-                name: "active_runs_present".into(),
-                expr: Expr::Gt(
-                    Box::new(Expr::Field("active_run_count".into())),
-                    Box::new(Expr::U64(0)),
-                ),
-            },
-            Guard {
-                name: "active_frames_present".into(),
-                expr: Expr::Gt(
-                    Box::new(Expr::Field("active_frame_count".into())),
-                    Box::new(Expr::U64(0)),
-                ),
-            },
-        ],
-        updates: vec![Update::Increment {
-            field: "active_loop_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("StartLoopNode")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "BodyFrameStartedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("BodyFrameStarted"),
-            variant: "BodyFrameStarted".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_runs_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_run_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Increment {
-            field: "active_frame_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("RequestBodyFrameStart")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "BodyFrameCompletedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("BodyFrameCompleted"),
-            variant: "BodyFrameCompleted".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_frames_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_frame_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![
-            Update::Decrement {
-                field: "active_frame_count".into(),
-                amount: 1,
-            },
-            Update::Assign {
-                field: "active_loop_count".into(),
-                expr: Expr::U64(0),
-            },
-        ],
-        to: "Running".into(),
-        emit: vec![simple_emit("BodyFrameCompleted")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "BodyFrameFailedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("BodyFrameFailed"),
-            variant: "BodyFrameFailed".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_frames_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_frame_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![
-            Update::Decrement {
-                field: "active_frame_count".into(),
-                amount: 1,
-            },
-            Update::Assign {
-                field: "active_loop_count".into(),
-                expr: Expr::U64(0),
-            },
-        ],
-        to: "Running".into(),
-        emit: vec![simple_emit("BodyFrameFailed")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "BodyFrameCanceledRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("BodyFrameCanceled"),
-            variant: "BodyFrameCanceled".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_frames_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_frame_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![
-            Update::Decrement {
-                field: "active_frame_count".into(),
-                amount: 1,
-            },
-            Update::Assign {
-                field: "active_loop_count".into(),
-                expr: Expr::U64(0),
-            },
-        ],
-        to: "Running".into(),
-        emit: vec![simple_emit("BodyFrameCanceled")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "UntilConditionFailedRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("UntilConditionFailed"),
-            variant: "UntilConditionFailed".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_loops_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_loop_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Decrement {
-            field: "active_loop_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("LoopCompleted")],
-    });
-
-    transitions.push(TransitionSchema {
-        name: "CancelLoopRunning".into(),
-        from: vec!["Running".into()],
-        on: InputMatch {
-            kind: mob_trigger_kind("CancelLoop"),
-            variant: "CancelLoop".into(),
-            bindings: vec![],
-        },
-        guards: vec![Guard {
-            name: "active_loops_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("active_loop_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Decrement {
-            field: "active_loop_count".into(),
-            amount: 1,
-        }],
-        to: "Running".into(),
-        emit: vec![simple_emit("LoopCanceled")],
-    });
-
     // FinishRun: runtime lifecycle authority accepts from Running|Stopped -> Running.
     transitions.push(TransitionSchema {
         name: "FinishRunRunning".into(),
@@ -1877,7 +1256,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![simple_emit("EmitRunLifecycleNotice")],
     });
 
-    // Retire: per-phase self-loops for Creating, Running, Stopped
+    // Retire: per-phase self-loops for Running and Stopped
     let retire_guards = vec![
         Guard {
             name: "active_members_present".into(),
@@ -1894,7 +1273,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             ),
         },
     ];
-    for phase in ["Creating", "Running", "Stopped"] {
+    for phase in ["Running", "Stopped"] {
         transitions.push(TransitionSchema {
             name: format!("Retire{phase}"),
             from: vec![phase.into()],
@@ -1913,8 +1292,8 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         });
     }
 
-    // RetireAll: per-phase self-loops for Creating, Running, Stopped
-    for phase in ["Creating", "Running", "Stopped"] {
+    // RetireAll: per-phase self-loops for Running and Stopped
+    for phase in ["Running", "Stopped"] {
         transitions.push(TransitionSchema {
             name: format!("RetireAll{phase}"),
             from: vec![phase.into()],
@@ -1966,12 +1345,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
     // Destroy input: runtime allows from all non-Destroyed phases via lifecycle authority.
     transitions.push(TransitionSchema {
         name: "DestroyFromAny".into(),
-        from: vec![
-            "Creating".into(),
-            "Running".into(),
-            "Stopped".into(),
-            "Completed".into(),
-        ],
+        from: vec!["Running".into(), "Stopped".into(), "Completed".into()],
         on: InputMatch {
             kind: mob_trigger_kind("Destroy"),
             variant: "Destroy".into(),
@@ -1983,24 +1357,23 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         emit: vec![lifecycle_notice_emit("destroyed")],
     });
 
-    // Respawn: from Creating or Running (self-loop per phase)
-    for phase in ["Creating", "Running"] {
-        transitions.push(mob_self_loop_transition(
-            "Respawn",
-            phase,
-            "Respawn",
-            vec!["agent_runtime_id"],
-            vec![Update::Increment {
-                field: "pending_spawn_count".into(),
-                amount: 1,
-            }],
-            vec![simple_emit("ExposePendingSpawn")],
-        ));
-    }
+    // Respawn: Running self-loop
+    let phase = "Running";
+    transitions.push(mob_self_loop_transition(
+        "Respawn",
+        phase,
+        "Respawn",
+        vec!["agent_runtime_id"],
+        vec![Update::Increment {
+            field: "pending_spawn_count".into(),
+            amount: 1,
+        }],
+        vec![simple_emit("ExposePendingSpawn")],
+    ));
 
     // CancelWork: handled directly in handle.rs with no actor dispatch or
     // phase guard. Returns WorkNotFound from any phase. Self-loop per phase.
-    for phase in ["Creating", "Running", "Stopped", "Completed", "Destroyed"] {
+    for phase in ["Running", "Stopped", "Completed", "Destroyed"] {
         transitions.push(mob_self_loop_transition(
             "CancelWork",
             phase,
@@ -2011,17 +1384,16 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    // CancelAllWork: delegates to ForceCancel which accepts [Creating, Running]
-    for phase in ["Creating", "Running"] {
-        transitions.push(mob_self_loop_transition(
-            "CancelAllWork",
-            phase,
-            "CancelAllWork",
-            vec![],
-            clear_work_updates(),
-            vec![simple_emit("FlowTerminalized")],
-        ));
-    }
+    // CancelAllWork: delegates to ForceCancel which the formal model keeps in Running.
+    let phase = "Running";
+    transitions.push(mob_self_loop_transition(
+        "CancelAllWork",
+        phase,
+        "CancelAllWork",
+        vec![],
+        clear_work_updates(),
+        vec![simple_emit("FlowTerminalized")],
+    ));
 
     transitions
 }
@@ -2086,18 +1458,6 @@ fn clear_runtime_projection_updates() -> Vec<Update> {
         Update::Assign {
             field: "active_run_count".into(),
             expr: Expr::U64(0),
-        },
-        Update::Assign {
-            field: "active_frame_count".into(),
-            expr: Expr::U64(0),
-        },
-        Update::Assign {
-            field: "active_loop_count".into(),
-            expr: Expr::U64(0),
-        },
-        Update::Assign {
-            field: "kickoff_pending".into(),
-            expr: Expr::Bool(false),
         },
     ]
 }
@@ -2179,39 +1539,15 @@ fn absorbed_mob_effect_variants() -> Vec<VariantSchema> {
     vec![
         variant("EmitRunLifecycleNotice"),
         variant("EmitFlowRunNotice"),
-        variant("EmitStepNotice"),
         variant("AppendFailureLedger"),
-        variant("PersistStepOutput"),
-        variant("AdmitStepWork"),
         variant("FlowTerminalized"),
         variant("EscalateSupervisor"),
-        variant("ProjectTargetSuccess"),
-        variant("ProjectTargetFailure"),
-        variant("ProjectTargetCanceled"),
-        variant("GrantNodeSlot"),
-        variant("GrantBodyFrameStart"),
         variant("NotifyCoordinator"),
         variant("ExposePendingSpawn"),
-        variant("AdmitKickoffTurn"),
         variant("EmitMemberTerminalNotice"),
         variant("AdmitPeerInput"),
         variant("EmitProgressNote"),
         variant("EmitTaskNotice"),
-        variant("ReadyFrontierChanged"),
-        variant("StartLoopNode"),
-        variant("NodeExecutionReleased"),
-        variant("RootFrameCompleted"),
-        variant("RootFrameFailed"),
-        variant("RootFrameCanceled"),
-        variant("BodyFrameCompleted"),
-        variant("BodyFrameFailed"),
-        variant("BodyFrameCanceled"),
-        variant("RequestBodyFrameStart"),
-        variant("EvaluateUntilCondition"),
-        variant("LoopCompleted"),
-        variant("LoopExhausted"),
-        variant("LoopFailed"),
-        variant("LoopCanceled"),
     ]
 }
 
@@ -2219,39 +1555,15 @@ fn absorbed_mob_effect_dispositions() -> Vec<EffectDispositionRule> {
     vec![
         external_disposition("EmitRunLifecycleNotice"),
         external_disposition("EmitFlowRunNotice"),
-        external_disposition("EmitStepNotice"),
         local_disposition("AppendFailureLedger"),
-        local_disposition("PersistStepOutput"),
-        local_disposition("AdmitStepWork"),
         external_disposition("FlowTerminalized"),
         external_disposition("EscalateSupervisor"),
-        external_disposition("ProjectTargetSuccess"),
-        external_disposition("ProjectTargetFailure"),
-        external_disposition("ProjectTargetCanceled"),
-        local_disposition("GrantNodeSlot"),
-        local_disposition("GrantBodyFrameStart"),
         external_disposition("NotifyCoordinator"),
         external_disposition("ExposePendingSpawn"),
-        local_disposition("AdmitKickoffTurn"),
         external_disposition("EmitMemberTerminalNotice"),
         external_disposition("AdmitPeerInput"),
         external_disposition("EmitProgressNote"),
         external_disposition("EmitTaskNotice"),
-        local_disposition("ReadyFrontierChanged"),
-        local_disposition("StartLoopNode"),
-        local_disposition("NodeExecutionReleased"),
-        external_disposition("RootFrameCompleted"),
-        external_disposition("RootFrameFailed"),
-        external_disposition("RootFrameCanceled"),
-        external_disposition("BodyFrameCompleted"),
-        external_disposition("BodyFrameFailed"),
-        external_disposition("BodyFrameCanceled"),
-        local_disposition("RequestBodyFrameStart"),
-        local_disposition("EvaluateUntilCondition"),
-        external_disposition("LoopCompleted"),
-        external_disposition("LoopExhausted"),
-        external_disposition("LoopFailed"),
-        external_disposition("LoopCanceled"),
     ]
 }
 

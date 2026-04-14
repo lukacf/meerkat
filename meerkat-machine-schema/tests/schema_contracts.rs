@@ -207,6 +207,9 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "Fail",
         "InterruptCurrentRun",
         "CancelAfterBoundary",
+        "ReconfigureSessionLlmIdentity",
+        "StagePersistentFilter",
+        "RequestDeferredTools",
     ] {
         assert!(
             input_names.iter().any(|name| name == &required),
@@ -382,33 +385,14 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         );
     }
 
-    for required in [
-        "StageSpawn",
-        "KickoffStarted",
-        "RuntimeRunSubmitted",
-        "CreateRun",
-        "RegisterTargets",
-        "StartRootFrame",
-        "StartLoop",
-        "BodyFrameCompleted",
-        "UntilConditionFailed",
-    ] {
+    for required in ["StageSpawn", "CreateRun"] {
         assert!(
             signal_names.iter().any(|name| name == &required),
             "MobMachine should absorb signal {required}"
         );
     }
 
-    for required in [
-        "EmitFlowRunNotice",
-        "PersistStepOutput",
-        "AdmitStepWork",
-        "NotifyCoordinator",
-        "AdmitKickoffTurn",
-        "RequestBodyFrameStart",
-        "LoopCompleted",
-        "EmitTaskNotice",
-    ] {
+    for required in ["EmitFlowRunNotice", "NotifyCoordinator", "EmitTaskNotice"] {
         assert!(
             effect_names.iter().any(|name| name == &required),
             "MobMachine should absorb effect {required}"
@@ -437,10 +421,7 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
         "wiring_edge_count",
         "task_count",
         "event_subscription_count",
-        "active_frame_count",
-        "active_loop_count",
         "coordinator_bound",
-        "kickoff_pending",
     ] {
         assert!(
             field_names.iter().any(|name| name == &required),
@@ -462,13 +443,6 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
         "CreateRunRunning",
         "StartRunRunning",
         "CompleteFlowRunning",
-        "StartRootFrameRunning",
-        "FrameTerminatedRunning",
-        "StartLoopRunning",
-        "BodyFrameCompletedRunning",
-        "BodyFrameFailedRunning",
-        "BodyFrameCanceledRunning",
-        "UntilConditionFailedRunning",
         "FinishRunRunning",
         "ObserveRuntimeRetired",
         "DestroyMob",
@@ -520,6 +494,9 @@ fn meerkat_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_in
         "LoadBoundaryReceipt",
         "AcceptWithCompletion",
         "AcceptWithoutWake",
+        "ReconfigureSessionLlmIdentity",
+        "StagePersistentFilter",
+        "RequestDeferredTools",
         "Prepare",
         "Commit",
         "Fail",
@@ -620,11 +597,13 @@ fn every_mutating_meerkat_runtime_command_has_transition_coverage() {
         "InterruptCurrentRun",
         "CancelAfterBoundary",
         "StopRuntimeExecutor",
-        "PrepareBindings",
         "ReconfigureSessionLlmIdentity",
+        "PrepareBindings",
         "PublishCommittedVisibleSet",
         "SetPeerIngressContext",
         "NotifyDrainExited",
+        "StagePersistentFilter",
+        "RequestDeferredTools",
         "AbortAll",
         "Abort",
         "Ingest",
@@ -718,6 +697,11 @@ fn every_query_runtime_command_has_transition_coverage() {
     }
 
     let mob = mob_machine();
+    let mob_surface_only_inputs = mob
+        .surface_only_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
     let mob_transitioned = mob
         .transitions
         .iter()
@@ -738,8 +722,12 @@ fn every_query_runtime_command_has_transition_coverage() {
         "GetMember",
     ] {
         assert!(
-            mob_transitioned.contains(required),
-            "MobMachine query command {required} should have transition coverage"
+            mob_surface_only_inputs.contains(required),
+            "MobMachine query command {required} should stay surfaced even without transitions"
+        );
+        assert!(
+            !mob_transitioned.contains(required),
+            "MobMachine query command {required} should no longer require transition coverage"
         );
     }
 }
@@ -747,11 +735,17 @@ fn every_query_runtime_command_has_transition_coverage() {
 #[test]
 fn every_canonical_input_variant_has_transition_coverage() {
     for schema in canonical_machine_schemas() {
+        let surface_only_inputs = schema
+            .surface_only_inputs
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
         let input_names = schema
             .inputs
             .variants
             .iter()
             .map(|variant| variant.name.as_str())
+            .filter(|input| !surface_only_inputs.contains(input))
             .collect::<Vec<_>>();
         let transitioned_inputs = schema
             .transitions

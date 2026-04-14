@@ -1,8 +1,12 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::fs;
+use std::{collections::BTreeSet, fs};
 
 use super::*;
+use meerkat_machine_schema::{
+    EnumSchema, InitSchema, InputMatch, MachineSchema, RustBinding, StateSchema, TransitionSchema,
+    TriggerKind, VariantSchema,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -84,4 +88,270 @@ fn machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts() {
         !stale.is_empty(),
         "editing a generated artifact should be caught by anti-drift checks"
     );
+}
+
+#[test]
+fn tlc_dot_parser_reads_snapshot_nodes_and_action_labels() {
+    let dot = r#"
+strict digraph DiskGraph {
+nodesep=0.35;
+subgraph cluster_graph {
+color="white";
+1 [label="phase = \"Idle\"\nmodel_step_count = 0",style = filled]
+1 -> 2 [label="StepUp",color="black",fontcolor="black"];
+2 [label="phase = \"Running\"\nmodel_step_count = 1"];
+2 -> 1 [label="StepDown",color="black",fontcolor="black"];
+}
+}
+"#;
+
+    let graph = parse_tlc_dot_graph(dot).expect("parse DOT graph");
+    assert_eq!(graph.states.len(), 2);
+    assert_eq!(graph.edges.len(), 2);
+    assert_eq!(graph.initial_states.len(), 1);
+    assert_eq!(graph.states[0].phase.as_deref(), Some("Idle"));
+}
+
+#[test]
+fn hopcroft_refinement_merges_terminally_equivalent_states_without_observation() {
+    let dot = r#"
+strict digraph DiskGraph {
+nodesep=0.35;
+subgraph cluster_graph {
+color="white";
+1 [label="phase = \"Idle\"\nmodel_step_count = 0",style = filled]
+1 -> 2 [label="Tick",color="black",fontcolor="black"];
+1 -> 3 [label="Tick",color="black",fontcolor="black"];
+2 [label="phase = \"LeftTerminal\"\nmodel_step_count = 1"];
+3 [label="phase = \"RightTerminal\"\nmodel_step_count = 1"];
+}
+}
+"#;
+
+    let graph = parse_tlc_dot_graph(dot).expect("parse DOT graph");
+    let quotient = hopcroft_partition_refinement(&graph, HopcroftObservation::None);
+    assert_eq!(quotient.blocks.len(), 2);
+
+    let terminal_blocks = quotient
+        .blocks
+        .iter()
+        .find(|members| members.len() == 2)
+        .expect("terminal states merged");
+    let phases = terminal_blocks
+        .iter()
+        .filter_map(|state_idx| graph.states[*state_idx].phase.as_deref())
+        .collect::<Vec<_>>();
+    assert!(phases.contains(&"LeftTerminal"));
+    assert!(phases.contains(&"RightTerminal"));
+}
+
+#[test]
+fn phase_observation_prevents_cross_phase_merges() {
+    let dot = r#"
+strict digraph DiskGraph {
+nodesep=0.35;
+subgraph cluster_graph {
+color="white";
+1 [label="phase = \"Idle\"\nmodel_step_count = 0",style = filled]
+2 [label="phase = \"Running\"\nmodel_step_count = 0"];
+}
+}
+"#;
+
+    let graph = parse_tlc_dot_graph(dot).expect("parse DOT graph");
+    let quotient = hopcroft_partition_refinement(&graph, HopcroftObservation::Phase);
+    assert_eq!(quotient.blocks.len(), 2);
+}
+
+#[test]
+fn field_observation_modes_support_only_and_all_except() {
+    let dot = r#"
+strict digraph DiskGraph {
+nodesep=0.35;
+subgraph cluster_graph {
+color="white";
+1 [label="/\\ phase = \"Idle\"\n/\\ x = 0\n/\\ y = 7\n/\\ model_step_count = 0",style = filled]
+2 [label="/\\ phase = \"Idle\"\n/\\ x = 1\n/\\ y = 7\n/\\ model_step_count = 0"];
+}
+}
+"#;
+
+    let graph = parse_tlc_dot_graph(dot).expect("parse DOT graph");
+    let only_x = hopcroft_partition_refinement_with_spec(
+        &graph,
+        &HopcroftObservationSpec::Fields(BTreeSet::from([String::from("x")])),
+    );
+    let all_except_x = hopcroft_partition_refinement_with_spec(
+        &graph,
+        &HopcroftObservationSpec::AllExceptFields(BTreeSet::from([String::from("x")])),
+    );
+
+    assert_eq!(
+        only_x.blocks.len(),
+        2,
+        "x alone should distinguish the states"
+    );
+    assert_eq!(
+        all_except_x.blocks.len(),
+        1,
+        "removing x should collapse the states because y is identical"
+    );
+}
+
+#[test]
+fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
+    let schema = MachineSchema {
+        machine: "TestMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![
+                    VariantSchema {
+                        name: "Idle".into(),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: "Attached".into(),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: "Running".into(),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: "Stopped".into(),
+                        fields: vec![],
+                    },
+                ],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Idle".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec!["Stopped".into()],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![
+                VariantSchema {
+                    name: "Ping".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
+                    name: "Start".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
+                    name: "Retire".into(),
+                    fields: vec![],
+                },
+            ],
+        },
+        surface_only_inputs: vec![],
+        signals: EnumSchema {
+            name: "Signal".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![
+            TransitionSchema {
+                name: "PingIdle".into(),
+                from: vec!["Idle".into()],
+                on: InputMatch {
+                    kind: TriggerKind::Input,
+                    variant: "Ping".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Idle".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "PingAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    kind: TriggerKind::Input,
+                    variant: "Ping".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Idle".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "StartIdle".into(),
+                from: vec!["Idle".into()],
+                on: InputMatch {
+                    kind: TriggerKind::Input,
+                    variant: "Start".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "RetireIdle".into(),
+                from: vec!["Idle".into()],
+                on: InputMatch {
+                    kind: TriggerKind::Input,
+                    variant: "Retire".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Idle".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "RetireAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    kind: TriggerKind::Input,
+                    variant: "Retire".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Stopped".into(),
+                emit: vec![],
+            },
+        ],
+        effect_dispositions: vec![],
+        ci_step_limit: None,
+    };
+
+    let rows = schema_input_rows_for_pair(&schema, "Idle", "Attached");
+    let by_input = rows
+        .into_iter()
+        .map(|row| (row.input_variant.clone(), row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert!(matches!(
+        by_input["Ping"].classification,
+        HopcroftSchemaInputClassification::SameSurface
+    ));
+    assert!(matches!(
+        by_input["Start"].classification,
+        HopcroftSchemaInputClassification::LeftOnly
+    ));
+    assert!(matches!(
+        by_input["Retire"].classification,
+        HopcroftSchemaInputClassification::DifferentSurface
+    ));
 }

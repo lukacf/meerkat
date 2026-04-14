@@ -1190,18 +1190,10 @@ mod tests {
     fn mob_spawn_and_submit_work_transitions_execute() {
         let kernel = GeneratedMachineKernel::new(mob_machine());
         let state = kernel.initial_state().expect("initial state");
+        assert_eq!(state.phase, "Running");
         let running = kernel
-            .transition_signal(
-                &state,
-                &KernelSignal {
-                    variant: "Start".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start");
-        let spawned = kernel
             .transition(
-                &running.next_state,
+                &state,
                 &KernelInput {
                     variant: "Spawn".into(),
                     fields: BTreeMap::from([
@@ -1219,17 +1211,17 @@ mod tests {
                 },
             )
             .expect("spawn member");
-        assert_eq!(spawned.transition, "SpawnRunning");
-        assert_eq!(spawned.next_state.phase, "Running");
+        assert_eq!(running.transition, "SpawnRunning");
+        assert_eq!(running.next_state.phase, "Running");
         assert!(
-            spawned
+            running
                 .effects
                 .iter()
                 .any(|effect| effect.variant == "RequestRuntimeBinding")
         );
         let submitted = kernel
             .transition(
-                &spawned.next_state,
+                &running.next_state,
                 &KernelInput {
                     variant: "SubmitWork".into(),
                     fields: BTreeMap::from([

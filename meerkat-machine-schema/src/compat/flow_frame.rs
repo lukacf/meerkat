@@ -854,6 +854,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 variant("SealFrame"),
             ],
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "FlowFrameSignal".into(),
             variants: vec![],

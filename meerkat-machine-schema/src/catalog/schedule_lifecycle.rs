@@ -106,6 +106,7 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                 },
             ],
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "ScheduleLifecycleSignal".into(),
             variants: vec![],

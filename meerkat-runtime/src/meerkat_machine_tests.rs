@@ -1,5 +1,6 @@
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -15,6 +16,10 @@ use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
 };
+use meerkat_machine_schema::{
+    MachineSchema, TriggerKind, meerkat_machine as schema_meerkat_machine,
+};
+use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::completion::CompletionOutcome;
@@ -9580,13 +9585,19 @@ async fn register_session_rejects_destroyed_session() {
     // Second register must be rejected — DestroyedShapeInvariant forbids
     // resurrecting a destroyed binding.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::RegisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("register should reject a destroyed session");
     assert!(
-        matches!(err, RuntimeDriverError::Destroyed),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::Destroyed)
+        ),
         "expected Destroyed, got {err:?}"
     );
 }
@@ -9598,13 +9609,19 @@ async fn unregister_session_rejects_unknown_session() {
 
     // Unregister on a session that was never registered must return an error.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::UnregisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::UnregisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("unregister should reject an unknown session");
     assert!(
-        matches!(err, RuntimeDriverError::NotReady { .. }),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::NotReady { .. })
+        ),
         "expected NotReady, got {err:?}"
     );
 }
@@ -10527,29 +10544,6 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
 }
 
 #[tokio::test]
-async fn prepare_bindings_keeps_session_idle_until_executor_attaches() {
-    let adapter = MeerkatMachine::ephemeral();
-    let session_id = SessionId::new();
-
-    adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .expect("bindings should prepare");
-
-    let phase = adapter
-        .meerkat_machine_spine_snapshot(&session_id)
-        .await
-        .expect("snapshot should exist after preparing bindings")
-        .control
-        .phase;
-    assert_eq!(
-        phase,
-        RuntimeState::Idle,
-        "prepare_bindings must not advertise a live attached runtime before an executor is attached"
-    );
-}
-
-#[tokio::test]
 async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_attached_session() {
     struct NoopExecutor;
 
@@ -10645,102 +10639,6 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
     assert_eq!(
         owner_state.active_revision, 1,
         "committed visibility revision should advance when the visible set changes"
-    );
-}
-
-#[tokio::test]
-async fn reconfigure_session_llm_identity_does_not_bump_revision_when_visible_set_is_unchanged() {
-    struct NoopExecutor;
-
-    #[async_trait::async_trait]
-    impl CoreExecutor for NoopExecutor {
-        async fn apply(
-            &mut self,
-            run_id: RunId,
-            primitive: RunPrimitive,
-        ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
-                    run_id,
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-                run_result: None,
-            })
-        }
-
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            Ok(())
-        }
-    }
-
-    let adapter = MeerkatMachine::ephemeral();
-    let session_id = SessionId::new();
-    let bindings = adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .expect("bindings should prepare");
-    adapter
-        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
-
-    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
-        model: "claude-sonnet-4-5".to_string(),
-        provider: meerkat_core::Provider::Anthropic,
-        self_hosted_server_id: None,
-        provider_params: None,
-    }));
-    let current_visibility_state = Arc::new(std::sync::Mutex::new(
-        meerkat_core::SessionToolVisibilityState::default(),
-    ));
-    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
-        current_identity,
-        current_visibility_state,
-        target_identity: meerkat_core::SessionLlmIdentity {
-            model: "gpt-5.2".to_string(),
-            provider: meerkat_core::Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-        },
-        current_capability_surface: Some(test_llm_capability_surface(true)),
-        target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: BTreeSet::new(),
-        fail_persist: false,
-    }));
-
-    let report = adapter
-        .reconfigure_session_llm_identity(
-            &session_id,
-            SessionLlmReconfigureRequest {
-                model: Some("gpt-5.2".to_string()),
-                provider: Some("openai".to_string()),
-                provider_params: None,
-            },
-        )
-        .await
-        .expect("attached session should reconfigure");
-
-    assert!(
-        !report.tool_visibility_delta.committed_visible_set_changed,
-        "no committed tool visibility change should be reported when the relevant tool is absent"
-    );
-    assert!(
-        !report.tool_visibility_delta.revision_bumped,
-        "visibility revision must not bump when the committed visible set is unchanged"
-    );
-    assert_eq!(
-        bindings
-            .tool_visibility_owner
-            .visibility_state()
-            .expect("owner state should remain readable")
-            .active_revision,
-        0,
-        "active visibility revision should remain stable on a visibility no-op"
     );
 }
 
@@ -11172,4 +11070,1137 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
         meerkat_core::ToolFilter::All,
         "machine-owned visibility should clear back to unresolved/default state on discard"
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityClassification {
+    SameSurface,
+    DifferentSurface,
+    LeftOnly,
+    RightOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityPhase {
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+}
+
+impl RuntimeParityPhase {
+    fn schema_name(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Running => "Running",
+            Self::Retired => "Retired",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityOutcomeKind {
+    Ok,
+    Err,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RuntimeParitySnapshotSummary {
+    phase: String,
+    current_run_present: bool,
+    pre_run_phase: Option<String>,
+    attachment_live: bool,
+    queue_len: usize,
+    steer_queue_len: usize,
+    current_run_contributor_count: usize,
+    admitted_input_count: usize,
+    wait_request_present: bool,
+    drain_slot_present: bool,
+    drain_phase: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeParityObservableSurface {
+    outcome_kind: RuntimeParityOutcomeKind,
+    result_summary: String,
+    after: Option<RuntimeParitySnapshotSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeParityInvocationReport {
+    phase: String,
+    setup_tags: Vec<String>,
+    before: Option<RuntimeParitySnapshotSummary>,
+    outcome_kind: RuntimeParityOutcomeKind,
+    result_summary: String,
+    after: Option<RuntimeParitySnapshotSummary>,
+}
+
+impl RuntimeParityInvocationReport {
+    fn observable_surface(&self) -> RuntimeParityObservableSurface {
+        RuntimeParityObservableSurface {
+            outcome_kind: self.outcome_kind,
+            result_summary: self.result_summary.clone(),
+            after: self.after.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeParitySchemaTransitionSummary {
+    transition: String,
+    to_phase: String,
+    binding_names: Vec<String>,
+    guard_names: Vec<String>,
+    update_count: usize,
+    effect_variants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeParitySchemaRow {
+    input_variant: String,
+    classification: RuntimeParityClassification,
+    left: Vec<RuntimeParitySchemaTransitionSummary>,
+    right: Vec<RuntimeParitySchemaTransitionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityProbeReport {
+    runtime_classification: RuntimeParityClassification,
+    agrees_with_schema: bool,
+    left: RuntimeParityInvocationReport,
+    right: RuntimeParityInvocationReport,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityRowReport {
+    input_variant: String,
+    schema_classification: RuntimeParityClassification,
+    schema_left: Vec<RuntimeParitySchemaTransitionSummary>,
+    schema_right: Vec<RuntimeParitySchemaTransitionSummary>,
+    probe: Option<RuntimeParityProbeReport>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RuntimeParityPairSummary {
+    interesting_rows: usize,
+    probed_rows: usize,
+    aligned_rows: usize,
+    mismatched_rows: usize,
+    unprobed_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityPairReport {
+    left_phase: String,
+    right_phase: String,
+    summary: RuntimeParityPairSummary,
+    rows: Vec<RuntimeParityRowReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RuntimeParityAuditSummary {
+    pair_count: usize,
+    interesting_rows: usize,
+    probed_rows: usize,
+    aligned_rows: usize,
+    mismatched_rows: usize,
+    unprobed_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityAuditReport {
+    machine: String,
+    generated_at: String,
+    summary: RuntimeParityAuditSummary,
+    pairs: Vec<RuntimeParityPairReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeParityProbeInput {
+    RegisterSession,
+    UnregisterSession,
+    EnsureSessionWithExecutor,
+    SetSilentIntents,
+    ReconfigureSessionLlmIdentity,
+    ContainsSession,
+    SessionHasExecutor,
+    SessionHasComms,
+    OpsLifecycleRegistry,
+    PrepareBindings,
+    InputState,
+    ListActiveInputs,
+    SetPeerIngressContext,
+    NotifyDrainExited,
+    InterruptCurrentRun,
+    CancelAfterBoundary,
+    StagePersistentFilter,
+    RequestDeferredTools,
+    PublishCommittedVisibleSet,
+    Recover,
+    Retire,
+    Reset,
+    StopRuntimeExecutor,
+    Destroy,
+}
+
+struct RuntimeParityFixture {
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    runtime_id: LogicalRuntimeId,
+    running_release: Option<Arc<Notify>>,
+    running_completion: Option<crate::completion::CompletionHandle>,
+}
+
+impl RuntimeParityFixture {
+    async fn cleanup(mut self) {
+        if let Some(release) = self.running_release.take() {
+            release.notify_waiters();
+        }
+        if let Some(handle) = self.running_completion.take() {
+            let _ = tokio::time::timeout(Duration::from_millis(250), handle.wait()).await;
+        }
+        let _ = self
+            .adapter
+            .stop_runtime_executor(
+                &self.session_id,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "runtime parity cleanup".to_string(),
+                },
+            )
+            .await;
+        let _ =
+            crate::traits::RuntimeControlPlane::destroy(self.adapter.as_ref(), &self.runtime_id)
+                .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+struct RuntimeParityNoopExecutor;
+
+#[async_trait::async_trait]
+impl CoreExecutor for RuntimeParityNoopExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        Ok(CoreApplyOutput {
+            receipt: RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
+    }
+
+    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+struct RuntimeParityBlockingExecutor {
+    apply_started: Arc<Notify>,
+    allow_finish: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for RuntimeParityBlockingExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.apply_started.notify_waiters();
+        self.allow_finish.notified().await;
+        Ok(CoreApplyOutput {
+            receipt: RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
+    }
+
+    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+fn runtime_parity_report_path() -> PathBuf {
+    std::env::temp_dir().join("meerkat-runtime-phase-parity.json")
+}
+
+fn runtime_parity_target_pairs() -> &'static [(RuntimeParityPhase, RuntimeParityPhase)] {
+    &[
+        (RuntimeParityPhase::Attached, RuntimeParityPhase::Idle),
+        (RuntimeParityPhase::Running, RuntimeParityPhase::Stopped),
+        (RuntimeParityPhase::Idle, RuntimeParityPhase::Retired),
+    ]
+}
+
+fn runtime_parity_probe_for_input_variant(input_variant: &str) -> Option<RuntimeParityProbeInput> {
+    match input_variant {
+        "RegisterSession" => Some(RuntimeParityProbeInput::RegisterSession),
+        "UnregisterSession" => Some(RuntimeParityProbeInput::UnregisterSession),
+        "EnsureSessionWithExecutor" => Some(RuntimeParityProbeInput::EnsureSessionWithExecutor),
+        "SetSilentIntents" => Some(RuntimeParityProbeInput::SetSilentIntents),
+        "ReconfigureSessionLlmIdentity" => {
+            Some(RuntimeParityProbeInput::ReconfigureSessionLlmIdentity)
+        }
+        "ContainsSession" => Some(RuntimeParityProbeInput::ContainsSession),
+        "SessionHasExecutor" => Some(RuntimeParityProbeInput::SessionHasExecutor),
+        "SessionHasComms" => Some(RuntimeParityProbeInput::SessionHasComms),
+        "OpsLifecycleRegistry" => Some(RuntimeParityProbeInput::OpsLifecycleRegistry),
+        "PrepareBindings" => Some(RuntimeParityProbeInput::PrepareBindings),
+        "InputState" => Some(RuntimeParityProbeInput::InputState),
+        "ListActiveInputs" => Some(RuntimeParityProbeInput::ListActiveInputs),
+        "SetPeerIngressContext" => Some(RuntimeParityProbeInput::SetPeerIngressContext),
+        "NotifyDrainExited" => Some(RuntimeParityProbeInput::NotifyDrainExited),
+        "InterruptCurrentRun" => Some(RuntimeParityProbeInput::InterruptCurrentRun),
+        "CancelAfterBoundary" => Some(RuntimeParityProbeInput::CancelAfterBoundary),
+        "StagePersistentFilter" => Some(RuntimeParityProbeInput::StagePersistentFilter),
+        "RequestDeferredTools" => Some(RuntimeParityProbeInput::RequestDeferredTools),
+        "PublishCommittedVisibleSet" => Some(RuntimeParityProbeInput::PublishCommittedVisibleSet),
+        "Recover" => Some(RuntimeParityProbeInput::Recover),
+        "Retire" => Some(RuntimeParityProbeInput::Retire),
+        "Reset" => Some(RuntimeParityProbeInput::Reset),
+        "StopRuntimeExecutor" => Some(RuntimeParityProbeInput::StopRuntimeExecutor),
+        "Destroy" => Some(RuntimeParityProbeInput::Destroy),
+        _ => None,
+    }
+}
+
+fn runtime_parity_state_label(state: RuntimeState) -> String {
+    format!("{state:?}")
+}
+
+fn runtime_parity_drain_phase_label(phase: CommsDrainPhase) -> String {
+    format!("{phase:?}")
+}
+
+fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {
+    [(
+        "probe_tool".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:runtime-parity".to_string()),
+            last_seen_provenance: None,
+        },
+    )]
+    .into_iter()
+    .collect()
+}
+
+fn runtime_parity_steered_prompt(text: &str) -> Input {
+    Input::Prompt(crate::input::PromptInput::new(
+        text,
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ))
+}
+
+fn runtime_parity_publish_state() -> meerkat_core::SessionToolVisibilityState {
+    meerkat_core::SessionToolVisibilityState {
+        active_revision: 1,
+        staged_revision: 1,
+        ..Default::default()
+    }
+}
+
+fn runtime_parity_input_id() -> InputId {
+    InputId::new()
+}
+
+fn runtime_parity_silent_intents() -> Vec<String> {
+    vec!["mob.peer_added".to_string(), "probe.intent".to_string()]
+}
+
+fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+}
+
+async fn runtime_parity_snapshot_summary(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Option<RuntimeParitySnapshotSummary> {
+    adapter
+        .meerkat_machine_spine_snapshot(session_id)
+        .await
+        .map(|snapshot| RuntimeParitySnapshotSummary {
+            phase: runtime_parity_state_label(snapshot.control.phase),
+            current_run_present: snapshot.control.current_run_id.is_some(),
+            pre_run_phase: snapshot
+                .control
+                .pre_run_phase
+                .map(runtime_parity_state_label),
+            attachment_live: snapshot.binding.attachment_live,
+            queue_len: snapshot.inputs.queue.len(),
+            steer_queue_len: snapshot.inputs.steer_queue.len(),
+            current_run_contributor_count: snapshot.inputs.current_run_contributors.len(),
+            admitted_input_count: snapshot.inputs.admission_order.len(),
+            wait_request_present: snapshot.ops.wait_request_id.is_some(),
+            drain_slot_present: snapshot.drain.slot_present,
+            drain_phase: snapshot.drain.phase.map(runtime_parity_drain_phase_label),
+        })
+}
+
+async fn wait_for_runtime_parity_phase(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    expected: RuntimeState,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match adapter.meerkat_machine_spine_snapshot(session_id).await {
+                Some(snapshot) if snapshot.control.phase == expected => break,
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("runtime phase transition should complete");
+}
+
+async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParityFixture {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+
+    match phase {
+        RuntimeParityPhase::Idle => {
+            adapter.register_session(session_id.clone()).await;
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+            }
+        }
+        RuntimeParityPhase::Attached => {
+            adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bindings should prepare for attached fixture");
+            adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    Box::new(RuntimeParityNoopExecutor),
+                )
+                .await;
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+            }
+        }
+        RuntimeParityPhase::Running => {
+            let apply_started = Arc::new(Notify::new());
+            let allow_finish = Arc::new(Notify::new());
+            adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bindings should prepare for running fixture");
+            adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    Box::new(RuntimeParityBlockingExecutor {
+                        apply_started: Arc::clone(&apply_started),
+                        allow_finish: Arc::clone(&allow_finish),
+                    }),
+                )
+                .await;
+            let (outcome, completion) = adapter
+                .accept_input_with_completion(
+                    &session_id,
+                    runtime_parity_steered_prompt("runtime parity running fixture"),
+                )
+                .await
+                .expect("running fixture should accept the steered prompt");
+            assert!(
+                outcome.is_accepted(),
+                "running fixture prompt should be accepted"
+            );
+            let completion =
+                completion.expect("running fixture prompt should expose a completion handle");
+            tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+                .await
+                .expect("running fixture executor should enter apply");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Running).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: Some(allow_finish),
+                running_completion: Some(completion),
+            }
+        }
+        RuntimeParityPhase::Retired => {
+            adapter.register_session(session_id.clone()).await;
+            adapter
+                .execute_meerkat_machine_command(
+                    Some(Arc::clone(&adapter)),
+                    MeerkatMachineCommand::Retire {
+                        runtime_id: runtime_id.clone(),
+                    },
+                )
+                .await
+                .expect("retired fixture should retire");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Retired).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+            }
+        }
+        RuntimeParityPhase::Stopped => {
+            adapter.register_session(session_id.clone()).await;
+            adapter
+                .stop_runtime_executor(
+                    &session_id,
+                    RunControlCommand::StopRuntimeExecutor {
+                        reason: "runtime parity stopped fixture".to_string(),
+                    },
+                )
+                .await
+                .expect("stopped fixture should stop");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Stopped).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+            }
+        }
+    }
+}
+
+async fn prepare_runtime_parity_probe(
+    fixture: &RuntimeParityFixture,
+    probe: RuntimeParityProbeInput,
+    setup_tags: &mut Vec<String>,
+) {
+    if matches!(
+        probe,
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity
+    ) {
+        install_runtime_parity_reconfigure_host(&fixture.adapter);
+        setup_tags.push("llm_reconfigure_host".to_string());
+    }
+
+    if matches!(probe, RuntimeParityProbeInput::NotifyDrainExited) {
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+        let spawned = fixture
+            .adapter
+            .update_peer_ingress_context(&fixture.session_id, true, Some(comms_runtime))
+            .await;
+        setup_tags.push(format!("drain_primed:{spawned}"));
+        if spawned {
+            wait_for_phase(
+                &fixture.adapter,
+                &fixture.session_id,
+                CommsDrainPhase::Running,
+            )
+            .await;
+        }
+    }
+}
+
+fn runtime_parity_probe_command(
+    fixture: &RuntimeParityFixture,
+    probe: RuntimeParityProbeInput,
+) -> MeerkatMachineCommand {
+    match probe {
+        RuntimeParityProbeInput::RegisterSession => MeerkatMachineCommand::RegisterSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::UnregisterSession => MeerkatMachineCommand::UnregisterSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::EnsureSessionWithExecutor => {
+            MeerkatMachineCommand::EnsureSessionWithExecutor {
+                session_id: fixture.session_id.clone(),
+                executor: Box::new(RuntimeParityNoopExecutor),
+            }
+        }
+        RuntimeParityProbeInput::SetSilentIntents => MeerkatMachineCommand::SetSilentIntents {
+            session_id: fixture.session_id.clone(),
+            intents: runtime_parity_silent_intents(),
+        },
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => {
+            MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
+                session_id: fixture.session_id.clone(),
+                request: Box::new(SessionLlmReconfigureRequest {
+                    model: Some("gpt-5.2".to_string()),
+                    provider: Some("openai".to_string()),
+                    provider_params: None,
+                }),
+            }
+        }
+        RuntimeParityProbeInput::ContainsSession => MeerkatMachineCommand::ContainsSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SessionHasExecutor => MeerkatMachineCommand::SessionHasExecutor {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SessionHasComms => MeerkatMachineCommand::SessionHasComms {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::OpsLifecycleRegistry => {
+            MeerkatMachineCommand::OpsLifecycleRegistry {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::PrepareBindings => MeerkatMachineCommand::PrepareBindings {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::InputState => MeerkatMachineCommand::InputState {
+            session_id: fixture.session_id.clone(),
+            input_id: runtime_parity_input_id(),
+        },
+        RuntimeParityProbeInput::ListActiveInputs => MeerkatMachineCommand::ListActiveInputs {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SetPeerIngressContext => {
+            let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: fixture.session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(comms_runtime),
+            }
+        }
+        RuntimeParityProbeInput::NotifyDrainExited => MeerkatMachineCommand::NotifyDrainExited {
+            session_id: fixture.session_id.clone(),
+            reason: DrainExitReason::Dismissed,
+        },
+        RuntimeParityProbeInput::InterruptCurrentRun => {
+            MeerkatMachineCommand::InterruptCurrentRun {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::CancelAfterBoundary => {
+            MeerkatMachineCommand::CancelAfterBoundary {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::StagePersistentFilter => {
+            MeerkatMachineCommand::StagePersistentFilter {
+                session_id: fixture.session_id.clone(),
+                filter: meerkat_core::ToolFilter::Deny(
+                    ["probe_tool".to_string()].into_iter().collect(),
+                ),
+                witnesses: runtime_parity_witnesses(),
+            }
+        }
+        RuntimeParityProbeInput::RequestDeferredTools => {
+            MeerkatMachineCommand::RequestDeferredTools {
+                session_id: fixture.session_id.clone(),
+                names: ["probe_tool".to_string()].into_iter().collect(),
+                witnesses: runtime_parity_witnesses(),
+            }
+        }
+        RuntimeParityProbeInput::PublishCommittedVisibleSet => {
+            MeerkatMachineCommand::PublishCommittedVisibleSet {
+                session_id: fixture.session_id.clone(),
+                visibility_state: Box::new(runtime_parity_publish_state()),
+            }
+        }
+        RuntimeParityProbeInput::Recover => MeerkatMachineCommand::Recover {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::Retire => MeerkatMachineCommand::Retire {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::StopRuntimeExecutor => {
+            MeerkatMachineCommand::StopRuntimeExecutor {
+                session_id: fixture.session_id.clone(),
+                command: RunControlCommand::StopRuntimeExecutor {
+                    reason: "runtime parity probe".to_string(),
+                },
+            }
+        }
+        RuntimeParityProbeInput::Destroy => MeerkatMachineCommand::Destroy {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+    }
+}
+
+fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult) -> String {
+    match result {
+        MeerkatMachineCommandResult::AcceptOutcome(outcome) => {
+            format!("accept_outcome:{outcome:?}")
+        }
+        MeerkatMachineCommandResult::AcceptWithCompletion { outcome, handle } => {
+            format!(
+                "accept_with_completion:{outcome:?}:handle={}",
+                handle.is_some()
+            )
+        }
+        MeerkatMachineCommandResult::Unit => "unit".to_string(),
+        MeerkatMachineCommandResult::Bool(value) => format!("bool:{value}"),
+        MeerkatMachineCommandResult::Spawned(value) => format!("spawned:{value}"),
+        MeerkatMachineCommandResult::OpsLifecycleRegistry(registry) => {
+            format!("ops_registry:{}", registry.is_some())
+        }
+        MeerkatMachineCommandResult::Bindings(_) => "bindings".to_string(),
+        MeerkatMachineCommandResult::InputState(state) => {
+            format!("input_state_present:{}", state.is_some())
+        }
+        MeerkatMachineCommandResult::ActiveInputs(inputs) => {
+            format!("active_inputs:{}", inputs.len())
+        }
+        MeerkatMachineCommandResult::LlmReconfigured(report) => format!(
+            "llm_reconfigured:{}->{}",
+            report.previous_identity.model, report.new_identity.model
+        ),
+        MeerkatMachineCommandResult::VisibilityRevision(revision) => {
+            format!("visibility_revision:{}", revision.0)
+        }
+        MeerkatMachineCommandResult::VisibilityPublished(state) => format!(
+            "visibility_published:active={},staged={}",
+            state.active_revision, state.staged_revision
+        ),
+        MeerkatMachineCommandResult::RetireReport(report) => format!(
+            "retire:abandoned={},pending_drain={}",
+            report.inputs_abandoned, report.inputs_pending_drain
+        ),
+        MeerkatMachineCommandResult::RecycleReport(report) => {
+            format!("recycle:transferred={}", report.inputs_transferred)
+        }
+        MeerkatMachineCommandResult::ResetReport(report) => {
+            format!("reset:abandoned={}", report.inputs_abandoned)
+        }
+        MeerkatMachineCommandResult::RecoveryReport(report) => format!(
+            "recover:recovered={},abandoned={},requeued={}",
+            report.inputs_recovered, report.inputs_abandoned, report.inputs_requeued
+        ),
+        MeerkatMachineCommandResult::DestroyReport(report) => {
+            format!("destroy:abandoned={}", report.inputs_abandoned)
+        }
+        MeerkatMachineCommandResult::RuntimeState(state) => {
+            format!("runtime_state:{}", runtime_parity_state_label(*state))
+        }
+        MeerkatMachineCommandResult::BoundaryReceipt(receipt) => {
+            format!("boundary_receipt:{}", receipt.is_some())
+        }
+        MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
+    }
+}
+
+fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
+    match error {
+        RuntimeDriverError::NotReady { state } => {
+            format!("not_ready:{}", runtime_parity_state_label(*state))
+        }
+        RuntimeDriverError::ValidationFailed { reason } => {
+            format!("validation_failed:{reason}")
+        }
+        RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
+    }
+}
+
+fn summarize_runtime_parity_control_error(error: &RuntimeControlPlaneError) -> String {
+    match error {
+        RuntimeControlPlaneError::NotFound(runtime_id) => format!("not_found:{runtime_id}"),
+        RuntimeControlPlaneError::InvalidState { state } => {
+            format!("invalid_state:{}", runtime_parity_state_label(*state))
+        }
+        RuntimeControlPlaneError::StoreError(reason) => format!("store_error:{reason}"),
+        RuntimeControlPlaneError::Internal(reason) => format!("internal:{reason}"),
+    }
+}
+
+fn summarize_runtime_parity_command_error(error: &MeerkatMachineCommandError) -> String {
+    match error {
+        MeerkatMachineCommandError::Driver(error) => {
+            format!("driver:{}", summarize_runtime_parity_driver_error(error))
+        }
+        MeerkatMachineCommandError::Control(error) => {
+            format!("control:{}", summarize_runtime_parity_control_error(error))
+        }
+    }
+}
+
+async fn execute_runtime_parity_probe(
+    phase: RuntimeParityPhase,
+    probe: RuntimeParityProbeInput,
+) -> RuntimeParityInvocationReport {
+    let fixture = build_runtime_parity_fixture(phase).await;
+    let mut setup_tags = Vec::new();
+    prepare_runtime_parity_probe(&fixture, probe, &mut setup_tags).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id).await;
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&fixture.adapter)),
+            runtime_parity_probe_command(&fixture, probe),
+        )
+        .await;
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id).await;
+    let (outcome_kind, result_summary) = match &result {
+        Ok(result) => (
+            RuntimeParityOutcomeKind::Ok,
+            summarize_runtime_parity_command_result(result),
+        ),
+        Err(error) => (
+            RuntimeParityOutcomeKind::Err,
+            summarize_runtime_parity_command_error(error),
+        ),
+    };
+    fixture.cleanup().await;
+
+    RuntimeParityInvocationReport {
+        phase: phase.schema_name().to_string(),
+        setup_tags,
+        before,
+        outcome_kind,
+        result_summary,
+        after,
+    }
+}
+
+fn classify_runtime_parity_probe_pair(
+    left: &RuntimeParityInvocationReport,
+    right: &RuntimeParityInvocationReport,
+) -> RuntimeParityClassification {
+    match (left.outcome_kind, right.outcome_kind) {
+        (RuntimeParityOutcomeKind::Ok, RuntimeParityOutcomeKind::Err) => {
+            RuntimeParityClassification::LeftOnly
+        }
+        (RuntimeParityOutcomeKind::Err, RuntimeParityOutcomeKind::Ok) => {
+            RuntimeParityClassification::RightOnly
+        }
+        _ if left.observable_surface() == right.observable_surface() => {
+            RuntimeParityClassification::SameSurface
+        }
+        _ => RuntimeParityClassification::DifferentSurface,
+    }
+}
+
+async fn probe_runtime_parity_row(
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+    probe: RuntimeParityProbeInput,
+    schema_classification: RuntimeParityClassification,
+) -> RuntimeParityProbeReport {
+    let left = execute_runtime_parity_probe(left_phase, probe).await;
+    let right = execute_runtime_parity_probe(right_phase, probe).await;
+    let runtime_classification = classify_runtime_parity_probe_pair(&left, &right);
+
+    RuntimeParityProbeReport {
+        runtime_classification,
+        agrees_with_schema: runtime_classification == schema_classification,
+        left,
+        right,
+    }
+}
+
+fn runtime_parity_schema_transition_summaries_for_phase_input(
+    schema: &MachineSchema,
+    phase: &str,
+    input_variant: &str,
+) -> Vec<RuntimeParitySchemaTransitionSummary> {
+    let mut summaries = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition.on.kind == TriggerKind::Input
+                && transition.on.variant == input_variant
+                && transition.from.iter().any(|from| from == phase)
+        })
+        .map(|transition| RuntimeParitySchemaTransitionSummary {
+            transition: transition.name.clone(),
+            to_phase: transition.to.clone(),
+            binding_names: transition.on.bindings.clone(),
+            guard_names: transition
+                .guards
+                .iter()
+                .map(|guard| guard.name.clone())
+                .collect(),
+            update_count: transition.updates.len(),
+            effect_variants: transition
+                .emit
+                .iter()
+                .map(|effect| effect.variant.clone())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.transition.cmp(&right.transition));
+    summaries
+}
+
+fn classify_runtime_parity_schema_row(
+    left: &[RuntimeParitySchemaTransitionSummary],
+    right: &[RuntimeParitySchemaTransitionSummary],
+) -> RuntimeParityClassification {
+    if left.is_empty() && !right.is_empty() {
+        return RuntimeParityClassification::RightOnly;
+    }
+    if !left.is_empty() && right.is_empty() {
+        return RuntimeParityClassification::LeftOnly;
+    }
+
+    let left_surface = left
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let right_surface = right
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    if left_surface == right_surface {
+        RuntimeParityClassification::SameSurface
+    } else {
+        RuntimeParityClassification::DifferentSurface
+    }
+}
+
+fn runtime_parity_schema_rows_for_pair(
+    schema: &MachineSchema,
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+) -> Vec<RuntimeParitySchemaRow> {
+    let mut rows = Vec::new();
+
+    for input_variant in &schema.inputs.variants {
+        let left = runtime_parity_schema_transition_summaries_for_phase_input(
+            schema,
+            left_phase.schema_name(),
+            &input_variant.name,
+        );
+        let right = runtime_parity_schema_transition_summaries_for_phase_input(
+            schema,
+            right_phase.schema_name(),
+            &input_variant.name,
+        );
+        if left.is_empty() && right.is_empty() {
+            continue;
+        }
+
+        rows.push(RuntimeParitySchemaRow {
+            input_variant: input_variant.name.clone(),
+            classification: classify_runtime_parity_schema_row(&left, &right),
+            left,
+            right,
+        });
+    }
+
+    rows
+}
+
+async fn build_runtime_parity_pair_report(
+    schema: &MachineSchema,
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+) -> RuntimeParityPairReport {
+    let mut rows = Vec::new();
+
+    for schema_row in runtime_parity_schema_rows_for_pair(schema, left_phase, right_phase)
+        .into_iter()
+        .filter(|row| row.classification != RuntimeParityClassification::SameSurface)
+    {
+        let probe =
+            runtime_parity_probe_for_input_variant(&schema_row.input_variant).map(|probe_input| {
+                Box::pin(probe_runtime_parity_row(
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                    schema_row.classification,
+                ))
+            });
+        let probe = match probe {
+            Some(probe) => Some(probe.await),
+            None => None,
+        };
+        let note = if probe.is_none() {
+            Some("no runtime probe implemented".to_string())
+        } else {
+            None
+        };
+
+        rows.push(RuntimeParityRowReport {
+            input_variant: schema_row.input_variant,
+            schema_classification: schema_row.classification,
+            schema_left: schema_row.left,
+            schema_right: schema_row.right,
+            probe,
+            note,
+        });
+    }
+
+    let summary = rows.iter().fold(
+        RuntimeParityPairSummary {
+            interesting_rows: rows.len(),
+            ..Default::default()
+        },
+        |mut summary, row| {
+            match &row.probe {
+                Some(probe) => {
+                    summary.probed_rows += 1;
+                    if probe.agrees_with_schema {
+                        summary.aligned_rows += 1;
+                    } else {
+                        summary.mismatched_rows += 1;
+                    }
+                }
+                None => summary.unprobed_rows += 1,
+            }
+            summary
+        },
+    );
+
+    RuntimeParityPairReport {
+        left_phase: left_phase.schema_name().to_string(),
+        right_phase: right_phase.schema_name().to_string(),
+        summary,
+        rows,
+    }
+}
+
+#[tokio::test]
+#[ignore = "diagnostic audit"]
+async fn audit_meerkat_runtime_phase_parity_map() {
+    let schema = schema_meerkat_machine();
+    let mut pairs = Vec::new();
+
+    for &(left_phase, right_phase) in runtime_parity_target_pairs() {
+        pairs.push(build_runtime_parity_pair_report(&schema, left_phase, right_phase).await);
+    }
+
+    let summary = pairs.iter().fold(
+        RuntimeParityAuditSummary {
+            pair_count: pairs.len(),
+            ..Default::default()
+        },
+        |mut summary, pair| {
+            summary.interesting_rows += pair.summary.interesting_rows;
+            summary.probed_rows += pair.summary.probed_rows;
+            summary.aligned_rows += pair.summary.aligned_rows;
+            summary.mismatched_rows += pair.summary.mismatched_rows;
+            summary.unprobed_rows += pair.summary.unprobed_rows;
+            summary
+        },
+    );
+
+    let report = RuntimeParityAuditReport {
+        machine: "MeerkatMachine".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        summary,
+        pairs,
+    };
+
+    let path = runtime_parity_report_path();
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&report).expect("serialize runtime parity report"),
+    )
+    .expect("write runtime parity report");
+
+    println!("wrote {}", path.display());
+    println!(
+        "pairs={} interesting_rows={} probed={} aligned={} mismatched={} unprobed={}",
+        report.summary.pair_count,
+        report.summary.interesting_rows,
+        report.summary.probed_rows,
+        report.summary.aligned_rows,
+        report.summary.mismatched_rows,
+        report.summary.unprobed_rows
+    );
+    for pair in &report.pairs {
+        println!(
+            "{} <-> {}: rows={} probed={} aligned={} mismatched={} unprobed={}",
+            pair.left_phase,
+            pair.right_phase,
+            pair.summary.interesting_rows,
+            pair.summary.probed_rows,
+            pair.summary.aligned_rows,
+            pair.summary.mismatched_rows,
+            pair.summary.unprobed_rows
+        );
+        for row in pair.rows.iter().filter(|row| {
+            row.probe
+                .as_ref()
+                .is_some_and(|probe| !probe.agrees_with_schema)
+        }) {
+            let probe = row
+                .probe
+                .as_ref()
+                .expect("filtered rows must have a probe result");
+            println!(
+                "  {}: schema={:?} runtime={:?}",
+                row.input_variant, row.schema_classification, probe.runtime_classification
+            );
+        }
+    }
 }

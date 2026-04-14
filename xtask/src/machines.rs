@@ -20,9 +20,10 @@ use meerkat_machine_codegen::{
 };
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionSchema, MachineCoverageManifest, MachineSchema,
-    SchedulerRule, SemanticCoverageEntry, canonical_composition_coverage_manifests,
+    SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
 };
+use serde::Serialize;
 
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
@@ -52,10 +53,42 @@ pub struct VerifyArgs {
     workers: Option<usize>,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct HopcroftArgs {
+    #[command(flatten)]
+    selection: SelectionArgs,
+    /// TLC config profile to dump.
+    #[arg(long, value_enum, default_value_t = VerifyProfile::Ci)]
+    profile: VerifyProfile,
+    /// TLC worker count. Defaults to local core count or TLC_WORKERS.
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Seed the initial quotient partition with a state observation signature.
+    #[arg(long, value_enum, default_value_t = HopcroftObservation::None)]
+    observation: HopcroftObservation,
+    /// Persist DOT dumps, TLC logs, and JSON summaries under this directory.
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+    /// Emit the full audit map: field-ablation summaries plus mixed-phase pair audits.
+    #[arg(long)]
+    audit_map: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum VerifyProfile {
     Ci,
     Deep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HopcroftObservation {
+    /// Pure behavior quotient seeded with a single initial partition.
+    None,
+    /// Preserve the `phase` snapshot as part of the observation signature.
+    Phase,
+    /// Preserve the full snapshot (minus `model_step_count`) as the observation signature.
+    Full,
 }
 
 pub fn machine_codegen(args: SelectionArgs) -> Result<()> {
@@ -87,6 +120,103 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
         !args.skip_tlc
     );
     machine_verify_at_root(&root, &selection, !args.skip_tlc, args.profile, workers)
+}
+
+pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+
+    let selection = registry.select(&args.selection)?;
+    let root = repo_root()?;
+    ensure_no_drift(&root, &selection)?;
+
+    if which::which("tlc").is_err() {
+        bail!("tlc not on PATH; machine-hopcroft requires the TLC CLI");
+    }
+
+    let workers = resolve_tlc_workers(args.workers)?;
+    println!(
+        "machine-hopcroft ({:?}, {:?}): {} machine(s), {} composition(s)",
+        args.profile,
+        args.observation,
+        selection.machines.len(),
+        selection.compositions.len()
+    );
+
+    let artifact_dir = args
+        .artifact_dir
+        .as_deref()
+        .map(|path| {
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            fs::create_dir_all(&resolved)
+                .with_context(|| format!("create artifact dir {}", resolved.display()))?;
+            Ok::<PathBuf, anyhow::Error>(resolved)
+        })
+        .transpose()?;
+
+    let mut items = Vec::new();
+    for machine in &selection.machines {
+        let dir = machine_dir(&root, &machine.slug);
+        let artifact_subdir = artifact_dir.as_deref().map(|base| base.join(&machine.slug));
+        items.push(run_hopcroft_for_target(
+            &root,
+            HopcroftTarget {
+                kind: "machine",
+                display_name: &machine.schema.machine,
+                slug: &machine.slug,
+                dir: &dir,
+                machine_schema: Some(&machine.schema),
+            },
+            args.profile,
+            workers,
+            args.observation,
+            args.audit_map,
+            artifact_subdir.as_deref(),
+        )?);
+    }
+
+    for composition in &selection.compositions {
+        let dir = composition_dir(&root, &composition.slug);
+        let artifact_subdir = artifact_dir
+            .as_deref()
+            .map(|base| base.join(&composition.slug));
+        items.push(run_hopcroft_for_target(
+            &root,
+            HopcroftTarget {
+                kind: "composition",
+                display_name: &composition.schema.name,
+                slug: &composition.slug,
+                dir: &dir,
+                machine_schema: None,
+            },
+            args.profile,
+            workers,
+            args.observation,
+            args.audit_map,
+            artifact_subdir.as_deref(),
+        )?);
+    }
+
+    if let Some(artifact_dir) = artifact_dir {
+        let summary_path = artifact_dir.join("summary.json");
+        let root_summary = HopcroftRunSummary {
+            observation: args.observation,
+            profile: verify_profile_name(args.profile).into(),
+            items,
+        };
+        fs::write(
+            &summary_path,
+            serde_json::to_vec_pretty(&root_summary).context("serialize hopcroft summary")?,
+        )
+        .with_context(|| format!("write {}", summary_path.display()))?;
+        println!("wrote {}", summary_path.display());
+    }
+
+    Ok(())
 }
 
 pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
@@ -2102,6 +2232,1304 @@ pub fn collect_stale_cfg_mismatches(root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(mismatches)
+}
+
+#[derive(Debug)]
+struct HopcroftTarget<'a> {
+    kind: &'static str,
+    display_name: &'a str,
+    slug: &'a str,
+    dir: &'a Path,
+    machine_schema: Option<&'a MachineSchema>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftRunSummary {
+    observation: HopcroftObservation,
+    profile: String,
+    items: Vec<HopcroftSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSummary {
+    kind: String,
+    name: String,
+    slug: String,
+    observation: HopcroftObservation,
+    reachable_states: usize,
+    edge_count: usize,
+    quotient_states: usize,
+    reduction_states: usize,
+    reduction_percent: f64,
+    initial_blocks: Vec<usize>,
+    mixed_phase_blocks: Vec<HopcroftBlockSummary>,
+    mixed_phase_pairs: Vec<HopcroftPhasePairSummary>,
+    field_audit: Option<HopcroftFieldAuditSummary>,
+    largest_blocks: Vec<HopcroftBlockSummary>,
+    tlc: TlcGraphStats,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockSummary {
+    block: usize,
+    size: usize,
+    phases: BTreeMap<String, usize>,
+    representative_state_id: String,
+    representative_phase: Option<String>,
+    outgoing: BTreeMap<String, Vec<usize>>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftPhasePairSummary {
+    left_phase: String,
+    right_phase: String,
+    blocks: Vec<usize>,
+    total_block_members: usize,
+    field_difference_counts: Vec<HopcroftFieldDifferenceCount>,
+    schema_input_counts: HopcroftSchemaInputCounts,
+    schema_input_rows: Vec<HopcroftSchemaInputRow>,
+    sample_block_witnesses: Vec<HopcroftStatePairWitness>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldAuditSummary {
+    field_count: usize,
+    fields: Vec<HopcroftFieldImpactSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldImpactSummary {
+    field: String,
+    only_quotient_states: usize,
+    only_reduction_states: usize,
+    only_reduction_percent: f64,
+    all_except_quotient_states: usize,
+    all_except_reduction_states: usize,
+    all_except_reduction_percent: f64,
+    all_except_collapsed_states: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldDifferenceCount {
+    field: String,
+    differing_blocks: usize,
+    equal_blocks: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct HopcroftSchemaInputCounts {
+    same_surface: usize,
+    different_surface: usize,
+    left_only: usize,
+    right_only: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HopcroftSchemaInputClassification {
+    SameSurface,
+    DifferentSurface,
+    LeftOnly,
+    RightOnly,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSchemaInputRow {
+    input_variant: String,
+    classification: HopcroftSchemaInputClassification,
+    left: Vec<HopcroftSchemaTransitionSummary>,
+    right: Vec<HopcroftSchemaTransitionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSchemaTransitionSummary {
+    transition: String,
+    to_phase: String,
+    binding_names: Vec<String>,
+    guard_names: Vec<String>,
+    update_count: usize,
+    effect_variants: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftStatePairWitness {
+    block: usize,
+    left_state_id: String,
+    right_state_id: String,
+    shared_input_witnesses: BTreeMap<String, Vec<String>>,
+    differing_fields: BTreeMap<String, HopcroftFieldPairValues>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldPairValues {
+    left_value: String,
+    right_value: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TlcGraphStats {
+    generated_states: Option<u64>,
+    distinct_states: Option<u64>,
+    depth: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TlcDotGraph {
+    states: Vec<TlcDotState>,
+    edges: Vec<TlcDotEdge>,
+    outgoing: Vec<Vec<usize>>,
+    initial_states: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct TlcDotState {
+    id: String,
+    phase: Option<String>,
+    snapshot_fields: BTreeMap<String, String>,
+    is_initial: bool,
+}
+
+#[derive(Debug)]
+struct TlcDotEdge {
+    to: usize,
+    label: String,
+}
+
+#[derive(Debug)]
+struct TlcDotDump {
+    dot: String,
+    tlc_output: String,
+}
+
+#[derive(Debug)]
+struct HopcroftQuotient {
+    partition_by_state: Vec<usize>,
+    blocks: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HopcroftObservationSpec {
+    Builtin(HopcroftObservation),
+    Fields(BTreeSet<String>),
+    AllExceptFields(BTreeSet<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HopcroftStateSignature {
+    observation: String,
+    outgoing: Vec<(String, Vec<usize>)>,
+}
+
+#[derive(Debug, Default)]
+struct HopcroftPhasePairAccumulator {
+    blocks: BTreeSet<usize>,
+    total_block_members: usize,
+    witness_pairs: Vec<HopcroftWitnessPair>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HopcroftWitnessPair {
+    block: usize,
+    left_state_idx: usize,
+    right_state_idx: usize,
+}
+
+fn run_hopcroft_for_target(
+    root: &Path,
+    target: HopcroftTarget<'_>,
+    profile: VerifyProfile,
+    workers: usize,
+    observation: HopcroftObservation,
+    audit_map: bool,
+    artifact_dir: Option<&Path>,
+) -> Result<HopcroftSummary> {
+    let artifact_dir = artifact_dir.map(|path| {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        Ok::<&Path, anyhow::Error>(path)
+    });
+    let artifact_dir = artifact_dir.transpose()?;
+
+    let dump = dump_tlc_dot_for_target(root, &target, profile, workers, artifact_dir)?;
+    let graph = parse_tlc_dot_graph(&dump.dot)
+        .with_context(|| format!("parse TLC DOT dump for {}", target.display_name))?;
+    let quotient = hopcroft_partition_refinement(&graph, observation);
+    let summary = summarize_hopcroft_target(
+        target,
+        observation,
+        audit_map,
+        &graph,
+        &quotient,
+        &dump.tlc_output,
+    );
+
+    print_hopcroft_summary(&summary);
+
+    if let Some(artifact_dir) = artifact_dir {
+        let summary_path = artifact_dir.join("summary.json");
+        fs::write(
+            &summary_path,
+            serde_json::to_vec_pretty(&summary).context("serialize hopcroft item summary")?,
+        )
+        .with_context(|| format!("write {}", summary_path.display()))?;
+        println!("  wrote {}", summary_path.display());
+    }
+
+    Ok(summary)
+}
+
+fn dump_tlc_dot_for_target(
+    root: &Path,
+    target: &HopcroftTarget<'_>,
+    profile: VerifyProfile,
+    workers: usize,
+    artifact_dir: Option<&Path>,
+) -> Result<TlcDotDump> {
+    let config_name = match profile {
+        VerifyProfile::Ci => "ci.cfg",
+        VerifyProfile::Deep => "deep.cfg",
+    };
+    let model = target.dir.join("model.tla");
+    let config = target.dir.join(config_name);
+    if !model.exists() || !config.exists() {
+        bail!(
+            "missing checked-in model/config for {} at {} / {}",
+            target.display_name,
+            model.display(),
+            config.display()
+        );
+    }
+
+    let metadir = verification_metadir(&format!("{}-hopcroft", target.slug), profile)?;
+    fs::create_dir_all(&metadir)
+        .with_context(|| format!("create TLC metadir {}", metadir.display()))?;
+
+    let owned_artifact_dir = artifact_dir.is_none().then(|| {
+        env::temp_dir()
+            .join("meerkat-machine-hopcroft")
+            .join(format!(
+                "{}-{}-{}",
+                target.slug,
+                verify_profile_name(profile),
+                std::process::id()
+            ))
+    });
+    let artifact_dir = match artifact_dir {
+        Some(path) => path,
+        None => owned_artifact_dir
+            .as_deref()
+            .context("expected temp hopcroft artifact dir to be created")?,
+    };
+    fs::create_dir_all(artifact_dir)
+        .with_context(|| format!("create artifact dir {}", artifact_dir.display()))?;
+
+    let dump_path = artifact_dir.join("graph.dot");
+    let log_path = artifact_dir.join("tlc.log");
+
+    let mut cmd = Command::new("tlc");
+    cmd.arg("-workers")
+        .arg(workers.to_string())
+        .arg("-dump")
+        .arg("dot,actionlabels,snapshot")
+        .arg(&dump_path)
+        .arg("-metadir")
+        .arg(&metadir)
+        .arg("-config")
+        .arg(&config)
+        .arg(&model)
+        .current_dir(root)
+        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options());
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("run tlc hopcroft dump for {}", target.display_name))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    fs::write(&log_path, &combined).with_context(|| format!("write {}", log_path.display()))?;
+
+    if let Err(err) = fs::remove_dir_all(&metadir) {
+        eprintln!(
+            "warning: failed to remove TLC metadir {}: {err:#}",
+            metadir.display()
+        );
+    }
+
+    if !tlc_run_succeeded(&output.status, &combined) {
+        bail!("tlc hopcroft dump failed for {}", target.display_name);
+    }
+
+    let dot = fs::read_to_string(&dump_path)
+        .with_context(|| format!("read TLC DOT dump {}", dump_path.display()))?;
+
+    if owned_artifact_dir.is_some()
+        && let Err(err) = fs::remove_dir_all(artifact_dir)
+    {
+        eprintln!(
+            "warning: failed to clean hopcroft temp artifacts {}: {err:#}",
+            artifact_dir.display()
+        );
+    }
+
+    Ok(TlcDotDump {
+        dot,
+        tlc_output: combined,
+    })
+}
+
+fn parse_tlc_dot_graph(contents: &str) -> Result<TlcDotGraph> {
+    let mut nodes = BTreeMap::<String, TlcDotState>::new();
+    let mut edges = Vec::<(String, String, String)>::new();
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line == "{"
+            || line == "}"
+            || line.starts_with("strict digraph")
+            || line.starts_with("subgraph")
+            || line.starts_with("nodesep=")
+            || line.starts_with("color=")
+            || line.starts_with("{rank")
+        {
+            continue;
+        }
+
+        if let Some((from, to, label)) = parse_tlc_dot_edge_line(line)? {
+            edges.push((from, to, label));
+            continue;
+        }
+
+        if let Some(state) = parse_tlc_dot_node_line(line)? {
+            nodes.insert(state.id.clone(), state);
+        }
+    }
+
+    if nodes.is_empty() {
+        bail!("no TLC graph nodes found in DOT dump");
+    }
+
+    let mut states = nodes.into_values().collect::<Vec<_>>();
+    states.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let id_to_index = states
+        .iter()
+        .enumerate()
+        .map(|(idx, state)| (state.id.clone(), idx))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut parsed_edges = Vec::new();
+    let mut outgoing = vec![Vec::new(); states.len()];
+    for (from, to, label) in edges {
+        let Some(&from_idx) = id_to_index.get(&from) else {
+            bail!("DOT edge references unknown source node {from}");
+        };
+        let Some(&to_idx) = id_to_index.get(&to) else {
+            bail!("DOT edge references unknown target node {to}");
+        };
+        outgoing[from_idx].push(parsed_edges.len());
+        parsed_edges.push(TlcDotEdge { to: to_idx, label });
+    }
+
+    let initial_states = states
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, state)| state.is_initial.then_some(idx))
+        .collect::<Vec<_>>();
+
+    Ok(TlcDotGraph {
+        states,
+        edges: parsed_edges,
+        outgoing,
+        initial_states,
+    })
+}
+
+fn parse_tlc_dot_node_line(line: &str) -> Result<Option<TlcDotState>> {
+    let Some(bracket_start) = line.find('[') else {
+        return Ok(None);
+    };
+    let Some(bracket_end) = line.rfind(']') else {
+        return Ok(None);
+    };
+
+    let id = line[..bracket_start]
+        .trim()
+        .trim_end_matches(';')
+        .to_owned();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let attrs = &line[(bracket_start + 1)..bracket_end];
+    let label = parse_tlc_dot_attribute(attrs, "label").unwrap_or_default();
+    let snapshot_fields = parse_snapshot_fields(&label);
+    let phase = snapshot_fields.get("phase").map(|value| {
+        value
+            .strip_prefix('"')
+            .and_then(|trimmed| trimmed.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_owned()
+    });
+    let is_initial = attrs.contains("style = filled") || attrs.contains("style=filled");
+
+    Ok(Some(TlcDotState {
+        id,
+        phase,
+        snapshot_fields,
+        is_initial,
+    }))
+}
+
+fn parse_tlc_dot_edge_line(line: &str) -> Result<Option<(String, String, String)>> {
+    let Some(arrow) = line.find("->") else {
+        return Ok(None);
+    };
+    let Some(bracket_start) = line.find('[') else {
+        return Ok(None);
+    };
+    if arrow > bracket_start {
+        return Ok(None);
+    }
+    let Some(bracket_end) = line.rfind(']') else {
+        return Ok(None);
+    };
+
+    let from = line[..arrow].trim().trim_end_matches(';').to_owned();
+    let to = line[(arrow + 2)..bracket_start]
+        .trim()
+        .trim_end_matches(';')
+        .to_owned();
+    let attrs = &line[(bracket_start + 1)..bracket_end];
+    let label = parse_tlc_dot_attribute(attrs, "label").unwrap_or_else(|| "<unlabeled>".into());
+    Ok(Some((from, to, label)))
+}
+
+fn parse_tlc_dot_attribute(attrs: &str, name: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(relative) = attrs[search_from..].find(name) {
+        let start = search_from + relative;
+        let mut cursor = start + name.len();
+        while matches!(attrs.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if attrs.as_bytes().get(cursor).copied() != Some(b'=') {
+            search_from = start + name.len();
+            continue;
+        }
+        cursor += 1;
+        while matches!(attrs.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if attrs.as_bytes().get(cursor).copied() != Some(b'"') {
+            return None;
+        }
+        return parse_tlc_dot_quoted_string(&attrs[cursor..]).map(|(value, _)| value);
+    }
+    None
+}
+
+fn parse_tlc_dot_quoted_string(input: &str) -> Option<(String, usize)> {
+    if !input.starts_with('"') {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut escaped = false;
+    for (offset, ch) in input[1..].char_indices() {
+        if escaped {
+            match ch {
+                'n' | 'l' => out.push('\n'),
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                other => out.push(other),
+            }
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some((out, offset + 2)),
+            other => out.push(other),
+        }
+    }
+
+    None
+}
+
+fn parse_snapshot_fields(label: &str) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    for line in label.lines() {
+        let line = line.trim_start();
+        let line = line
+            .strip_prefix("/\\ ")
+            .or_else(|| line.strip_prefix("/\\"))
+            .unwrap_or(line);
+        if let Some((field, value)) = line.split_once(" = ") {
+            fields.insert(field.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    fields
+}
+
+fn hopcroft_partition_refinement(
+    graph: &TlcDotGraph,
+    observation: HopcroftObservation,
+) -> HopcroftQuotient {
+    hopcroft_partition_refinement_with_spec(graph, &HopcroftObservationSpec::Builtin(observation))
+}
+
+fn hopcroft_partition_refinement_with_spec(
+    graph: &TlcDotGraph,
+    observation: &HopcroftObservationSpec,
+) -> HopcroftQuotient {
+    let mut partition = seed_hopcroft_partition_with_spec(graph, observation);
+
+    loop {
+        let signatures = graph
+            .states
+            .iter()
+            .enumerate()
+            .map(|(state_idx, state)| {
+                let mut by_label = BTreeMap::<String, BTreeSet<usize>>::new();
+                for &edge_idx in &graph.outgoing[state_idx] {
+                    let edge = &graph.edges[edge_idx];
+                    by_label
+                        .entry(edge.label.clone())
+                        .or_default()
+                        .insert(partition[edge.to]);
+                }
+
+                HopcroftStateSignature {
+                    observation: hopcroft_observation_key_with_spec(state, observation),
+                    outgoing: by_label
+                        .into_iter()
+                        .map(|(label, targets)| (label, targets.into_iter().collect()))
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut groups = BTreeMap::<HopcroftStateSignature, Vec<usize>>::new();
+        for (state_idx, signature) in signatures.into_iter().enumerate() {
+            groups.entry(signature).or_default().push(state_idx);
+        }
+
+        let mut blocks = groups.into_values().collect::<Vec<_>>();
+        blocks.sort_by_key(|members| members.first().copied().unwrap_or(usize::MAX));
+
+        let mut next_partition = vec![0; graph.states.len()];
+        for (block_id, members) in blocks.iter().enumerate() {
+            for &state_idx in members {
+                next_partition[state_idx] = block_id;
+            }
+        }
+
+        if next_partition == partition {
+            return HopcroftQuotient {
+                partition_by_state: next_partition,
+                blocks,
+            };
+        }
+
+        partition = next_partition;
+    }
+}
+
+fn seed_hopcroft_partition_with_spec(
+    graph: &TlcDotGraph,
+    observation: &HopcroftObservationSpec,
+) -> Vec<usize> {
+    let mut groups = BTreeMap::<String, Vec<usize>>::new();
+    for (state_idx, state) in graph.states.iter().enumerate() {
+        groups
+            .entry(hopcroft_observation_key_with_spec(state, observation))
+            .or_default()
+            .push(state_idx);
+    }
+
+    let mut blocks = groups.into_values().collect::<Vec<_>>();
+    blocks.sort_by_key(|members| members.first().copied().unwrap_or(usize::MAX));
+
+    let mut partition = vec![0; graph.states.len()];
+    for (block_id, members) in blocks.iter().enumerate() {
+        for &state_idx in members {
+            partition[state_idx] = block_id;
+        }
+    }
+    partition
+}
+
+fn hopcroft_observation_key_with_spec(
+    state: &TlcDotState,
+    observation: &HopcroftObservationSpec,
+) -> String {
+    match observation {
+        HopcroftObservationSpec::Builtin(HopcroftObservation::None) => String::new(),
+        HopcroftObservationSpec::Builtin(HopcroftObservation::Phase) => {
+            state.phase.clone().unwrap_or_else(|| "<unknown>".into())
+        }
+        HopcroftObservationSpec::Builtin(HopcroftObservation::Full) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| field.as_str() != "model_step_count")
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HopcroftObservationSpec::Fields(fields) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| fields.contains(*field) && is_extended_state_field(field))
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HopcroftObservationSpec::AllExceptFields(excluded) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| {
+                is_extended_state_field(field) && !excluded.contains((*field).as_str())
+            })
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn is_extended_state_field(field: &str) -> bool {
+    field != "phase" && field != "model_step_count"
+}
+
+fn summarize_hopcroft_target(
+    target: HopcroftTarget<'_>,
+    observation: HopcroftObservation,
+    audit_map: bool,
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    tlc_output: &str,
+) -> HopcroftSummary {
+    let mixed_phase_blocks = quotient
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(block_id, members)| {
+            let summary = summarize_hopcroft_block(block_id, members, graph, quotient);
+            (summary.phases.len() > 1).then_some(summary)
+        })
+        .collect::<Vec<_>>();
+
+    let mut largest_blocks = quotient
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(block_id, members)| summarize_hopcroft_block(block_id, members, graph, quotient))
+        .collect::<Vec<_>>();
+    largest_blocks.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.block.cmp(&right.block))
+    });
+    largest_blocks.truncate(10);
+
+    let initial_blocks = graph
+        .initial_states
+        .iter()
+        .map(|state_idx| quotient.partition_by_state[*state_idx])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let reduction_states = graph.states.len().saturating_sub(quotient.blocks.len());
+    let reduction_percent = if graph.states.is_empty() {
+        0.0
+    } else {
+        ((reduction_states as f64) / (graph.states.len() as f64)) * 100.0
+    };
+    let mixed_phase_pairs =
+        summarize_hopcroft_phase_pairs(graph, quotient, target.machine_schema, audit_map);
+    let field_audit = if audit_map {
+        summarize_hopcroft_field_audit(graph)
+    } else {
+        None
+    };
+
+    HopcroftSummary {
+        kind: target.kind.into(),
+        name: target.display_name.into(),
+        slug: target.slug.into(),
+        observation,
+        reachable_states: graph.states.len(),
+        edge_count: graph.edges.len(),
+        quotient_states: quotient.blocks.len(),
+        reduction_states,
+        reduction_percent,
+        initial_blocks,
+        mixed_phase_blocks,
+        mixed_phase_pairs,
+        field_audit,
+        largest_blocks,
+        tlc: parse_tlc_graph_stats(tlc_output),
+    }
+}
+
+fn summarize_hopcroft_phase_pairs(
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    machine_schema: Option<&MachineSchema>,
+    audit_map: bool,
+) -> Vec<HopcroftPhasePairSummary> {
+    let mut pairs = BTreeMap::<(String, String), HopcroftPhasePairAccumulator>::new();
+
+    for (block_id, members) in quotient.blocks.iter().enumerate() {
+        let mut representatives = BTreeMap::<String, usize>::new();
+        for &state_idx in members {
+            if let Some(phase) = graph.states[state_idx].phase.clone() {
+                representatives.entry(phase).or_insert(state_idx);
+            }
+        }
+
+        let phases = representatives.keys().cloned().collect::<Vec<_>>();
+        for (idx, left) in phases.iter().enumerate() {
+            for right in phases.iter().skip(idx + 1) {
+                let Some(&left_state_idx) = representatives.get(left) else {
+                    continue;
+                };
+                let Some(&right_state_idx) = representatives.get(right) else {
+                    continue;
+                };
+                let key = (left.clone(), right.clone());
+                let entry = pairs.entry(key).or_default();
+                entry.blocks.insert(block_id);
+                entry.total_block_members += members.len();
+                if audit_map {
+                    entry.witness_pairs.push(HopcroftWitnessPair {
+                        block: block_id,
+                        left_state_idx,
+                        right_state_idx,
+                    });
+                }
+            }
+        }
+    }
+
+    let transition_input_variants = machine_schema.map(transition_input_variant_map);
+    let mut summaries = pairs
+        .into_iter()
+        .map(|((left_phase, right_phase), pair)| {
+            let witness_pairs = pair.witness_pairs;
+            let (field_difference_counts, sample_block_witnesses) = if audit_map {
+                (
+                    summarize_phase_pair_field_differences(graph, &witness_pairs),
+                    summarize_phase_pair_sample_witnesses(
+                        graph,
+                        &witness_pairs,
+                        transition_input_variants.as_ref(),
+                    ),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let schema_input_rows = if audit_map {
+                machine_schema
+                    .map(|schema| schema_input_rows_for_pair(schema, &left_phase, &right_phase))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let schema_input_counts = summarize_schema_input_counts(&schema_input_rows);
+
+            HopcroftPhasePairSummary {
+                left_phase,
+                right_phase,
+                blocks: pair.blocks.into_iter().collect(),
+                total_block_members: pair.total_block_members,
+                field_difference_counts,
+                schema_input_counts,
+                schema_input_rows,
+                sample_block_witnesses,
+            }
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .total_block_members
+            .cmp(&left.total_block_members)
+            .then_with(|| left.left_phase.cmp(&right.left_phase))
+            .then_with(|| left.right_phase.cmp(&right.right_phase))
+    });
+    summaries
+}
+
+fn summarize_hopcroft_field_audit(graph: &TlcDotGraph) -> Option<HopcroftFieldAuditSummary> {
+    let fields = graph_field_names(graph);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut summaries = Vec::new();
+    for field in fields {
+        let only_spec = HopcroftObservationSpec::Fields(BTreeSet::from([field.clone()]));
+        let only_quotient = hopcroft_partition_refinement_with_spec(graph, &only_spec);
+        let only_reduction_states = graph
+            .states
+            .len()
+            .saturating_sub(only_quotient.blocks.len());
+        let only_reduction_percent = reduction_percent(only_reduction_states, graph.states.len());
+
+        let all_except_spec =
+            HopcroftObservationSpec::AllExceptFields(BTreeSet::from([field.clone()]));
+        let all_except_quotient = hopcroft_partition_refinement_with_spec(graph, &all_except_spec);
+        let all_except_reduction_states = graph
+            .states
+            .len()
+            .saturating_sub(all_except_quotient.blocks.len());
+        let all_except_reduction_percent =
+            reduction_percent(all_except_reduction_states, graph.states.len());
+
+        summaries.push(HopcroftFieldImpactSummary {
+            all_except_collapsed_states: all_except_reduction_states,
+            field,
+            only_quotient_states: only_quotient.blocks.len(),
+            only_reduction_states,
+            only_reduction_percent,
+            all_except_quotient_states: all_except_quotient.blocks.len(),
+            all_except_reduction_states,
+            all_except_reduction_percent,
+        });
+    }
+
+    summaries.sort_by(|left, right| {
+        right
+            .all_except_collapsed_states
+            .cmp(&left.all_except_collapsed_states)
+            .then_with(|| right.only_quotient_states.cmp(&left.only_quotient_states))
+            .then_with(|| left.field.cmp(&right.field))
+    });
+
+    Some(HopcroftFieldAuditSummary {
+        field_count: summaries.len(),
+        fields: summaries,
+    })
+}
+
+fn graph_field_names(graph: &TlcDotGraph) -> Vec<String> {
+    graph
+        .states
+        .iter()
+        .flat_map(|state| state.snapshot_fields.keys().cloned())
+        .filter(|field| is_extended_state_field(field))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn reduction_percent(reduction_states: usize, reachable_states: usize) -> f64 {
+    if reachable_states == 0 {
+        0.0
+    } else {
+        ((reduction_states as f64) / (reachable_states as f64)) * 100.0
+    }
+}
+
+fn summarize_phase_pair_field_differences(
+    graph: &TlcDotGraph,
+    witness_pairs: &[HopcroftWitnessPair],
+) -> Vec<HopcroftFieldDifferenceCount> {
+    let mut counts = BTreeMap::<String, (usize, usize)>::new();
+
+    for witness in witness_pairs {
+        let left = &graph.states[witness.left_state_idx];
+        let right = &graph.states[witness.right_state_idx];
+        let fields = left
+            .snapshot_fields
+            .keys()
+            .chain(right.snapshot_fields.keys())
+            .filter(|field| is_extended_state_field(field))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        for field in fields {
+            let left_value = left
+                .snapshot_fields
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or("<missing>");
+            let right_value = right
+                .snapshot_fields
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or("<missing>");
+            let entry = counts.entry(field).or_insert((0, 0));
+            if left_value == right_value {
+                entry.1 += 1;
+            } else {
+                entry.0 += 1;
+            }
+        }
+    }
+
+    let mut summaries = counts
+        .into_iter()
+        .map(
+            |(field, (differing_blocks, equal_blocks))| HopcroftFieldDifferenceCount {
+                field,
+                differing_blocks,
+                equal_blocks,
+            },
+        )
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .differing_blocks
+            .cmp(&left.differing_blocks)
+            .then_with(|| right.equal_blocks.cmp(&left.equal_blocks))
+            .then_with(|| left.field.cmp(&right.field))
+    });
+    summaries
+}
+
+fn summarize_phase_pair_sample_witnesses(
+    graph: &TlcDotGraph,
+    witness_pairs: &[HopcroftWitnessPair],
+    transition_input_variants: Option<&BTreeMap<String, String>>,
+) -> Vec<HopcroftStatePairWitness> {
+    witness_pairs
+        .iter()
+        .take(4)
+        .map(|witness| {
+            let left = &graph.states[witness.left_state_idx];
+            let right = &graph.states[witness.right_state_idx];
+            let differing_fields = left
+                .snapshot_fields
+                .keys()
+                .chain(right.snapshot_fields.keys())
+                .filter(|field| is_extended_state_field(field))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|field| {
+                    let left_value = left
+                        .snapshot_fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| "<missing>".into());
+                    let right_value = right
+                        .snapshot_fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| "<missing>".into());
+                    (left_value != right_value).then_some((
+                        field,
+                        HopcroftFieldPairValues {
+                            left_value,
+                            right_value,
+                        },
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            HopcroftStatePairWitness {
+                block: witness.block,
+                left_state_id: left.id.clone(),
+                right_state_id: right.id.clone(),
+                shared_input_witnesses: transition_input_variants
+                    .map(|index| {
+                        shared_input_witnesses_for_state(graph, witness.left_state_idx, index)
+                    })
+                    .unwrap_or_default(),
+                differing_fields,
+            }
+        })
+        .collect()
+}
+
+fn shared_input_witnesses_for_state(
+    graph: &TlcDotGraph,
+    state_idx: usize,
+    transition_input_variants: &BTreeMap<String, String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut inputs = BTreeMap::<String, BTreeSet<String>>::new();
+    for &edge_idx in &graph.outgoing[state_idx] {
+        let edge = &graph.edges[edge_idx];
+        let Some(input_variant) = transition_input_variants.get(&edge.label) else {
+            continue;
+        };
+        inputs
+            .entry(input_variant.clone())
+            .or_default()
+            .insert(edge.label.clone());
+    }
+
+    inputs
+        .into_iter()
+        .map(|(input_variant, transitions)| (input_variant, transitions.into_iter().collect()))
+        .collect()
+}
+
+fn transition_input_variant_map(schema: &MachineSchema) -> BTreeMap<String, String> {
+    schema
+        .transitions
+        .iter()
+        .filter(|transition| transition.on.kind == TriggerKind::Input)
+        .map(|transition| (transition.name.clone(), transition.on.variant.clone()))
+        .collect()
+}
+
+fn schema_input_rows_for_pair(
+    schema: &MachineSchema,
+    left_phase: &str,
+    right_phase: &str,
+) -> Vec<HopcroftSchemaInputRow> {
+    let mut rows = Vec::new();
+
+    for input_variant in &schema.inputs.variants {
+        let left =
+            schema_transition_summaries_for_phase_input(schema, left_phase, &input_variant.name);
+        let right =
+            schema_transition_summaries_for_phase_input(schema, right_phase, &input_variant.name);
+        if left.is_empty() && right.is_empty() {
+            continue;
+        }
+
+        rows.push(HopcroftSchemaInputRow {
+            input_variant: input_variant.name.clone(),
+            classification: classify_schema_input_row(&left, &right),
+            left,
+            right,
+        });
+    }
+
+    rows
+}
+
+fn schema_transition_summaries_for_phase_input(
+    schema: &MachineSchema,
+    phase: &str,
+    input_variant: &str,
+) -> Vec<HopcroftSchemaTransitionSummary> {
+    let mut summaries = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition.on.kind == TriggerKind::Input
+                && transition.on.variant == input_variant
+                && transition.from.iter().any(|from| from == phase)
+        })
+        .map(|transition| HopcroftSchemaTransitionSummary {
+            transition: transition.name.clone(),
+            to_phase: transition.to.clone(),
+            binding_names: transition.on.bindings.clone(),
+            guard_names: transition
+                .guards
+                .iter()
+                .map(|guard| guard.name.clone())
+                .collect(),
+            update_count: transition.updates.len(),
+            effect_variants: transition
+                .emit
+                .iter()
+                .map(|effect| effect.variant.clone())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    summaries.sort_by(|left, right| left.transition.cmp(&right.transition));
+    summaries
+}
+
+fn classify_schema_input_row(
+    left: &[HopcroftSchemaTransitionSummary],
+    right: &[HopcroftSchemaTransitionSummary],
+) -> HopcroftSchemaInputClassification {
+    if left.is_empty() && !right.is_empty() {
+        return HopcroftSchemaInputClassification::RightOnly;
+    }
+    if !left.is_empty() && right.is_empty() {
+        return HopcroftSchemaInputClassification::LeftOnly;
+    }
+
+    let left_surface = left
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let right_surface = right
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    if left_surface == right_surface {
+        HopcroftSchemaInputClassification::SameSurface
+    } else {
+        HopcroftSchemaInputClassification::DifferentSurface
+    }
+}
+
+fn summarize_schema_input_counts(rows: &[HopcroftSchemaInputRow]) -> HopcroftSchemaInputCounts {
+    let mut counts = HopcroftSchemaInputCounts::default();
+    for row in rows {
+        match row.classification {
+            HopcroftSchemaInputClassification::SameSurface => counts.same_surface += 1,
+            HopcroftSchemaInputClassification::DifferentSurface => counts.different_surface += 1,
+            HopcroftSchemaInputClassification::LeftOnly => counts.left_only += 1,
+            HopcroftSchemaInputClassification::RightOnly => counts.right_only += 1,
+        }
+    }
+    counts
+}
+
+fn summarize_hopcroft_block(
+    block_id: usize,
+    members: &[usize],
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+) -> HopcroftBlockSummary {
+    let phases = members
+        .iter()
+        .filter_map(|state_idx| graph.states[*state_idx].phase.clone())
+        .fold(BTreeMap::<String, usize>::new(), |mut acc, phase| {
+            *acc.entry(phase).or_default() += 1;
+            acc
+        });
+
+    let representative = members.first().copied().unwrap_or(0);
+    let outgoing = graph.outgoing[representative]
+        .iter()
+        .fold(
+            BTreeMap::<String, BTreeSet<usize>>::new(),
+            |mut acc, edge_idx| {
+                let edge = &graph.edges[*edge_idx];
+                acc.entry(edge.label.clone())
+                    .or_default()
+                    .insert(quotient.partition_by_state[edge.to]);
+                acc
+            },
+        )
+        .into_iter()
+        .map(|(label, targets)| (label, targets.into_iter().collect()))
+        .collect::<BTreeMap<_, _>>();
+
+    HopcroftBlockSummary {
+        block: block_id,
+        size: members.len(),
+        phases,
+        representative_state_id: graph.states[representative].id.clone(),
+        representative_phase: graph.states[representative].phase.clone(),
+        outgoing,
+    }
+}
+
+fn parse_tlc_graph_stats(output: &str) -> TlcGraphStats {
+    let mut stats = TlcGraphStats::default();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.contains("states generated") && line.contains("distinct states found") {
+            let fragments = line.split(',').collect::<Vec<_>>();
+            if let Some(generated) = fragments
+                .first()
+                .and_then(|fragment| fragment.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                stats.generated_states = Some(generated);
+            }
+            if let Some(distinct) = fragments
+                .get(1)
+                .and_then(|fragment| fragment.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                stats.distinct_states = Some(distinct);
+            }
+        }
+
+        if let Some(prefix) = line.strip_prefix("The depth of the complete state graph search is ")
+        {
+            let depth = prefix.trim_end_matches('.').trim();
+            if let Ok(parsed) = depth.parse::<u64>() {
+                stats.depth = Some(parsed);
+            }
+        }
+    }
+
+    stats
+}
+
+fn print_hopcroft_summary(summary: &HopcroftSummary) {
+    println!("{}: {}", summary.kind, summary.name);
+    println!(
+        "  reachable={} edges={} quotient={} reduced={} ({:.1}%)",
+        summary.reachable_states,
+        summary.edge_count,
+        summary.quotient_states,
+        summary.reduction_states,
+        summary.reduction_percent
+    );
+    if let Some(generated) = summary.tlc.generated_states {
+        println!(
+            "  tlc generated={} distinct={:?} depth={:?}",
+            generated, summary.tlc.distinct_states, summary.tlc.depth
+        );
+    }
+    if summary.mixed_phase_blocks.is_empty() {
+        println!("  phase-mixed blocks: none");
+    } else {
+        println!("  phase-mixed blocks:");
+        for block in summary.mixed_phase_blocks.iter().take(8) {
+            println!(
+                "    - block {} size {} phases {:?}",
+                block.block, block.size, block.phases
+            );
+        }
+        println!("  mixed-phase pairs:");
+        for pair in summary.mixed_phase_pairs.iter().take(8) {
+            println!(
+                "    - {} <-> {} across blocks {:?} ({} states, schema same={} diff={} left={} right={})",
+                pair.left_phase,
+                pair.right_phase,
+                pair.blocks,
+                pair.total_block_members,
+                pair.schema_input_counts.same_surface,
+                pair.schema_input_counts.different_surface,
+                pair.schema_input_counts.left_only,
+                pair.schema_input_counts.right_only
+            );
+        }
+    }
+    if let Some(field_audit) = &summary.field_audit {
+        println!("  field audit:");
+        for field in field_audit.fields.iter().take(8) {
+            println!(
+                "    - {}: only={} | all_except={} (collapse_without={} / {:.1}%)",
+                field.field,
+                field.only_quotient_states,
+                field.all_except_quotient_states,
+                field.all_except_collapsed_states,
+                field.all_except_reduction_percent
+            );
+        }
+    }
+    println!("  largest blocks:");
+    for block in summary.largest_blocks.iter().take(5) {
+        println!(
+            "    - block {} size {} phase {:?}",
+            block.block, block.size, block.representative_phase
+        );
+    }
 }
 
 fn generated_kernel_module_slug(machine_name: &str) -> String {

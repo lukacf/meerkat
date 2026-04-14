@@ -27,10 +27,9 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant("Idle"),
                     variant("Attached"),
                     variant("Running"),
-                    // Recovering is declared for completeness but is only reachable
-                    // via the internal RuntimeControl sub-machine, not at the
-                    // MeerkatMachine level.
-                    variant("Recovering"),
+                    // Recovering remains an internal RuntimeControlAuthority
+                    // phase, but the top-level MeerkatMachine never transitions
+                    // into it directly.
                     variant("Retired"),
                     variant("Stopped"),
                     variant("Destroyed"),
@@ -143,6 +142,7 @@ pub fn meerkat_machine() -> MachineSchema {
             name: "MeerkatMachineInput".into(),
             variants: input_variants,
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "MeerkatMachineSignal".into(),
             variants: signal_variants,
@@ -320,35 +320,16 @@ pub fn meerkat_machine() -> MachineSchema {
                 to: "Idle".into(),
                 emit: vec![],
             },
-            TransitionSchema {
-                name: "RegisterSession".into(),
-                from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("RegisterSession"),
-                    variant: "RegisterSession".into(),
-                    bindings: vec!["session_id".into()],
-                },
-                guards: vec![],
-                updates: vec![assign_some("session_id", "session_id")],
-                to: "Idle".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "UnregisterSession".into(),
-                from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("UnregisterSession"),
-                    variant: "UnregisterSession".into(),
-                    bindings: vec!["session_id".into()],
-                },
-                guards: vec![session_matches_guard(
-                    "session_matches_current",
-                    "session_id",
-                )],
-                updates: reset_session_state(),
-                to: "Idle".into(),
-                emit: vec![],
-            },
+            register_session_transition("RegisterSessionIdle", "Idle"),
+            register_session_transition("RegisterSessionAttached", "Attached"),
+            register_session_transition("RegisterSessionRunning", "Running"),
+            register_session_transition("RegisterSessionRetired", "Retired"),
+            register_session_transition("RegisterSessionStopped", "Stopped"),
+            unregister_session_transition("UnregisterSessionIdle", "Idle"),
+            unregister_session_transition("UnregisterSessionAttached", "Attached"),
+            unregister_session_transition("UnregisterSessionRunning", "Running"),
+            unregister_session_transition("UnregisterSessionRetired", "Retired"),
+            unregister_session_transition("UnregisterSessionStopped", "Stopped"),
             TransitionSchema {
                 name: "ReconfigureSessionLlmIdentityAttached".into(),
                 from: vec!["Attached".into()],
@@ -375,234 +356,27 @@ pub fn meerkat_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
-            TransitionSchema {
-                name: "StagePersistentFilterAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("StagePersistentFilter"),
-                    variant: "StagePersistentFilter".into(),
-                    bindings: vec!["filter".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::Assign {
-                        field: "staged_filter".into(),
-                        expr: Expr::Binding("filter".into()),
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "filter_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Attached".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "StagePersistentFilterIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("StagePersistentFilter"),
-                    variant: "StagePersistentFilter".into(),
-                    bindings: vec!["filter".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::Assign {
-                        field: "staged_filter".into(),
-                        expr: Expr::Binding("filter".into()),
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "filter_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "StagePersistentFilterRunning".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("StagePersistentFilter"),
-                    variant: "StagePersistentFilter".into(),
-                    bindings: vec!["filter".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::Assign {
-                        field: "staged_filter".into(),
-                        expr: Expr::Binding("filter".into()),
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "filter_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "RequestDeferredToolsAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("RequestDeferredTools"),
-                    variant: "RequestDeferredTools".into(),
-                    bindings: vec!["names".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::Binding("names".into()),
-                        updates: vec![Update::SetInsert {
-                            field: "staged_requested_deferred_names".into(),
-                            value: Expr::Binding("name".into()),
-                        }],
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "requested_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Attached".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "RequestDeferredToolsIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("RequestDeferredTools"),
-                    variant: "RequestDeferredTools".into(),
-                    bindings: vec!["names".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::Binding("names".into()),
-                        updates: vec![Update::SetInsert {
-                            field: "staged_requested_deferred_names".into(),
-                            value: Expr::Binding("name".into()),
-                        }],
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "requested_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Idle".into(),
-                emit: vec![],
-            },
-            TransitionSchema {
-                name: "RequestDeferredToolsRunning".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("RequestDeferredTools"),
-                    variant: "RequestDeferredTools".into(),
-                    bindings: vec!["names".into(), "witnesses".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::Binding("names".into()),
-                        updates: vec![Update::SetInsert {
-                            field: "staged_requested_deferred_names".into(),
-                            value: Expr::Binding("name".into()),
-                        }],
-                    },
-                    Update::ForEach {
-                        binding: "name".into(),
-                        over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
-                        updates: vec![Update::MapInsert {
-                            field: "requested_witnesses".into(),
-                            key: Expr::Binding("name".into()),
-                            value: Expr::MapGet {
-                                map: Box::new(Expr::Binding("witnesses".into())),
-                                key: Box::new(Expr::Binding("name".into())),
-                            },
-                        }],
-                    },
-                    Update::Increment {
-                        field: "staged_visibility_revision".into(),
-                        amount: 1,
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![],
-            },
-            // PrepareBindings: registration + query. It prepares canonical
-            // bindings but does not itself publish a live attached runtime;
-            // accepted phases preserve their current phase while recording the
-            // runtime binding fields.
+            stage_persistent_filter_transition("StagePersistentFilterIdle", "Idle"),
+            stage_persistent_filter_transition("StagePersistentFilterAttached", "Attached"),
+            stage_persistent_filter_transition("StagePersistentFilterRunning", "Running"),
+            stage_persistent_filter_transition("StagePersistentFilterRetired", "Retired"),
+            stage_persistent_filter_transition("StagePersistentFilterStopped", "Stopped"),
+            request_deferred_tools_transition("RequestDeferredToolsIdle", "Idle"),
+            request_deferred_tools_transition("RequestDeferredToolsAttached", "Attached"),
+            request_deferred_tools_transition("RequestDeferredToolsRunning", "Running"),
+            request_deferred_tools_transition("RequestDeferredToolsRetired", "Retired"),
+            request_deferred_tools_transition("RequestDeferredToolsStopped", "Stopped"),
+            // PrepareBindings: registration + query. A newly prepared idle
+            // session becomes runtime-bound/Attached; all other accepted
+            // phases preserve their current phase while recording the runtime
+            // binding fields.
             prepare_bindings_transition(
                 "PrepareBindingsInitializing",
                 "Initializing",
                 "Initializing",
             ),
-            prepare_bindings_transition("PrepareBindingsIdle", "Idle", "Idle"),
+            prepare_bindings_transition("PrepareBindingsIdle", "Idle", "Attached"),
             prepare_bindings_transition("PrepareBindingsAttached", "Attached", "Attached"),
-            prepare_bindings_transition("PrepareBindingsRecovering", "Recovering", "Recovering"),
             prepare_bindings_transition("PrepareBindingsRunning", "Running", "Running"),
             prepare_bindings_transition("PrepareBindingsRetired", "Retired", "Retired"),
             TransitionSchema {
@@ -632,7 +406,6 @@ pub fn meerkat_machine() -> MachineSchema {
             set_peer_ingress_transition("SetPeerIngressContextIdle", "Idle"),
             set_peer_ingress_transition("SetPeerIngressContextAttached", "Attached"),
             set_peer_ingress_transition("SetPeerIngressContextRunning", "Running"),
-            set_peer_ingress_transition("SetPeerIngressContextRecovering", "Recovering"),
             set_peer_ingress_transition("SetPeerIngressContextRetired", "Retired"),
             set_peer_ingress_transition("SetPeerIngressContextStopped", "Stopped"),
             // NotifyDrainExited: the comms drain exits asynchronously, so the
@@ -684,22 +457,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     expr: Expr::Bool(false),
                 }],
                 to: "Running".into(),
-                emit: vec![notice_emit("drain", "drain exited")],
-            },
-            TransitionSchema {
-                name: "NotifyDrainExitedRecovering".into(),
-                from: vec!["Recovering".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("NotifyDrainExited"),
-                    variant: "NotifyDrainExited".into(),
-                    bindings: vec!["reason".into()],
-                },
-                guards: vec![session_registered_guard()],
-                updates: vec![Update::Assign {
-                    field: "drain_running".into(),
-                    expr: Expr::Bool(false),
-                }],
-                to: "Recovering".into(),
                 emit: vec![notice_emit("drain", "drain exited")],
             },
             TransitionSchema {
@@ -854,63 +611,23 @@ pub fn meerkat_machine() -> MachineSchema {
                     fields: IndexMap::from([("revision".into(), Expr::Binding("revision".into()))]),
                 }],
             },
-            TransitionSchema {
-                name: "PublishCommittedVisibleSetIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
-                    variant: "PublishCommittedVisibleSet".into(),
-                    bindings: vec!["revision".into()],
-                },
-                guards: vec![published_revision_matches_active_guard()],
-                updates: vec![Update::Assign {
-                    field: "committed_visibility_revision".into(),
-                    expr: Expr::Binding("revision".into()),
-                }],
-                to: "Idle".into(),
-                emit: vec![EffectEmit {
-                    variant: "CommittedVisibleSetPublished".into(),
-                    fields: IndexMap::from([("revision".into(), Expr::Binding("revision".into()))]),
-                }],
-            },
-            TransitionSchema {
-                name: "PublishCommittedVisibleSetAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
-                    variant: "PublishCommittedVisibleSet".into(),
-                    bindings: vec!["revision".into()],
-                },
-                guards: vec![published_revision_matches_active_guard()],
-                updates: vec![Update::Assign {
-                    field: "committed_visibility_revision".into(),
-                    expr: Expr::Binding("revision".into()),
-                }],
-                to: "Attached".into(),
-                emit: vec![EffectEmit {
-                    variant: "CommittedVisibleSetPublished".into(),
-                    fields: IndexMap::from([("revision".into(), Expr::Binding("revision".into()))]),
-                }],
-            },
-            TransitionSchema {
-                name: "PublishCommittedVisibleSetRunning".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
-                    variant: "PublishCommittedVisibleSet".into(),
-                    bindings: vec!["revision".into()],
-                },
-                guards: vec![published_revision_matches_active_guard()],
-                updates: vec![Update::Assign {
-                    field: "committed_visibility_revision".into(),
-                    expr: Expr::Binding("revision".into()),
-                }],
-                to: "Running".into(),
-                emit: vec![EffectEmit {
-                    variant: "CommittedVisibleSetPublished".into(),
-                    fields: IndexMap::from([("revision".into(), Expr::Binding("revision".into()))]),
-                }],
-            },
+            publish_committed_visible_set_transition("PublishCommittedVisibleSetIdle", "Idle"),
+            publish_committed_visible_set_transition(
+                "PublishCommittedVisibleSetAttached",
+                "Attached",
+            ),
+            publish_committed_visible_set_transition(
+                "PublishCommittedVisibleSetRunning",
+                "Running",
+            ),
+            publish_committed_visible_set_transition(
+                "PublishCommittedVisibleSetRetired",
+                "Retired",
+            ),
+            publish_committed_visible_set_transition(
+                "PublishCommittedVisibleSetStopped",
+                "Stopped",
+            ),
             TransitionSchema {
                 name: "RunCompleted".into(),
                 from: vec!["Running".into()],
@@ -980,19 +697,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("recover", "runtime recovering")],
             },
             TransitionSchema {
-                name: "RecoverFromRecovering".into(),
-                from: vec!["Recovering".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Recovering".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
                 name: "RecoverFromRetired".into(),
                 from: vec!["Retired".into()],
                 on: InputMatch {
@@ -1050,7 +754,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Initializing".into(),
                     "Idle".into(),
                     "Attached".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                 ],
                 on: InputMatch {
@@ -1099,7 +802,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Idle".into(),
                     "Attached".into(),
                     "Running".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                 ],
                 on: InputMatch {
@@ -1128,7 +830,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Idle".into(),
                     "Attached".into(),
                     "Running".into(),
-                    "Recovering".into(),
                     "Retired".into(),
                     "Stopped".into(),
                 ],
@@ -1349,6 +1050,43 @@ fn tool_filter_all() -> Expr {
     }
 }
 
+fn register_session_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("RegisterSession"),
+            variant: "RegisterSession".into(),
+            bindings: vec!["session_id".into()],
+        },
+        // Runtime treats registration as an idempotent binding helper for an
+        // already-live session and as a create helper for an unknown session.
+        guards: vec![],
+        updates: vec![assign_some("session_id", "session_id")],
+        to: phase.into(),
+        emit: vec![],
+    }
+}
+
+fn unregister_session_transition(name: &str, from_phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![from_phase.into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("UnregisterSession"),
+            variant: "UnregisterSession".into(),
+            bindings: vec!["session_id".into()],
+        },
+        guards: vec![session_matches_guard(
+            "session_matches_current",
+            "session_id",
+        )],
+        updates: reset_session_state(),
+        to: "Idle".into(),
+        emit: vec![],
+    }
+}
+
 fn prepare_bindings_transition(name: &str, from_phase: &str, to_phase: &str) -> TransitionSchema {
     TransitionSchema {
         name: name.into(),
@@ -1372,6 +1110,106 @@ fn prepare_bindings_transition(name: &str, from_phase: &str, to_phase: &str) -> 
         ],
         to: to_phase.into(),
         emit: vec![runtime_identity_emit("RuntimeBound")],
+    }
+}
+
+fn stage_persistent_filter_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("StagePersistentFilter"),
+            variant: "StagePersistentFilter".into(),
+            bindings: vec!["filter".into(), "witnesses".into()],
+        },
+        guards: vec![session_registered_guard()],
+        updates: vec![
+            Update::Assign {
+                field: "staged_filter".into(),
+                expr: Expr::Binding("filter".into()),
+            },
+            Update::ForEach {
+                binding: "name".into(),
+                over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
+                updates: vec![Update::MapInsert {
+                    field: "filter_witnesses".into(),
+                    key: Expr::Binding("name".into()),
+                    value: Expr::MapGet {
+                        map: Box::new(Expr::Binding("witnesses".into())),
+                        key: Box::new(Expr::Binding("name".into())),
+                    },
+                }],
+            },
+            Update::Increment {
+                field: "staged_visibility_revision".into(),
+                amount: 1,
+            },
+        ],
+        to: phase.into(),
+        emit: vec![],
+    }
+}
+
+fn request_deferred_tools_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("RequestDeferredTools"),
+            variant: "RequestDeferredTools".into(),
+            bindings: vec!["names".into(), "witnesses".into()],
+        },
+        guards: vec![session_registered_guard()],
+        updates: vec![
+            Update::ForEach {
+                binding: "name".into(),
+                over: Expr::Binding("names".into()),
+                updates: vec![Update::SetInsert {
+                    field: "staged_requested_deferred_names".into(),
+                    value: Expr::Binding("name".into()),
+                }],
+            },
+            Update::ForEach {
+                binding: "name".into(),
+                over: Expr::MapKeys(Box::new(Expr::Binding("witnesses".into()))),
+                updates: vec![Update::MapInsert {
+                    field: "requested_witnesses".into(),
+                    key: Expr::Binding("name".into()),
+                    value: Expr::MapGet {
+                        map: Box::new(Expr::Binding("witnesses".into())),
+                        key: Box::new(Expr::Binding("name".into())),
+                    },
+                }],
+            },
+            Update::Increment {
+                field: "staged_visibility_revision".into(),
+                amount: 1,
+            },
+        ],
+        to: phase.into(),
+        emit: vec![],
+    }
+}
+
+fn publish_committed_visible_set_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
+            variant: "PublishCommittedVisibleSet".into(),
+            bindings: vec!["revision".into()],
+        },
+        guards: vec![published_revision_matches_active_guard()],
+        updates: vec![Update::Assign {
+            field: "committed_visibility_revision".into(),
+            expr: Expr::Binding("revision".into()),
+        }],
+        to: phase.into(),
+        emit: vec![EffectEmit {
+            variant: "CommittedVisibleSetPublished".into(),
+            fields: IndexMap::from([("revision".into(), Expr::Binding("revision".into()))]),
+        }],
     }
 }
 
@@ -1628,6 +1466,8 @@ fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
             | "PrepareBindings"
             | "InputState"
             | "ListActiveInputs"
+            | "StagePersistentFilter"
+            | "RequestDeferredTools"
             | "PublishCommittedVisibleSet"
             | "Ingest"
             | "PublishEvent"
@@ -1648,8 +1488,6 @@ fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
             | "Prepare"
             | "Commit"
             | "Fail"
-            | "StagePersistentFilter"
-            | "RequestDeferredTools"
     )
 }
 
@@ -1813,25 +1651,52 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
 fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     let mut transitions = Vec::new();
 
-    for (variant, bindings) in [
-        ("EnsureSessionWithExecutor", vec!["session_id"]),
-        ("SetSilentIntents", vec!["session_id", "intents"]),
-        ("ContainsSession", vec!["session_id"]),
-        ("SessionHasExecutor", vec!["session_id"]),
-        ("SessionHasComms", vec!["session_id"]),
-        ("OpsLifecycleRegistry", vec!["session_id"]),
-        ("InputState", vec!["session_id", "input_id"]),
-        ("ListActiveInputs", vec!["session_id"]),
-    ] {
+    transitions.push(TransitionSchema {
+        name: "EnsureSessionWithExecutorIdle".into(),
+        from: vec!["Idle".into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("EnsureSessionWithExecutor"),
+            variant: "EnsureSessionWithExecutor".into(),
+            bindings: vec!["session_id".into()],
+        },
+        guards: vec![],
+        updates: vec![],
+        to: "Attached".into(),
+        emit: vec![],
+    });
+
+    for phase in ["Attached", "Running", "Retired", "Stopped"] {
         transitions.push(self_loop_transition_with(
-            &format!("{variant}Idle"),
-            "Idle",
-            variant,
-            bindings,
+            &format!("EnsureSessionWithExecutor{phase}"),
+            phase,
+            "EnsureSessionWithExecutor",
+            vec!["session_id"],
             vec![],
             vec![],
-            vec![session_registered_guard()],
+            vec![],
         ));
+    }
+
+    for phase in ["Idle", "Attached", "Running", "Retired", "Stopped"] {
+        for (variant, bindings) in [
+            ("SetSilentIntents", vec!["session_id", "intents"]),
+            ("ContainsSession", vec!["session_id"]),
+            ("SessionHasExecutor", vec!["session_id"]),
+            ("SessionHasComms", vec!["session_id"]),
+            ("OpsLifecycleRegistry", vec!["session_id"]),
+            ("InputState", vec!["session_id", "input_id"]),
+            ("ListActiveInputs", vec!["session_id"]),
+        ] {
+            transitions.push(self_loop_transition_with(
+                &format!("{variant}{phase}"),
+                phase,
+                variant,
+                bindings,
+                vec![],
+                vec![],
+                vec![session_registered_guard()],
+            ));
+        }
     }
 
     for (variant, bindings) in [("Abort", vec!["session_id"]), ("Wait", vec!["session_id"])] {
@@ -1855,7 +1720,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    for phase in ["Attached", "Running", "Recovering", "Retired", "Stopped"] {
+    for phase in ["Attached", "Running", "Retired", "Stopped"] {
         transitions.push(self_loop_transition_with(
             &format!("AbortAll{phase}"),
             phase,

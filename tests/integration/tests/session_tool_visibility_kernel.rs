@@ -76,8 +76,8 @@ fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     )
     .expect("publish committed visible set");
 
-    // PrepareBindings is a self-loop; state stays Idle after registration.
-    assert_eq!(published.next_state.phase, "Idle");
+    // PrepareBindings promotes an idle registered session to Attached.
+    assert_eq!(published.next_state.phase, "Attached");
     assert_eq!(published.effects.len(), 1);
     assert_eq!(published.effects[0].variant, "CommittedVisibleSetPublished");
 }

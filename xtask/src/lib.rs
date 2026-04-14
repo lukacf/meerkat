@@ -13,7 +13,7 @@ pub mod seam_inventory;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::machines::{SelectionArgs, VerifyArgs};
+use crate::machines::{HopcroftArgs, SelectionArgs, VerifyArgs};
 use crate::ownership_ledger::OwnershipLedgerArgs;
 use crate::rmat_audit::RmatAuditArgs;
 
@@ -31,6 +31,8 @@ enum Commands {
     Codegen(SelectionArgs),
     #[command(name = "machine-verify")]
     Verify(VerifyArgs),
+    #[command(name = "machine-hopcroft")]
+    Hopcroft(HopcroftArgs),
     #[command(name = "machine-check-drift")]
     CheckDrift(SelectionArgs),
     #[command(name = "seam-inventory")]
@@ -47,6 +49,7 @@ pub fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Codegen(args) => machines::machine_codegen(args),
         Commands::Verify(args) => machines::machine_verify(args),
+        Commands::Hopcroft(args) => machines::machine_hopcroft(args),
         Commands::CheckDrift(args) => machines::machine_check_drift(args),
         Commands::SeamInventory => seam_inventory::run_seam_inventory(),
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),

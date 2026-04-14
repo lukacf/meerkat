@@ -81,7 +81,6 @@ pub fn decode_public_mob_definition(input: MobDefinitionInput) -> Result<MobDefi
         limits: input.limits.map(decode_limits),
         spawn_policy: input.spawn_policy.map(decode_spawn_policy),
         event_router: input.event_router.map(decode_event_router),
-        owner_session_id: None,
         owner_bridge_session_id: None,
         session_cleanup_policy: SessionCleanupPolicy::Manual,
         is_implicit: false,

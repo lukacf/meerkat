@@ -94,11 +94,11 @@ pub(crate) enum MemberRef {
 }
 
 impl MemberRef {
-    pub fn from_bridge_session_id(session_id: SessionId) -> Self {
+    pub(crate) fn from_bridge_session_id(session_id: SessionId) -> Self {
         Self::Session { session_id }
     }
 
-    pub fn bridge_session_id(&self) -> Option<&SessionId> {
+    pub(crate) fn bridge_session_id(&self) -> Option<&SessionId> {
         match self {
             Self::Session { session_id } => Some(session_id),
             Self::BackendPeer { session_id, .. } => session_id.as_ref(),
@@ -574,7 +574,6 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
             owner_bridge_session_id: None,
             session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,

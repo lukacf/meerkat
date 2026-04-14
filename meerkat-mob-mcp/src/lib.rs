@@ -898,8 +898,7 @@ impl MobMcpState {
     ///
     /// Scans the in-memory mob registry for a mob whose definition has
     /// `is_implicit == true` and an owner bridge-session index matching the
-    /// given bridge session ID. Older definitions may still satisfy that index
-    /// via the compatibility `owner_session_id` field.
+    /// given bridge session ID.
     /// Does NOT match explicit mobs that merely share the same owner.
     pub async fn find_implicit_mob_for_bridge_session(
         &self,
@@ -4277,7 +4276,6 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
             owner_bridge_session_id: None,
             session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
@@ -4457,7 +4455,6 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mut manual = explicit_definition("manual-owner-index");
-        manual.owner_session_id = Some(sid.clone());
         manual.owner_bridge_session_id = Some(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
@@ -4475,7 +4472,7 @@ mod tests {
 
         assert!(
             state.handle_for(&manual_id).await.is_ok(),
-            "owner_session_id alone must not make a mob eligible for cleanup"
+            "owner bridge-session indexing alone must not make a mob eligible for cleanup"
         );
         assert!(
             state.handle_for(&bridge_session_scoped_id).await.is_err(),
@@ -4557,7 +4554,6 @@ mod tests {
 
         // Also create a manual owner-indexed explicit mob that should survive scavenging.
         let mut manual = explicit_definition("manual-owner-index");
-        manual.owner_session_id = Some(sid.clone());
         manual.owner_bridge_session_id = Some(sid.clone());
         let manual_id = state
             .mob_create_definition(manual)
@@ -4614,7 +4610,6 @@ mod tests {
 
         let mut bridge_owned = explicit_definition("bridge-owned-orphan");
         bridge_owned.mark_owner_bridge_session_indexed(&sid);
-        bridge_owned.owner_session_id = None;
         let bridge_owned_id = state
             .mob_create_definition(bridge_owned)
             .await
@@ -4649,11 +4644,6 @@ mod tests {
         assert!(
             handle.definition().wiring.auto_wire_orchestrator,
             "implicit mob must have auto_wire_orchestrator set"
-        );
-        assert_eq!(
-            handle.definition().owner_session_id.as_deref(),
-            Some(sid.as_str()),
-            "implicit mob must have correct owner_session_id"
         );
         assert_eq!(
             handle.definition().owner_bridge_session_id.as_deref(),

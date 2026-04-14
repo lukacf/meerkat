@@ -1873,7 +1873,6 @@ fn sample_definition() -> MobDefinition {
         limits: None,
         spawn_policy: None,
         event_router: None,
-        owner_session_id: None,
         owner_bridge_session_id: None,
         session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
         is_implicit: false,
@@ -11103,7 +11102,8 @@ async fn test_fan_in_aggregate_output_is_deterministic_array_shape() {
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "dispatch"
-                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.agent_identity
+                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())
@@ -12429,7 +12429,8 @@ async fn test_collection_policy_all_uses_map_shape_for_single_target() {
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "collect"
-                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.agent_identity
+                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())
@@ -15763,7 +15764,8 @@ async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
         terminal.step_ledger.iter().any(|entry| {
             entry.step_id.as_str() == "needs_lead"
                 && entry.status == StepRunStatus::Failed
-                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.agent_identity
+                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
         }),
         "root-frame failure should project a failed step entry for the failed node"
     );
@@ -15929,7 +15931,8 @@ async fn test_root_frame_fan_in_persists_canonical_completed_aggregate_output() 
         .iter()
         .find(|entry| {
             entry.step_id.as_str() == "dispatch"
-                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.agent_identity
+                    == AgentIdentity::from(crate::runtime::flow_system_member_id().as_str())
                 && entry.status == StepRunStatus::Completed
         })
         .and_then(|entry| entry.output.clone())

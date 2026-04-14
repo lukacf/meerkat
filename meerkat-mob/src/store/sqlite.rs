@@ -686,7 +686,7 @@ impl MobRunStore for SqliteMobRunStore {
             let mut run: MobRun = decode_json(&bytes)?;
             let is_duplicate = run.step_ledger.iter().any(|existing| {
                 existing.step_id == entry.step_id
-                    && existing.meerkat_id == entry.meerkat_id
+                    && existing.agent_identity == entry.agent_identity
                     && existing.status == entry.status
             });
             if is_duplicate {
@@ -1646,7 +1646,7 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, FlowSpec, WiringRules};
     use crate::event::MobEventKind;
-    use crate::ids::{MeerkatId, ProfileName};
+    use crate::ids::{AgentIdentity, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
     use futures::future::join_all;
@@ -1700,7 +1700,6 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
             owner_bridge_session_id: None,
             session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
@@ -1833,7 +1832,7 @@ mod tests {
 
         let entry = StepLedgerEntry {
             step_id: StepId::from("step-a"),
-            meerkat_id: MeerkatId::from("worker-1"),
+            agent_identity: AgentIdentity::from("worker-1"),
             status: StepRunStatus::Completed,
             output: None,
             timestamp: Utc::now(),

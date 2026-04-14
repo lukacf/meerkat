@@ -15,7 +15,7 @@ use crate::definition::{
 };
 use crate::error::MobError;
 use crate::generated::flow_frame_loop_driver::FlowFrameTerminalPhase;
-use crate::ids::{FlowId, MeerkatId, RunId, StepId};
+use crate::ids::{AgentIdentity, FlowId, MeerkatId, RunId, StepId};
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
@@ -162,7 +162,9 @@ impl FlowEngine {
                                         &run_id,
                                         StepLedgerEntry {
                                             step_id: step_id.clone(),
-                                            meerkat_id: flow_system_member_id(),
+                                            agent_identity: AgentIdentity::from(
+                                                flow_system_member_id().as_str(),
+                                            ),
                                             status: StepRunStatus::Failed,
                                             output: None,
                                             timestamp: Utc::now(),
@@ -234,7 +236,9 @@ impl FlowEngine {
                                     &run_id,
                                     StepLedgerEntry {
                                         step_id: step_id.clone(),
-                                        meerkat_id: MeerkatId::from(""),
+                                        agent_identity: AgentIdentity::from(
+                                            flow_system_member_id().as_str(),
+                                        ),
                                         status: StepRunStatus::Skipped,
                                         output: None,
                                         timestamp: Utc::now(),
@@ -259,7 +263,9 @@ impl FlowEngine {
                                     &run_id,
                                     StepLedgerEntry {
                                         step_id: step_id.clone(),
-                                        meerkat_id: MeerkatId::from(""),
+                                        agent_identity: AgentIdentity::from(
+                                            flow_system_member_id().as_str(),
+                                        ),
                                         status: StepRunStatus::Skipped,
                                         output: None,
                                         timestamp: Utc::now(),
@@ -473,7 +479,9 @@ impl FlowEngine {
                                 &run_id,
                                 StepLedgerEntry {
                                     step_id: step_notice.step_id.clone(),
-                                    meerkat_id: flow_system_member_id(),
+                                    agent_identity: AgentIdentity::from(
+                                        flow_system_member_id().as_str(),
+                                    ),
                                     status: step_notice.status,
                                     output: Some(output.clone()),
                                     timestamp: Utc::now(),
@@ -955,7 +963,7 @@ impl FlowEngine {
                     run_id,
                     StepLedgerEntry {
                         step_id: step_id.clone(),
-                        meerkat_id: target.clone(),
+                        agent_identity: AgentIdentity::from(target.as_str()),
                         status: StepRunStatus::Dispatched,
                         output: None,
                         timestamp: Utc::now(),
@@ -1007,7 +1015,7 @@ impl FlowEngine {
                                     run_id,
                                     StepLedgerEntry {
                                         step_id: step_id.clone(),
-                                        meerkat_id: target.clone(),
+                                        agent_identity: AgentIdentity::from(target.as_str()),
                                         status: StepRunStatus::Completed,
                                         output: Some(value.clone()),
                                         timestamp: Utc::now(),
@@ -1041,7 +1049,7 @@ impl FlowEngine {
                                     run_id,
                                     StepLedgerEntry {
                                         step_id: step_id.clone(),
-                                        meerkat_id: target.clone(),
+                                        agent_identity: AgentIdentity::from(target.as_str()),
                                         status: StepRunStatus::Failed,
                                         output: None,
                                         timestamp: Utc::now(),
@@ -1088,7 +1096,7 @@ impl FlowEngine {
                             run_id,
                             StepLedgerEntry {
                                 step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
+                                agent_identity: AgentIdentity::from(target.as_str()),
                                 status: StepRunStatus::Failed,
                                 output: None,
                                 timestamp: Utc::now(),
@@ -1122,7 +1130,7 @@ impl FlowEngine {
                             run_id,
                             StepLedgerEntry {
                                 step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
+                                agent_identity: AgentIdentity::from(target.as_str()),
                                 status: StepRunStatus::Failed,
                                 output: None,
                                 timestamp: Utc::now(),
@@ -1187,7 +1195,7 @@ impl FlowEngine {
                             run_id,
                             StepLedgerEntry {
                                 step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
+                                agent_identity: AgentIdentity::from(target.as_str()),
                                 status: StepRunStatus::Failed,
                                 output: None,
                                 timestamp: Utc::now(),
@@ -1300,7 +1308,7 @@ impl FlowEngine {
                 run_id,
                 StepLedgerEntry {
                     step_id: step_id.clone(),
-                    meerkat_id: flow_system_member_id(),
+                    agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
                     status: effects.step_status.clone(),
                     output: if effects.persist_output { output } else { None },
                     timestamp: Utc::now(),
@@ -1362,7 +1370,7 @@ impl FlowEngine {
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
-                        meerkat_id: flow_system_member_id(),
+                        agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
                         status: step_notice.status,
                         output: None,
                         timestamp: Utc::now(),
@@ -1393,7 +1401,7 @@ impl FlowEngine {
                     run_id,
                     StepLedgerEntry {
                         step_id: step_notice.step_id.clone(),
-                        meerkat_id: flow_system_member_id(),
+                        agent_identity: AgentIdentity::from(flow_system_member_id().as_str()),
                         status: step_notice.status,
                         output: None,
                         timestamp: Utc::now(),

@@ -39,10 +39,6 @@ impl MemberLaunchMode {
             _ => None,
         }
     }
-
-    pub fn resume_session_id(&self) -> Option<&SessionId> {
-        self.resume_bridge_session_id()
-    }
 }
 
 /// Controls how much conversation history is included when forking.
@@ -85,7 +81,6 @@ mod tests {
         };
 
         assert_eq!(mode.resume_bridge_session_id(), Some(&sid));
-        assert_eq!(mode.resume_session_id(), Some(&sid));
     }
 
     #[test]
@@ -100,6 +95,5 @@ mod tests {
             serde_json::from_value(payload).expect("resume launch mode should deserialize");
 
         assert_eq!(mode.resume_bridge_session_id(), Some(&sid));
-        assert_eq!(mode.resume_session_id(), Some(&sid));
     }
 }

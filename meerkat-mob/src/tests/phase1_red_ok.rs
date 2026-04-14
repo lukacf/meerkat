@@ -283,8 +283,8 @@ async fn ops_registry_integration_red_ok_background_ops_retire_without_peer_hand
 fn ops_registry_integration_red_ok_existing_session_attach_reuses_spawn_control_plane() {
     let session_id = SessionId::new();
     let spec = SpawnMemberSpec::new("orchestrator", "member-alpha")
-        .with_resume_session_id(session_id.clone());
+        .with_resume_bridge_session_id(session_id.clone());
 
-    assert_eq!(spec.resume_session_id(), Some(&session_id));
+    assert_eq!(spec.resume_bridge_session_id(), Some(&session_id));
     assert_eq!(spec.role_name.as_str(), "orchestrator");
 }

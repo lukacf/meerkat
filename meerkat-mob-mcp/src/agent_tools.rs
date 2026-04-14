@@ -2282,7 +2282,6 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
             owner_bridge_session_id: None,
             session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
@@ -2595,7 +2594,6 @@ mod tests {
                             "runtime_mode": "turn_driven"
                         }
                     },
-                    "owner_session_id": "spoofed-session",
                     "is_implicit": true,
                     "session_cleanup_policy": "manual"
                 }
@@ -2627,11 +2625,6 @@ mod tests {
             .await
             .expect("created mob handle");
         let created_definition = created_handle.definition();
-        assert_eq!(
-            created_definition.owner_session_id.as_deref(),
-            Some(expected_session_id.as_str()),
-            "mob_create must keep the compatibility owner_session_id aligned to the current owner bridge session"
-        );
         assert_eq!(
             created_definition.owner_bridge_session_id.as_deref(),
             Some(expected_session_id.as_str()),

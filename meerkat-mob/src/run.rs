@@ -3,7 +3,8 @@
 use crate::definition::{DependencyMode, FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
 use crate::error::MobError;
 use crate::ids::{
-    BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName, RunId, StepId,
+    AgentIdentity, BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MobId, ProfileName, RunId,
+    StepId,
 };
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
@@ -839,7 +840,7 @@ impl MobRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepLedgerEntry {
     pub step_id: StepId,
-    pub meerkat_id: MeerkatId,
+    pub agent_identity: AgentIdentity,
     pub status: StepRunStatus,
     pub output: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
@@ -1103,7 +1104,6 @@ mod tests {
             }),
             spawn_policy: None,
             event_router: None,
-            owner_session_id: None,
             owner_bridge_session_id: None,
             session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
@@ -1397,7 +1397,7 @@ mod tests {
             completed_at: None,
             step_ledger: vec![StepLedgerEntry {
                 step_id: StepId::from("step-1"),
-                meerkat_id: MeerkatId::from("agent-1"),
+                agent_identity: AgentIdentity::from("agent-1"),
                 status: StepRunStatus::Completed,
                 output: Some(serde_json::json!({"ok":true})),
                 timestamp: now,

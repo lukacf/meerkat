@@ -12,7 +12,6 @@
 //! Key types:
 //! - [`MobDefinition`] - Describes mob structure (profiles, wiring, skills)
 //! - [`MobEvent`] / [`MobEventKind`] - Structural state changes
-//! - [`Roster`] - Projected view of active meerkats
 //! - [`TaskBoard`] - Projected view of shared tasks
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
@@ -36,7 +35,7 @@ pub mod tokio {
 }
 
 pub mod backend;
-pub mod build;
+mod build;
 pub mod definition;
 pub mod error;
 pub mod event;
@@ -45,7 +44,7 @@ pub mod ids;
 pub mod launch;
 mod mob_machine;
 pub mod profile;
-pub mod roster;
+mod roster;
 pub mod run;
 pub mod runtime;
 pub mod runtime_mode;
@@ -68,9 +67,7 @@ pub use ids::{
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
-pub use roster::{
-    MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot, Roster, RosterEntry,
-};
+pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,
     LoopIterationLedgerEntry, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,

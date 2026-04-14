@@ -542,14 +542,6 @@ impl SpawnMemberSpec {
         self
     }
 
-    /// Set launch mode to resume an existing session.
-    ///
-    /// This is a convenience method equivalent to setting
-    /// `launch_mode = MemberLaunchMode::Resume { bridge_session_id }`.
-    pub fn with_resume_session_id(self, id: meerkat_core::types::SessionId) -> Self {
-        self.with_resume_bridge_session_id(id)
-    }
-
     pub fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
         self.launch_mode = mode;
         self
@@ -592,11 +584,6 @@ impl SpawnMemberSpec {
     /// Extract the resume bridge session ID if the launch mode is `Resume`.
     pub fn resume_bridge_session_id(&self) -> Option<&meerkat_core::types::SessionId> {
         self.launch_mode.resume_bridge_session_id()
-    }
-
-    /// Extract the compatibility resume session ID alias if the launch mode is `Resume`.
-    pub fn resume_session_id(&self) -> Option<&meerkat_core::types::SessionId> {
-        self.resume_bridge_session_id()
     }
 }
 
@@ -2870,6 +2857,6 @@ mod tests {
             SpawnMemberSpec::new("worker", "worker-1").with_resume_bridge_session_id(sid.clone());
 
         assert_eq!(spec.resume_bridge_session_id(), Some(&sid));
-        assert_eq!(spec.resume_session_id(), Some(&sid));
+        assert_eq!(spec.resume_bridge_session_id(), Some(&sid));
     }
 }

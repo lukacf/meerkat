@@ -295,8 +295,8 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     for (profile, id, msg) in &stages {
         let mut spec = SpawnMemberSpec::new(*profile, *id);
         spec.initial_message = Some(msg.to_string().into());
-        let member_ref = handle.spawn_spec(spec).await?;
-        println!("  Spawned {id} ({profile}): {member_ref:?}");
+        let spawn_result = handle.spawn_spec(spec).await?;
+        println!("  Spawned {id} ({profile}): {spawn_result:?}");
     }
 
     // Wire coordinator to all stages, and chain stages sequentially.

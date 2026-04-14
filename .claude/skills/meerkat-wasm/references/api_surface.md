@@ -187,12 +187,12 @@ sessionEvents.poll();
 session.destroy();
 ```
 
-### Key type changes (0.5)
+### Key type changes (0.6)
 
 - `Mob.subscribe()` and `Mob.subscribeAll()` are now **async** (return `Promise<EventSubscription<T>>`)
 - `EventSubscription<T>` is generic — `subscribe()` yields `EventEnvelope`, `subscribeAll()` yields `AttributedEvent`
 - `Mob.events()` returns `MobEvent[]` (structural mob events, not agent events)
 - `mob_create` and `mob_run_flow` return plain strings (not JSON-wrapped)
-- `SpawnResult` has `status: 'ok' | 'error'` with optional `member_ref` and `error` fields
-- `MobMember` includes `member_ref`, `runtime_mode`, `state`, `wired_to`, and `labels`
+- `SpawnResult` is identity-native: `agent_identity`, `agent_runtime_id`, `fence_token`, optional `generation`
+- `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
 - `MobStatus` uses `state` field instead of `status` + `member_count`

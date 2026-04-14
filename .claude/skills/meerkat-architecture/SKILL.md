@@ -164,7 +164,7 @@ should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 **Key operations:**
 - `ingest` — admit an input through policy resolution
 - `retire` — graceful drain (process queue, reject new input)
-- `respawn` — helper convenience: retire old session, spawn fresh with same identity/spec/wiring, new session ID (not machine-owned)
+- `respawn` — helper convenience: retire the old runtime binding, spawn fresh with the same identity/spec/wiring, and advance runtime incarnation + fence (not machine-owned)
 - `reset` — abandon pending, return to Idle
 - `recover` — replay from store for crash recovery
 - `destroy` — terminal state, no recovery
@@ -182,7 +182,7 @@ should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 
 **Detached-op wake:** idle keep-alive wake from background shell completions is runtime-owned. `DetachedWakeState` (`pending`, `signaled`, `notify`) sits beside the runtime loop; terminal detached ops fire `notify`, and the runtime injects `ContinuationInput::detached_background_op_completed()`. Do not spawn surface-local waker tasks or side channels for this.
 
-**Respawn semantics:** Helper convenience (not a machine-owned primitive). Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
+**Respawn semantics:** Helper convenience (not a machine-owned primitive). Same `AgentIdentity`, spec, and peer wiring — **new runtime incarnation and fence token**. Old bridge binding is archived. Used for "agent is confused, restart it" recovery.
 
 ## OpsLifecycleRegistry
 
@@ -294,7 +294,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 - `retire_member(id)` — archive session, remove from roster
 - `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
-- `respawn(id, initial_message)` — helper convenience: retire old session → enqueue spawn with same identity/profile/wiring/labels → new session ID (not machine-owned)
+- `respawn(id, initial_message)` — helper convenience: retire old bridge/runtime binding → enqueue spawn with same identity/profile/wiring/labels → new runtime incarnation/fence (not machine-owned)
 - `member_status(id)` → `MobMemberSnapshot` (status, output, error, timestamps, tokens, is_final, peer_metadata)
 - `wait_one(id)`, `wait_all(ids)`, `collect_completed()`
 

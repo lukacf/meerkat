@@ -108,7 +108,8 @@ Primary crates:
 ```rust
 use std::sync::Arc;
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
+    AgentIdentity, FlowId, MobBuilder, MobDefinition, MobSessionService, MobStorage,
+    SpawnMemberSpec,
 };
 
 async fn run_mob(
@@ -124,17 +125,24 @@ async fn run_mob(
         .await?;
 
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
         .await?;
     handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("worker-1")))
         .await?;
     handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
+        .wire(
+            AgentIdentity::from("lead-1"),
+            AgentIdentity::from("worker-1"),
+        )
         .await?;
     handle
-        .member(MeerkatId::from("lead-1"))
-        .send("Coordinate a short execution plan.".to_string())
+        .member(&AgentIdentity::from("lead-1"))
+        .await?
+        .send(
+            "Coordinate a short execution plan.".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
         .await?;
 
     let run_id = handle
@@ -150,7 +158,7 @@ async fn run_mob(
 ### Rust example: high-level in-memory mob state helper
 
 ```rust
-use meerkat_mob::{MeerkatId, MobDefinition, ProfileName};
+use meerkat_mob::{AgentIdentity, MobDefinition, ProfileName};
 use meerkat_mob_mcp::MobMcpState;
 
 async fn in_memory() -> Result<(), Box<dyn std::error::Error>> {
@@ -182,7 +190,7 @@ comms = true
         .mob_spawn(
             &mob_id,
             ProfileName::from("lead"),
-            MeerkatId::from("lead-1"),
+            AgentIdentity::from("lead-1"),
             None,
             None,
         )

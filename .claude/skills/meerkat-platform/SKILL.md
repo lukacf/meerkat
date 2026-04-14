@@ -72,7 +72,7 @@ External members must provide `RuntimeBinding::External` at spawn time with the 
 
 The bridge session (placeholder) still exists for lifecycle transport (notifications, kickoff events) within the orchestrator process. `trusted_peer_spec` uses the bridge key for transport trust, not `BackendPeer.peer_id` (which is the real identity).
 
-This is the first step toward identity-first mobs where `MeerkatId` is the durable identity and everything else (session, comms, runtime) is a hidden binding detail.
+This is the first step toward identity-first mobs where `AgentIdentity` is the durable member identity and everything else (runtime incarnation, comms, bridge/session transport) is hidden binding detail.
 
 ## Surfaces
 

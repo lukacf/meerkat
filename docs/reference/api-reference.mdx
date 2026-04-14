@@ -116,7 +116,8 @@ Mob runtime APIs live primarily in:
 use std::sync::Arc;
 use meerkat_core::types::HandlingMode;
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
+    AgentIdentity, FlowId, MobBuilder, MobDefinition, MobSessionService, MobStorage,
+    SpawnMemberSpec,
 };
 
 async fn orchestrate(
@@ -132,16 +133,19 @@ async fn orchestrate(
         .await?;
 
     handle
-        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
         .await?;
     handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("worker-1"), None)
+        .spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("worker-1")))
         .await?;
     handle
-        .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
+        .wire(
+            AgentIdentity::from("lead-1"),
+            AgentIdentity::from("worker-1"),
+        )
         .await?;
-    let lead = handle.member(&MeerkatId::from("lead-1")).await?;
-    lead.send("Coordinate work.", HandlingMode::Queue, None).await?;
+    let lead = handle.member(&AgentIdentity::from("lead-1")).await?;
+    lead.send("Coordinate work.", HandlingMode::Queue).await?;
 
     let run_id = handle
         .run_flow(FlowId::from("release_flow"), serde_json::json!({"severity":"critical"}))

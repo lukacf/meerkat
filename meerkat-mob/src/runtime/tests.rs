@@ -10107,7 +10107,7 @@ async fn test_flow_dispatch_autonomous_mode_with_overlay_rejects() {
 }
 
 #[tokio::test]
-async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_turn_for_turn_driven()
+async fn test_internal_turn_mode_routing_uses_runtime_admission_for_autonomous_and_start_turn_for_turn_driven()
  {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
@@ -10127,6 +10127,8 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
     // Allow background start_turn from autonomous spawn to register.
     tokio::time::sleep(Duration::from_millis(10)).await;
     let baseline_start_turn = service.start_turn_call_count();
+    let baseline_keep_alive = service.keep_alive_start_turn_call_count();
+    let baseline_injects = service.inject_call_count();
 
     handle
         .internal_turn(AgentIdentity::from("l-auto"), "internal autonomous")
@@ -10137,17 +10139,25 @@ async fn test_internal_turn_mode_routing_uses_injector_for_autonomous_and_start_
         .await
         .expect("turn-driven internal turn");
 
-    // Runtime adapter path: autonomous spawn uses accept_input_with_completion (already in baseline).
-    // internal_turn for autonomous uses inject (1). internal_turn for turn-driven uses start_turn (+1).
+    // Runtime adapter path: autonomous spawn uses accept_input_with_completion
+    // for kickoff (already in baseline). internal_turn for autonomous admits a
+    // durable runtime peer input into the still-running keep-alive loop, so it
+    // should not fall back to the live injector or start a second keep-alive turn.
+    tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "autonomous internal turn should route via injector (1 internal_turn only)"
+        baseline_injects,
+        "autonomous internal turn should avoid the live injector when runtime admission is available"
+    );
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        baseline_keep_alive,
+        "autonomous internal turn should stay on the existing keep-alive loop rather than start another one"
     );
     assert_eq!(
         service.start_turn_call_count(),
         baseline_start_turn + 1,
-        "turn-driven internal turn should route via start_turn"
+        "only the turn-driven internal turn should issue a new start_turn while the autonomous loop is already running"
     );
 }
 

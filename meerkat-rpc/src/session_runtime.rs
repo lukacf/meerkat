@@ -49,7 +49,12 @@ use meerkat_core::{
     Config, ConfigStore, ContentInput, HookRunOverrides, PendingSystemContextAppend, Session,
     SessionLlmIdentity, SessionSystemContextState,
 };
-use meerkat_runtime::{MeerkatMachine, SessionServiceRuntimeExt};
+use meerkat_runtime::RuntimeDriverError;
+use meerkat_runtime::{
+    HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure,
+    SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
+    SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
+};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
@@ -92,19 +97,322 @@ fn pending_system_context_appends(
         .collect()
 }
 
-fn exported_tool_filter(session: &Session) -> meerkat_core::ToolFilter {
-    session
-        .tool_visibility_state()
-        .map(|state| state.staged_filter)
-        .or_else(|| {
-            session
-                .metadata()
-                .get(meerkat_core::EXTERNAL_TOOL_FILTER_METADATA_KEY)
-                .and_then(|value| {
-                    serde_json::from_value::<meerkat_core::ToolFilter>(value.clone()).ok()
-                })
+fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
+    match err {
+        SessionError::NotFound { .. } => RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        },
+        other => RuntimeDriverError::Internal(other.to_string()),
+    }
+}
+
+fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+    match err {
+        RuntimeDriverError::ValidationFailed { reason } => RpcError {
+            code: error::INVALID_PARAMS,
+            message: reason,
+            data: None,
+        },
+        RuntimeDriverError::NotReady { state } => RpcError {
+            code: error::INVALID_REQUEST,
+            message: format!("runtime not ready for llm reconfiguration: {state}"),
+            data: None,
+        },
+        RuntimeDriverError::Destroyed => RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: "runtime destroyed".to_string(),
+            data: None,
+        },
+        RuntimeDriverError::Internal(message) => RpcError {
+            code: error::INTERNAL_ERROR,
+            message,
+            data: None,
+        },
+        _ => RpcError {
+            code: error::INTERNAL_ERROR,
+            message: err.to_string(),
+            data: None,
+        },
+    }
+}
+
+fn profile_to_capability_surface(
+    profile: &meerkat_models::profile::ModelProfile,
+) -> SessionLlmCapabilitySurface {
+    SessionLlmCapabilitySurface {
+        supports_temperature: profile.supports_temperature,
+        supports_thinking: profile.supports_thinking,
+        supports_reasoning: profile.supports_reasoning,
+        inline_video: profile.inline_video,
+        vision: profile.vision,
+        image_tool_results: profile.image_tool_results,
+        supports_web_search: profile.supports_web_search,
+        call_timeout_secs: profile.call_timeout_secs,
+    }
+}
+
+#[derive(Clone)]
+struct SessionRuntimeLlmReconfigureHost {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    factory: AgentFactory,
+    default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
+    config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
+}
+
+impl SessionRuntimeLlmReconfigureHost {
+    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RuntimeDriverError> {
+        let runtime = {
+            self.config_runtime
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        let config = if let Some(runtime) = runtime {
+            runtime
+                .get()
+                .await
+                .map(|snapshot| snapshot.config)
+                .map_err(|e| RuntimeDriverError::Internal(format!("Failed to load config: {e}")))?
+        } else {
+            meerkat_core::Config::default()
+        };
+
+        config.model_registry().map_err(|e| {
+            RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
         })
-        .unwrap_or(meerkat_core::ToolFilter::All)
+    }
+
+    async fn build_adapter_for_llm_identity(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, RuntimeDriverError> {
+        let default_client = {
+            self.default_llm_client
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        let raw_client = if let Some(default) = default_client {
+            default
+        } else {
+            let runtime = {
+                self.config_runtime
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            };
+            let config = if let Some(runtime) = runtime {
+                runtime
+                    .get()
+                    .await
+                    .map(|snapshot| snapshot.config)
+                    .map_err(|e| {
+                        RuntimeDriverError::Internal(format!(
+                            "Failed to load config for hot-swap: {e}"
+                        ))
+                    })?
+            } else {
+                meerkat_core::Config::default()
+            };
+            self.factory
+                .build_llm_client_for_identity(&config, identity)
+                .await
+                .map_err(|e| {
+                    RuntimeDriverError::Internal(format!(
+                        "Failed to build LLM client for session identity hot-swap: {e}"
+                    ))
+                })?
+        };
+
+        let mut adapter = self
+            .factory
+            .build_llm_adapter(raw_client, identity.model.clone())
+            .await;
+        if let Some(params) = identity.provider_params.clone() {
+            adapter = adapter.with_provider_params(Some(params));
+        }
+        Ok(Arc::new(adapter))
+    }
+
+    async fn resolve_target_llm_identity(
+        &self,
+        current: &SessionLlmIdentity,
+        request: &SessionLlmReconfigureRequest,
+    ) -> Result<SessionLlmIdentity, RuntimeDriverError> {
+        if request.provider.is_some() && request.model.is_none() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "provider override requires model on an existing session".to_string(),
+            });
+        }
+
+        let registry = self.model_registry().await?;
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| current.model.clone());
+        let provider = if let Some(provider_name) = request.provider.as_ref() {
+            meerkat_core::Provider::from_name(provider_name)
+        } else if request.model.is_some() {
+            registry
+                .entry(&model)
+                .map(|entry| entry.provider)
+                .or_else(|| meerkat_core::Provider::infer_from_model(&model))
+                .unwrap_or(current.provider)
+        } else {
+            current.provider
+        };
+        let provider_params = request
+            .provider_params
+            .clone()
+            .or_else(|| current.provider_params.clone());
+        let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
+            if request.model.is_none() {
+                current.self_hosted_server_id.clone().or_else(|| {
+                    registry
+                        .entry(&model)
+                        .and_then(|entry| entry.self_hosted.as_ref())
+                        .map(|server| server.server_id.clone())
+                })
+            } else {
+                match registry.entry(&model) {
+                    Some(entry) => entry
+                        .self_hosted
+                        .as_ref()
+                        .map(|server| server.server_id.clone()),
+                    None => {
+                        return Err(RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "self-hosted provider requires a registered model alias; '{model}' is not configured"
+                            ),
+                        });
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(SessionLlmIdentity {
+            model,
+            provider,
+            self_hosted_server_id,
+            provider_params,
+        })
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
+    async fn hydrate_session_llm_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+        let current_identity = self
+            .service
+            .live_session_llm_identity(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?;
+        let session = self
+            .service
+            .export_live_session(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?;
+        let current_visibility_state = session.tool_visibility_state().unwrap_or_default();
+        let base_tool_names = self
+            .service
+            .tool_scope_snapshot(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "session {session_id} missing live tool scope snapshot during llm reconfiguration"
+                ))
+            })?
+            .known_base_names
+            .into_iter()
+            .collect();
+
+        let registry = self.model_registry().await?;
+        let (current_capability_surface, capability_surface_status) =
+            match registry.profile_for(&current_identity.model) {
+                Some(profile) => (
+                    Some(profile_to_capability_surface(&profile)),
+                    SessionLlmCapabilitySurfaceStatus::Resolved,
+                ),
+                None => (None, SessionLlmCapabilitySurfaceStatus::Unresolved),
+            };
+
+        Ok(HydratedSessionLlmState {
+            current_identity,
+            current_visibility_state,
+            current_capability_surface,
+            capability_surface_status,
+            base_tool_names,
+        })
+    }
+
+    async fn resolve_target_session_llm_identity(
+        &self,
+        request: &SessionLlmReconfigureRequest,
+        current_identity: &SessionLlmIdentity,
+    ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+        let target_identity = self
+            .resolve_target_llm_identity(current_identity, request)
+            .await?;
+        let registry = self.model_registry().await?;
+        let profile = registry
+            .profile_for(&target_identity.model)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "no capability profile is registered for model '{}'",
+                    target_identity.model
+                ),
+            })?;
+
+        Ok(ResolvedSessionLlmReconfigure {
+            target_identity,
+            target_capability_surface: profile_to_capability_surface(&profile),
+        })
+    }
+
+    async fn apply_live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        let adapter = self.build_adapter_for_llm_identity(identity).await?;
+        self.service
+            .hot_swap_session_llm_identity(session_id, adapter, identity.clone())
+            .await
+            .map_err(session_error_to_runtime_driver)
+    }
+
+    async fn apply_live_session_tool_visibility_state(
+        &self,
+        session_id: &SessionId,
+        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.service
+            .set_session_tool_visibility_state(session_id, visibility_state)
+            .await
+            .map_err(session_error_to_runtime_driver)
+    }
+
+    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.service
+            .persist_live_session_now(session_id)
+            .await
+            .map(|_| ())
+            .map_err(session_error_to_runtime_driver)
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.service
+            .discard_live_session(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)
+    }
 }
 
 #[derive(Clone)]
@@ -220,14 +528,12 @@ pub struct SessionRuntime {
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
     max_sessions: usize,
-    /// Factory for building LLM clients on model/provider hot-swap.
-    factory: AgentFactory,
     /// Override LLM client for all sessions (primarily for testing).
-    pub default_llm_client: Option<Arc<dyn LlmClient>>,
+    default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
     realm_id: Option<String>,
     instance_id: Option<String>,
     backend: Option<String>,
-    config_runtime: Option<Arc<meerkat_core::ConfigRuntime>>,
+    config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
@@ -303,6 +609,8 @@ impl SessionRuntime {
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
+        let default_llm_client = Arc::new(StdRwLock::new(None));
+        let config_runtime = Arc::new(StdRwLock::new(None));
         *builder_schedule_tools_slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -316,6 +624,14 @@ impl SessionRuntime {
             blob_store,
             &runtime_adapter,
         ));
+        runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
+            SessionRuntimeLlmReconfigureHost {
+                service: Arc::clone(&service),
+                factory: factory_clone,
+                default_llm_client: Arc::clone(&default_llm_client),
+                config_runtime: Arc::clone(&config_runtime),
+            },
+        ));
 
         Self {
             service,
@@ -323,12 +639,11 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
-            factory: factory_clone,
-            default_llm_client: None,
+            default_llm_client,
             realm_id: None,
             instance_id: None,
             backend: None,
-            config_runtime: None,
+            config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
@@ -366,6 +681,8 @@ impl SessionRuntime {
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
+        let default_llm_client = Arc::new(StdRwLock::new(None));
+        let config_runtime = Arc::new(StdRwLock::new(None));
         *builder_schedule_tools_slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -379,6 +696,14 @@ impl SessionRuntime {
             blob_store,
             &runtime_adapter,
         ));
+        runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
+            SessionRuntimeLlmReconfigureHost {
+                service: Arc::clone(&service),
+                factory: factory_clone,
+                default_llm_client: Arc::clone(&default_llm_client),
+                config_runtime: Arc::clone(&config_runtime),
+            },
+        ));
 
         Self {
             service,
@@ -386,12 +711,11 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
-            factory: factory_clone,
-            default_llm_client: None,
+            default_llm_client,
             realm_id: None,
             instance_id: None,
             backend: None,
-            config_runtime: None,
+            config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
@@ -464,12 +788,26 @@ impl SessionRuntime {
 
     /// Attach config runtime for generation stamping.
     pub fn set_config_runtime(&mut self, runtime: Arc<meerkat_core::ConfigRuntime>) {
-        self.config_runtime = Some(runtime);
+        *self
+            .config_runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
     }
 
     /// Shared config runtime used by config handlers.
     pub fn config_runtime(&self) -> Option<Arc<meerkat_core::ConfigRuntime>> {
-        self.config_runtime.as_ref().map(Arc::clone)
+        self.config_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Override the shared default LLM client used by this runtime.
+    pub fn set_default_llm_client(&mut self, client: Option<Arc<dyn LlmClient>>) {
+        *self
+            .default_llm_client
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = client;
     }
 
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
@@ -486,11 +824,14 @@ impl SessionRuntime {
     }
 
     pub fn default_llm_client(&self) -> Option<Arc<dyn LlmClient>> {
-        self.default_llm_client.clone()
+        self.default_llm_client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RpcError> {
-        let config = if let Some(runtime) = &self.config_runtime {
+        let config = if let Some(runtime) = self.config_runtime() {
             runtime
                 .get()
                 .await
@@ -733,163 +1074,41 @@ impl SessionRuntime {
         }
     }
 
-    async fn build_adapter_for_llm_identity(
-        &self,
-        identity: &SessionLlmIdentity,
-    ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, RpcError> {
-        let raw_client = if let Some(ref default) = self.default_llm_client {
-            Arc::clone(default)
-        } else {
-            let config = if let Some(runtime) = &self.config_runtime {
-                runtime
-                    .get()
-                    .await
-                    .map(|snapshot| snapshot.config)
-                    .map_err(|e| RpcError {
-                        code: error::INTERNAL_ERROR,
-                        message: format!("Failed to load config for hot-swap: {e}"),
-                        data: None,
-                    })?
-            } else {
-                meerkat_core::Config::default()
-            };
-            self.factory
-                .build_llm_client_for_identity(&config, identity)
-                .await
-                .map_err(|e| RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!(
-                        "Failed to build LLM client for session identity hot-swap: {e}"
-                    ),
-                    data: None,
-                })?
-        };
-
-        let mut adapter = self
-            .factory
-            .build_llm_adapter(raw_client, identity.model.clone())
-            .await;
-        if let Some(params) = identity.provider_params.clone() {
-            adapter = adapter.with_provider_params(Some(params));
-        }
-        Ok(Arc::new(adapter))
-    }
-
-    async fn refresh_view_image_filter_for_identity(
-        &self,
-        session_id: &SessionId,
-        identity: &SessionLlmIdentity,
-    ) {
-        let registry = match self.model_registry().await {
-            Ok(registry) => registry,
-            Err(_) => return,
-        };
-        let Some(profile) = registry.profile_for(&identity.model) else {
-            return;
-        };
-
-        let current_filter = self
-            .service
-            .export_live_session(session_id)
-            .await
-            .ok()
-            .map(|session| exported_tool_filter(&session))
-            .unwrap_or(meerkat_core::ToolFilter::All);
-
-        let view_image = "view_image".to_string();
-        let filter = if profile.image_tool_results {
-            match current_filter {
-                meerkat_core::ToolFilter::Deny(mut denied) => {
-                    denied.remove(&view_image);
-                    if denied.is_empty() {
-                        meerkat_core::ToolFilter::All
-                    } else {
-                        meerkat_core::ToolFilter::Deny(denied)
-                    }
-                }
-                meerkat_core::ToolFilter::Allow(mut allowed) => {
-                    allowed.insert(view_image);
-                    meerkat_core::ToolFilter::Allow(allowed)
-                }
-                other => other,
-            }
-        } else {
-            match current_filter {
-                meerkat_core::ToolFilter::Deny(mut denied) => {
-                    denied.insert(view_image);
-                    meerkat_core::ToolFilter::Deny(denied)
-                }
-                meerkat_core::ToolFilter::All => {
-                    meerkat_core::ToolFilter::Deny([view_image].into_iter().collect())
-                }
-                meerkat_core::ToolFilter::Allow(mut allowed) => {
-                    allowed.remove(&view_image);
-                    meerkat_core::ToolFilter::Allow(allowed)
-                }
-            }
-        };
-
-        let _ = self
-            .service
-            .set_session_tool_filter(session_id, filter)
-            .await;
-    }
-
     /// Hot-swap the LLM client on a materialized session.
     ///
-    /// Resolves a new durable session identity from the current identity plus
-    /// explicit overrides, updates the live client and durable metadata
-    /// together, then persists the updated session snapshot before the next
-    /// turn begins.
+    /// The machine owns the semantic transition; RPC only adapts the request.
     async fn hot_swap_llm_client(
         &self,
         session_id: &SessionId,
         ov: &crate::handlers::turn::TurnOverrides,
     ) -> Result<(), RpcError> {
-        let current_identity = self.current_materialized_llm_identity(session_id).await?;
-        let new_identity = self
-            .resolve_target_llm_identity(&current_identity, ov)
-            .await?;
-        let adapter = self.build_adapter_for_llm_identity(&new_identity).await?;
-        self.service
-            .hot_swap_session_llm_identity(session_id, adapter, new_identity.clone())
-            .await
-            .map_err(session_error_to_rpc)?;
-
-        if let Err(err) = self.service.persist_live_session_now(session_id).await {
-            let rollback_adapter = self
-                .build_adapter_for_llm_identity(&current_identity)
-                .await?;
-            if let Err(rollback_err) = self
-                .service
-                .hot_swap_session_llm_identity(
-                    session_id,
-                    rollback_adapter,
-                    current_identity.clone(),
-                )
+        if !self.runtime_adapter.contains_session(session_id).await
+            && self.service.read(session_id).await.is_ok()
+        {
+            self.runtime_adapter
+                .prepare_bindings(session_id.clone())
                 .await
-            {
-                tracing::error!(
-                    session_id = %session_id,
-                    persist_error = %err,
-                    rollback_error = %rollback_err,
-                    "failed to persist hot-swapped llm identity and rollback live session; discarding live session"
-                );
-                let _ = self.service.discard_live_session(session_id).await;
-                return Err(RpcError {
+                .map_err(|e| RpcError {
                     code: error::INTERNAL_ERROR,
                     message: format!(
-                        "failed to persist hot-swapped llm identity and rollback live session: {rollback_err}"
+                        "failed to prepare runtime bindings for live session {session_id}: {e}"
                     ),
                     data: None,
-                });
-            }
-            return Err(session_error_to_rpc(err));
+                })?;
         }
 
-        self.refresh_view_image_filter_for_identity(session_id, &new_identity)
-            .await;
-        Ok(())
+        self.runtime_adapter
+            .reconfigure_session_llm_identity(
+                session_id,
+                SessionLlmReconfigureRequest {
+                    model: ov.model.clone(),
+                    provider: ov.provider.clone(),
+                    provider_params: ov.provider_params.clone(),
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(runtime_driver_error_to_rpc)
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -1516,12 +1735,12 @@ impl SessionRuntime {
             }
 
             if build_config.llm_client_override.is_none()
-                && let Some(ref client) = self.default_llm_client
+                && let Some(client) = self.default_llm_client()
             {
-                build_config.llm_client_override = Some(client.clone());
+                build_config.llm_client_override = Some(client);
             }
             let runtime_generation = if build_config.config_generation.is_none() {
-                if let Some(runtime) = &self.config_runtime {
+                if let Some(runtime) = self.config_runtime() {
                     runtime.get().await.ok().map(|snapshot| snapshot.generation)
                 } else {
                     None
@@ -1654,7 +1873,7 @@ impl SessionRuntime {
             .as_ref()
             .map(|meta| meta.tooling.clone())
             .unwrap_or_default();
-        let current_generation = match self.config_runtime.as_ref() {
+        let current_generation = match self.config_runtime() {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
@@ -1692,8 +1911,7 @@ impl SessionRuntime {
             external_tools: None,
             recoverable_tool_defs: None,
             llm_client_override: self
-                .default_llm_client
-                .clone()
+                .default_llm_client()
                 .map(encode_llm_client_override_for_service),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             override_builtins: tooling.builtins,
@@ -2056,12 +2274,12 @@ impl SessionRuntime {
             }
             // Inject default LLM client if the caller didn't provide one.
             if build_config.llm_client_override.is_none()
-                && let Some(ref client) = self.default_llm_client
+                && let Some(client) = self.default_llm_client()
             {
-                build_config.llm_client_override = Some(client.clone());
+                build_config.llm_client_override = Some(client);
             }
             let runtime_generation = if build_config.config_generation.is_none() {
-                if let Some(runtime) = &self.config_runtime {
+                if let Some(runtime) = self.config_runtime() {
                     runtime.get().await.ok().map(|snapshot| snapshot.generation)
                 } else {
                     None
@@ -2371,8 +2589,8 @@ impl SessionRuntime {
         build_config.keep_alive = keep_alive;
 
         // Inject default LLM client if available.
-        if let Some(ref client) = self.default_llm_client {
-            build_config.llm_client_override = Some(client.clone());
+        if let Some(client) = self.default_llm_client() {
+            build_config.llm_client_override = Some(client);
         }
 
         // Restore callback tools backed by the live registered_tools list.
@@ -5076,7 +5294,7 @@ mod tests {
     async fn hot_swap_to_openai_hides_view_image() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         // Create session with an Anthropic model (supports image_tool_results).
         let session_id = runtime
@@ -5118,15 +5336,17 @@ mod tests {
             .await
             .unwrap();
 
-        // Export the session and check that the tool filter metadata blocks view_image.
+        // Export the session and check that the machine-owned capability layer blocks view_image.
         let session = runtime
             .service
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter = exported_tool_filter(&session);
+        let visibility_state = session
+            .tool_visibility_state()
+            .expect("hot-swap should persist canonical tool visibility state");
         assert_eq!(
-            filter,
+            visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
             "hot-swap to OpenAI should deny view_image"
         );
@@ -5138,7 +5358,7 @@ mod tests {
     async fn hot_swap_to_anthropic_clears_view_image_deny() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -5198,26 +5418,29 @@ mod tests {
             .await
             .unwrap();
 
-        // Export session and verify filter is cleared.
+        // Export session and verify the capability-owned deny is cleared.
         let session = runtime
             .service
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter = exported_tool_filter(&session);
+        let visibility_state = session
+            .tool_visibility_state()
+            .expect("hot-swap should persist canonical tool visibility state");
         assert_eq!(
-            filter,
+            visibility_state.capability_base_filter,
             meerkat_core::ToolFilter::All,
             "hot-swap back to Anthropic should clear view_image deny"
         );
     }
 
-    /// Hot-swapping preserves pre-existing denied tools in the external filter.
+    /// Hot-swapping preserves pre-existing session-local denies while adding
+    /// capability-owned model gating on top.
     #[tokio::test]
     async fn hot_swap_preserves_preexisting_deny_filter() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -5273,16 +5496,19 @@ mod tests {
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter = exported_tool_filter(&session);
+        let visibility_state = session
+            .tool_visibility_state()
+            .expect("hot-swap should persist canonical tool visibility state");
 
-        let expected_deny: std::collections::HashSet<String> = ["datetime", "view_image"]
-            .iter()
-            .map(ToString::to_string)
-            .collect();
         assert_eq!(
-            filter,
-            meerkat_core::ToolFilter::Deny(expected_deny),
-            "hot-swap should merge view_image into existing deny set, not replace it"
+            visibility_state.staged_filter,
+            meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
+            "hot-swap should preserve the user-authored deny filter"
+        );
+        assert_eq!(
+            visibility_state.capability_base_filter,
+            meerkat_core::ToolFilter::Deny(["view_image".to_string()].into_iter().collect()),
+            "hot-swap should add a separate capability-owned view_image deny"
         );
     }
 
@@ -5291,7 +5517,7 @@ mod tests {
     async fn hot_swap_back_preserves_other_denied_tools() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory_with_builtins(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -5313,24 +5539,19 @@ mod tests {
             .await
             .unwrap();
 
-        // Stage deny filter with datetime + view_image (simulating prior OpenAI swap).
+        // Stage a session-local deny filter for datetime.
         runtime
             .service
             .set_session_tool_filter(
                 &session_id,
-                meerkat_core::ToolFilter::Deny(
-                    ["datetime", "view_image"]
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                ),
+                meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
             )
             .await
-            .expect("staging deny filter for datetime+view_image should succeed");
+            .expect("staging deny filter for datetime should succeed");
 
-        // Hot-swap to Anthropic — should remove view_image but keep datetime.
+        // Hot-swap to OpenAI first so the capability-owned view_image hide is active.
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("claude-sonnet-4-5".to_string()),
+            model: Some("gpt-5.2".to_string()),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -5347,17 +5568,44 @@ mod tests {
             .await
             .unwrap();
 
+        // Hot-swap back to Anthropic — should remove only the capability-owned
+        // view_image hide and preserve the user-authored datetime deny.
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let (event_tx3, _event_rx3) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Third turn".into(),
+                event_tx3,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
         let session = runtime
             .service
             .export_live_session(&session_id)
             .await
             .unwrap();
-        let filter = exported_tool_filter(&session);
+        let visibility_state = session
+            .tool_visibility_state()
+            .expect("hot-swap should persist canonical tool visibility state");
 
         assert_eq!(
-            filter,
+            visibility_state.staged_filter,
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
-            "hot-swap to Anthropic should remove view_image but keep other denied tools"
+            "hot-swap back to Anthropic should preserve only the user-authored deny"
+        );
+        assert_eq!(
+            visibility_state.capability_base_filter,
+            meerkat_core::ToolFilter::All,
+            "hot-swap back to Anthropic should clear the capability-owned view_image deny"
         );
     }
 
@@ -5365,7 +5613,7 @@ mod tests {
     async fn materialized_provider_only_override_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -5414,7 +5662,7 @@ mod tests {
     async fn materialized_provider_params_hot_swap_persists_identity() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -5484,7 +5732,7 @@ mod tests {
     async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)

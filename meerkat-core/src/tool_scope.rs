@@ -49,6 +49,7 @@ pub struct ToolScopeRevision(pub u64);
 pub struct ToolScopeSnapshot {
     pub known_base_names: Vec<String>,
     pub visible_names: Vec<String>,
+    pub capability_base_filter: ToolFilter,
     pub base_filter: ToolFilter,
     pub active_external_filter: ToolFilter,
     pub active_turn_allow: Option<Vec<String>>,
@@ -457,6 +458,7 @@ impl ToolScope {
         Some(ToolScopeSnapshot {
             known_base_names: sorted_names(&state.known_base_names),
             visible_names: Self::visible_names_for_state(&state, &visibility_state),
+            capability_base_filter: visibility_state.capability_base_filter.clone(),
             base_filter: visibility_state.inherited_base_filter.clone(),
             active_external_filter: visibility_state.active_filter.clone(),
             active_turn_allow: state.active_turn_allow.as_ref().map(sorted_names),
@@ -635,6 +637,11 @@ impl ToolScope {
             Self::effective_filter_for_current_projection(
                 state,
                 visibility_state,
+                &visibility_state.capability_base_filter,
+            ),
+            Self::effective_filter_for_current_projection(
+                state,
+                visibility_state,
                 &visibility_state.inherited_base_filter,
             ),
             Self::effective_filter_for_current_projection(
@@ -786,6 +793,11 @@ impl ToolScope {
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let visibility_state = self.visibility_owner.visibility_state()?;
         Ok(Self::compose(&[
+            Self::effective_filter_for_current_projection(
+                &state,
+                &visibility_state,
+                &visibility_state.capability_base_filter,
+            ),
             Self::effective_filter_for_current_projection(
                 &state,
                 &visibility_state,

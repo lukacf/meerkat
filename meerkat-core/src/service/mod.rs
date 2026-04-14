@@ -946,6 +946,20 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
+    /// Replace the canonical tool visibility state carried by the live session.
+    ///
+    /// This seam is live-only and must not perform its own durable write. The
+    /// caller owns any surrounding transactional persistence and rollback.
+    async fn set_session_tool_visibility_state(
+        &self,
+        _id: &SessionId,
+        _state: Option<crate::SessionToolVisibilityState>,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "set_session_tool_visibility_state".to_string(),
+        ))
+    }
+
     /// Update the `keep_alive` flag on a live session's durable metadata.
     ///
     /// Called by the runtime when an explicit override changes the session's

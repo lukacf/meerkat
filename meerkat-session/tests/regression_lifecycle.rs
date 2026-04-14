@@ -1255,6 +1255,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
             ["alpha".to_string()].into_iter().collect(),
         ),
         staged_revision: meerkat_core::ToolScopeRevision(3),
+        capability_base_filter: meerkat_core::ToolFilter::All,
     };
     let service = make_snapshot_service(expected.clone(), expected_tool_scope, None);
 
@@ -1314,6 +1315,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
                 .collect(),
         ),
         staged_revision: meerkat_core::ToolScopeRevision(5),
+        capability_base_filter: meerkat_core::ToolFilter::All,
     };
     let service = make_snapshot_service(expected_execution, expected.clone(), None);
 
@@ -1363,6 +1365,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         active_revision: meerkat_core::ToolScopeRevision(0),
         staged_external_filter: meerkat_core::ToolFilter::All,
         staged_revision: meerkat_core::ToolScopeRevision(0),
+        capability_base_filter: meerkat_core::ToolFilter::All,
     };
     let expected_surface = meerkat_core::ExternalToolSurfaceSnapshot {
         phase: meerkat_core::ExternalToolSurfaceGlobalPhase::Operating,

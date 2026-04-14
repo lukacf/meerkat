@@ -61,6 +61,19 @@ pub fn meerkat_machine() -> MachineSchema {
                 field("process_pending", TypeRef::Bool),
                 field("peer_ingress_configured", TypeRef::Bool),
                 field("drain_running", TypeRef::Bool),
+                field(
+                    "current_llm_identity",
+                    TypeRef::Option(Box::new(named("SessionLlmIdentity"))),
+                ),
+                field(
+                    "current_capability_surface",
+                    TypeRef::Option(Box::new(named("SessionLlmCapabilitySurface"))),
+                ),
+                field(
+                    "capability_surface_status",
+                    named("SessionLlmCapabilitySurfaceStatus"),
+                ),
+                field("capability_base_filter", named("ToolFilter")),
                 field("inherited_base_filter", named("ToolFilter")),
                 field("active_filter", named("ToolFilter")),
                 field("staged_filter", named("ToolFilter")),
@@ -102,6 +115,16 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("process_pending", Expr::Bool(false)),
                     init("peer_ingress_configured", Expr::Bool(false)),
                     init("drain_running", Expr::Bool(false)),
+                    init("current_llm_identity", Expr::None),
+                    init("current_capability_surface", Expr::None),
+                    init(
+                        "capability_surface_status",
+                        Expr::NamedVariant {
+                            enum_name: "SessionLlmCapabilitySurfaceStatus".into(),
+                            variant: "Unresolved".into(),
+                        },
+                    ),
+                    init("capability_base_filter", tool_filter_all()),
                     init("inherited_base_filter", tool_filter_all()),
                     init("active_filter", tool_filter_all()),
                     init("staged_filter", tool_filter_all()),
@@ -327,6 +350,32 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
+                name: "ReconfigureSessionLlmIdentityAttached".into(),
+                from: vec!["Attached".into()],
+                on: InputMatch {
+                    kind: meerkat_trigger_kind("ReconfigureSessionLlmIdentity"),
+                    variant: "ReconfigureSessionLlmIdentity".into(),
+                    bindings: vec!["model".into(), "provider".into(), "provider_params".into()],
+                },
+                guards: vec![session_registered_guard(), runtime_is_bound_guard()],
+                updates: vec![],
+                to: "Attached".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "ReconfigureSessionLlmIdentityRunning".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    kind: meerkat_trigger_kind("ReconfigureSessionLlmIdentity"),
+                    variant: "ReconfigureSessionLlmIdentity".into(),
+                    bindings: vec!["model".into(), "provider".into(), "provider_params".into()],
+                },
+                guards: vec![session_registered_guard(), runtime_is_bound_guard()],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
                 name: "StagePersistentFilterAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
@@ -542,15 +591,20 @@ pub fn meerkat_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
-            // PrepareBindings: registration + query, no phase change.
-            // Runtime rejects only Destroyed; all other phases (including
-            // Running) are self-loops that record the runtime binding fields.
-            prepare_bindings_transition("PrepareBindingsInitializing", "Initializing"),
-            prepare_bindings_transition("PrepareBindingsIdle", "Idle"),
-            prepare_bindings_transition("PrepareBindingsAttached", "Attached"),
-            prepare_bindings_transition("PrepareBindingsRecovering", "Recovering"),
-            prepare_bindings_transition("PrepareBindingsRunning", "Running"),
-            prepare_bindings_transition("PrepareBindingsRetired", "Retired"),
+            // PrepareBindings: registration + query. A newly prepared idle
+            // session becomes runtime-bound/Attached; all other accepted
+            // phases preserve their current phase while recording the runtime
+            // binding fields.
+            prepare_bindings_transition(
+                "PrepareBindingsInitializing",
+                "Initializing",
+                "Initializing",
+            ),
+            prepare_bindings_transition("PrepareBindingsIdle", "Idle", "Attached"),
+            prepare_bindings_transition("PrepareBindingsAttached", "Attached", "Attached"),
+            prepare_bindings_transition("PrepareBindingsRecovering", "Recovering", "Recovering"),
+            prepare_bindings_transition("PrepareBindingsRunning", "Running", "Running"),
+            prepare_bindings_transition("PrepareBindingsRetired", "Retired", "Retired"),
             TransitionSchema {
                 name: "PrepareBindingsStopped".into(),
                 from: vec!["Stopped".into()],
@@ -1295,10 +1349,10 @@ fn tool_filter_all() -> Expr {
     }
 }
 
-fn prepare_bindings_transition(name: &str, phase: &str) -> TransitionSchema {
+fn prepare_bindings_transition(name: &str, from_phase: &str, to_phase: &str) -> TransitionSchema {
     TransitionSchema {
         name: name.into(),
-        from: vec![phase.into()],
+        from: vec![from_phase.into()],
         on: InputMatch {
             kind: meerkat_trigger_kind("PrepareBindings"),
             variant: "PrepareBindings".into(),
@@ -1316,7 +1370,7 @@ fn prepare_bindings_transition(name: &str, phase: &str) -> TransitionSchema {
             assign_some("active_fence_token", "fence_token"),
             assign_some("active_generation", "generation"),
         ],
-        to: phase.into(),
+        to: to_phase.into(),
         emit: vec![runtime_identity_emit("RuntimeBound")],
     }
 }
@@ -1458,6 +1512,17 @@ fn direct_meerkat_trigger_variants() -> Vec<VariantSchema> {
             fields: vec![field("session_id", TypeRef::Named("SessionId".into()))],
         },
         VariantSchema {
+            name: "ReconfigureSessionLlmIdentity".into(),
+            fields: vec![
+                field("model", TypeRef::Option(Box::new(TypeRef::String))),
+                field("provider", TypeRef::Option(Box::new(TypeRef::String))),
+                field(
+                    "provider_params",
+                    TypeRef::Option(Box::new(named("JsonValue"))),
+                ),
+            ],
+        },
+        VariantSchema {
             name: "PrepareBindings".into(),
             fields: vec![
                 field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
@@ -1559,6 +1624,7 @@ fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
             | "SessionHasExecutor"
             | "SessionHasComms"
             | "OpsLifecycleRegistry"
+            | "ReconfigureSessionLlmIdentity"
             | "PrepareBindings"
             | "InputState"
             | "ListActiveInputs"

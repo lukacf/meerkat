@@ -1773,11 +1773,28 @@ impl AgentFactory {
         #[allow(clippy::no_effect_underscore_binding)]
         let _comms_runtime: Option<()> = None;
 
-        // Resolve model profile for capability gating (e.g., hiding view_image
-        // when the model cannot process image blocks in tool results).
-        let image_tool_results = registry
-            .profile_for(&model)
-            .is_none_or(|p| p.image_tool_results);
+        // Resolve model profile for capability gating and runtime defaults.
+        let model_profile = registry.profile_for(&model);
+        let image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
+
+        if let Some(profile) = model_profile.as_ref() {
+            let has_canonical_visibility_state = session
+                .metadata()
+                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY);
+            let capability_base_filter =
+                meerkat_core::capability_base_filter_for_image_tool_results(
+                    profile.image_tool_results,
+                );
+            let mut visibility_state = session.tool_visibility_state().unwrap_or_default();
+            if visibility_state.capability_base_filter != capability_base_filter
+                || has_canonical_visibility_state
+            {
+                visibility_state.capability_base_filter = capability_base_filter;
+                session
+                    .set_tool_visibility_state(visibility_state)
+                    .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+            }
+        }
         // Resolve ops lifecycle registry via RuntimeBuildMode.
         use meerkat_core::runtime_epoch::RuntimeBuildMode;
 
@@ -2419,21 +2436,6 @@ impl AgentFactory {
         // Wire mob authority handle into agent for session-effect application.
         if let Some(handle) = hoisted_mob_authority_handle {
             agent.set_mob_authority_handle(handle);
-        }
-
-        // 13b. Stage initial external filter to hide view_image when the model
-        // cannot process image blocks in tool results. For resumed sessions,
-        // the persisted filter is already restored by the builder — only gate
-        // fresh sessions.
-        if !image_tool_results {
-            // Applied to both fresh and resumed sessions — old sessions without
-            // filter metadata would otherwise expose view_image on models that
-            // can't handle image tool results.
-            let deny = std::collections::HashSet::from(["view_image".to_string()]);
-            if let Err(err) = agent.stage_external_tool_filter(meerkat_core::ToolFilter::Deny(deny))
-            {
-                tracing::warn!(error = %err, "failed to stage initial view_image deny filter");
-            }
         }
 
         // 14. Set SessionMetadata

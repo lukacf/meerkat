@@ -54,7 +54,7 @@ fn spawn_test_server(
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
-    runtime.default_llm_client = Some(client);
+    runtime.set_default_llm_client(Some(client));
     runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         temp.path().join("config_state.json"),
@@ -1291,7 +1291,7 @@ async fn e2e_scenario_22_transport_backpressure() {
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(Config::default()));
-    runtime.default_llm_client = Some(client);
+    runtime.set_default_llm_client(Some(client));
     runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         temp.path().join("config_state.json"),

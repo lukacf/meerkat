@@ -2167,7 +2167,7 @@ mod tests {
         );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),
@@ -2204,7 +2204,7 @@ mod tests {
         );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.default_llm_client = Some(llm_client);
+        runtime.set_default_llm_client(Some(llm_client));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),
@@ -2233,7 +2233,7 @@ mod tests {
         );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.default_llm_client = Some(llm_client);
+        runtime.set_default_llm_client(Some(llm_client));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),
@@ -2262,7 +2262,7 @@ mod tests {
         );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),
@@ -2290,7 +2290,7 @@ mod tests {
         );
         let config_store: Arc<dyn ConfigStore> =
             Arc::new(MemoryConfigStore::new(Config::default()));
-        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
             temp.path().join("config_state.json"),

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use meerkat_core::types::ContentInput;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ToolConfig};
+use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
 use crate::packs::{Pack, format_context, resolve_model};
@@ -110,7 +110,7 @@ impl UserMobConfig {
 
         for (name, agent) in &self.agents {
             let skill_key = format!("{name}-skill");
-            profiles.insert(ProfileName::from(name.as_str()), Profile {
+            profiles.insert(ProfileName::from(name.as_str()), ProfileBinding::Inline(Profile {
                 model: resolve_model(model_overrides, name, &agent.model),
                 skills: vec![skill_key.clone()],
                 tools: tools.clone(),
@@ -125,7 +125,7 @@ impl UserMobConfig {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: provider_params.cloned(),
-            });
+            }));
             skills.insert(skill_key, SkillSource::Inline {
                 content: agent.skill.clone(),
             });
@@ -178,28 +178,17 @@ impl UserMobConfig {
             }
         }
 
-        MobDefinition {
-            id: MobId::from(format!("codemob-user-{}-{}", self.name, uuid::Uuid::new_v4().as_simple())),
-            orchestrator,
-            profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: WiringRules {
-                auto_wire_orchestrator: has_orchestrator,
-                role_wiring,
-            },
-            skills,
-            backend: BackendConfig::default(),
-            flows,
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_session_id: None,
-            owner_bridge_session_id: None,
-            is_implicit: false,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-        }
+        let mut definition =
+            MobDefinition::explicit(MobId::from(format!("codemob-user-{}-{}", self.name, uuid::Uuid::new_v4().as_simple())));
+        definition.orchestrator = orchestrator;
+        definition.profiles = profiles;
+        definition.wiring = WiringRules {
+            auto_wire_orchestrator: has_orchestrator,
+            role_wiring,
+        };
+        definition.skills = skills;
+        definition.flows = flows;
+        definition
     }
 }
 

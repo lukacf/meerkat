@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ToolConfig};
+use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 use serde_json::Value;
 
@@ -41,7 +41,7 @@ impl Pack for PanelPack {
 
         let mut profiles = BTreeMap::new();
         for (name, skill, desc, m) in &agents {
-            profiles.insert(ProfileName::from(*name), Profile {
+            profiles.insert(ProfileName::from(*name), ProfileBinding::Inline(Profile {
                 model: m.clone(),
                 skills: vec![skill.to_string()],
                 tools: tools.clone(),
@@ -52,7 +52,7 @@ impl Pack for PanelPack {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: pp.cloned(),
-            });
+            }));
         }
 
         let mut skills = BTreeMap::new();
@@ -74,24 +74,12 @@ impl Pack for PanelPack {
             }
         }
 
-        MobDefinition {
-            id: MobId::from(format!("codemob-panel-{}", uuid::Uuid::new_v4().as_simple())),
-            orchestrator: Some(OrchestratorConfig { profile: ProfileName::from("moderator") }),
-            profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: WiringRules { auto_wire_orchestrator: true, role_wiring },
-            skills,
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_session_id: None,
-            owner_bridge_session_id: None,
-            is_implicit: false,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-        }
+        let mut definition =
+            MobDefinition::explicit(MobId::from(format!("codemob-panel-{}", uuid::Uuid::new_v4().as_simple())));
+        definition.orchestrator = Some(OrchestratorConfig { profile: ProfileName::from("moderator") });
+        definition.profiles = profiles;
+        definition.wiring = WiringRules { auto_wire_orchestrator: true, role_wiring };
+        definition.skills = skills;
+        definition
     }
 }

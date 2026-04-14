@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ToolConfig};
+use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 use serde_json::Value;
 
@@ -31,7 +31,7 @@ impl Pack for ImplementPack {
         let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
 
         let mut profiles = BTreeMap::new();
-        profiles.insert(ProfileName::from("implementer"), Profile {
+        profiles.insert(ProfileName::from("implementer"), ProfileBinding::Inline(Profile {
             model: resolve_model(overrides, "implementer", "claude-sonnet-4-6"),
             skills: vec!["implementer-skill".to_string()],
             tools: tools.clone(),
@@ -42,8 +42,8 @@ impl Pack for ImplementPack {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: pp.cloned(),
-        });
-        profiles.insert(ProfileName::from("reviewer"), Profile {
+        }));
+        profiles.insert(ProfileName::from("reviewer"), ProfileBinding::Inline(Profile {
             model: resolve_model(overrides, "reviewer", "gpt-5.4"),
             skills: vec!["gate-reviewer-skill".to_string()],
             tools: tools.clone(),
@@ -54,7 +54,7 @@ impl Pack for ImplementPack {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: pp.cloned(),
-        });
+        }));
 
         let mut skills = BTreeMap::new();
         skills.insert("implementer-skill".into(), SkillSource::Inline {
@@ -64,30 +64,18 @@ impl Pack for ImplementPack {
             content: include_str!("../../skills/gate_reviewer.md").into(),
         });
 
-        MobDefinition {
-            id: MobId::from(format!("codemob-implement-{}", uuid::Uuid::new_v4().as_simple())),
-            orchestrator: Some(OrchestratorConfig { profile: ProfileName::from("reviewer") }),
-            profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: WiringRules {
-                auto_wire_orchestrator: true,
-                role_wiring: vec![RoleWiringRule {
-                    a: ProfileName::from("implementer"),
-                    b: ProfileName::from("reviewer"),
-                }],
-            },
-            skills,
-            backend: BackendConfig::default(),
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_session_id: None,
-            owner_bridge_session_id: None,
-            is_implicit: false,
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-        }
+        let mut definition =
+            MobDefinition::explicit(MobId::from(format!("codemob-implement-{}", uuid::Uuid::new_v4().as_simple())));
+        definition.orchestrator = Some(OrchestratorConfig { profile: ProfileName::from("reviewer") });
+        definition.profiles = profiles;
+        definition.wiring = WiringRules {
+            auto_wire_orchestrator: true,
+            role_wiring: vec![RoleWiringRule {
+                a: ProfileName::from("implementer"),
+                b: ProfileName::from("reviewer"),
+            }],
+        };
+        definition.skills = skills;
+        definition
     }
 }

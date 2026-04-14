@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
-use meerkat_mob::profile::{Profile, ToolConfig};
+use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 use meerkat_core::types::ContentInput;
 use serde_json::Value;
@@ -124,8 +124,8 @@ pub fn turn_driven_profile(
     skill: &str,
     desc: &str,
     provider_params: Option<&Value>,
-) -> Profile {
-    Profile {
+) -> ProfileBinding {
+    ProfileBinding::Inline(Profile {
         model,
         skills: vec![skill.to_string()],
         tools: ToolConfig {
@@ -141,7 +141,7 @@ pub fn turn_driven_profile(
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: provider_params.cloned(),
-    }
+    })
 }
 
 /// Build a flow step with text output mode and common defaults.
@@ -175,28 +175,16 @@ pub fn identity_spawn_policy(names: &[&str]) -> Option<SpawnPolicyConfig> {
 /// Build a MobDefinition with common defaults filled in.
 pub fn mob_definition(
     id_prefix: &str,
-    profiles: BTreeMap<ProfileName, Profile>,
+    profiles: BTreeMap<ProfileName, ProfileBinding>,
     skills: BTreeMap<String, SkillSource>,
     flows: BTreeMap<FlowId, FlowSpec>,
     spawn_policy: Option<SpawnPolicyConfig>,
 ) -> MobDefinition {
-    MobDefinition {
-        id: MobId::from(format!("codemob-{id_prefix}-{}", uuid::Uuid::new_v4().as_simple())),
-        orchestrator: None,
-        profiles,
-        mcp_servers: BTreeMap::new(),
-        wiring: WiringRules::default(),
-        skills,
-        backend: BackendConfig::default(),
-        flows,
-        topology: None,
-        supervisor: None,
-        limits: None,
-        spawn_policy,
-        event_router: None,
-        owner_session_id: None,
-        owner_bridge_session_id: None,
-        is_implicit: false,
-        session_cleanup_policy: SessionCleanupPolicy::Manual,
-    }
+    let mut definition =
+        MobDefinition::explicit(MobId::from(format!("codemob-{id_prefix}-{}", uuid::Uuid::new_v4().as_simple())));
+    definition.profiles = profiles;
+    definition.skills = skills;
+    definition.flows = flows;
+    definition.spawn_policy = spawn_policy;
+    definition
 }

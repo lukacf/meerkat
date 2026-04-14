@@ -126,11 +126,10 @@ pub async fn handle(
 
     if !mob_exists {
         // Override the mob id when resuming with a new mob
-        let definition = if resuming {
-            MobDefinition { id: mob_id.clone(), ..definition }
-        } else {
-            definition
-        };
+        let mut definition = definition;
+        if resuming {
+            definition.id = mob_id.clone();
+        }
 
         // Create mob
         state

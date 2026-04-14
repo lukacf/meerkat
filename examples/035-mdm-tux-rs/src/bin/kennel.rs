@@ -16,7 +16,7 @@ use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Profile, ProfileBinding,
     ProfileName, RuntimeBinding, SpawnMemberSpec, ToolConfig,
 };
-use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, SessionCleanupPolicy, WiringRules};
+use meerkat_mob::definition::{BackendConfig, ExternalBackendConfig, WiringRules};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
 use parking_lot::Mutex;
@@ -324,33 +324,21 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
 
-        let definition = MobDefinition {
-            id: MobId::from("hive-fleet"),
-            orchestrator: None,
-            profiles,
-            mcp_servers: BTreeMap::new(),
-            wiring: WiringRules {
-                auto_wire_orchestrator: true,
-                role_wiring: Vec::new(),
-            },
-            skills: BTreeMap::new(),
-            backend: BackendConfig {
-                default: MobBackendKind::External,
-                external: Some(ExternalBackendConfig {
-                    address_base: format!("tcp://{advertise_ip}:{hive_comms_port}"),
-                }),
-            },
-            flows: BTreeMap::new(),
-            topology: None,
-            supervisor: None,
-            limits: None,
-            spawn_policy: None,
-            event_router: None,
-            owner_session_id: hive_session_id.clone(),
-            owner_bridge_session_id: hive_session_id.clone(),
-            session_cleanup_policy: SessionCleanupPolicy::Manual,
-            is_implicit: false,
+        let mut definition = MobDefinition::explicit(MobId::from("hive-fleet"));
+        definition.profiles = profiles;
+        definition.wiring = WiringRules {
+            auto_wire_orchestrator: true,
+            role_wiring: Vec::new(),
         };
+        definition.backend = BackendConfig {
+            default: MobBackendKind::External,
+            external: Some(ExternalBackendConfig {
+                address_base: format!("tcp://{advertise_ip}:{hive_comms_port}"),
+            }),
+        };
+        if let Some(ref bridge_session_id) = hive_session_id {
+            definition.set_owner_bridge_session_lookup_index(bridge_session_id.clone());
+        }
 
         match hive_mob_state_for_kennel
             .mob_create_definition(definition)

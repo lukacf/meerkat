@@ -5,10 +5,6 @@ use std::collections::BTreeMap;
 use meerkat_machine_kernels::generated::meerkat;
 use meerkat_machine_kernels::{KernelSignal, KernelValue};
 
-fn string(value: &str) -> KernelValue {
-    KernelValue::String(value.to_string())
-}
-
 fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
     KernelSignal {
         variant: variant.to_string(),

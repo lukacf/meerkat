@@ -9,10 +9,6 @@ fn string(value: &str) -> KernelValue {
     KernelValue::String(value.to_string())
 }
 
-fn tool_filter_all() -> KernelValue {
-    string("All")
-}
-
 fn verified_witness() -> KernelValue {
     string("verified")
 }

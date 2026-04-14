@@ -9,9 +9,15 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep, timeout};
 
-const SHARED_REALM_RPC_STEP_TIMEOUT_SECS: u64 = 180;
+// Shared-realm system tests shell out to CLI / REST / RPC surfaces while the
+// broader e2e lane may also be contending for Cargo caches and artifact locks.
+// Give the process-level shell steps more room than individual RPC calls, while
+// still staying comfortably below the outer e2e lane timeout.
+const SHARED_REALM_BINARY_STEP_TIMEOUT_SECS: u64 = 600;
+const SHARED_REALM_RPC_STEP_TIMEOUT_SECS: u64 = 120;
 
 fn sqlite_shared_realm_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -28,16 +34,6 @@ fn workspace_root() -> PathBuf {
 }
 
 fn binary_path(name: &str) -> PathBuf {
-    if let Some(path) = std::env::var_os(format!(
-        "RKAT_TEST_BIN_{}",
-        name.replace('-', "_").to_ascii_uppercase()
-    )) {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return path;
-        }
-    }
-
     if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")) {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -57,15 +53,31 @@ fn binary_path(name: &str) -> PathBuf {
     }
 
     let root = workspace_root();
-    [
+    if let Some(candidate) = [
         root.join(format!("target/debug/{name}")),
         root.join(format!("target/release/{name}")),
     ]
     .into_iter()
     .find(|candidate| candidate.exists())
-    .unwrap_or_else(|| {
-        panic!("binary '{name}' not found; build it in CARGO_TARGET_DIR or repo target")
-    })
+    {
+        return candidate;
+    }
+
+    // Fall back to the explicit test-bin override only after trying the actual
+    // built workspace binaries. Under the shared-realm e2e wrappers, the copied
+    // e2e-bin carrier can wedge in dyld before `main`, while the real target
+    // binary remains healthy.
+    if let Some(path) = std::env::var_os(format!(
+        "RKAT_TEST_BIN_{}",
+        name.replace('-', "_").to_ascii_uppercase()
+    )) {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    panic!("binary '{name}' not found; build it in CARGO_TARGET_DIR or repo target")
 }
 
 async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -86,6 +98,28 @@ fn command_base(cmd: &mut Command, cwd: &Path) {
         .env("RKAT_TEST_CLIENT", "1");
 }
 
+fn spawn_pipe_reader<T>(pipe: Option<T>) -> Option<JoinHandle<std::io::Result<Vec<u8>>>>
+where
+    T: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    pipe.map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).await?;
+            Ok(buf)
+        })
+    })
+}
+
+async fn join_pipe_output(
+    task: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    match task {
+        Some(task) => Ok(task.await??),
+        None => Ok(Vec::new()),
+    }
+}
+
 async fn run_binary(
     binary: &Path,
     cwd: &Path,
@@ -97,7 +131,45 @@ async fn run_binary(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .args(args);
-    Ok(timeout(Duration::from_secs(180), cmd.output()).await??)
+    let mut child = cmd.spawn()?;
+    let stdout_task = spawn_pipe_reader(child.stdout.take());
+    let stderr_task = spawn_pipe_reader(child.stderr.take());
+    let status = match timeout(
+        Duration::from_secs(SHARED_REALM_BINARY_STEP_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = timeout(Duration::from_secs(5), child.wait()).await;
+            if let Some(task) = stdout_task {
+                let _ = timeout(Duration::from_secs(2), task).await;
+            }
+            if let Some(task) = stderr_task {
+                let _ = timeout(Duration::from_secs(2), task).await;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{} {} timed out after {}s",
+                    binary.display(),
+                    args.join(" "),
+                    SHARED_REALM_BINARY_STEP_TIMEOUT_SECS
+                ),
+            )
+            .into());
+        }
+    };
+
+    let stdout = join_pipe_output(stdout_task).await?;
+    let stderr = join_pipe_output(stderr_task).await?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn output_ok_or_err(

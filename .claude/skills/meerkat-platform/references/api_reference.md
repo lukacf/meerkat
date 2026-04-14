@@ -52,19 +52,17 @@ rkat init                               # initialize local project config from g
 rkat run <PROMPT> [OPTIONS]
 rkat <PROMPT>                            # shorthand — "run" is implied
 cat file.txt | rkat run "Analyze this"   # stdin piped as context
-rkat resume <SESSION-ID> <PROMPT>         # full UUID, short prefix, last, ~N
-rkat continue <PROMPT>                   # shortcut for resume last (alias: c)
-rkat sessions list [--limit N] [--offset N] [--label KEY=VALUE]
-rkat sessions show <ID>
-rkat sessions delete <ID>
-rkat sessions interrupt <ID>
-rkat sessions locate <LOCATOR> [--extra-state-root <PATH>]
+rkat run --resume[=<SESSION-ID>] <PROMPT> # full UUID, short prefix, last, ~N
+rkat session list [--limit N] [--offset N] [--label KEY=VALUE]
+rkat session show <ID>
+rkat session delete <ID>
+rkat session interrupt <ID>
 rkat comms send <SESSION-ID> --json <JSON>        # (comms feature)
 rkat comms peers <SESSION-ID>                     # (comms feature)
-rkat realms current|list|show
-rkat skills list [--json]
-rkat skills inspect <ID> [--source <SOURCE>] [--json]
-rkat models catalog [--json]
+rkat realm current|list|show
+rkat skill list [--json]
+rkat skill inspect <ID> [--source <SOURCE>] [--json]
+rkat models [--json]
 rkat mob create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities

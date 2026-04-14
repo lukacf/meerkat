@@ -18,7 +18,26 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
     assert!(rendered.contains(
         "STATE\n  phase : {\"Initializing\", \"Idle\", \"Attached\", \"Running\", \"Recovering\", \"Retired\", \"Stopped\", \"Destroyed\"}"
     ));
-    assert!(rendered.contains("INPUTS\n  MeerkatMachineInput = {\"Initialize\", \"RegisterSession\", \"PrepareBindings\", \"SubmitMobWork\", \"InterruptCurrentRun\""));
+    assert!(rendered.contains("INPUTS\n  MeerkatMachineInput = {"));
+    for required in [
+        "\"Initialize\"",
+        "\"RegisterSession\"",
+        "\"UnregisterSession\"",
+        "\"PrepareBindings\"",
+        "\"SubmitMobWork\"",
+        "\"InterruptCurrentRun\"",
+        "\"CancelAfterBoundary\"",
+        "\"PublishCommittedVisibleSet\"",
+        "\"SetPeerIngressContext\"",
+        "\"AcceptWithCompletion\"",
+        "\"StagePersistentFilter\"",
+        "\"RequestDeferredTools\"",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "rendered MeerkatMachine module should include input {required}"
+        );
+    }
     assert!(rendered.contains("TRANSITIONS\n  Initialize"));
     assert!(rendered.contains("PrepareBindings"));
     assert!(rendered.ends_with("====\n"));

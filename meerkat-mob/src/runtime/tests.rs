@@ -17057,7 +17057,7 @@ async fn test_cancel_all_work_valid_fence_succeeds() {
 async fn test_identity_first_spawn_with_role_wiring_creates_valid_roster_and_sessions() {
     let mut def = sample_definition_with_cross_role_wiring();
     // Ensure comms are enabled on both profiles so wiring creates trust edges.
-    for (_, binding) in def.profiles.iter_mut() {
+    for (_, binding) in &mut def.profiles {
         if let crate::profile::ProfileBinding::Inline(profile) = binding {
             profile.tools.comms = true;
         }

@@ -2702,6 +2702,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn spawn_spec_input_accepts_legacy_meerkat_id_alias() {
         let payload = json!([{

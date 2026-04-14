@@ -17,8 +17,10 @@ use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 
 /// A mob event with metadata assigned by the event store.

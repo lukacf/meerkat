@@ -10,6 +10,7 @@ use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::RequestContext;
 use meerkat_contracts::{MobCreateParams, MobCreateResult};
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
@@ -1052,6 +1053,81 @@ pub async fn handle_profile_delete(
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// mob/turn_start — identity-native turn routing
+// ---------------------------------------------------------------------------
+
+/// Parameters for `mob/turn_start`.
+///
+/// Resolves `agent_identity` to the backing bridge session and delegates to
+/// the standard `turn/start` handler. This is the identity-first replacement
+/// for extracting `session_id` from spawn responses.
+#[derive(Debug, Deserialize)]
+pub struct MobTurnStartParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub prompt: serde_json::Value,
+    /// All optional turn/start overrides are forwarded transparently.
+    #[serde(flatten)]
+    pub turn_overrides: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Handle `mob/turn_start` — resolve identity to session and delegate to turn/start.
+pub async fn handle_mob_turn_start(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+    runtime: Arc<SessionRuntime>,
+    notification_sink: &crate::router::NotificationSink,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    request_context: Option<RequestContext>,
+) -> RpcResponse {
+    let mob_params: MobTurnStartParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &mob_params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(mob_params.agent_identity.as_str());
+
+    // Resolve identity → bridge session ID.
+    let handle = match state.handle_for(&mob_id).await {
+        Ok(h) => h,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let session_id = match handle.resolve_bridge_session_id(&identity).await {
+        Some(sid) => sid,
+        None => {
+            return invalid_params(
+                id,
+                format!("member '{identity}' has no active bridge session in mob '{mob_id}'"),
+            );
+        }
+    };
+
+    // Build a turn/start-compatible JSON blob with the resolved session_id.
+    let mut turn_params = mob_params.turn_overrides;
+    turn_params.insert(
+        "session_id".to_string(),
+        serde_json::Value::String(session_id.to_string()),
+    );
+    turn_params.insert("prompt".to_string(), mob_params.prompt);
+    let raw_json = serde_json::to_string(&turn_params).unwrap_or_default();
+    let raw_value = RawValue::from_string(raw_json).ok();
+
+    super::turn::handle_start(
+        id,
+        raw_value.as_deref(),
+        runtime,
+        notification_sink,
+        runtime_adapter,
+        request_context,
+    )
+    .await
 }
 
 #[cfg(test)]

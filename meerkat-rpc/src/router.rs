@@ -753,6 +753,19 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/turn_start" => {
+                handlers::mob::handle_mob_turn_start(
+                    id,
+                    params,
+                    &self.mob_state,
+                    self.runtime.clone(),
+                    &self.notification_sink,
+                    &self.runtime_adapter,
+                    request_context.clone(),
+                )
+                .await
+            }
+            #[cfg(feature = "mob")]
             "mob/member_send" => {
                 handlers::mob::handle_member_send(id, params, &self.mob_state).await
             }

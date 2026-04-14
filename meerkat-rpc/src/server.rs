@@ -468,7 +468,7 @@ fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
 
 fn request_requires_long_running_executor(request: &RpcRequest) -> bool {
     match request.method.as_str() {
-        "turn/start" => true,
+        "turn/start" | "mob/turn_start" => true,
         "session/create" => session_create_runs_immediately(request.params.as_deref()),
         _ => false,
     }
@@ -476,7 +476,7 @@ fn request_requires_long_running_executor(request: &RpcRequest) -> bool {
 
 fn request_commits_state_on_success(request: &RpcRequest) -> bool {
     match request.method.as_str() {
-        "turn/start" => true,
+        "turn/start" | "mob/turn_start" => true,
         "session/create" => session_create_runs_immediately(request.params.as_deref()),
         _ => false,
     }

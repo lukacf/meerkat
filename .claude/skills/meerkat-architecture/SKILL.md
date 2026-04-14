@@ -61,7 +61,7 @@ When reviewing a proposal, ask first:
 | `meerkat-tools` | Tool registry, builtins, shell, utility helpers, session-scoped task store (`SqliteTaskStore`) | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client and protocol transport integration | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent) | Implements `SessionService` |
-| `meerkat-runtime` | Runtime control plane, input lifecycle, policy engine, detached wake, peer handling-mode validation | `RuntimeControlPlane`, `RuntimeDriver`, `RuntimeSessionAdapter` |
+| `meerkat-runtime` | Runtime control plane, input lifecycle, policy engine, detached wake, peer handling-mode validation | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims | Implements `CommsRuntime` |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
@@ -147,17 +147,17 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 ## Runtime Control Plane
 
-`RuntimeSessionAdapter` implements the `RuntimeControlPlane` trait with per-session `RuntimeDriver` instances (ephemeral or persistent).
+`MeerkatMachine` implements the `RuntimeControlPlane` trait with per-session `RuntimeDriver` instances (ephemeral or persistent).
 
 **Runtime-backed build seam:** product/runtime-backed surfaces should obtain
-`SessionRuntimeBindings` from `RuntimeSessionAdapter::prepare_bindings(session_id)`
+`SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)`
 and pass them through `SessionBuildOptions.runtime_build_mode =
 RuntimeBuildMode::SessionOwned(bindings)`. Standalone/testing/embedded paths
 should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 
 **Ownership split:**
 - `PersistentRuntimeDriver::recover()` owns input/runtime/control recovery
-- `RuntimeSessionAdapter` owns session-entry runtime recovery:
+- `MeerkatMachine` owns session-entry runtime recovery:
   `ops_lifecycle`, `epoch_id`, and shared cursor state
 - `SessionRuntimeBindings` are the epoch-local witness for that ownership
 
@@ -202,7 +202,7 @@ Important current boundary:
 
 **Persistence channel**: When wired via `set_persistence_channel()`, terminal transitions capture a `PersistedOpsSnapshot` (authority state + completion entries + cursor values) and queue it to a bounded mpsc channel. A dedicated persistence task drains the channel to `RuntimeStore::persist_ops_lifecycle()`.
 
-**Recovery**: `RuntimeSessionAdapter::recover_or_create_ops_state()` loads persisted snapshots via `RuntimeOpsLifecycleRegistry::from_recovered()`. Non-terminal operations are stripped on recovery. The feed buffer is pre-seeded with persisted completion entries. Consumer cursors are restored from the snapshot.
+**Recovery**: `MeerkatMachine::recover_or_create_ops_state()` loads persisted snapshots via `RuntimeOpsLifecycleRegistry::from_recovered()`. Non-terminal operations are stripped on recovery. The feed buffer is pre-seeded with persisted completion entries. Consumer cursors are restored from the snapshot.
 
 ## Session Service
 
@@ -234,7 +234,7 @@ leans on implicit standalone fallback, treat that as architectural drift.
 Persistent realm opening is backend-owned in the `meerkat` facade through `PersistenceBundle`.
 
 - Surfaces open a realm bundle, not a raw session store plus ad hoc runtime companion.
-- The bundle carries the paired `SessionStore`, optional `RuntimeStore`, matching `RuntimeSessionAdapter`, and when enabled the blob/task companions for that realm.
+- The bundle carries the paired `SessionStore`, optional `RuntimeStore`, matching `MeerkatMachine`, and when enabled the blob/task companions for that realm.
 - SQLite is now the default persistent realm backend when compiled; jsonl remains the file-backed alternative, and mob persistence itself is SQLite/WAL-backed.
 - `meerkat-tools::builtin::SqliteTaskStore` persists session-scoped tasks in the shared SQLite realm when `session-store` is enabled.
 - `meerkat-mob::MobStorage::persistent()` uses `SqliteMobStores` (WAL, per-operation connections), and `MobStorage::custom()` is the extension seam for user-provided mob stores.
@@ -387,7 +387,7 @@ Use this as the first regression checklist when touching post-`v0.5.0` architect
 9. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
 10. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
 11. **Runtime-backed builds require bindings** — `RuntimeBuildMode::SessionOwned(bindings)` for runtime-backed surfaces; `StandaloneEphemeral` for WASM/tests/embedded. Factory never creates a competing registry for `SessionOwned`.
-12. **One recovery seam for epoch state** — `recover_or_create_ops_state()` on `RuntimeSessionAdapter` is the single canonical recovery helper. Both `register_session()` and `ensure_session_with_executor()` use it.
+12. **One recovery seam for epoch state** — `recover_or_create_ops_state()` on `MeerkatMachine` is the single canonical recovery helper. Both `register_session()` and `ensure_session_with_executor()` use it.
 13. **No shadow semantic truth** — if a helper, cache, queue, or surface carries authoritative meaning beside the machine/composition/protocol owner, the design is wrong.
 14. **No raw infra IDs as app-facing control nouns** — use domain handles publicly and keep canonical raw identity infra-only unless there is a very strong reason not to.
 15. **Definition-only mob creation** — `MobDefinition` is the only creation input. Do not resurrect prefabs or hidden template injection.
@@ -419,7 +419,7 @@ than reintroducing script-owned truth.
 - `meerkat-core/src/session_store.rs` — canonical `SessionStore` contract
 - `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (the pipeline)
 - `meerkat/src/service_factory.rs` — `FactoryAgentBuilder`
-- `meerkat-runtime/src/session_adapter.rs` — RuntimeSessionAdapter, RuntimeControlPlane impl
+- `meerkat-runtime/src/meerkat_machine.rs` — MeerkatMachine, RuntimeControlPlane impl
 - `meerkat-runtime/src/policy_table.rs` — DefaultPolicyTable (policy matrix)
 - `meerkat-runtime/src/ops_lifecycle.rs` — RuntimeOpsLifecycleRegistry
 - `meerkat-runtime/src/detached_wake.rs` — idle keep-alive wake for detached background ops

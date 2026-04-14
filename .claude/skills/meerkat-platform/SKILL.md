@@ -52,7 +52,7 @@ rkat-mcp --realm team-alpha
 
 Meerkat uses an explicit runtime-binding contract:
 
-- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- runtime-backed surfaces should call `MeerkatMachine::prepare_bindings(session_id)`
 - those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
 - standalone/testing/embedded paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly
 
@@ -283,7 +283,7 @@ OccurrenceLifecycleAuthority — authority-backed occurrence state transitions
 ScheduleStore           — persistence (Memory, SQLite)
 ```
 
-**Delivery**: The driver claims due occurrences, probes target availability, dispatches delivery (creates session + runs prompt), and monitors completion. The schedule host surface (`meerkat/src/surface/schedule_host.rs`) bridges delivery to `RuntimeSessionAdapter`.
+**Delivery**: The driver claims due occurrences, probes target availability, dispatches delivery (creates session + runs prompt), and monitors completion. The schedule host surface (`meerkat/src/surface/schedule_host.rs`) bridges delivery to `MeerkatMachine`.
 
 **Planning**: On create/update/resume, `ScheduleService` projects occurrences within a horizon (30 days or 64 occurrences). Old occurrences are superseded atomically via `atomic_plan_mutation()`.
 
@@ -515,7 +515,7 @@ Runtime epoch state (ops lifecycle, completion feed entries, consumer cursors) c
 
 Recovery contract: bounded-loss, no invisible completions, possible duplicate notices. Terminal transitions are persisted via a bounded persistence channel; the loss window is the time between channel send and store commit.
 
-Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Recovery seam: `RuntimeSessionAdapter::recover_or_create_ops_state()`.
+Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Recovery seam: `MeerkatMachine::recover_or_create_ops_state()`.
 
 ### Skills
 

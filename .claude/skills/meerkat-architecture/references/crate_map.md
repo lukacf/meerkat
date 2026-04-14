@@ -59,7 +59,7 @@ Surface binaries:
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `RuntimeControlPlane` | Multi-session runtime control (ingest, retire, respawn, reset, recover, destroy) | `RuntimeSessionAdapter` |
+| `RuntimeControlPlane` | Multi-session runtime control (ingest, retire, respawn, reset, recover, destroy) | `MeerkatMachine` |
 | `RuntimeDriver` | Per-session input lifecycle (accept, run events, control, recover, retire, destroy) | `EphemeralRuntimeDriver`, `PersistentRuntimeDriver` |
 
 ### Session traits (defined in meerkat-session)

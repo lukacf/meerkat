@@ -441,11 +441,11 @@ All runtime-backed surfaces (CLI, RPC, REST, MCP) must use `SessionOwned` bindin
 
 ```rust
 use meerkat::{RuntimeBuildMode, SessionRuntimeBindings};
-use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_runtime::MeerkatMachine;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
 // Runtime-backed surface: prepare bindings from the adapter
-let adapter = RuntimeSessionAdapter::persistent(store, blob_store);
+let adapter = MeerkatMachine::persistent(store, blob_store);
 let bindings = adapter.prepare_bindings(session_id.clone()).await?;
 let build = SessionBuildOptions {
     runtime_build_mode: RuntimeBuildMode::SessionOwned(bindings),

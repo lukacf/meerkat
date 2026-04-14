@@ -1519,7 +1519,7 @@ impl MobHandle {
             .await
     }
 
-    /// Resolve the bridge session ID for a member by identity.
+    /// Resolve the backing bridge session ID for a member by identity.
     ///
     /// This is an internal routing helper for surfaces that need to call
     /// `SessionService` methods on a member's backing session. Returns `None`
@@ -1580,13 +1580,13 @@ impl MobHandle {
         }
     }
 
-    /// Subscribe to agent-level events for a specific meerkat.
+    /// Subscribe to agent-level events for a specific member.
     ///
-    /// Looks up the meerkat's session ID from the roster, then subscribes
-    /// to the session-level event stream via [`MobSessionService`].
+    /// Looks up the member's backing bridge session from the roster, then
+    /// subscribes to the session-level event stream via [`MobSessionService`].
     ///
-    /// Returns `MobError::MeerkatNotFound` if the meerkat is not in the
-    /// roster or has no session ID.
+    /// Returns `MobError::MeerkatNotFound` if the member is not in the
+    /// roster or has no backing bridge session.
     pub async fn subscribe_agent_events(
         &self,
         identity: &AgentIdentity,
@@ -1606,7 +1606,7 @@ impl MobHandle {
 
     /// Subscribe to agent events for all active members (point-in-time snapshot).
     ///
-    /// Returns one stream per active member that has a session ID. Members
+    /// Returns one stream per active member that has a live bridge binding. Members
     /// spawned after this call are not included — use [`subscribe_mob_events`]
     /// for a continuously updated view.
     pub async fn subscribe_all_agent_events(&self) -> Vec<(AgentIdentity, EventStream)> {
@@ -2304,7 +2304,7 @@ impl MobHandle {
 
     /// Set or clear the spawn policy for automatic member provisioning.
     ///
-    /// When set, external turns targeting an unknown meerkat ID will
+    /// When set, external turns targeting an unknown member identity will
     /// consult the policy before returning `MeerkatNotFound`.
     pub async fn set_spawn_policy(
         &self,

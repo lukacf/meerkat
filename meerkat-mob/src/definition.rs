@@ -61,7 +61,7 @@ pub struct RoleWiringRule {
 /// Wiring rules controlling automatic peer connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WiringRules {
-    /// Automatically wire every spawned meerkat to the orchestrator.
+    /// Automatically wire every spawned member to the orchestrator.
     #[serde(default)]
     pub auto_wire_orchestrator: bool,
     /// Fan-out wiring rules between profile roles.
@@ -347,7 +347,7 @@ pub struct MobDefinition {
     /// Optional orchestrator configuration.
     #[serde(default)]
     pub orchestrator: Option<OrchestratorConfig>,
-    /// Named profiles for spawning meerkats.
+    /// Named profiles for spawning mob members.
     ///
     /// Each profile can be an inline definition or a reference to a
     /// realm-scoped reusable profile.

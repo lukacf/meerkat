@@ -1,15 +1,15 @@
-//! Profile and tool configuration for mob meerkats.
+//! Profile and tool configuration for mob members.
 //!
-//! A `Profile` defines the template for spawning a meerkat: which model to use,
+//! A `Profile` defines the template for spawning a member: which model to use,
 //! which skills to load, tool configuration, and communication settings.
 
 use crate::backend::MobBackendKind;
 use crate::runtime_mode::MobRuntimeMode;
 use serde::{Deserialize, Serialize};
 
-/// Tool configuration for a meerkat profile.
+/// Tool configuration for a mob member profile.
 ///
-/// Controls which tool categories are enabled for meerkats spawned
+/// Controls which tool categories are enabled for members spawned
 /// from this profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolConfig {
@@ -90,7 +90,7 @@ impl ProfileBinding {
     }
 }
 
-/// Agent-owned spawn tooling mode for child meerkats.
+/// Agent-owned spawn tooling mode for child members.
 ///
 /// Controls how the child's tool surface is determined at spawn time.
 /// External/public spawn remains role-based; this enum is for agent-owned spawns.
@@ -134,10 +134,10 @@ pub enum ProfileSource {
     Inline(Profile),
 }
 
-/// Profile template for spawning meerkats.
+/// Profile template for spawning mob members.
 ///
 /// Each profile defines the model, skills, tool configuration, and
-/// communication properties for a class of meerkat agents.
+/// communication properties for a class of mob members.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     /// LLM model name (e.g. "claude-opus-4-6").
@@ -148,10 +148,10 @@ pub struct Profile {
     /// Tool configuration.
     #[serde(default)]
     pub tools: ToolConfig,
-    /// Human-readable description of this meerkat's role, visible to peers.
+    /// Human-readable description of this member's role, visible to peers.
     #[serde(default)]
     pub peer_description: String,
-    /// Whether this meerkat can receive turns from external callers.
+    /// Whether this member can receive turns from external callers.
     #[serde(default)]
     pub external_addressable: bool,
     /// Optional backend override for this profile.

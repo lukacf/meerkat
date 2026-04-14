@@ -24,9 +24,9 @@ impl MobBackendKind {
 /// [`MobBackendKind`] says *what kind* of backend (definition/profile level).
 /// `RuntimeBinding` says *which specific runtime* (spawn/provision level).
 ///
-/// First step toward identity-first mobs: the mob's roster is keyed by
-/// identity ([`crate::MeerkatId`]). Everything in `RuntimeBinding` is a
-/// hidden binding detail — how to reach the member's runtime, not who it is.
+/// In the identity-first mob model, stable member identity is separate from
+/// runtime binding. Everything in `RuntimeBinding` is a hidden binding detail:
+/// how to reach the member's runtime, not who the member is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeBinding {

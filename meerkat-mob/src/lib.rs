@@ -1,7 +1,7 @@
 //! Meerkat Mob - Multi-agent orchestration runtime.
 //!
-//! This crate provides the runtime for orchestrating multiple Meerkat agents
-//! (meerkats) as a collaborative mob. It handles spawning, wiring, lifecycle
+//! This crate provides the runtime for orchestrating multiple agents as a
+//! collaborative mob. It handles member spawning, wiring, lifecycle
 //! management, and shared task coordination.
 //!
 //! # Architecture

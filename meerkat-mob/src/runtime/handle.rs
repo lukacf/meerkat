@@ -8,7 +8,6 @@ use crate::runtime::mob_member_lifecycle_authority::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::{
     PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerSpec,
 };
@@ -34,7 +33,6 @@ enum PeerConnectivityProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionObservationProjection {
     Omit,
-    LiveOnly,
     Full,
 }
 
@@ -1419,31 +1417,6 @@ impl MobHandle {
                     SessionObservationProjection::Omit => {
                         (None, 0, CanonicalSessionObservation::Unknown)
                     }
-                    SessionObservationProjection::LiveOnly => {
-                        match self
-                            .session_service
-                            .has_live_session(&bridge_session_id)
-                            .await
-                        {
-                            Ok(false) => (None, 0, CanonicalSessionObservation::Missing),
-                            Ok(true) => match self.session_service.read(&bridge_session_id).await {
-                                Ok(view) => (
-                                    view.state.last_assistant_text.clone(),
-                                    view.billing.total_tokens,
-                                    if view.state.is_active {
-                                        CanonicalSessionObservation::Active
-                                    } else {
-                                        CanonicalSessionObservation::Inactive
-                                    },
-                                ),
-                                Err(SessionError::NotFound { .. }) => {
-                                    (None, 0, CanonicalSessionObservation::Unknown)
-                                }
-                                Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
-                            },
-                            Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
-                        }
-                    }
                     SessionObservationProjection::Full => {
                         match self.session_service.read(&bridge_session_id).await {
                             Ok(view) => (
@@ -2360,89 +2333,63 @@ impl MobHandle {
         }
     }
 
-    async fn snapshot_kickoff_waiters(
-        &self,
-        meerkat_ids: Vec<MeerkatId>,
-    ) -> Result<Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::KickoffBarrierSnapshot { meerkat_ids })
-            .await?
-        {
-            MobMachineCommandResult::KickoffBarrierSnapshot(waiters) => Ok(waiters),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
+    fn kickoff_wait_is_satisfied(entry: &RosterEntry) -> bool {
+        if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+            return true;
+        }
+
+        match entry.kickoff.as_ref().map(|kickoff| kickoff.phase) {
+            None
+            | Some(MobMemberKickoffPhase::Started)
+            | Some(MobMemberKickoffPhase::Failed)
+            | Some(MobMemberKickoffPhase::Cancelled) => true,
+            Some(
+                MobMemberKickoffPhase::Pending
+                | MobMemberKickoffPhase::Starting
+                | MobMemberKickoffPhase::CallbackPending,
+            ) => false,
         }
     }
 
-    async fn wait_for_kickoff_receivers(
+    async fn wait_for_kickoff_resolution(
         &self,
         target_ids: &[MeerkatId],
-        waiters: Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>,
         timeout: Option<Duration>,
     ) -> Result<(), MobError> {
-        if waiters.is_empty() {
+        if target_ids.is_empty() {
             return Ok(());
         }
 
         let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
-        let mut pending = waiters
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        let mut futures = FuturesUnordered::new();
+        loop {
+            let entries = self
+                .list_all_members()
+                .await
+                .into_iter()
+                .map(|entry| (entry.meerkat_id.clone(), entry))
+                .collect::<HashMap<_, _>>();
 
-        for (id, mut rx) in waiters {
-            if *rx.borrow() {
-                pending.remove(&id);
-                continue;
+            let pending_member_ids = target_ids
+                .iter()
+                .filter(|id| {
+                    entries
+                        .get(*id)
+                        .is_some_and(|entry| !Self::kickoff_wait_is_satisfied(entry))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if pending_member_ids.is_empty() {
+                return Ok(());
             }
-            futures.push(async move {
-                loop {
-                    if *rx.borrow() {
-                        break;
-                    }
-                    if rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-                id
-            });
-        }
 
-        while !futures.is_empty() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                let pending_member_ids = target_ids
-                    .iter()
-                    .filter(|id| pending.contains(*id))
-                    .cloned()
-                    .collect();
                 return Err(MobError::KickoffWaitTimedOut { pending_member_ids });
             }
 
-            let next_fut = futures.next();
-            let sleep_fut = tokio::time::sleep(remaining);
-            futures::pin_mut!(next_fut);
-            futures::pin_mut!(sleep_fut);
-
-            match futures::future::select(next_fut, sleep_fut).await {
-                futures::future::Either::Left((Some(id), _)) => {
-                    pending.remove(&id);
-                }
-                futures::future::Either::Left((None, _)) => break,
-                futures::future::Either::Right(((), _)) => {
-                    let pending_member_ids = target_ids
-                        .iter()
-                        .filter(|id| pending.contains(*id))
-                        .cloned()
-                        .collect();
-                    return Err(MobError::KickoffWaitTimedOut { pending_member_ids });
-                }
-            }
+            tokio::time::sleep(std::cmp::min(remaining, Duration::from_millis(50))).await;
         }
-
-        Ok(())
     }
 
     async fn wait_one_material(
@@ -2479,11 +2426,13 @@ impl MobHandle {
         }
     }
 
-    /// Wait until all autonomous members have been admitted to the runtime.
+    /// Wait until all current autonomous members resolve their initial kickoff.
     ///
-    /// Autonomous members no longer run a separate kickoff turn — their initial
-    /// prompt is injected through the runtime input path at spawn time. This
-    /// method returns member snapshots immediately since admission is synchronous.
+    /// In 0.6 autonomous members no longer run a synthetic second kickoff turn,
+    /// but their initial prompt still resolves asynchronously through the
+    /// runtime-backed input path. This barrier is satisfied once each targeted
+    /// autonomous member leaves `pending` / `starting` / `callback_pending`
+    /// and reaches a terminal kickoff phase.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -2498,8 +2447,7 @@ impl MobHandle {
             .iter()
             .map(|id| AgentIdentity::from(id.as_str()))
             .collect();
-        let waiters = self.snapshot_kickoff_waiters(target_ids.clone()).await?;
-        self.wait_for_kickoff_receivers(&target_ids, waiters, timeout)
+        self.wait_for_kickoff_resolution(&target_ids, timeout)
             .await?;
 
         let mut snapshots = Vec::with_capacity(identities.len());
@@ -2509,7 +2457,7 @@ impl MobHandle {
         Ok(snapshots)
     }
 
-    /// Wait until the given autonomous members have been admitted to the runtime.
+    /// Wait until the given members resolve their initial kickoff.
     ///
     /// See [`wait_for_kickoff_complete`](Self::wait_for_kickoff_complete) for details.
     pub async fn wait_for_members_kickoff_complete(
@@ -2519,10 +2467,7 @@ impl MobHandle {
     ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
         let target_meerkat_ids: Vec<MeerkatId> =
             ids.iter().map(|id| MeerkatId::from(id.as_str())).collect();
-        let waiters = self
-            .snapshot_kickoff_waiters(target_meerkat_ids.clone())
-            .await?;
-        self.wait_for_kickoff_receivers(&target_meerkat_ids, waiters, timeout)
+        self.wait_for_kickoff_resolution(&target_meerkat_ids, timeout)
             .await?;
 
         let mut snapshots = Vec::with_capacity(ids.len());

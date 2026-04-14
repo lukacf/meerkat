@@ -4505,8 +4505,8 @@ async fn test_wait_for_members_kickoff_complete_only_waits_requested_members() {
 #[tokio::test]
 async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    // Autonomous spawn uses the runtime adapter path (accept_input_with_completion).
-    // Enable immediate completion so the barrier resolves quickly.
+    // Runtime-backed autonomous kickoff still resolves asynchronously, but
+    // enabling immediate completion should let the barrier clear quickly.
     service.set_keep_alive_turns_complete_immediately(true);
 
     let member = MeerkatId::from("lead-hung");
@@ -4515,8 +4515,6 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
         .await
         .expect("spawn lead");
 
-    // The barrier waits for the background start_turn task to complete.
-    // With keep_alive_turns_complete_immediately, it should finish fast.
     let snapshots = handle
         .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
         .await
@@ -4526,6 +4524,44 @@ async fn test_wait_for_kickoff_complete_returns_after_initial_turn() {
         !snapshots.is_empty(),
         "barrier should return snapshots for spawned members"
     );
+    let kickoff = snapshots[0]
+        .1
+        .kickoff
+        .as_ref()
+        .expect("autonomous member should expose kickoff state");
+    assert_eq!(
+        kickoff.phase,
+        crate::roster::MobMemberKickoffPhase::Started,
+        "barrier must return only after kickoff reaches a terminal started phase"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_kickoff_complete_times_out_while_runtime_backed_kickoff_pending() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(250);
+
+    let member = MeerkatId::from("lead-pending");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn lead");
+
+    let error = handle
+        .wait_for_kickoff_complete(Some(Duration::from_millis(50)))
+        .await
+        .expect_err("barrier must not return before kickoff resolves");
+
+    match error {
+        MobError::KickoffWaitTimedOut { pending_member_ids } => {
+            assert_eq!(
+                pending_member_ids,
+                vec![member],
+                "pending autonomous kickoff should surface the still-starting member"
+            );
+        }
+        other => panic!("expected kickoff timeout, got {other:?}"),
+    }
 }
 
 #[tokio::test]

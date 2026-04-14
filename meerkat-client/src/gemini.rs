@@ -312,7 +312,8 @@ impl GeminiClient {
             }
         }
 
-        if !request.tools.is_empty() {
+        let has_function_declarations = !request.tools.is_empty();
+        if has_function_declarations {
             let function_declarations: Vec<Value> = request
                 .tools
                 .iter()
@@ -334,16 +335,25 @@ impl GeminiClient {
         // Inject provider-native google_search tool from provider_params.
         // google_search is a separate tools array element alongside functionDeclarations.
         // Bool(false) and Null are treated as explicit disable; only objects are injected.
+        let mut has_server_side_tool = false;
         if let Some(ref params) = request.provider_params
             && let Some(gs) = params.get("google_search")
             && gs.is_object()
         {
+            has_server_side_tool = true;
             match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
                 Some(arr) => arr.push(serde_json::json!({"google_search": gs})),
                 None => {
                     body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})]);
                 }
             }
+        }
+
+        if has_function_declarations && has_server_side_tool {
+            if !body["toolConfig"].is_object() {
+                body["toolConfig"] = serde_json::json!({});
+            }
+            body["toolConfig"]["includeServerSideToolInvocations"] = Value::Bool(true);
         }
 
         Ok(body)
@@ -2562,6 +2572,11 @@ mod tests {
             tools[1].get("google_search").is_some(),
             "second element should be google_search"
         );
+        assert_eq!(
+            body["toolConfig"]["includeServerSideToolInvocations"].as_bool(),
+            Some(true),
+            "mixed built-in + function tools must opt into server-side tool invocations"
+        );
         Ok(())
     }
 
@@ -2577,6 +2592,10 @@ mod tests {
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1, "should have only google_search");
         assert!(tools[0].get("google_search").is_some());
+        assert!(
+            body.get("toolConfig").is_none() || body["toolConfig"].is_null(),
+            "google_search alone should not force toolConfig"
+        );
         Ok(())
     }
 
@@ -2599,6 +2618,10 @@ mod tests {
         let tools = body["tools"].as_array().expect("tools should be array");
         assert_eq!(tools.len(), 1, "should only have functionDeclarations");
         assert!(tools[0].get("functionDeclarations").is_some());
+        assert!(
+            body.get("toolConfig").is_none() || body["toolConfig"].is_null(),
+            "functionDeclarations alone should not force toolConfig"
+        );
         Ok(())
     }
 }

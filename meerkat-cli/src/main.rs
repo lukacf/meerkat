@@ -473,6 +473,7 @@ fn inject_default_run_subcommand(
         "sessions",
         "realms",
         "mcp",
+        "skill",
         "skills",
         "mob",
         "config",
@@ -634,12 +635,17 @@ enum Commands {
     /// Initialize local project config from the global template
     Init,
     #[command(
-        after_help = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
+        after_help = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
     )]
     /// Run an agent with a prompt
     Run {
         /// The prompt to execute
         prompt: String,
+
+        /// Resume an existing session instead of starting a new one.
+        /// Omitting the value resumes `last`.
+        #[arg(long, value_name = "SESSION", num_args = 0..=1, default_missing_value = "last")]
+        resume: Option<String>,
 
         /// Optional per-request system prompt override.
         #[arg(long = "system")]
@@ -933,7 +939,8 @@ enum Commands {
         command: MobCommands,
     },
 
-    /// Skill introspection
+    #[command(name = "skill", alias = "skills")]
+    /// Skill introspection and realm-local skill resources
     Skills {
         #[command(subcommand)]
         command: SkillsCommands,
@@ -1440,6 +1447,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Init => init_project_config().await,
         Commands::Run {
             prompt,
+            resume,
             system_prompt,
             model,
             provider,
@@ -1471,6 +1479,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         } => {
             Box::pin(handle_run_command(
                 prompt,
+                resume,
                 system_prompt,
                 model,
                 provider,
@@ -1646,6 +1655,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 #[allow(clippy::large_futures)]
 async fn handle_run_command(
     mut prompt: String,
+    resume: Option<String>,
     system_prompt: Option<String>,
     model: Option<String>,
     provider: Option<Provider>,
@@ -1676,6 +1686,44 @@ async fn handle_run_command(
     line_format: LineFormat,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
+    if let Some(session_id) = resume {
+        if model.is_some()
+            || provider.is_some()
+            || max_tokens.is_some()
+            || output_schema.is_some()
+            || !preload_skills.is_empty()
+            || !labels.is_empty()
+            || app_context.is_some()
+            || keep_alive
+        {
+            return Err(anyhow::anyhow!(
+                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --preload-skill, --label, --app-context, and --keep-alive are not supported there yet"
+            ));
+        }
+        return resume_session(
+            &session_id,
+            prompt,
+            system_prompt,
+            skill_refs,
+            skill_references,
+            allow_tools,
+            block_tools,
+            instructions,
+            max_duration,
+            max_tool_calls,
+            params,
+            provider_params_json,
+            stream,
+            no_stream,
+            stdin,
+            line_format,
+            scope,
+            verbose,
+            wait_for_mcp,
+        )
+        .await;
+    }
+
     let (config, config_base_dir) = load_config(scope).await?;
 
     let model = model.unwrap_or_else(|| config.agent.model.clone());

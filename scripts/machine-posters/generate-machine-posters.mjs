@@ -1146,16 +1146,11 @@ function renderPosterHtml(poster) {
   const leftRail = 304;
   const rightRail = 316;
   const railGap = 18;
-  const headerHeight = 118;
-  const footerHeight = 252;
+  const headerHeight = 172;
+  const footerHeight = 262;
   const canvasWidth =
     outerPad * 2 + leftRail + railGap + poster.layout.plate.width + railGap + rightRail;
   const canvasHeight = headerHeight + poster.layout.plate.height + footerHeight;
-  const schematicX = outerPad + leftRail + railGap;
-  const schematicY = headerHeight;
-  const leftX = outerPad;
-  const rightX = canvasWidth - outerPad - rightRail;
-  const bottomY = schematicY + poster.layout.plate.height + 18;
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1167,88 +1162,294 @@ function renderPosterHtml(poster) {
   <body>
     <main class="page-shell">
       <a class="page-index-link" href="./index.html">← Poster index</a>
-      <article class="architectural-plate" style="--canvas-width:${canvasWidth}; --canvas-height:${canvasHeight};">
-        <header class="plate-header">
-          <div class="title-plaque">
-            <div class="eyebrow">Canonical machine plate / generated from TLA + contract artifacts</div>
-            <h1>${escapeHtml(poster.title)}</h1>
-            <p class="subtitle">${escapeHtml(poster.subtitle)}</p>
-          </div>
-          <div class="legend-plaque">
-            <div class="meta-grid">
-              ${renderMetaChip("TLA", path.relative(repoRoot, poster.tlaPath))}
-              ${renderMetaChip("contract", path.relative(repoRoot, poster.contractPath))}
-              ${renderMetaChip("catalog", path.relative(repoRoot, poster.catalogPath))}
-              ${renderMetaChip("generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC"))}
-            </div>
-            <div class="legend-grid">
-              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--input"></span><strong>Input</strong></div>
-              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--signal"></span><strong>Signal</strong></div>
-              <div class="legend-chip"><span class="legend-chip__swatch legend-chip__swatch--effect"></span><strong>Effect</strong></div>
-            </div>
-          </div>
-        </header>
-
-        <section class="canvas-surface">
-          <section class="metrics-rack">
-            ${renderStatChip("phases", poster.contract.phases.length)}
-            ${renderStatChip("domains", poster.groupedTriggers.length)}
-            ${renderStatChip("inputs", poster.contract.inputs.length)}
-            ${renderStatChip("signals", poster.contract.signals.length)}
-            ${renderStatChip("effects", poster.contract.effects.length)}
-            ${renderStatChip("invariants", poster.invariants.length)}
-            ${renderStatChip("state vars", poster.contract.stateFields.length)}
-          </section>
-
-          <aside class="sidebar sidebar--left" style="left:${leftX}px; top:${schematicY}px; width:${leftRail}px;">
-            ${poster.statePanels.left.map((panel) => renderStatePanel(panel)).join("")}
-          </aside>
-
-          <section class="schematic-column" style="left:${schematicX}px; top:${schematicY}px; width:${poster.layout.plate.width}px;">
-            ${renderSchematicPlate(poster)}
-          </section>
-
-          <aside class="sidebar sidebar--right" style="left:${rightX}px; top:${schematicY}px; width:${rightRail}px;">
-            ${poster.statePanels.right.map((panel) => renderStatePanel(panel)).join("")}
-          </aside>
-
-          <section class="effect-panel effect-panel--canvas" style="left:${leftX}px; top:${bottomY}px; width:${Math.round(
-            canvasWidth * 0.58,
-          ) - leftX}px;">
-            <div class="section-label">Effect bus</div>
-            <div class="effect-lanes">
-              ${renderEffectLane("routed", "Routed effects", poster.effectBus.routed)}
-              ${renderEffectLane("external", "External effects", poster.effectBus.external)}
-              ${renderEffectLane("local", "Local effects", poster.effectBus.local)}
-              ${poster.effectBus.unknown.length > 0 ? renderEffectLane("unknown", "Unknown disposition", poster.effectBus.unknown) : ""}
-            </div>
-          </section>
-
-          <section class="invariant-panel invariant-panel--canvas" style="left:${Math.round(
-            canvasWidth * 0.58,
-          )}px; top:${bottomY}px; width:${canvasWidth - Math.round(canvasWidth * 0.58) - outerPad}px;">
-            <div class="section-label">Invariant plate</div>
-            <div class="invariant-grid">
-              ${poster.invariants
-                .map(
-                  (invariant) => `<article class="invariant-card">
-                    <h3>${escapeHtml(invariant.name)}</h3>
-                    <pre>${escapeHtml(invariant.formula)}</pre>
-                  </article>`,
-                )
-                .join("")}
-            </div>
-          </section>
-        </section>
-
-        <footer class="footer-note footer-note--plate">
-          <div>Complexity target: central lifecycle spine, radial transition halos, sidecar subsystems, effect bus, invariant plate.</div>
-          <div>Regenerate with <code>node scripts/machine-posters/generate-machine-posters.mjs</code>.</div>
-        </footer>
+      <article class="architectural-plate">
+        <svg class="poster-svg" viewBox="0 0 ${canvasWidth} ${canvasHeight}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeHtml(
+          poster.title,
+        )} architectural plate">
+          ${renderPosterPlateSvg(poster, {
+            outerPad,
+            leftRail,
+            rightRail,
+            railGap,
+            headerHeight,
+            footerHeight,
+            canvasWidth,
+            canvasHeight,
+          })}
+        </svg>
       </article>
     </main>
   </body>
 </html>`;
+}
+
+function renderPosterPlateSvg(poster, dims) {
+  const { outerPad, leftRail, rightRail, railGap, headerHeight, canvasWidth, canvasHeight } = dims;
+  const plateX = outerPad + leftRail + railGap;
+  const plateY = headerHeight;
+  const plateW = poster.layout.plate.width;
+  const plateH = poster.layout.plate.height;
+  const leftX = outerPad;
+  const rightX = canvasWidth - outerPad - rightRail;
+  const bottomY = plateY + plateH + 26;
+  const effectW = 1020;
+  const invariantW = canvasWidth - outerPad - (leftX + effectW + 22);
+
+  return `
+    <defs>
+      <linearGradient id="pageFade" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="rgba(255,255,255,0.03)" />
+        <stop offset="100%" stop-color="rgba(255,255,255,0.01)" />
+      </linearGradient>
+      <marker id="plateArrow" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+        <path d="M0,0 L14,7 L0,14 z" fill="${poster.accent}" />
+      </marker>
+      <marker id="ghostArrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+        <path d="M0,0 L12,6 L0,12 z" fill="rgba(244,239,229,0.3)" />
+      </marker>
+    </defs>
+    <rect x="0" y="0" width="${canvasWidth}" height="${canvasHeight}" rx="28" fill="${THEME.shell}" stroke="rgba(255,255,255,0.12)" />
+    <rect x="1" y="1" width="${canvasWidth - 2}" height="${canvasHeight - 2}" rx="27" fill="url(#pageFade)" opacity="0.9" />
+    ${renderSvgHeader(poster, canvasWidth)}
+    ${renderSvgMetricRack(poster, 48, 132)}
+    ${renderSvgPanelStack(poster.statePanels.left, leftX, plateY + 26, leftRail)}
+    ${renderSvgPanelStack(poster.statePanels.right, rightX, plateY + 26, rightRail)}
+    <g transform="translate(${plateX}, ${plateY})">
+      ${renderSchematicSvg(poster.layout, poster.groupedTriggers, poster.phaseStats, poster.accent)}
+      ${renderSvgPhaseCards(poster)}
+      ${poster.groupedTriggers.map((group) => renderSvgGroupCard(group)).join("")}
+    </g>
+    ${renderSvgEffectBus(poster.effectBus, leftX, bottomY, effectW)}
+    ${renderSvgInvariantPlate(poster.invariants, leftX + effectW + 22, bottomY, invariantW)}
+    <text x="${canvasWidth - 48}" y="${canvasHeight - 18}" text-anchor="end" fill="${THEME.faint}" font-size="10" letter-spacing="2" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">REGENERATE WITH NODE SCRIPTS/MACHINE-POSTERS/GENERATE-MACHINE-POSTERS.MJS</text>
+  `;
+}
+
+function renderSvgHeader(poster, canvasWidth) {
+  const titleX = 48;
+  const plaqueX = canvasWidth - 520;
+  const meta = [
+    ["TLA", path.relative(repoRoot, poster.tlaPath)],
+    ["contract", path.relative(repoRoot, poster.contractPath)],
+    ["catalog", path.relative(repoRoot, poster.catalogPath)],
+    ["generated", poster.generatedAt.replace("T", " ").replace("Z", " UTC")],
+  ];
+  return `
+    <text x="${titleX}" y="44" fill="${THEME.faint}" font-size="11" letter-spacing="3" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">CANONICAL MACHINE PLATE / GENERATED FROM TLA + CONTRACT ARTIFACTS</text>
+    <text x="${titleX}" y="106" fill="${THEME.ink}" font-size="66" font-weight="600" letter-spacing="-5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+      poster.title,
+    )}</text>
+    <text x="${titleX}" y="140" fill="${THEME.muted}" font-size="16" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+      poster.subtitle,
+    )}</text>
+    <g transform="translate(${plaqueX}, 26)">
+      <rect x="0" y="0" width="472" height="112" rx="16" fill="${THEME.panel}" stroke="rgba(255,255,255,0.09)" />
+      ${meta
+        .map((item, index) => {
+          const x = index % 2 === 0 ? 14 : 238;
+          const y = 14 + Math.floor(index / 2) * 40;
+          return `
+            <rect x="${x}" y="${y}" width="220" height="28" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)" />
+            <text x="${x + 10}" y="${y + 10}" fill="${THEME.faint}" font-size="9" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+              item[0].toUpperCase(),
+            )}</text>
+            <text x="${x + 10}" y="${y + 22}" fill="${THEME.ink}" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+              item[1],
+            )}</text>`;
+        })
+        .join("")}
+      <g transform="translate(14, 96)">
+        ${[
+          ["INPUT", THEME.input],
+          ["SIGNAL", THEME.signal],
+          ["EFFECT", THEME.effect],
+        ]
+          .map(
+            ([label, color], index) => `
+              <rect x="${index * 148}" y="-10" width="136" height="16" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.05)" />
+              <rect x="${index * 148 + 8}" y="-5" width="8" height="8" rx="2" fill="${color}" />
+              <text x="${index * 148 + 24}" y="2" fill="${THEME.ink}" font-size="10" letter-spacing="1.6" font-weight="600" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${label}</text>`,
+          )
+          .join("")}
+      </g>
+    </g>
+  `;
+}
+
+function renderSvgMetricRack(poster, x, y) {
+  const items = [
+    ["PHASES", poster.contract.phases.length],
+    ["DOMAINS", poster.groupedTriggers.length],
+    ["INPUTS", poster.contract.inputs.length],
+    ["SIGNALS", poster.contract.signals.length],
+    ["EFFECTS", poster.contract.effects.length],
+    ["INVARIANTS", poster.invariants.length],
+    ["STATE", poster.contract.stateFields.length],
+  ];
+  return `<g transform="translate(${x}, ${y})">
+    ${items
+      .map(
+        ([label, value], index) => `
+          <rect x="${index * 62}" y="0" width="54" height="28" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.07)" />
+          <text x="${index * 62 + 8}" y="10" fill="${THEME.faint}" font-size="8" letter-spacing="1.4" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${label}</text>
+          <text x="${index * 62 + 8}" y="22" fill="${THEME.ink}" font-size="11" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${value}</text>`,
+      )
+      .join("")}
+  </g>`;
+}
+
+function renderSvgPanelStack(panels, x, startY, width) {
+  let y = startY;
+  return panels
+    .map((panel) => {
+      const columns = 2;
+      const cellW = Math.floor((width - 18 - 8) / 2);
+      const rows = Math.max(1, Math.ceil(panel.fields.length / columns));
+      const height = 34 + rows * 34 + 14;
+      const svg = `<g transform="translate(${x}, ${y})">
+        <rect x="0" y="0" width="${width}" height="${height}" rx="12" fill="${THEME.panel}" stroke="rgba(255,255,255,0.08)" />
+        <text x="12" y="14" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">SUBSYSTEM</text>
+        <text x="12" y="28" fill="${THEME.ink}" font-size="13" font-weight="600" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+          panel.title,
+        )}</text>
+        ${panel.fields
+          .map((field, index) => {
+            const col = index % columns;
+            const row = Math.floor(index / columns);
+            const cellX = 10 + col * (cellW + 8);
+            const cellY = 40 + row * 34;
+            return `
+              <rect x="${cellX}" y="${cellY}" width="${cellW}" height="26" rx="7" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.05)" />
+              <text x="${cellX + 7}" y="${cellY + 16}" fill="${THEME.ink}" font-size="9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+                field.name,
+              )}</text>`;
+          })
+          .join("")}
+      </g>`;
+      y += height + 12;
+      return svg;
+    })
+    .join("");
+}
+
+function renderSvgPhaseCards(poster) {
+  return poster.contract.phases
+    .map((phase) => {
+      const layout = poster.layout.phases[phase];
+      const stats = poster.phaseStats.get(phase);
+      const fill = layout.sink
+        ? "rgba(68,18,18,0.88)"
+        : layout.emphasis
+          ? "rgba(201,109,84,0.18)"
+          : "rgba(132,191,215,0.08)";
+      const stroke = layout.sink
+        ? "rgba(201,109,84,0.55)"
+        : layout.emphasis
+          ? "rgba(201,109,84,0.42)"
+          : "rgba(255,255,255,0.12)";
+      return `
+        <g transform="translate(${layout.x}, ${layout.y})">
+          <rect x="0" y="0" width="${layout.w}" height="${layout.h}" rx="14" fill="${fill}" stroke="${stroke}" />
+          <text x="16" y="16" fill="${THEME.faint}" font-size="8" letter-spacing="1.8" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">PHASE</text>
+          <text x="16" y="42" fill="${THEME.ink}" font-size="${layout.emphasis ? 32 : 24}" font-weight="600" letter-spacing="-1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+            phase,
+          )}</text>
+          <text x="16" y="${layout.h - 22}" fill="${THEME.muted}" font-size="9" letter-spacing="1" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">L:${stats.loopCount} E:${stats.exitCount} I:${stats.entryCount}</text>
+        </g>`;
+    })
+    .join("");
+}
+
+function renderSvgGroupCard(group) {
+  const cols = group.columns;
+  const innerX = 12;
+  const headerH = 34;
+  const gap = 6;
+  const cellW = Math.floor((group.w - innerX * 2 - gap * (cols - 1)) / cols);
+  const cellH = 18;
+  return `<g transform="translate(${group.x}, ${group.y})">
+    <rect x="0" y="0" width="${group.w}" height="${group.height}" rx="14" fill="rgba(20,26,31,0.82)" stroke="${
+      group.tone === "input" ? THEME.input : group.tone === "signal" ? THEME.signal : posterAccent(group)
+    }" stroke-opacity="0.28" />
+    <text x="14" y="15" fill="${THEME.faint}" font-size="8" letter-spacing="1.8" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">CONTROL DOMAIN</text>
+    <text x="14" y="30" fill="${THEME.ink}" font-size="13" font-weight="600" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${escapeHtml(
+      group.title,
+    )}</text>
+    <text x="${group.w - 14}" y="15" text-anchor="end" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${group.stats.total} TRIGGERS</text>
+    ${group.records
+      .map((record, index) => {
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        const x = innerX + col * (cellW + gap);
+        const y = headerH + row * (cellH + 4);
+        const color = record.kind === "input" ? THEME.input : THEME.signal;
+        return `
+          <rect x="${x}" y="${y}" width="${cellW}" height="${cellH}" rx="5" fill="rgba(255,255,255,0.018)" stroke="rgba(255,255,255,0.05)" />
+          <rect x="${x + 6}" y="${y + 6}" width="6" height="6" rx="1" fill="${color}" />
+          <text x="${x + 18}" y="${y + 12.5}" fill="${THEME.ink}" font-size="8.6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+            record.name,
+          )}</text>`;
+      })
+      .join("")}
+  </g>`;
+}
+
+function posterAccent(group) {
+  return "rgba(201,109,84,0.28)";
+}
+
+function renderSvgEffectBus(effectBus, x, y, width) {
+  const laneDefs = [
+    ["ROUTED EFFECTS", THEME.routed, effectBus.routed],
+    ["EXTERNAL EFFECTS", THEME.external, effectBus.external],
+    ["LOCAL EFFECTS", THEME.local, effectBus.local],
+  ];
+  let offsetY = y;
+  return laneDefs
+    .map(([title, color, effects]) => {
+      const lane = `<g transform="translate(${x}, ${offsetY})">
+        <rect x="0" y="0" width="${width}" height="40" rx="10" fill="${THEME.panel}" stroke="rgba(255,255,255,0.08)" />
+        <rect x="0" y="0" width="4" height="40" rx="4" fill="${color}" />
+        <text x="12" y="13" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">${title}</text>
+        ${effects
+          .slice(0, 12)
+          .map((effect, index) => {
+            const chipX = 12 + index * 82;
+            return `
+              <rect x="${chipX}" y="18" width="76" height="14" rx="7" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.05)" />
+              <text x="${chipX + 6}" y="27.5" fill="${THEME.ink}" font-size="7.4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+                effect.name,
+              )}</text>`;
+          })
+          .join("")}
+      </g>`;
+      offsetY += 46;
+      return lane;
+    })
+    .join("");
+}
+
+function renderSvgInvariantPlate(invariants, x, y, width) {
+  const cols = 2;
+  const gap = 8;
+  const cellW = Math.floor((width - 18 - gap) / cols);
+  return `<g transform="translate(${x}, ${y})">
+    <rect x="0" y="0" width="${width}" height="${Math.max(146, 30 + Math.ceil(invariants.length / cols) * 26)}" rx="12" fill="${THEME.panel}" stroke="rgba(255,255,255,0.08)" />
+    <text x="12" y="14" fill="${THEME.faint}" font-size="8" letter-spacing="1.5" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif">INVARIANT PLATE</text>
+    ${invariants
+      .map((inv, index) => {
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        const cx = 10 + col * (cellW + gap);
+        const cy = 22 + row * 26;
+        return `
+          <rect x="${cx}" y="${cy}" width="${cellW}" height="20" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.05)" />
+          <text x="${cx + 8}" y="${cy + 13}" fill="${THEME.ink}" font-size="8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">${escapeHtml(
+            inv.name,
+          )}</text>`;
+      })
+      .join("")}
+  </g>`;
 }
 
 function renderSchematicPlate(poster) {
@@ -1640,10 +1841,10 @@ function renderStyles(poster) {
       text-transform: uppercase;
     }
     .architectural-plate {
-      width: max(calc(var(--canvas-width) * 1px), 96vw);
+      width: min(3520px, calc(100vw - 48px));
       max-width: 3520px;
       margin: 0 auto;
-      padding: 24px 26px 20px;
+      padding: 10px;
       background:
         linear-gradient(180deg, rgba(255,255,255,0.02), transparent 24%),
         linear-gradient(90deg, rgba(255,255,255,0.01), transparent 22%, transparent 78%, rgba(255,255,255,0.01)),
@@ -1654,6 +1855,12 @@ function renderStyles(poster) {
         0 44px 120px rgba(0,0,0,0.5),
         inset 0 1px 0 rgba(255,255,255,0.05),
         inset 0 0 0 1px rgba(0,0,0,0.22);
+    }
+    .poster-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 18px;
     }
     .plate-header {
       display: flex;

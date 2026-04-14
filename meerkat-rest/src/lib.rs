@@ -5404,17 +5404,11 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    #[ignore = "requires ANTHROPIC_API_KEY; run with cargo e2e-system"]
     async fn test_mob_spawn_helper_route_returns_identity_native_fields() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
-
-        // Set a dummy API key so AgentFactory doesn't reject the build.
-        // The mock LLM client overrides actual provider calls.
-        // SAFETY: single-threaded test; no concurrent env reads.
-        unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-dummy-key-for-unit-test");
-        }
 
         let temp = TempDir::new().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())

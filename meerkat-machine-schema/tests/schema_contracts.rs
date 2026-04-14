@@ -588,6 +588,94 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
 }
 
 #[test]
+fn every_mutating_meerkat_runtime_command_has_transition_coverage() {
+    let schema = meerkat_machine();
+    let transitioned_inputs = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.on.variant.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for required in [
+        "RegisterSession",
+        "UnregisterSession",
+        "EnsureSessionWithExecutor",
+        "SetSilentIntents",
+        "InterruptCurrentRun",
+        "CancelAfterBoundary",
+        "StopRuntimeExecutor",
+        "PrepareBindings",
+        "PublishCommittedVisibleSet",
+        "SetPeerIngressContext",
+        "NotifyDrainExited",
+        "AbortAll",
+        "Abort",
+        "Ingest",
+        "PublishEvent",
+        "Retire",
+        "Recycle",
+        "Reset",
+        "Recover",
+        "Destroy",
+        "AcceptWithCompletion",
+        "AcceptWithoutWake",
+        "Prepare",
+        "Commit",
+        "Fail",
+    ] {
+        assert!(
+            transitioned_inputs.contains(required),
+            "MeerkatMachine should model mutating runtime command {required} with at least one transition",
+        );
+    }
+}
+
+#[test]
+fn every_mutating_mob_runtime_command_has_transition_coverage() {
+    let schema = mob_machine();
+    let transitioned_inputs = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.on.variant.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for required in [
+        "RunFlow",
+        "CancelFlow",
+        "Spawn",
+        "Retire",
+        "Respawn",
+        "RetireAll",
+        "Wire",
+        "Unwire",
+        "ExternalTurn",
+        "InternalTurn",
+        "SubmitWork",
+        "CancelWork",
+        "CancelAllWork",
+        "Stop",
+        "Resume",
+        "Complete",
+        "Reset",
+        "Destroy",
+        "TaskCreate",
+        "TaskUpdate",
+        "SubscribeAgentEvents",
+        "SubscribeAllAgentEvents",
+        "SubscribeMobEvents",
+        "RecordOperatorActionProvenance",
+        "SetSpawnPolicy",
+        "Shutdown",
+        "ForceCancel",
+    ] {
+        assert!(
+            transitioned_inputs.contains(required),
+            "MobMachine should model mutating runtime command {required} with at least one transition",
+        );
+    }
+}
+
+#[test]
 fn every_canonical_input_variant_has_transition_coverage() {
     for schema in canonical_machine_schemas() {
         let input_names = schema

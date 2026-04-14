@@ -1379,19 +1379,6 @@ impl CommsRuntime {
         self.unregister_trusted_peer(&public_key.to_peer_id()).await
     }
 
-    /// Legacy local trust insertion helper.
-    ///
-    /// This updates router-visible trust data only. It does not synchronize the
-    /// inbox-owned peer authority, so runtime paths that rely on classified
-    /// ingress should prefer [`Self::register_trusted_peer`] or the trait-level
-    /// `add_trusted_peer` seam instead.
-    #[deprecated(
-        note = "use register_trusted_peer() for canonical runtime trust mutation; upsert_trusted_peer() does not synchronize inbox-owned peer authority"
-    )]
-    pub fn upsert_trusted_peer(&self, peer: TrustedPeer) {
-        self.router.add_trusted_peer(peer);
-    }
-
     /// Update the inproc registry entry with friendly metadata.
     ///
     /// Call this after construction to advertise [`PeerMeta`] to other

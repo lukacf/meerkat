@@ -110,6 +110,26 @@ impl<'de> Deserialize<'de> for KernelValue {
     }
 }
 
+fn option_some(value: KernelValue) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([(
+        KernelValue::String("value".to_string()),
+        value,
+    )]))
+}
+
+fn option_map_matches_inner(value: &KernelValue, inner_ty: &TypeRef) -> bool {
+    let KernelValue::Map(entries) = value else {
+        return false;
+    };
+    if entries.len() != 1 {
+        return false;
+    }
+    let Some(inner) = entries.get(&KernelValue::String("value".to_string())) else {
+        return false;
+    };
+    value_matches_type(inner, inner_ty)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelState {
     pub phase: String,
@@ -797,7 +817,12 @@ impl GeneratedMachineKernel {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 Ok(map.get(&key).cloned().unwrap_or(KernelValue::None))
             }
-            Expr::Some(inner) => self.eval_expr(state, bindings, inner, transition_name),
+            Expr::Some(inner) => Ok(option_some(self.eval_expr(
+                state,
+                bindings,
+                inner,
+                transition_name,
+            )?)),
             Expr::Call { helper, args } => {
                 let helper = self
                     .schema
@@ -990,7 +1015,9 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
             true
         }
         (KernelValue::None, TypeRef::Option(_)) => true,
-        (inner, TypeRef::Option(inner_ty)) => value_matches_type(inner, inner_ty),
+        (inner, TypeRef::Option(inner_ty)) => {
+            value_matches_type(inner, inner_ty) || option_map_matches_inner(inner, inner_ty)
+        }
         (KernelValue::Set(values), TypeRef::Set(inner_ty)) => values
             .iter()
             .all(|value| value_matches_type(value, inner_ty)),

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::{KernelInput, KernelValue};
+use meerkat_machine_kernels::{KernelInput, KernelSignal, KernelValue};
 
 fn string(value: &str) -> KernelValue {
     KernelValue::String(value.to_string())
@@ -34,6 +34,16 @@ fn input(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
     }
 }
 
+fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
+    KernelSignal {
+        variant: variant.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(field, value)| (field.to_string(), value))
+            .collect(),
+    }
+}
+
 fn map_value<'a>(
     state: &'a meerkat_machine_kernels::KernelState,
     field: &str,
@@ -46,9 +56,9 @@ fn map_value<'a>(
 }
 
 fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
-    let initialized = meerkat::transition(
+    let initialized = meerkat::transition_signal(
         &meerkat::initial_state().expect("initial state"),
-        &input("Initialize", vec![]),
+        &signal("Initialize", vec![]),
     )
     .expect("initialize")
     .next_state;
@@ -77,9 +87,9 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 fn peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot() {
     let state = attached_meerkat_state();
     let peer_key = key("agent-a", "ed25519:a");
-    let reconciled = meerkat::transition(
+    let reconciled = meerkat::transition_signal(
         &state,
-        &input(
+        &signal(
             "ReconcileResolvedDirectory",
             vec![
                 (
@@ -115,9 +125,9 @@ fn peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot() {
 fn peer_directory_reachability_kernel_records_send_failures_for_resolved_peers() {
     let state = attached_meerkat_state();
     let peer_key = key("agent-a", "ed25519:a");
-    let reconciled = meerkat::transition(
+    let reconciled = meerkat::transition_signal(
         &state,
-        &input(
+        &signal(
             "ReconcileResolvedDirectory",
             vec![
                 (
@@ -138,9 +148,9 @@ fn peer_directory_reachability_kernel_records_send_failures_for_resolved_peers()
     .expect("reconcile directory")
     .next_state;
 
-    let failed = meerkat::transition(
+    let failed = meerkat::transition_signal(
         &reconciled,
-        &input(
+        &signal(
             "RecordSendFailed",
             vec![
                 ("key", peer_key.clone()),

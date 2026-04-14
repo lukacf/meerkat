@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::{KernelInput, KernelValue};
+use meerkat_machine_kernels::{KernelInput, KernelSignal, KernelValue};
 
 fn string(value: &str) -> KernelValue {
     KernelValue::String(value.to_string())
@@ -27,10 +27,20 @@ fn input(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
     }
 }
 
+fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
+    KernelSignal {
+        variant: variant.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(field, value)| (field.to_string(), value))
+            .collect(),
+    }
+}
+
 fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
-    let initialized = meerkat::transition(
+    let initialized = meerkat::transition_signal(
         &meerkat::initial_state().expect("initial state"),
-        &input("Initialize", vec![]),
+        &signal("Initialize", vec![]),
     )
     .expect("initialize")
     .next_state;
@@ -58,9 +68,9 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 #[test]
 fn session_tool_visibility_kernel_promotes_staged_filter_at_boundary() {
     let attached = attached_meerkat_state();
-    let running = meerkat::transition(
+    let running = meerkat::transition_signal(
         &attached,
-        &input(
+        &signal(
             "SubmitMobWork",
             vec![
                 ("agent_runtime_id", string("runtime-7")),
@@ -71,9 +81,9 @@ fn session_tool_visibility_kernel_promotes_staged_filter_at_boundary() {
     )
     .expect("submit work")
     .next_state;
-    let staged = meerkat::transition(
+    let staged = meerkat::transition_signal(
         &running,
-        &input(
+        &signal(
             "StagePersistentFilter",
             vec![
                 ("filter", tool_filter_all()),
@@ -96,9 +106,9 @@ fn session_tool_visibility_kernel_promotes_staged_filter_at_boundary() {
         Some(&KernelValue::U64(0))
     );
 
-    let promoted = meerkat::transition(
+    let promoted = meerkat::transition_signal(
         &staged,
-        &input("BoundaryApplied", vec![("revision", KernelValue::U64(1))]),
+        &signal("BoundaryApplied", vec![("revision", KernelValue::U64(1))]),
     )
     .expect("promote staged visibility");
 
@@ -121,9 +131,9 @@ fn session_tool_visibility_kernel_promotes_staged_filter_at_boundary() {
 #[test]
 fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state() {
     let attached = attached_meerkat_state();
-    let requested = meerkat::transition(
+    let requested = meerkat::transition_signal(
         &attached,
-        &input(
+        &signal(
             "RequestDeferredTools",
             vec![
                 (

@@ -21,6 +21,7 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
+meerkat-machine-derive = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 tracing = { workspace = true }
 meerkat-store = { workspace = true, optional = true }

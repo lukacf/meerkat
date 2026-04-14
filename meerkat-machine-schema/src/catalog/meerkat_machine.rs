@@ -3,10 +3,15 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldSchema, Guard,
     HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding,
-    StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
+    StateSchema, TransitionSchema, TypeRef, Update, VariantSchema, machine::TriggerKind,
 };
 
 pub fn meerkat_machine() -> MachineSchema {
+    let mut trigger_variants = direct_meerkat_trigger_variants();
+    trigger_variants.extend(absorbed_meerkat_input_variants());
+    let (input_variants, signal_variants) =
+        split_variants(trigger_variants, is_meerkat_runtime_input_variant);
+
     MachineSchema {
         machine: "MeerkatMachine".into(),
         version: 1,
@@ -135,131 +140,11 @@ pub fn meerkat_machine() -> MachineSchema {
         },
         inputs: EnumSchema {
             name: "MeerkatMachineInput".into(),
-            variants: {
-                let mut variants = vec![
-                    variant("Initialize"),
-                    VariantSchema {
-                        name: "RegisterSession".into(),
-                        fields: vec![field("session_id", TypeRef::Named("SessionId".into()))],
-                    },
-                    VariantSchema {
-                        name: "UnregisterSession".into(),
-                        fields: vec![field("session_id", TypeRef::Named("SessionId".into()))],
-                    },
-                    VariantSchema {
-                        name: "PrepareBindings".into(),
-                        fields: vec![
-                            field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
-                            field("fence_token", TypeRef::Named("FenceToken".into())),
-                            field("generation", TypeRef::Named("Generation".into())),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "SubmitMobWork".into(),
-                        fields: vec![
-                            field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
-                            field("fence_token", TypeRef::Named("FenceToken".into())),
-                            field("work_id", TypeRef::Named("WorkId".into())),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "SetPeerIngressContext".into(),
-                        fields: vec![field("keep_alive", TypeRef::Bool)],
-                    },
-                    VariantSchema {
-                        name: "NotifyDrainExited".into(),
-                        fields: vec![field("reason", TypeRef::String)],
-                    },
-                    VariantSchema {
-                        name: "ReconcileResolvedDirectory".into(),
-                        fields: vec![
-                            field("keys", TypeRef::Set(Box::new(named("ReachabilityKey")))),
-                            field(
-                                "reachability",
-                                TypeRef::Map(
-                                    Box::new(named("ReachabilityKey")),
-                                    Box::new(named("PeerReachability")),
-                                ),
-                            ),
-                            field(
-                                "last_reason",
-                                TypeRef::Map(
-                                    Box::new(named("ReachabilityKey")),
-                                    Box::new(TypeRef::Option(Box::new(named(
-                                        "PeerReachabilityReason",
-                                    )))),
-                                ),
-                            ),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "RecordSendSucceeded".into(),
-                        fields: vec![field("key", named("ReachabilityKey"))],
-                    },
-                    VariantSchema {
-                        name: "RecordSendFailed".into(),
-                        fields: vec![
-                            field("key", named("ReachabilityKey")),
-                            field("reason", named("PeerReachabilityReason")),
-                        ],
-                    },
-                    variant("InterruptCurrentRun"),
-                    variant("CancelAfterBoundary"),
-                    VariantSchema {
-                        name: "StagePersistentFilter".into(),
-                        fields: vec![
-                            field("filter", named("ToolFilter")),
-                            field(
-                                "witnesses",
-                                TypeRef::Map(
-                                    Box::new(TypeRef::String),
-                                    Box::new(named("ToolVisibilityWitness")),
-                                ),
-                            ),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "RequestDeferredTools".into(),
-                        fields: vec![
-                            field("names", TypeRef::Set(Box::new(TypeRef::String))),
-                            field(
-                                "witnesses",
-                                TypeRef::Map(
-                                    Box::new(TypeRef::String),
-                                    Box::new(named("ToolVisibilityWitness")),
-                                ),
-                            ),
-                        ],
-                    },
-                    VariantSchema {
-                        name: "PublishCommittedVisibleSet".into(),
-                        fields: vec![field("revision", TypeRef::U64)],
-                    },
-                    VariantSchema {
-                        name: "BoundaryApplied".into(),
-                        fields: vec![field("revision", TypeRef::U64)],
-                    },
-                    VariantSchema {
-                        name: "RunCompleted".into(),
-                        fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
-                    },
-                    VariantSchema {
-                        name: "RunFailed".into(),
-                        fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
-                    },
-                    VariantSchema {
-                        name: "RunCancelled".into(),
-                        fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
-                    },
-                    variant("Recover"),
-                    variant("Retire"),
-                    variant("Reset"),
-                    variant("StopRuntimeExecutor"),
-                    variant("Destroy"),
-                ];
-                variants.extend(absorbed_meerkat_input_variants());
-                variants
-            },
+            variants: input_variants,
+        },
+        signals: EnumSchema {
+            name: "MeerkatMachineSignal".into(),
+            variants: signal_variants,
         },
         effects: EnumSchema {
             name: "MeerkatMachineEffect".into(),
@@ -476,6 +361,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "Initialize".into(),
                 from: vec!["Initializing".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("Initialize"),
                     variant: "Initialize".into(),
                     bindings: vec![],
                 },
@@ -488,6 +374,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RegisterSession".into(),
                 from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RegisterSession"),
                     variant: "RegisterSession".into(),
                     bindings: vec!["session_id".into()],
                 },
@@ -500,6 +387,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "UnregisterSession".into(),
                 from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("UnregisterSession"),
                     variant: "UnregisterSession".into(),
                     bindings: vec!["session_id".into()],
                 },
@@ -515,6 +403,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "StagePersistentFilterAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("StagePersistentFilter"),
                     variant: "StagePersistentFilter".into(),
                     bindings: vec!["filter".into(), "witnesses".into()],
                 },
@@ -548,6 +437,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "StagePersistentFilterRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("StagePersistentFilter"),
                     variant: "StagePersistentFilter".into(),
                     bindings: vec!["filter".into(), "witnesses".into()],
                 },
@@ -581,6 +471,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RequestDeferredToolsAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RequestDeferredTools"),
                     variant: "RequestDeferredTools".into(),
                     bindings: vec!["names".into(), "witnesses".into()],
                 },
@@ -618,6 +509,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RequestDeferredToolsRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RequestDeferredTools"),
                     variant: "RequestDeferredTools".into(),
                     bindings: vec!["names".into(), "witnesses".into()],
                 },
@@ -655,6 +547,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "PrepareBindings".into(),
                 from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("PrepareBindings"),
                     variant: "PrepareBindings".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -683,6 +576,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "SetPeerIngressContextAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("SetPeerIngressContext"),
                     variant: "SetPeerIngressContext".into(),
                     bindings: vec!["keep_alive".into()],
                 },
@@ -704,6 +598,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "SetPeerIngressContextRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("SetPeerIngressContext"),
                     variant: "SetPeerIngressContext".into(),
                     bindings: vec!["keep_alive".into()],
                 },
@@ -725,6 +620,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "NotifyDrainExitedAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("NotifyDrainExited"),
                     variant: "NotifyDrainExited".into(),
                     bindings: vec!["reason".into()],
                 },
@@ -740,6 +636,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "NotifyDrainExitedRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("NotifyDrainExited"),
                     variant: "NotifyDrainExited".into(),
                     bindings: vec!["reason".into()],
                 },
@@ -755,6 +652,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "ReconcileResolvedDirectoryAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("ReconcileResolvedDirectory"),
                     variant: "ReconcileResolvedDirectory".into(),
                     bindings: vec!["keys".into(), "reachability".into(), "last_reason".into()],
                 },
@@ -791,6 +689,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "ReconcileResolvedDirectoryRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("ReconcileResolvedDirectory"),
                     variant: "ReconcileResolvedDirectory".into(),
                     bindings: vec!["keys".into(), "reachability".into(), "last_reason".into()],
                 },
@@ -827,6 +726,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RecordSendSucceededAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RecordSendSucceeded"),
                     variant: "RecordSendSucceeded".into(),
                     bindings: vec!["key".into()],
                 },
@@ -850,6 +750,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RecordSendSucceededRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RecordSendSucceeded"),
                     variant: "RecordSendSucceeded".into(),
                     bindings: vec!["key".into()],
                 },
@@ -873,6 +774,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RecordSendFailedAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RecordSendFailed"),
                     variant: "RecordSendFailed".into(),
                     bindings: vec!["key".into(), "reason".into()],
                 },
@@ -896,6 +798,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RecordSendFailedRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RecordSendFailed"),
                     variant: "RecordSendFailed".into(),
                     bindings: vec!["key".into(), "reason".into()],
                 },
@@ -919,6 +822,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "BeginRunFromIdle".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("SubmitMobWork"),
                     variant: "SubmitMobWork".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -949,6 +853,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "InterruptCurrentRun".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("InterruptCurrentRun"),
                     variant: "InterruptCurrentRun".into(),
                     bindings: vec![],
                 },
@@ -973,6 +878,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "CancelAfterBoundary".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("CancelAfterBoundary"),
                     variant: "CancelAfterBoundary".into(),
                     bindings: vec![],
                 },
@@ -991,6 +897,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "BoundaryAppliedPromote".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("BoundaryApplied"),
                     variant: "BoundaryApplied".into(),
                     bindings: vec!["revision".into()],
                 },
@@ -1038,6 +945,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "BoundaryAppliedNoop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("BoundaryApplied"),
                     variant: "BoundaryApplied".into(),
                     bindings: vec!["revision".into()],
                 },
@@ -1071,6 +979,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "PublishCommittedVisibleSetAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
                     variant: "PublishCommittedVisibleSet".into(),
                     bindings: vec!["revision".into()],
                 },
@@ -1089,6 +998,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "PublishCommittedVisibleSetRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("PublishCommittedVisibleSet"),
                     variant: "PublishCommittedVisibleSet".into(),
                     bindings: vec!["revision".into()],
                 },
@@ -1107,6 +1017,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RunCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RunCompleted"),
                     variant: "RunCompleted".into(),
                     bindings: vec!["work_id".into()],
                 },
@@ -1119,6 +1030,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RunFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RunFailed"),
                     variant: "RunFailed".into(),
                     bindings: vec!["work_id".into()],
                 },
@@ -1131,6 +1043,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RunCancelled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("RunCancelled"),
                     variant: "RunCancelled".into(),
                     bindings: vec!["work_id".into()],
                 },
@@ -1143,6 +1056,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "Recover".into(),
                 from: vec!["Idle".into(), "Stopped".into(), "Retired".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("Recover"),
                     variant: "Recover".into(),
                     bindings: vec![],
                 },
@@ -1155,6 +1069,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "RetireRequestedFromIdle".into(),
                 from: vec!["Attached".into(), "Running".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("Retire"),
                     variant: "Retire".into(),
                     bindings: vec![],
                 },
@@ -1172,6 +1087,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Recovering".into(),
                 ],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("Reset"),
                     variant: "Reset".into(),
                     bindings: vec![],
                 },
@@ -1221,6 +1137,7 @@ pub fn meerkat_machine() -> MachineSchema {
                 name: "StopRuntimeExecutor".into(),
                 from: vec!["Attached".into(), "Retired".into(), "Recovering".into()],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("StopRuntimeExecutor"),
                     variant: "StopRuntimeExecutor".into(),
                     bindings: vec![],
                 },
@@ -1256,6 +1173,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     "Stopped".into(),
                 ],
                 on: InputMatch {
+                    kind: meerkat_trigger_kind("Destroy"),
                     variant: "Destroy".into(),
                     bindings: vec![],
                 },
@@ -1639,6 +1557,184 @@ fn routed_disposition(effect_variant: &str, consumers: &[&str]) -> EffectDisposi
         },
         handoff_protocol: None,
     }
+}
+
+fn direct_meerkat_trigger_variants() -> Vec<VariantSchema> {
+    vec![
+        variant("Initialize"),
+        VariantSchema {
+            name: "RegisterSession".into(),
+            fields: vec![field("session_id", TypeRef::Named("SessionId".into()))],
+        },
+        VariantSchema {
+            name: "UnregisterSession".into(),
+            fields: vec![field("session_id", TypeRef::Named("SessionId".into()))],
+        },
+        VariantSchema {
+            name: "PrepareBindings".into(),
+            fields: vec![
+                field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
+                field("fence_token", TypeRef::Named("FenceToken".into())),
+                field("generation", TypeRef::Named("Generation".into())),
+            ],
+        },
+        VariantSchema {
+            name: "SubmitMobWork".into(),
+            fields: vec![
+                field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
+                field("fence_token", TypeRef::Named("FenceToken".into())),
+                field("work_id", TypeRef::Named("WorkId".into())),
+            ],
+        },
+        VariantSchema {
+            name: "SetPeerIngressContext".into(),
+            fields: vec![field("keep_alive", TypeRef::Bool)],
+        },
+        VariantSchema {
+            name: "NotifyDrainExited".into(),
+            fields: vec![field("reason", TypeRef::String)],
+        },
+        VariantSchema {
+            name: "ReconcileResolvedDirectory".into(),
+            fields: vec![
+                field("keys", TypeRef::Set(Box::new(named("ReachabilityKey")))),
+                field(
+                    "reachability",
+                    TypeRef::Map(
+                        Box::new(named("ReachabilityKey")),
+                        Box::new(named("PeerReachability")),
+                    ),
+                ),
+                field(
+                    "last_reason",
+                    TypeRef::Map(
+                        Box::new(named("ReachabilityKey")),
+                        Box::new(TypeRef::Option(Box::new(named("PeerReachabilityReason")))),
+                    ),
+                ),
+            ],
+        },
+        VariantSchema {
+            name: "RecordSendSucceeded".into(),
+            fields: vec![field("key", named("ReachabilityKey"))],
+        },
+        VariantSchema {
+            name: "RecordSendFailed".into(),
+            fields: vec![
+                field("key", named("ReachabilityKey")),
+                field("reason", named("PeerReachabilityReason")),
+            ],
+        },
+        variant("InterruptCurrentRun"),
+        variant("CancelAfterBoundary"),
+        VariantSchema {
+            name: "StagePersistentFilter".into(),
+            fields: vec![
+                field("filter", named("ToolFilter")),
+                field(
+                    "witnesses",
+                    TypeRef::Map(
+                        Box::new(TypeRef::String),
+                        Box::new(named("ToolVisibilityWitness")),
+                    ),
+                ),
+            ],
+        },
+        VariantSchema {
+            name: "RequestDeferredTools".into(),
+            fields: vec![
+                field("names", TypeRef::Set(Box::new(TypeRef::String))),
+                field(
+                    "witnesses",
+                    TypeRef::Map(
+                        Box::new(TypeRef::String),
+                        Box::new(named("ToolVisibilityWitness")),
+                    ),
+                ),
+            ],
+        },
+        VariantSchema {
+            name: "PublishCommittedVisibleSet".into(),
+            fields: vec![field("revision", TypeRef::U64)],
+        },
+        VariantSchema {
+            name: "BoundaryApplied".into(),
+            fields: vec![field("revision", TypeRef::U64)],
+        },
+        VariantSchema {
+            name: "RunCompleted".into(),
+            fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
+        },
+        VariantSchema {
+            name: "RunFailed".into(),
+            fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
+        },
+        VariantSchema {
+            name: "RunCancelled".into(),
+            fields: vec![field("work_id", TypeRef::Named("WorkId".into()))],
+        },
+        variant("Recover"),
+        variant("Retire"),
+        variant("Reset"),
+        variant("StopRuntimeExecutor"),
+        variant("Destroy"),
+    ]
+}
+
+fn split_variants(
+    variants: Vec<VariantSchema>,
+    keep_input: impl Fn(&str) -> bool,
+) -> (Vec<VariantSchema>, Vec<VariantSchema>) {
+    let mut inputs = Vec::new();
+    let mut signals = Vec::new();
+    for variant in variants {
+        if keep_input(&variant.name) {
+            inputs.push(variant);
+        } else {
+            signals.push(variant);
+        }
+    }
+    (inputs, signals)
+}
+
+fn is_meerkat_runtime_input_variant(variant: &str) -> bool {
+    matches!(
+        variant,
+        "RegisterSession"
+            | "UnregisterSession"
+            | "EnsureSessionWithExecutor"
+            | "SetSilentIntents"
+            | "InterruptCurrentRun"
+            | "CancelAfterBoundary"
+            | "StopRuntimeExecutor"
+            | "ContainsSession"
+            | "SessionHasExecutor"
+            | "SessionHasComms"
+            | "OpsLifecycleRegistry"
+            | "PrepareBindings"
+            | "InputState"
+            | "ListActiveInputs"
+            | "PublishCommittedVisibleSet"
+            | "Ingest"
+            | "PublishEvent"
+            | "Retire"
+            | "Recycle"
+            | "Reset"
+            | "Recover"
+            | "Destroy"
+            | "RuntimeState"
+            | "LoadBoundaryReceipt"
+            | "SetPeerIngressContext"
+            | "NotifyDrainExited"
+            | "AcceptWithCompletion"
+            | "AcceptWithoutWake"
+            | "AbortAll"
+            | "Abort"
+            | "Wait"
+            | "Prepare"
+            | "Commit"
+            | "Fail"
+    )
 }
 
 fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
@@ -2092,6 +2188,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             "Stopped".into(),
         ],
         on: InputMatch {
+            kind: meerkat_trigger_kind("Recycle"),
             variant: "Recycle".into(),
             bindings: vec![],
         },
@@ -2158,6 +2255,7 @@ fn self_loop_transition_with(
         name: name.into(),
         from: vec![phase.into()],
         on: InputMatch {
+            kind: meerkat_trigger_kind(variant),
             variant: variant.into(),
             bindings: bindings.into_iter().map(|binding| binding.into()).collect(),
         },
@@ -2165,6 +2263,14 @@ fn self_loop_transition_with(
         updates,
         to: phase.into(),
         emit,
+    }
+}
+
+fn meerkat_trigger_kind(variant: &str) -> TriggerKind {
+    if is_meerkat_runtime_input_variant(variant) {
+        TriggerKind::Input
+    } else {
+        TriggerKind::Signal
     }
 }
 

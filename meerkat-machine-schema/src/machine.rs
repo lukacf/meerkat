@@ -8,6 +8,7 @@ pub struct MachineSchema {
     pub rust: RustBinding,
     pub state: StateSchema,
     pub inputs: EnumSchema,
+    pub signals: EnumSchema,
     pub effects: EnumSchema,
     pub helpers: Vec<HelperSchema>,
     pub derived: Vec<HelperSchema>,
@@ -25,6 +26,7 @@ impl MachineSchema {
     pub fn validate(&self) -> Result<(), MachineSchemaError> {
         let phase_names = self.state.phase.variants_by_name()?;
         let input_variants = self.inputs.variants_by_name()?;
+        let signal_variants = self.signals.variants_by_name()?;
         let effect_variants = self.effects.variants_by_name()?;
         let field_names = self.state.fields_by_name()?;
         let helper_names = unique_names(
@@ -65,6 +67,7 @@ impl MachineSchema {
                 &phase_names,
                 &field_names,
                 &input_variants,
+                &signal_variants,
                 &effect_variants,
                 &helper_names,
                 &IndexSet::new(),
@@ -89,10 +92,18 @@ impl MachineSchema {
                     });
                 }
             }
-            if !input_variants.contains(&transition.on.variant) {
-                return Err(MachineSchemaError::UnknownInputVariant {
-                    variant: transition.on.variant.clone(),
-                });
+            match transition.on.kind {
+                TriggerKind::Input if !input_variants.contains(&transition.on.variant) => {
+                    return Err(MachineSchemaError::UnknownInputVariant {
+                        variant: transition.on.variant.clone(),
+                    });
+                }
+                TriggerKind::Signal if !signal_variants.contains(&transition.on.variant) => {
+                    return Err(MachineSchemaError::UnknownSignalVariant {
+                        variant: transition.on.variant.clone(),
+                    });
+                }
+                _ => {}
             }
             if !phase_names.contains(&transition.to) {
                 return Err(MachineSchemaError::UnknownPhase {
@@ -110,6 +121,7 @@ impl MachineSchema {
                     &phase_names,
                     &field_names,
                     &input_variants,
+                    &signal_variants,
                     &effect_variants,
                     &helper_names,
                     &bindings,
@@ -120,6 +132,7 @@ impl MachineSchema {
                     &phase_names,
                     &field_names,
                     &input_variants,
+                    &signal_variants,
                     &effect_variants,
                     &helper_names,
                     &bindings,
@@ -136,6 +149,7 @@ impl MachineSchema {
                         &phase_names,
                         &field_names,
                         &input_variants,
+                        &signal_variants,
                         &effect_variants,
                         &helper_names,
                         &bindings,
@@ -331,18 +345,27 @@ pub struct InvariantSchema {
 pub struct TransitionSchema {
     pub name: String,
     pub from: Vec<String>,
-    pub on: InputMatch,
+    pub on: TriggerMatch,
     pub guards: Vec<Guard>,
     pub updates: Vec<Update>,
     pub to: String,
     pub emit: Vec<EffectEmit>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerKind {
+    Input,
+    Signal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputMatch {
+pub struct TriggerMatch {
+    pub kind: TriggerKind,
     pub variant: String,
     pub bindings: Vec<String>,
 }
+
+pub type InputMatch = TriggerMatch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Guard {
@@ -420,6 +443,7 @@ impl Update {
         phase_names: &IndexSet<&String>,
         field_names: &IndexSet<&str>,
         input_variants: &IndexSet<&String>,
+        signal_variants: &IndexSet<&String>,
         effect_variants: &IndexSet<&String>,
         helper_names: &IndexSet<&str>,
         bindings: &IndexSet<&str>,
@@ -439,6 +463,7 @@ impl Update {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -455,6 +480,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -463,6 +489,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -481,6 +508,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -496,6 +524,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -510,6 +539,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -521,6 +551,7 @@ impl Update {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         &nested_bindings,
@@ -536,6 +567,7 @@ impl Update {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -545,6 +577,7 @@ impl Update {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -555,6 +588,7 @@ impl Update {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -641,6 +675,7 @@ impl Expr {
         phase_names: &IndexSet<&String>,
         field_names: &IndexSet<&str>,
         input_variants: &IndexSet<&String>,
+        signal_variants: &IndexSet<&String>,
         effect_variants: &IndexSet<&String>,
         helper_names: &IndexSet<&str>,
         bindings: &IndexSet<&str>,
@@ -660,6 +695,7 @@ impl Expr {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -688,7 +724,10 @@ impl Expr {
                 }
             }
             Self::Variant(variant) => {
-                if !input_variants.contains(variant) && !effect_variants.contains(variant) {
+                if !input_variants.contains(variant)
+                    && !signal_variants.contains(variant)
+                    && !effect_variants.contains(variant)
+                {
                     return Err(MachineSchemaError::UnknownVariant {
                         variant: variant.clone(),
                     });
@@ -703,6 +742,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -711,6 +751,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -719,6 +760,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -732,6 +774,7 @@ impl Expr {
                 phase_names,
                 field_names,
                 input_variants,
+                signal_variants,
                 effect_variants,
                 helper_names,
                 bindings,
@@ -742,6 +785,7 @@ impl Expr {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -760,6 +804,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -768,6 +813,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -778,6 +824,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -786,6 +833,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -796,6 +844,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -804,6 +853,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -814,6 +864,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -824,6 +875,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -832,6 +884,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -848,6 +901,7 @@ impl Expr {
                         phase_names,
                         field_names,
                         input_variants,
+                        signal_variants,
                         effect_variants,
                         helper_names,
                         bindings,
@@ -864,6 +918,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     bindings,
@@ -874,6 +929,7 @@ impl Expr {
                     phase_names,
                     field_names,
                     input_variants,
+                    signal_variants,
                     effect_variants,
                     helper_names,
                     &nested_bindings,
@@ -910,6 +966,7 @@ pub enum MachineSchemaError {
     UnknownPhase { phase: String },
     UnknownField { field: String },
     UnknownInputVariant { variant: String },
+    UnknownSignalVariant { variant: String },
     UnknownEffectVariant { variant: String },
     UnknownHelper { helper: String },
     UnknownBinding { binding: String },
@@ -930,6 +987,9 @@ impl fmt::Display for MachineSchemaError {
             Self::UnknownField { field } => write!(f, "unknown field `{field}`"),
             Self::UnknownInputVariant { variant } => {
                 write!(f, "unknown input variant `{variant}`")
+            }
+            Self::UnknownSignalVariant { variant } => {
+                write!(f, "unknown signal variant `{variant}`")
             }
             Self::UnknownEffectVariant { variant } => {
                 write!(f, "unknown effect variant `{variant}`")

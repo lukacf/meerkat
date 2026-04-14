@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_machine_schema::{
-    EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TypeRef, Update,
+    EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TriggerKind,
+    TypeRef, Update,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -143,6 +144,12 @@ pub struct KernelInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelSignal {
+    pub variant: String,
+    pub fields: BTreeMap<String, KernelValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelEffect {
     pub variant: String,
     pub fields: BTreeMap<String, KernelValue>,
@@ -159,8 +166,16 @@ pub struct TransitionOutcome {
 pub enum TransitionRefusal {
     #[error("unknown input variant `{variant}` for machine `{machine}`")]
     UnknownInputVariant { machine: String, variant: String },
+    #[error("unknown signal variant `{variant}` for machine `{machine}`")]
+    UnknownSignalVariant { machine: String, variant: String },
     #[error("invalid input payload for machine `{machine}` variant `{variant}`: {reason}")]
     InvalidInputPayload {
+        machine: String,
+        variant: String,
+        reason: String,
+    },
+    #[error("invalid signal payload for machine `{machine}` variant `{variant}`: {reason}")]
+    InvalidSignalPayload {
         machine: String,
         variant: String,
         reason: String,
@@ -229,28 +244,66 @@ impl GeneratedMachineKernel {
         state: &KernelState,
         input: &KernelInput,
     ) -> Result<TransitionOutcome, TransitionRefusal> {
-        let input_variant = self
-            .schema
-            .inputs
-            .variant_named(&input.variant)
-            .map_err(|_| TransitionRefusal::UnknownInputVariant {
-                machine: self.schema.machine.clone(),
-                variant: input.variant.clone(),
-            })?;
+        self.transition_with_kind(state, TriggerKind::Input, &input.variant, &input.fields)
+    }
 
-        for field in &input_variant.fields {
-            let Some(value) = input.fields.get(&field.name) else {
-                return Err(TransitionRefusal::InvalidInputPayload {
+    pub fn transition_signal(
+        &self,
+        state: &KernelState,
+        signal: &KernelSignal,
+    ) -> Result<TransitionOutcome, TransitionRefusal> {
+        self.transition_with_kind(state, TriggerKind::Signal, &signal.variant, &signal.fields)
+    }
+
+    fn transition_with_kind(
+        &self,
+        state: &KernelState,
+        trigger_kind: TriggerKind,
+        variant: &str,
+        fields: &BTreeMap<String, KernelValue>,
+    ) -> Result<TransitionOutcome, TransitionRefusal> {
+        let trigger_variant = match trigger_kind {
+            TriggerKind::Input => self.schema.inputs.variant_named(variant).map_err(|_| {
+                TransitionRefusal::UnknownInputVariant {
                     machine: self.schema.machine.clone(),
-                    variant: input.variant.clone(),
-                    reason: format!("missing field `{}`", field.name),
+                    variant: variant.to_owned(),
+                }
+            })?,
+            TriggerKind::Signal => self.schema.signals.variant_named(variant).map_err(|_| {
+                TransitionRefusal::UnknownSignalVariant {
+                    machine: self.schema.machine.clone(),
+                    variant: variant.to_owned(),
+                }
+            })?,
+        };
+
+        for field in &trigger_variant.fields {
+            let Some(value) = fields.get(&field.name) else {
+                return Err(match trigger_kind {
+                    TriggerKind::Input => TransitionRefusal::InvalidInputPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: format!("missing field `{}`", field.name),
+                    },
+                    TriggerKind::Signal => TransitionRefusal::InvalidSignalPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: format!("missing field `{}`", field.name),
+                    },
                 });
             };
             if !value_matches_type(value, &field.ty) {
-                return Err(TransitionRefusal::InvalidInputPayload {
-                    machine: self.schema.machine.clone(),
-                    variant: input.variant.clone(),
-                    reason: format!("field `{}` does not match declared type", field.name),
+                return Err(match trigger_kind {
+                    TriggerKind::Input => TransitionRefusal::InvalidInputPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: format!("field `{}` does not match declared type", field.name),
+                    },
+                    TriggerKind::Signal => TransitionRefusal::InvalidSignalPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: format!("field `{}` does not match declared type", field.name),
+                    },
                 });
             }
         }
@@ -260,24 +313,31 @@ impl GeneratedMachineKernel {
             if !transition.from.iter().any(|phase| phase == &state.phase) {
                 continue;
             }
-            if transition.on.variant != input.variant {
+            if transition.on.kind != trigger_kind || transition.on.variant != variant {
                 continue;
             }
 
             let mut bindings = BTreeMap::new();
             let mut malformed = false;
             for binding in &transition.on.bindings {
-                let Some(value) = input.fields.get(binding) else {
+                let Some(value) = fields.get(binding) else {
                     malformed = true;
                     break;
                 };
                 bindings.insert(binding.clone(), value.clone());
             }
             if malformed {
-                return Err(TransitionRefusal::InvalidInputPayload {
-                    machine: self.schema.machine.clone(),
-                    variant: input.variant.clone(),
-                    reason: "transition binding missing from payload".into(),
+                return Err(match trigger_kind {
+                    TriggerKind::Input => TransitionRefusal::InvalidInputPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: "transition binding missing from payload".into(),
+                    },
+                    TriggerKind::Signal => TransitionRefusal::InvalidSignalPayload {
+                        machine: self.schema.machine.clone(),
+                        variant: variant.to_owned(),
+                        reason: "transition binding missing from payload".into(),
+                    },
                 });
             }
 
@@ -303,14 +363,14 @@ impl GeneratedMachineKernel {
             0 => Err(TransitionRefusal::NoMatchingTransition {
                 machine: self.schema.machine.clone(),
                 phase: state.phase.clone(),
-                variant: input.variant.clone(),
+                variant: variant.to_owned(),
             }),
             1 => {
                 let Some((transition, bindings)) = matches.pop() else {
                     return Err(TransitionRefusal::NoMatchingTransition {
                         machine: self.schema.machine.clone(),
                         phase: state.phase.clone(),
-                        variant: input.variant.clone(),
+                        variant: variant.to_owned(),
                     });
                 };
                 self.apply_transition(state, transition, &bindings)
@@ -318,7 +378,7 @@ impl GeneratedMachineKernel {
             _ => Err(TransitionRefusal::AmbiguousTransition {
                 machine: self.schema.machine.clone(),
                 phase: state.phase.clone(),
-                variant: input.variant.clone(),
+                variant: variant.to_owned(),
                 transitions: matches
                     .iter()
                     .map(|(transition, _)| transition.name.clone())
@@ -1046,7 +1106,9 @@ mod tests {
 
     use meerkat_machine_schema::{canonical_machine_schemas, meerkat_machine, mob_machine};
 
-    use super::{GeneratedMachineKernel, KernelInput, KernelValue, TransitionRefusal};
+    use super::{
+        GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
+    };
 
     #[allow(clippy::expect_used)]
     #[test]
@@ -1084,9 +1146,9 @@ mod tests {
         let kernel = GeneratedMachineKernel::new(meerkat_machine());
         let state = kernel.initial_state().expect("initial state");
         let initialized = kernel
-            .transition(
+            .transition_signal(
                 &state,
-                &KernelInput {
+                &KernelSignal {
                     variant: "Initialize".into(),
                     fields: BTreeMap::new(),
                 },
@@ -1129,9 +1191,9 @@ mod tests {
         let kernel = GeneratedMachineKernel::new(mob_machine());
         let state = kernel.initial_state().expect("initial state");
         let running = kernel
-            .transition(
+            .transition_signal(
                 &state,
-                &KernelInput {
+                &KernelSignal {
                     variant: "Start".into(),
                     fields: BTreeMap::new(),
                 },

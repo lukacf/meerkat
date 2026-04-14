@@ -3,10 +3,16 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MobMachine.
 
-CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, FenceTokenValues, GenerationValues, WorkIdValues
+CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, NatValues, WorkIdValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
+
+OptionAgentIdentityValues == {None} \cup {Some(x) : x \in AgentIdentityValues}
+OptionAgentRuntimeIdValues == {None} \cup {Some(x) : x \in AgentRuntimeIdValues}
+OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
+OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
+OptionWorkIdValues == {None} \cup {Some(x) : x \in WorkIdValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]

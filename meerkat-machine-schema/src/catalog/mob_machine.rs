@@ -3,10 +3,14 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldSchema, Guard,
     InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    TransitionSchema, TypeRef, Update, VariantSchema, machine::TriggerKind,
 };
 
 pub fn mob_machine() -> MachineSchema {
+    let mut trigger_variants = direct_mob_trigger_variants();
+    trigger_variants.extend(absorbed_mob_input_variants());
+    let (input_variants, signal_variants) = split_mob_variants(trigger_variants);
+
     MachineSchema {
         machine: "MobMachine".into(),
         version: 1,
@@ -83,59 +87,11 @@ pub fn mob_machine() -> MachineSchema {
         },
         inputs: EnumSchema {
             name: "MobMachineInput".into(),
-            variants: {
-                let mut variants = vec![
-                    variant("Start"),
-                    VariantSchema {
-                        name: "Spawn".into(),
-                        fields: identity_runtime_fields(),
-                    },
-                    VariantSchema {
-                        name: "ObserveRuntimeReady".into(),
-                        fields: runtime_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "SubmitWork".into(),
-                        fields: work_submission_fields(),
-                    },
-                    VariantSchema {
-                        name: "ObserveWorkCompleted".into(),
-                        fields: work_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "ObserveWorkFailed".into(),
-                        fields: work_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "ObserveWorkCancelled".into(),
-                        fields: work_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "RetireMember".into(),
-                        fields: runtime_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "ObserveRuntimeRetired".into(),
-                        fields: runtime_observation_fields(),
-                    },
-                    VariantSchema {
-                        name: "ResetMember".into(),
-                        fields: identity_runtime_fields(),
-                    },
-                    VariantSchema {
-                        name: "RespawnMember".into(),
-                        fields: identity_runtime_fields(),
-                    },
-                    variant("DestroyMob"),
-                    VariantSchema {
-                        name: "ObserveRuntimeDestroyed".into(),
-                        fields: runtime_observation_fields(),
-                    },
-                    variant("MarkCompleted"),
-                ];
-                variants.extend(absorbed_mob_input_variants());
-                variants
-            },
+            variants: input_variants,
+        },
+        signals: EnumSchema {
+            name: "MobMachineSignal".into(),
+            variants: signal_variants,
         },
         effects: EnumSchema {
             name: "MobMachineEffect".into(),
@@ -263,6 +219,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "Start".into(),
                 from: vec!["Creating".into(), "Stopped".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("Start"),
                     variant: "Start".into(),
                     bindings: vec![],
                 },
@@ -275,6 +232,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "Spawn".into(),
                 from: vec!["Creating".into(), "Running".into(), "Stopped".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("Spawn"),
                     variant: "Spawn".into(),
                     bindings: vec![
                         "agent_identity".into(),
@@ -308,6 +266,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ObserveRuntimeReady".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveRuntimeReady"),
                     variant: "ObserveRuntimeReady".into(),
                     bindings: vec!["agent_runtime_id".into(), "fence_token".into()],
                 },
@@ -320,6 +279,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "SubmitWork".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("SubmitWork"),
                     variant: "SubmitWork".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -348,6 +308,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ObserveWorkCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveWorkCompleted"),
                     variant: "ObserveWorkCompleted".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -364,6 +325,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ObserveWorkFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveWorkFailed"),
                     variant: "ObserveWorkFailed".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -380,6 +342,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ObserveWorkCancelled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveWorkCancelled"),
                     variant: "ObserveWorkCancelled".into(),
                     bindings: vec![
                         "agent_runtime_id".into(),
@@ -396,6 +359,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "RetireMember".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("RetireMember"),
                     variant: "RetireMember".into(),
                     bindings: vec!["agent_runtime_id".into(), "fence_token".into()],
                 },
@@ -408,6 +372,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ObserveRuntimeRetired".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveRuntimeRetired"),
                     variant: "ObserveRuntimeRetired".into(),
                     bindings: vec!["agent_runtime_id".into(), "fence_token".into()],
                 },
@@ -436,6 +401,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "ResetMember".into(),
                 from: vec!["Running".into(), "Stopped".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ResetMember"),
                     variant: "ResetMember".into(),
                     bindings: vec![
                         "agent_identity".into(),
@@ -469,6 +435,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "RespawnMember".into(),
                 from: vec!["Running".into(), "Stopped".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("RespawnMember"),
                     variant: "RespawnMember".into(),
                     bindings: vec![
                         "agent_identity".into(),
@@ -502,6 +469,7 @@ pub fn mob_machine() -> MachineSchema {
                 name: "MarkCompleted".into(),
                 from: vec!["Running".into(), "Stopped".into()],
                 on: InputMatch {
+                    kind: mob_trigger_kind("MarkCompleted"),
                     variant: "MarkCompleted".into(),
                     bindings: vec![],
                 },
@@ -525,6 +493,7 @@ pub fn mob_machine() -> MachineSchema {
                     "Completed".into(),
                 ],
                 on: InputMatch {
+                    kind: mob_trigger_kind("DestroyMob"),
                     variant: "DestroyMob".into(),
                     bindings: vec![],
                 },
@@ -542,6 +511,7 @@ pub fn mob_machine() -> MachineSchema {
                     "Destroyed".into(),
                 ],
                 on: InputMatch {
+                    kind: mob_trigger_kind("ObserveRuntimeDestroyed"),
                     variant: "ObserveRuntimeDestroyed".into(),
                     bindings: vec!["agent_runtime_id".into(), "fence_token".into()],
                 },
@@ -717,6 +687,117 @@ fn routed_disposition(effect_variant: &str, consumers: &[&str]) -> EffectDisposi
         },
         handoff_protocol: None,
     }
+}
+
+fn direct_mob_trigger_variants() -> Vec<VariantSchema> {
+    vec![
+        variant("Start"),
+        VariantSchema {
+            name: "Spawn".into(),
+            fields: identity_runtime_fields(),
+        },
+        VariantSchema {
+            name: "ObserveRuntimeReady".into(),
+            fields: runtime_observation_fields(),
+        },
+        VariantSchema {
+            name: "SubmitWork".into(),
+            fields: work_submission_fields(),
+        },
+        VariantSchema {
+            name: "ObserveWorkCompleted".into(),
+            fields: work_observation_fields(),
+        },
+        VariantSchema {
+            name: "ObserveWorkFailed".into(),
+            fields: work_observation_fields(),
+        },
+        VariantSchema {
+            name: "ObserveWorkCancelled".into(),
+            fields: work_observation_fields(),
+        },
+        VariantSchema {
+            name: "RetireMember".into(),
+            fields: runtime_observation_fields(),
+        },
+        VariantSchema {
+            name: "ObserveRuntimeRetired".into(),
+            fields: runtime_observation_fields(),
+        },
+        VariantSchema {
+            name: "ResetMember".into(),
+            fields: identity_runtime_fields(),
+        },
+        VariantSchema {
+            name: "RespawnMember".into(),
+            fields: identity_runtime_fields(),
+        },
+        variant("DestroyMob"),
+        VariantSchema {
+            name: "ObserveRuntimeDestroyed".into(),
+            fields: runtime_observation_fields(),
+        },
+        variant("MarkCompleted"),
+    ]
+}
+
+fn split_mob_variants(variants: Vec<VariantSchema>) -> (Vec<VariantSchema>, Vec<VariantSchema>) {
+    let mut inputs = Vec::new();
+    let mut signals = Vec::new();
+    for variant in variants {
+        if is_mob_runtime_input_variant(&variant.name) {
+            inputs.push(variant);
+        } else {
+            signals.push(variant);
+        }
+    }
+    (inputs, signals)
+}
+
+fn is_mob_runtime_input_variant(variant: &str) -> bool {
+    matches!(
+        variant,
+        "RunFlow"
+            | "CancelFlow"
+            | "FlowStatus"
+            | "Spawn"
+            | "Retire"
+            | "Respawn"
+            | "RetireAll"
+            | "Wire"
+            | "Unwire"
+            | "ExternalTurn"
+            | "InternalTurn"
+            | "SubmitWork"
+            | "CancelWork"
+            | "CancelAllWork"
+            | "Stop"
+            | "Resume"
+            | "Complete"
+            | "Reset"
+            | "Destroy"
+            | "TaskCreate"
+            | "TaskUpdate"
+            | "TaskList"
+            | "TaskGet"
+            | "McpServerStates"
+            | "RosterSnapshot"
+            | "ListMembers"
+            | "ListMembersIncludingRetiring"
+            | "ListAllMembers"
+            | "MemberStatus"
+            | "SubscribeAgentEvents"
+            | "SubscribeAllAgentEvents"
+            | "SubscribeMobEvents"
+            | "PollEvents"
+            | "ReplayAllEvents"
+            | "RecordOperatorActionProvenance"
+            | "GetMember"
+            | "KickoffBarrierSnapshot"
+            | "SetSpawnPolicy"
+            | "Shutdown"
+            | "ForceCancel"
+    )
 }
 
 fn absorbed_mob_input_variants() -> Vec<VariantSchema> {
@@ -1114,6 +1195,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "KickoffStartedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("KickoffStarted"),
             variant: "KickoffStarted".into(),
             bindings: vec![],
         },
@@ -1136,6 +1218,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "KickoffCallbackPendingRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("KickoffCallbackPending"),
             variant: "KickoffCallbackPending".into(),
             bindings: vec![],
         },
@@ -1158,6 +1241,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "RunFlowRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("RunFlow"),
             variant: "RunFlow".into(),
             bindings: vec![],
         },
@@ -1174,6 +1258,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "StartFlowRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("StartFlow"),
             variant: "StartFlow".into(),
             bindings: vec![],
         },
@@ -1190,6 +1275,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "CreateRunRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("CreateRun"),
             variant: "CreateRun".into(),
             bindings: vec![],
         },
@@ -1206,6 +1292,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "StartRunRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("StartRun"),
             variant: "StartRun".into(),
             bindings: vec![],
         },
@@ -1222,6 +1309,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "RegisterReadyFrameRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("RegisterReadyFrame"),
             variant: "RegisterReadyFrame".into(),
             bindings: vec![],
         },
@@ -1244,6 +1332,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "UnwireRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("Unwire"),
             variant: "Unwire".into(),
             bindings: vec![],
         },
@@ -1266,6 +1355,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "RegisterPendingBodyFrameRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("RegisterPendingBodyFrame"),
             variant: "RegisterPendingBodyFrame".into(),
             bindings: vec![],
         },
@@ -1288,6 +1378,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "CompleteFlowRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("CompleteFlow"),
             variant: "CompleteFlow".into(),
             bindings: vec![],
         },
@@ -1307,6 +1398,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "StartRootFrameRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("StartRootFrame"),
             variant: "StartRootFrame".into(),
             bindings: vec![],
         },
@@ -1329,6 +1421,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "StartBodyFrameRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("StartBodyFrame"),
             variant: "StartBodyFrame".into(),
             bindings: vec![],
         },
@@ -1351,6 +1444,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "FrameTerminatedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("FrameTerminated"),
             variant: "FrameTerminated".into(),
             bindings: vec![],
         },
@@ -1379,6 +1473,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "StartLoopRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("StartLoop"),
             variant: "StartLoop".into(),
             bindings: vec![],
         },
@@ -1410,6 +1505,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "BodyFrameStartedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("BodyFrameStarted"),
             variant: "BodyFrameStarted".into(),
             bindings: vec![],
         },
@@ -1432,6 +1528,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "BodyFrameCompletedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("BodyFrameCompleted"),
             variant: "BodyFrameCompleted".into(),
             bindings: vec![],
         },
@@ -1460,6 +1557,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "BodyFrameFailedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("BodyFrameFailed"),
             variant: "BodyFrameFailed".into(),
             bindings: vec![],
         },
@@ -1488,6 +1586,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "BodyFrameCanceledRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("BodyFrameCanceled"),
             variant: "BodyFrameCanceled".into(),
             bindings: vec![],
         },
@@ -1516,6 +1615,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "UntilConditionFailedRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("UntilConditionFailed"),
             variant: "UntilConditionFailed".into(),
             bindings: vec![],
         },
@@ -1538,6 +1638,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "CancelLoopRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("CancelLoop"),
             variant: "CancelLoop".into(),
             bindings: vec![],
         },
@@ -1560,6 +1661,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "FinishRunRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("FinishRun"),
             variant: "FinishRun".into(),
             bindings: vec![],
         },
@@ -1579,6 +1681,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "RetireRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("Retire"),
             variant: "Retire".into(),
             bindings: vec!["agent_runtime_id".into()],
         },
@@ -1610,6 +1713,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "RetireAllRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("RetireAll"),
             variant: "RetireAll".into(),
             bindings: vec![],
         },
@@ -1626,6 +1730,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "CompleteSpawnRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("CompleteSpawn"),
             variant: "CompleteSpawn".into(),
             bindings: vec![],
         },
@@ -1654,6 +1759,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         name: "DestroyRunning".into(),
         from: vec!["Running".into()],
         on: InputMatch {
+            kind: mob_trigger_kind("Destroy"),
             variant: "Destroy".into(),
             bindings: vec![],
         },
@@ -1711,6 +1817,7 @@ fn mob_self_loop_transition(
         name: format!("{name}{phase}"),
         from: vec![phase.into()],
         on: InputMatch {
+            kind: mob_trigger_kind(variant),
             variant: variant.into(),
             bindings: bindings.into_iter().map(|binding| binding.into()).collect(),
         },
@@ -1718,6 +1825,14 @@ fn mob_self_loop_transition(
         updates,
         to: phase.into(),
         emit,
+    }
+}
+
+fn mob_trigger_kind(variant: &str) -> TriggerKind {
+    if is_mob_runtime_input_variant(variant) {
+        TriggerKind::Input
+    } else {
+        TriggerKind::Signal
     }
 }
 

@@ -40,9 +40,33 @@ use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
     CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
     FeedbackInputRef, Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier,
-    Route, RouteBindingSource, RouteDelivery, SchedulerRule, TransitionSchema, TypeRef, Update,
-    VariantSchema, canonical_machine_schemas,
+    Route, RouteBindingSource, RouteDelivery, RouteTarget, RouteTargetKind, SchedulerRule,
+    TransitionSchema, TypeRef, Update, VariantSchema, canonical_machine_schemas,
 };
+
+fn route_target_variant<'a>(
+    machine: &'a MachineSchema,
+    target: &RouteTarget,
+) -> Option<&'a VariantSchema> {
+    match target.kind {
+        RouteTargetKind::Input => machine.inputs.variant_named(&target.input_variant).ok(),
+        RouteTargetKind::Signal => machine.signals.variant_named(&target.input_variant).ok(),
+    }
+}
+
+fn transition_trigger_variant<'a>(
+    schema: &'a MachineSchema,
+    transition: &TransitionSchema,
+) -> Option<&'a VariantSchema> {
+    match transition.on.kind {
+        meerkat_machine_schema::TriggerKind::Input => {
+            schema.inputs.variant_named(&transition.on.variant).ok()
+        }
+        meerkat_machine_schema::TriggerKind::Signal => {
+            schema.signals.variant_named(&transition.on.variant).ok()
+        }
+    }
+}
 
 fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
     match expr {
@@ -185,6 +209,7 @@ pub fn render_machine_contract_markdown(
 
     render_state_markdown(&mut out, schema);
     render_enum_markdown(&mut out, "Inputs", &schema.inputs);
+    render_enum_markdown(&mut out, "Signals", &schema.signals);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
 
     if !schema.helpers.is_empty() {
@@ -926,13 +951,12 @@ fn render_field_list(fields: &[meerkat_machine_schema::FieldSchema]) -> String {
 fn collect_binding_domains(schema: &MachineSchema) -> BTreeMap<String, TypeRef> {
     let mut domains = BTreeMap::new();
 
+    for field in &schema.state.fields {
+        collect_type_domains(&field.ty, &mut domains);
+    }
+
     for transition in &schema.transitions {
-        if let Some(variant) = schema
-            .inputs
-            .variants
-            .iter()
-            .find(|item| item.name == transition.on.variant)
-        {
+        if let Some(variant) = transition_trigger_variant(schema, transition) {
             for binding in &transition.on.bindings {
                 if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
                     collect_type_domains(&field.ty, &mut domains);
@@ -1052,10 +1076,7 @@ fn collect_machine_named_type_samples(
     }
 
     for transition in &schema.transitions {
-        let binding_types = schema
-            .inputs
-            .variant_named(&transition.on.variant)
-            .ok()
+        let binding_types = transition_trigger_variant(schema, transition)
             .map(|variant| {
                 variant
                     .fields
@@ -1151,8 +1172,7 @@ fn collect_composition_named_type_samples(
         else {
             continue;
         };
-        let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
-        else {
+        let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
             continue;
         };
         let field_types = target_variant
@@ -1318,7 +1338,7 @@ fn collect_route_binding_named_type_samples(
     let Some(target_machine) = machine_by_instance.get(route.to.machine.as_str()).copied() else {
         return false;
     };
-    let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant) else {
+    let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
         return false;
     };
     let target_field_types = target_variant
@@ -2763,11 +2783,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         if transition.on.bindings.is_empty() {
             self.machine_transition_name(instance_id, transition)
         } else {
-            let binding_types = self
-                .machine(instance_id)
-                .inputs
-                .variant_named(&transition.on.variant)
-                .ok()
+            let binding_types = transition_trigger_variant(self.machine(instance_id), transition)
                 .map(|variant| {
                     variant
                         .fields
@@ -3312,6 +3328,25 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .map(|route| (route.name.as_str(), tla_string(&route.to.input_variant)))
                 .collect(),
             tla_string("unknown_input"),
+        );
+        render_composition_case_fn(
+            out,
+            "RouteTargetKind",
+            "route_name",
+            self.schema
+                .routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.name.as_str(),
+                        tla_string(match route.to.kind {
+                            RouteTargetKind::Input => "Input",
+                            RouteTargetKind::Signal => "Signal",
+                        }),
+                    )
+                })
+                .collect(),
+            tla_string("Unknown"),
         );
         render_composition_case_fn(
             out,
@@ -4260,8 +4295,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         binding_types: &BTreeMap<String, TypeRef>,
     ) -> (String, Vec<String>) {
         let target_machine = self.machine(route.to.machine.as_str());
-        let Ok(target_variant) = target_machine.inputs.variant_named(&route.to.input_variant)
-        else {
+        let Some(target_variant) = route_target_variant(target_machine, &route.to) else {
             return (String::new(), Vec::new());
         };
         let Ok(source_effect_variant) = source_machine.effects.variant_named(effect_variant) else {
@@ -4844,13 +4878,7 @@ impl<'a> MachineTlaCompiler<'a> {
 
     fn binding_type_map(&self, transition: &TransitionSchema) -> BTreeMap<String, TypeRef> {
         let mut map = BTreeMap::new();
-        if let Some(variant) = self
-            .schema
-            .inputs
-            .variants
-            .iter()
-            .find(|item| item.name == transition.on.variant)
-        {
+        if let Some(variant) = transition_trigger_variant(self.schema, transition) {
             for binding in &transition.on.bindings {
                 if let Some(field) = variant.fields.iter().find(|field| field.name == *binding) {
                     map.insert(binding.clone(), field.ty.clone());

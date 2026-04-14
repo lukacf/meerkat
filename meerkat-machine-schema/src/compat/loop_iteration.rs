@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, InitSchema, InputMatch, MachineSchema, RustBinding, StateSchema, TransitionSchema,
-    TypeRef, Update, VariantSchema,
+    TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 pub fn loop_iteration_machine() -> MachineSchema {
@@ -136,6 +136,10 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 },
             ],
         },
+        signals: EnumSchema {
+            name: "LoopIterationSignal".into(),
+            variants: vec![],
+        },
         effects: EnumSchema {
             name: "LoopIterationEffect".into(),
             variants: vec![
@@ -199,6 +203,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "StartLoop".into(),
                 from: vec!["Absent".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "StartLoop".into(),
                     bindings: vec![
                         "loop_instance_id".into(),
@@ -269,6 +274,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "BodyFrameStarted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "BodyFrameStarted".into(),
                     bindings: vec![
                         "loop_instance_id".into(),
@@ -323,6 +329,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "BodyFrameCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "BodyFrameCompleted".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -390,6 +397,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "UntilConditionMet".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "UntilConditionMet".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -435,6 +443,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "UntilConditionFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "UntilConditionFailed".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -493,6 +502,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "ExhaustedIterations".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "UntilConditionFailed".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -545,6 +555,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "BodyFrameFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "BodyFrameFailed".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -593,6 +604,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "BodyFrameCanceled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "BodyFrameCanceled".into(),
                     bindings: vec!["loop_instance_id".into(), "iteration".into()],
                 },
@@ -641,6 +653,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
                 name: "CancelLoop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CancelLoop".into(),
                     bindings: vec!["loop_instance_id".into()],
                 },

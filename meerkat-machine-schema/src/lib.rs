@@ -22,14 +22,14 @@ pub use composition::{
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
     EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
     ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
-    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetSelector,
-    SchedulerRule,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    RouteTargetSelector, SchedulerRule,
 };
 pub use machine::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     FieldType, Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema,
-    MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
-    VariantSchema,
+    MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TriggerKind,
+    TypeRef, Update, VariantSchema,
 };
 
 #[cfg(test)]

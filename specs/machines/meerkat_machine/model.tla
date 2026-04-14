@@ -8,7 +8,12 @@ CONSTANTS AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValue
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
+OptionAgentRuntimeIdValues == {None} \cup {Some(x) : x \in AgentRuntimeIdValues}
+OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
+OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
 OptionPeerReachabilityReasonValues == {None} \cup {Some(x) : x \in PeerReachabilityReasonValues}
+OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
+OptionWorkIdValues == {None} \cup {Some(x) : x \in WorkIdValues}
 MapReachabilityKeyOptionPeerReachabilityReasonValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in ReachabilityKeyValues, v \in OptionPeerReachabilityReasonValues }
 MapReachabilityKeyPeerReachabilityValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in ReachabilityKeyValues, v \in PeerReachabilityValues }
 MapStringToolVisibilityWitnessValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ToolVisibilityWitnessValues }

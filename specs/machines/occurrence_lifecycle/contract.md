@@ -37,6 +37,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeliveryFailed`(receipt_stage: Option<DeliveryReceiptStage>, failure_class: OccurrenceFailureClass, detail: Option<String>, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 
+## Signals
+
 ## Effects
 - `Claimed`
 - `DispatchStarted`

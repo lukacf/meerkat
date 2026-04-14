@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier,
-    RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
+    RustBinding, StateSchema, TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 pub fn flow_run_machine() -> MachineSchema {
@@ -363,6 +363,10 @@ pub fn flow_run_machine() -> MachineSchema {
                 variant("TerminalizeFailed"),
                 variant("TerminalizeCanceled"),
             ],
+        },
+        signals: EnumSchema {
+            name: "FlowRunSignal".into(),
+            variants: vec![],
         },
         effects: EnumSchema {
             name: "FlowRunEffect".into(),
@@ -951,6 +955,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "CreateRun".into(),
                 from: vec!["Absent".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CreateRun".into(),
                     bindings: vec![
                         "step_ids".into(),
@@ -1665,6 +1670,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RegisterTargets".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RegisterTargets".into(),
                     bindings: vec!["step_id".into(), "target_count".into()],
                 },
@@ -1696,6 +1702,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RecordTargetSuccess".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RecordTargetSuccess".into(),
                     bindings: vec!["step_id".into(), "target_id".into()],
                 },
@@ -1728,6 +1735,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RecordTargetTerminalFailure".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RecordTargetTerminalFailure".into(),
                     bindings: vec!["step_id".into()],
                 },
@@ -1754,6 +1762,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RecordTargetCanceled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RecordTargetCanceled".into(),
                     bindings: vec!["step_id".into(), "target_id".into()],
                 },
@@ -1786,6 +1795,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RecordTargetFailure".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RecordTargetFailure".into(),
                     bindings: vec!["step_id".into(), "target_id".into(), "retry_key".into()],
                 },
@@ -1822,6 +1832,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RegisterReadyFrame".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RegisterReadyFrame".into(),
                     bindings: vec!["frame_id".into()],
                 },
@@ -1850,6 +1861,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "PumpNodeScheduler".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "PumpNodeScheduler".into(),
                     bindings: vec![],
                 },
@@ -1909,6 +1921,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "RegisterPendingBodyFrame".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RegisterPendingBodyFrame".into(),
                     bindings: vec!["loop_instance_id".into(), "depth".into()],
                 },
@@ -1955,6 +1968,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "PumpFrameScheduler".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "PumpFrameScheduler".into(),
                     bindings: vec![],
                 },
@@ -2014,6 +2028,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "NodeExecutionReleased".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "NodeExecutionReleased".into(),
                     bindings: vec!["frame_id".into()],
                 },
@@ -2036,6 +2051,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "FrameTerminated".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "FrameTerminated".into(),
                     bindings: vec!["frame_id".into()],
                 },
@@ -2057,6 +2073,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "TerminalizeCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "TerminalizeCompleted".into(),
                     bindings: vec![],
                 },
@@ -2087,6 +2104,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "TerminalizeFailed".into(),
                 from: vec!["Pending".into(), "Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "TerminalizeFailed".into(),
                     bindings: vec![],
                 },
@@ -2114,6 +2132,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 name: "TerminalizeCanceled".into(),
                 from: vec!["Pending".into(), "Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "TerminalizeCanceled".into(),
                     bindings: vec![],
                 },
@@ -2226,6 +2245,7 @@ fn transition(
         name: name.into(),
         from: from.iter().map(|phase| (*phase).to_owned()).collect(),
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: input_variant.into(),
             bindings: vec![],
         },
@@ -2278,6 +2298,7 @@ fn step_transition(
         name: name.into(),
         from: vec![flow_run_phase_name(FlowRunPhaseVariant::Running)],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: input_variant.into(),
             bindings: vec!["step_id".into()],
         },
@@ -2298,6 +2319,7 @@ fn frame_projection_transition(
         name: name.into(),
         from: vec![flow_run_phase_name(FlowRunPhaseVariant::Running)],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: "ProjectFrameStepStatus".into(),
             bindings: vec![
                 "step_id".into(),

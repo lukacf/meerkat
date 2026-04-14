@@ -3,12 +3,22 @@
 use std::collections::BTreeMap;
 
 use meerkat_machine_kernels::generated::meerkat;
-use meerkat_machine_kernels::{KernelInput, KernelValue};
+use meerkat_machine_kernels::{KernelInput, KernelSignal, KernelValue};
 
 fn input(variant: &str) -> KernelInput {
     KernelInput {
         variant: variant.to_string(),
         fields: BTreeMap::new(),
+    }
+}
+
+fn signal(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelSignal {
+    KernelSignal {
+        variant: variant.to_string(),
+        fields: fields
+            .into_iter()
+            .map(|(field, value)| (field.to_string(), value))
+            .collect(),
     }
 }
 
@@ -27,9 +37,9 @@ fn input_with_fields(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelI
 }
 
 fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
-    let initialized = meerkat::transition(
+    let initialized = meerkat::transition_signal(
         &meerkat::initial_state().expect("initial state"),
-        &input("Initialize"),
+        &signal("Initialize", vec![]),
     )
     .expect("initialize")
     .next_state;
@@ -57,9 +67,9 @@ fn attached_meerkat_state() -> meerkat_machine_kernels::KernelState {
 #[test]
 fn session_turn_admission_kernel_gracefully_drains_running_shutdown() {
     let state = attached_meerkat_state();
-    let running = meerkat::transition(
+    let running = meerkat::transition_signal(
         &state,
-        &input_with_fields(
+        &signal(
             "SubmitMobWork",
             vec![
                 ("agent_runtime_id", string("runtime-7")),
@@ -79,9 +89,9 @@ fn session_turn_admission_kernel_gracefully_drains_running_shutdown() {
         Some(&KernelValue::Bool(true))
     );
 
-    let finalized = meerkat::transition(
+    let finalized = meerkat::transition_signal(
         &shutdown,
-        &input_with_fields("RunCompleted", vec![("work_id", string("work-1"))]),
+        &signal("RunCompleted", vec![("work_id", string("work-1"))]),
     )
     .expect("complete run")
     .next_state;
@@ -104,9 +114,9 @@ fn session_turn_admission_kernel_interrupt_only_wakes_running_turns() {
         "attached sessions without active work must reject interrupts"
     );
 
-    let running = meerkat::transition(
+    let running = meerkat::transition_signal(
         &state,
-        &input_with_fields(
+        &signal(
             "SubmitMobWork",
             vec![
                 ("agent_runtime_id", string("runtime-7")),

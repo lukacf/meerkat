@@ -2,6 +2,7 @@ use crate::{
     ActorKind, ActorSchema, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
     CompositionStateLimits, CompositionTransactionPlan, CompositionWitness, EntryInput,
     MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget,
+    RouteTargetKind,
 };
 
 pub fn schedule_bundle_composition() -> CompositionSchema {
@@ -30,6 +31,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
             "schedule",
             "SupersedePendingOccurrences",
             "occurrence",
+            RouteTargetKind::Input,
             "Supersede",
             &[bind("superseded_by_revision", "superseding_revision")],
         )],
@@ -194,12 +196,12 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
             EntryInput {
                 name: "retire_member".into(),
                 machine: "mob".into(),
-                input_variant: "RetireMember".into(),
+                input_variant: "Retire".into(),
             },
             EntryInput {
                 name: "destroy_mob".into(),
                 machine: "mob".into(),
-                input_variant: "DestroyMob".into(),
+                input_variant: "Destroy".into(),
             },
         ],
         routes: vec![
@@ -208,6 +210,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "RequestRuntimeBinding",
                 "meerkat",
+                RouteTargetKind::Input,
                 "PrepareBindings",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -220,6 +223,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "SubmitMemberWork",
                 "meerkat",
+                RouteTargetKind::Signal,
                 "SubmitMobWork",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -232,6 +236,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "RequestRuntimeRetire",
                 "meerkat",
+                RouteTargetKind::Input,
                 "Retire",
                 &[],
             ),
@@ -240,6 +245,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "mob",
                 "RequestRuntimeDestroy",
                 "meerkat",
+                RouteTargetKind::Input,
                 "Destroy",
                 &[],
             ),
@@ -248,6 +254,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "RuntimeBound",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveRuntimeReady",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -259,6 +266,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "RuntimeRetired",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveRuntimeRetired",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -270,6 +278,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "RuntimeDestroyed",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveRuntimeDestroyed",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -281,6 +290,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "WorkCompleted",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveWorkCompleted",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -293,6 +303,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "WorkFailed",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveWorkFailed",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -305,6 +316,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "meerkat",
                 "WorkCancelled",
                 "mob",
+                RouteTargetKind::Signal,
                 "ObserveWorkCancelled",
                 &[
                     bind("agent_runtime_id", "agent_runtime_id"),
@@ -368,6 +380,7 @@ fn route(
     from_machine: &str,
     effect_variant: &str,
     to_machine: &str,
+    target_kind: RouteTargetKind,
     input_variant: &str,
     bindings: &[RouteFieldBinding],
 ) -> Route {
@@ -377,6 +390,7 @@ fn route(
         effect_variant: effect_variant.into(),
         to: RouteTarget {
             machine: to_machine.into(),
+            kind: target_kind,
             input_variant: input_variant.into(),
         },
         bindings: bindings.to_vec(),

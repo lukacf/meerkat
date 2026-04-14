@@ -35,6 +35,7 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+meerkat-machine-derive = { workspace = true }
 
 # Utilities
 uuid = { workspace = true, features = ["v4"] }

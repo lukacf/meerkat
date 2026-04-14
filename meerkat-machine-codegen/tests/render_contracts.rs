@@ -19,23 +19,37 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
         "STATE\n  phase : {\"Initializing\", \"Idle\", \"Attached\", \"Running\", \"Recovering\", \"Retired\", \"Stopped\", \"Destroyed\"}"
     ));
     assert!(rendered.contains("INPUTS\n  MeerkatMachineInput = {"));
+    assert!(rendered.contains("SIGNALS\n  MeerkatMachineSignal = {"));
     for required in [
-        "\"Initialize\"",
         "\"RegisterSession\"",
         "\"UnregisterSession\"",
         "\"PrepareBindings\"",
-        "\"SubmitMobWork\"",
         "\"InterruptCurrentRun\"",
         "\"CancelAfterBoundary\"",
         "\"PublishCommittedVisibleSet\"",
         "\"SetPeerIngressContext\"",
+        "\"AbortAll\"",
+        "\"Wait\"",
+        "\"Prepare\"",
+        "\"Commit\"",
+        "\"Fail\"",
+    ] {
+        assert!(
+            rendered.contains(required),
+            "rendered MeerkatMachine module should include input {required}"
+        );
+    }
+    for required in [
+        "\"Initialize\"",
+        "\"SubmitMobWork\"",
         "\"AcceptWithCompletion\"",
+        "\"AcceptWithoutWake\"",
         "\"StagePersistentFilter\"",
         "\"RequestDeferredTools\"",
     ] {
         assert!(
             rendered.contains(required),
-            "rendered MeerkatMachine module should include input {required}"
+            "rendered MeerkatMachine module should include signal {required}"
         );
     }
     assert!(rendered.contains("TRANSITIONS\n  Initialize"));
@@ -51,9 +65,24 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     assert!(rendered.contains(
         "STATE\n  phase : {\"Creating\", \"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}"
     ));
-    assert!(rendered.contains(
-        "INPUTS\n  MobMachineInput = {\"Start\", \"Spawn\", \"ObserveRuntimeReady\", \"SubmitWork\""
-    ));
+    assert!(rendered.contains("INPUTS\n  MobMachineInput = {"));
+    assert!(rendered.contains("SIGNALS\n  MobMachineSignal = {"));
+    for required in [
+        "\"Spawn\"",
+        "\"SubmitWork\"",
+        "\"RunFlow\"",
+        "\"ForceCancel\"",
+    ] {
+        assert!(rendered.contains(required));
+    }
+    for required in [
+        "\"Start\"",
+        "\"ObserveRuntimeReady\"",
+        "\"StartRun\"",
+        "\"FinishRun\"",
+    ] {
+        assert!(rendered.contains(required));
+    }
     assert!(rendered.contains("AgentIdentity"));
     assert!(!rendered.contains("MeerkatId"));
 }
@@ -64,10 +93,10 @@ fn renders_kernel_seam_composition_with_routes() {
 
     assert!(rendered.starts_with("---- MODULE Composition_meerkat_mob_seam ----"));
     assert!(rendered.contains(
-        "binding_request_reaches_meerkat == mob.RequestRuntimeBinding -> meerkat.PrepareBindings [Immediate]"
+        "binding_request_reaches_meerkat == mob.RequestRuntimeBinding -> meerkat.PrepareBindings (Input) [Immediate]"
     ));
     assert!(rendered.contains(
-        "work_completed_reaches_mob == meerkat.WorkCompleted -> mob.ObserveWorkCompleted [Immediate]"
+        "work_completed_reaches_mob == meerkat.WorkCompleted -> mob.ObserveWorkCompleted (Signal) [Immediate]"
     ));
     assert!(rendered.contains("ROUTES"));
     assert!(rendered.ends_with("====\n"));
@@ -128,5 +157,5 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     let replaced = merge_mapping_document(Some(&existing), "MeerkatMachine", &generated);
     assert!(!replaced.contains("old block"));
     assert!(replaced.contains("Manual text."));
-    assert!(replaced.contains("- `BeginRunFromIdle`"));
+    assert!(replaced.contains("- `PrepareBindings`"));
 }

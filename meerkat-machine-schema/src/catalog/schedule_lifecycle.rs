@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 pub fn schedule_lifecycle_machine() -> MachineSchema {
@@ -84,6 +84,10 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                 variant("Delete"),
             ],
         },
+        signals: EnumSchema {
+            name: "ScheduleLifecycleSignal".into(),
+            variants: vec![],
+        },
         effects: EnumSchema {
             name: "ScheduleLifecycleEffect".into(),
             variants: vec![
@@ -153,6 +157,7 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                 name: "PauseActive".into(),
                 from: vec!["Active".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "Pause".into(),
                     bindings: vec![],
                 },
@@ -165,6 +170,7 @@ pub fn schedule_lifecycle_machine() -> MachineSchema {
                 name: "ResumePaused".into(),
                 from: vec!["Paused".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "Resume".into(),
                     bindings: vec![],
                 },
@@ -195,6 +201,7 @@ fn revise_transition(name: &str, phase: &str) -> TransitionSchema {
         name: name.into(),
         from: vec![phase.into()],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: "Revise".into(),
             bindings: vec![
                 "trigger_key".into(),
@@ -254,6 +261,7 @@ fn planning_window_transition(name: &str, phase: &str) -> TransitionSchema {
         name: name.into(),
         from: vec![phase.into()],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: "RecordPlanningWindow".into(),
             bindings: vec![
                 "planning_cursor_utc_ms".into(),
@@ -302,6 +310,7 @@ fn delete_transition(name: &str, phase: &str) -> TransitionSchema {
         name: name.into(),
         from: vec![phase.into()],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: "Delete".into(),
             bindings: vec![],
         },

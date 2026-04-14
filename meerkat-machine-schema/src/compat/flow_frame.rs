@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     Guard, HelperSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding,
-    StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
+    StateSchema, TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 // ---------------------------------------------------------------------------
@@ -854,6 +854,10 @@ pub fn flow_frame_machine() -> MachineSchema {
                 variant("SealFrame"),
             ],
         },
+        signals: EnumSchema {
+            name: "FlowFrameSignal".into(),
+            variants: vec![],
+        },
         effects: EnumSchema {
             name: "FlowFrameEffect".into(),
             variants: vec![
@@ -1153,6 +1157,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "StartRootFrame".into(),
                 from: vec!["Absent".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "StartRootFrame".into(),
                     bindings: vec![
                         "frame_id".into(),
@@ -1173,6 +1178,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "StartBodyFrame".into(),
                 from: vec!["Absent".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "StartBodyFrame".into(),
                     bindings: vec![
                         "frame_id".into(),
@@ -1199,6 +1205,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "AdmitNextReadyNode_StepRun".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "AdmitNextReadyNode".into(),
                     bindings: vec![],
                 },
@@ -1228,6 +1235,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "AdmitNextReadyNode_LoopRun".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "AdmitNextReadyNode".into(),
                     bindings: vec![],
                 },
@@ -1258,6 +1266,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "AdmitNextReadyNode_Skip".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "AdmitNextReadyNode".into(),
                     bindings: vec![],
                 },
@@ -1277,6 +1286,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "AdmitNextReadyNode_Fail".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "AdmitNextReadyNode".into(),
                     bindings: vec![],
                 },
@@ -1295,6 +1305,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "CompleteNode_Step".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CompleteNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1373,6 +1384,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "CompleteNode_Loop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CompleteNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1445,6 +1457,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "RecordNodeOutput".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "RecordNodeOutput".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1470,6 +1483,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "FailNode_Step".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "FailNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1527,6 +1541,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "FailNode_Loop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "FailNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1580,6 +1595,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SkipNode_Step".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SkipNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1637,6 +1653,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SkipNode_Loop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SkipNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1690,6 +1707,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "CancelNode_Step".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CancelNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1747,6 +1765,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "CancelNode_Loop".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "CancelNode".into(),
                     bindings: vec!["node_id".into()],
                 },
@@ -1801,6 +1820,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealRootFrameCanceled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },
@@ -1829,6 +1849,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealRootFrameFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },
@@ -1861,6 +1882,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealRootFrameCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },
@@ -1893,6 +1915,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealBodyFrameCanceled".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },
@@ -1921,6 +1944,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealBodyFrameFailed".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },
@@ -1953,6 +1977,7 @@ pub fn flow_frame_machine() -> MachineSchema {
                 name: "SealBodyFrameCompleted".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "SealFrame".into(),
                     bindings: vec![],
                 },

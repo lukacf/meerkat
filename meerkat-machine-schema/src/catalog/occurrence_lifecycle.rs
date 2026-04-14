@@ -1,7 +1,7 @@
 use crate::{
     EffectDisposition, EffectDispositionRule, EnumSchema, Expr, FieldInit, FieldSchema,
     HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema,
+    TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 pub fn occurrence_lifecycle_machine() -> MachineSchema {
@@ -186,6 +186,10 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 },
             ],
         },
+        signals: EnumSchema {
+            name: "OccurrenceLifecycleSignal".into(),
+            variants: vec![],
+        },
         effects: EnumSchema {
             name: "OccurrenceLifecycleEffect".into(),
             variants: vec![
@@ -269,6 +273,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 name: "ClaimPending".into(),
                 from: vec!["Pending".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "Claim".into(),
                     bindings: vec![
                         "owner_id".into(),
@@ -331,6 +336,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 name: "DispatchStartedFromClaimed".into(),
                 from: vec!["Claimed".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "DispatchStarted".into(),
                     bindings: vec!["correlation_id".into(), "at_utc_ms".into()],
                 },
@@ -352,6 +358,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 name: "AwaitCompletionFromDispatching".into(),
                 from: vec!["Dispatching".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "AwaitCompletion".into(),
                     bindings: vec!["at_utc_ms".into()],
                 },
@@ -367,6 +374,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 name: "CompleteFromDispatchingOrAwaiting".into(),
                 from: vec!["Dispatching".into(), "AwaitingCompletion".into()],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "Complete".into(),
                     bindings: vec!["receipt_stage".into(), "at_utc_ms".into()],
                 },
@@ -405,6 +413,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     "AwaitingCompletion".into(),
                 ],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "Supersede".into(),
                     bindings: vec!["superseded_by_revision".into(), "at_utc_ms".into()],
                 },
@@ -430,6 +439,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                     "AwaitingCompletion".into(),
                 ],
                 on: InputMatch {
+                    kind: TriggerKind::Input,
                     variant: "DeliveryFailed".into(),
                     bindings: vec![
                         "receipt_stage".into(),
@@ -489,6 +499,7 @@ fn terminal_transition(
         name: name.into(),
         from: from.iter().map(|phase| (*phase).into()).collect(),
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: input_variant.into(),
             bindings: vec!["detail".into(), "failure_class".into(), "at_utc_ms".into()],
         },
@@ -517,6 +528,7 @@ fn lease_expired_transition(name: &str, from: &str) -> TransitionSchema {
         name: name.into(),
         from: vec![from.into()],
         on: InputMatch {
+            kind: TriggerKind::Input,
             variant: "LeaseExpired".into(),
             bindings: vec!["at_utc_ms".into()],
         },

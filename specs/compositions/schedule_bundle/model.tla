@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_bundle.
 
-CONSTANTS DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OverlapPolicyValues, StringValues
+CONSTANTS DeliveryReceiptStageValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OverlapPolicyValues, ScheduleIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -11,6 +11,7 @@ Some(v) == [tag |-> "some", value |-> v]
 OptionDeliveryReceiptStageValues == {None} \cup {Some(x) : x \in DeliveryReceiptStageValues}
 OptionOccurrenceFailureClassValues == {None} \cup {Some(x) : x \in OccurrenceFailureClassValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
+OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
@@ -61,6 +62,10 @@ RouteTargetMachine(route_name) ==
 RouteTargetInput(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "Supersede"
       [] OTHER -> "unknown_input"
+
+RouteTargetKind(route_name) ==
+    CASE route_name = "revision_supersede_enters_occurrence_authority" -> "Input"
+      [] OTHER -> "Unknown"
 
 RouteDeliveryKind(route_name) ==
     CASE route_name = "revision_supersede_enters_occurrence_authority" -> "Immediate"

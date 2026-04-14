@@ -1,5 +1,5 @@
 [package]
-name = "meerkat-machine-codegen"
+name = "meerkat-machine-derive"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -12,12 +12,13 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[dependencies]
-meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+[lib]
+proc-macro = true
 
-[dev-dependencies]
-meerkat-runtime = { path = "../meerkat-runtime" }
-meerkat-mob = { path = "../meerkat-mob" }
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 
 [lints]
 workspace = true

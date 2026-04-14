@@ -92,7 +92,7 @@ pub use meerkat_machine_types::{
     MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot, MeerkatCompletionWaiterSnapshot,
     MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
     MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot,
+    MeerkatOpsSnapshot, canonical_meerkat_machine_command_manifest,
 };
 pub use ops_lifecycle::{OpsLifecycleConfig, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
 pub use peer_handling_mode::{PeerHandlingModeError, validate_peer_handling_mode};

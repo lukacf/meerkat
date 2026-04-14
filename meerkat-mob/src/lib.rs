@@ -66,6 +66,8 @@ pub use ids::{
     WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext};
+#[doc(hidden)]
+pub use mob_machine::canonical_mob_machine_command_manifest;
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{

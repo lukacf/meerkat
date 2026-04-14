@@ -23,6 +23,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Resume`
 - `Delete`
 
+## Signals
+
 ## Effects
 - `EmitScheduleNotice`(new_state: ScheduleLifecycleState, revision: u64)
 - `SupersedePendingOccurrences`(superseding_revision: u64)

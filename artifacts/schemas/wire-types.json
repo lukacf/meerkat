@@ -1686,6 +1686,24 @@
   },
   "MobMemberSendResult": {
     "$defs": {
+      "WireAgentRuntimeId": {
+        "description": "Response payload for host-side mob member delivery.",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "generation"
+        ],
+        "type": "object"
+      },
       "WireHandlingMode": {
         "description": "Public handling mode for mob member delivery.",
         "enum": [
@@ -1703,8 +1721,8 @@
         "type": "string"
       },
       "agent_runtime_id": {
-        "description": "Identity-native runtime ID for this incarnation (0.6).",
-        "type": "string"
+        "$ref": "#/$defs/WireAgentRuntimeId",
+        "description": "Identity-native runtime ID for this incarnation (0.6)."
       },
       "fence_token": {
         "description": "Fence token for the current incarnation (0.6).",

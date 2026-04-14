@@ -889,25 +889,44 @@ impl CompositionSchema {
                 });
             }
 
-            let to_inputs = to_schema
-                .inputs
-                .variants_by_name()
-                .map_err(CompositionSchemaError::MachineSchema)?;
-            if !to_inputs.contains(&route.to.input_variant) {
-                return Err(CompositionSchemaError::UnknownRouteInput {
-                    machine: route.to.machine.clone(),
-                    input: route.to.input_variant.clone(),
-                });
-            }
-
             let from_variant = from_schema
                 .effects
                 .variant_named(&route.effect_variant)
                 .map_err(CompositionSchemaError::MachineSchema)?;
-            let to_variant = to_schema
-                .inputs
-                .variant_named(&route.to.input_variant)
-                .map_err(CompositionSchemaError::MachineSchema)?;
+            let to_variant = match route.to.kind {
+                RouteTargetKind::Input => {
+                    let to_inputs = to_schema
+                        .inputs
+                        .variants_by_name()
+                        .map_err(CompositionSchemaError::MachineSchema)?;
+                    if !to_inputs.contains(&route.to.input_variant) {
+                        return Err(CompositionSchemaError::UnknownRouteInput {
+                            machine: route.to.machine.clone(),
+                            input: route.to.input_variant.clone(),
+                        });
+                    }
+                    to_schema
+                        .inputs
+                        .variant_named(&route.to.input_variant)
+                        .map_err(CompositionSchemaError::MachineSchema)?
+                }
+                RouteTargetKind::Signal => {
+                    let to_signals = to_schema
+                        .signals
+                        .variants_by_name()
+                        .map_err(CompositionSchemaError::MachineSchema)?;
+                    if !to_signals.contains(&route.to.input_variant) {
+                        return Err(CompositionSchemaError::UnknownRouteSignal {
+                            machine: route.to.machine.clone(),
+                            signal: route.to.input_variant.clone(),
+                        });
+                    }
+                    to_schema
+                        .signals
+                        .variant_named(&route.to.input_variant)
+                        .map_err(CompositionSchemaError::MachineSchema)?
+                }
+            };
 
             for binding in &route.bindings {
                 let to_field = to_variant
@@ -1302,6 +1321,7 @@ impl CompositionSchema {
                     route.from_machine == protocol.producer_instance
                         && route.effect_variant == protocol.effect_variant
                         && route.to.machine == feedback.machine_instance
+                        && route.to.kind == RouteTargetKind::Input
                         && route.to.input_variant == feedback.input_variant
                 }) {
                     return Err(CompositionSchemaError::DirectRouteBypassesHandoffProtocol {
@@ -1426,7 +1446,14 @@ pub struct Route {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteTarget {
     pub machine: String,
+    pub kind: RouteTargetKind,
     pub input_variant: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteTargetKind {
+    Input,
+    Signal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1580,6 +1607,10 @@ pub enum CompositionSchemaError {
     UnknownRouteInput {
         machine: String,
         input: String,
+    },
+    UnknownRouteSignal {
+        machine: String,
+        signal: String,
     },
     MissingRequiredRoute {
         invariant: String,
@@ -1841,6 +1872,12 @@ impl fmt::Display for CompositionSchemaError {
             }
             Self::UnknownRouteInput { machine, input } => {
                 write!(f, "route to `{machine}` references unknown input `{input}`")
+            }
+            Self::UnknownRouteSignal { machine, signal } => {
+                write!(
+                    f,
+                    "route to `{machine}` references unknown signal `{signal}`"
+                )
             }
             Self::MissingRequiredRoute {
                 invariant,

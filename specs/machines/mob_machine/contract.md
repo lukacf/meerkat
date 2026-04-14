@@ -25,20 +25,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `kickoff_pending`: `Bool`
 
 ## Inputs
-- `Start`
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
-- `ObserveWorkCompleted`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
-- `ObserveWorkFailed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
-- `ObserveWorkCancelled`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
-- `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `DestroyMob`
-- `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `MarkCompleted`
 - `RunFlow`
 - `CancelFlow`
 - `FlowStatus`
@@ -77,6 +65,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
+
+## Signals
+- `Start`
+- `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveWorkCompleted`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
+- `ObserveWorkFailed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
+- `ObserveWorkCancelled`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
+- `RetireMember`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ObserveRuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `ResetMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `DestroyMob`
+- `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `MarkCompleted`
 - `StartRun`
 - `FinishRun`
 - `BeginCleanup`

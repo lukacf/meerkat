@@ -8,7 +8,13 @@ CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenVa
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
+OptionAgentIdentityValues == {None} \cup {Some(x) : x \in AgentIdentityValues}
+OptionAgentRuntimeIdValues == {None} \cup {Some(x) : x \in AgentRuntimeIdValues}
+OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
+OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
 OptionPeerReachabilityReasonValues == {None} \cup {Some(x) : x \in PeerReachabilityReasonValues}
+OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
+OptionWorkIdValues == {None} \cup {Some(x) : x \in WorkIdValues}
 MapReachabilityKeyOptionPeerReachabilityReasonValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in ReachabilityKeyValues, v \in OptionPeerReachabilityReasonValues }
 MapReachabilityKeyPeerReachabilityValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in ReachabilityKeyValues, v \in PeerReachabilityValues }
 MapStringToolVisibilityWitnessValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ToolVisibilityWitnessValues }
@@ -107,6 +113,19 @@ RouteTargetInput(route_name) ==
       [] route_name = "work_failed_reaches_mob" -> "ObserveWorkFailed"
       [] route_name = "work_cancelled_reaches_mob" -> "ObserveWorkCancelled"
       [] OTHER -> "unknown_input"
+
+RouteTargetKind(route_name) ==
+    CASE route_name = "binding_request_reaches_meerkat" -> "Input"
+      [] route_name = "member_work_reaches_meerkat" -> "Signal"
+      [] route_name = "retire_request_reaches_meerkat" -> "Input"
+      [] route_name = "destroy_request_reaches_meerkat" -> "Input"
+      [] route_name = "runtime_bound_reaches_mob" -> "Signal"
+      [] route_name = "runtime_retired_reaches_mob" -> "Signal"
+      [] route_name = "runtime_destroyed_reaches_mob" -> "Signal"
+      [] route_name = "work_completed_reaches_mob" -> "Signal"
+      [] route_name = "work_failed_reaches_mob" -> "Signal"
+      [] route_name = "work_cancelled_reaches_mob" -> "Signal"
+      [] OTHER -> "Unknown"
 
 RouteDeliveryKind(route_name) ==
     CASE route_name = "binding_request_reaches_meerkat" -> "Immediate"
@@ -5328,17 +5347,17 @@ Inject_submit_work(arg_agent_runtime_id, arg_fence_token, arg_work_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_phase, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
-Inject_retire_member(arg_agent_runtime_id, arg_fence_token) ==
-    /\ ~([machine |-> "mob", variant |-> "RetireMember", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "RetireMember", effect_id |-> 0] \in SeqElements(pending_inputs))
-    /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "RetireMember", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "RetireMember", effect_id |-> 0])
-    /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "RetireMember", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "RetireMember", effect_id |-> 0]}
+Inject_retire_member(arg_agent_runtime_id) ==
+    /\ ~([machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0] \in SeqElements(pending_inputs))
+    /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0])
+    /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_phase, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_destroy_mob ==
-    /\ ~([machine |-> "mob", variant |-> "DestroyMob", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "DestroyMob", effect_id |-> 0] \in SeqElements(pending_inputs))
-    /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "DestroyMob", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "DestroyMob", effect_id |-> 0])
-    /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "DestroyMob", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "DestroyMob", effect_id |-> 0]}
+    /\ ~([machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0] \in SeqElements(pending_inputs))
+    /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0])
+    /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_active_generation, meerkat_active_work_id, meerkat_wake_pending, meerkat_process_pending, meerkat_peer_ingress_configured, meerkat_drain_running, meerkat_resolved_peer_keys, meerkat_peer_reachability, meerkat_peer_last_reason, meerkat_interrupt_pending, meerkat_shutdown_pending, meerkat_inherited_base_filter, meerkat_active_filter, meerkat_staged_filter, meerkat_active_requested_deferred_names, meerkat_staged_requested_deferred_names, meerkat_requested_witnesses, meerkat_filter_witnesses, meerkat_active_visibility_revision, meerkat_staged_visibility_revision, meerkat_committed_visibility_revision, mob_phase, mob_active_identity, mob_active_runtime_id, mob_active_fence_token, mob_current_generation, mob_inflight_work_id, mob_active_member_count, mob_active_run_count, mob_pending_spawn_count, mob_retiring_member_count, mob_wiring_edge_count, mob_task_count, mob_event_subscription_count, mob_active_frame_count, mob_active_loop_count, mob_coordinator_bound, mob_kickoff_pending, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
@@ -5637,7 +5656,7 @@ CoreNext ==
 InjectNext ==
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : Inject_spawn_member(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation)
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : Inject_submit_work(arg_agent_runtime_id, arg_fence_token, arg_work_id)
-    \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : Inject_retire_member(arg_agent_runtime_id, arg_fence_token)
+    \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : Inject_retire_member(arg_agent_runtime_id)
     \/ Inject_destroy_mob
 
 Next ==

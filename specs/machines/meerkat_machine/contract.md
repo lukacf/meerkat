@@ -33,25 +33,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `committed_visibility_revision`: `u64`
 
 ## Inputs
-- `Initialize`
 - `RegisterSession`(session_id: SessionId)
 - `UnregisterSession`(session_id: SessionId)
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `SubmitMobWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
-- `ReconcileResolvedDirectory`(keys: Set<ReachabilityKey>, reachability: Map<ReachabilityKey, PeerReachability>, last_reason: Map<ReachabilityKey, Option<PeerReachabilityReason>>)
-- `RecordSendSucceeded`(key: ReachabilityKey)
-- `RecordSendFailed`(key: ReachabilityKey, reason: PeerReachabilityReason)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
-- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(revision: u64)
-- `BoundaryApplied`(revision: u64)
-- `RunCompleted`(work_id: WorkId)
-- `RunFailed`(work_id: WorkId)
-- `RunCancelled`(work_id: WorkId)
 - `Recover`
 - `Retire`
 - `Reset`
@@ -77,6 +66,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Prepare`(session_id: SessionId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
+- `Recycle`
+
+## Signals
+- `Initialize`
+- `SubmitMobWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
+- `ReconcileResolvedDirectory`(keys: Set<ReachabilityKey>, reachability: Map<ReachabilityKey, PeerReachability>, last_reason: Map<ReachabilityKey, Option<PeerReachabilityReason>>)
+- `RecordSendSucceeded`(key: ReachabilityKey)
+- `RecordSendFailed`(key: ReachabilityKey, reason: PeerReachabilityReason)
+- `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
+- `BoundaryApplied`(revision: u64)
+- `RunCompleted`(work_id: WorkId)
+- `RunFailed`(work_id: WorkId)
+- `RunCancelled`(work_id: WorkId)
 - `AdmitQueued`
 - `AdmitConsumedOnAccept`
 - `StageDrainSnapshot`
@@ -138,7 +141,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinalizeRemovalForced`
 - `SnapshotAligned`
 - `ShutdownSurface`
-- `Recycle`
 
 ## Effects
 - `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)

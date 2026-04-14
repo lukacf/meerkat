@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use indexmap::IndexSet;
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
@@ -21,6 +22,7 @@ use meerkat_core::ops_lifecycle::OperationLifecycleSnapshot;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
 use meerkat_core::{CommsDrainMode, CommsDrainPhase};
+use meerkat_machine_derive::CommandManifest;
 
 use crate::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
@@ -35,6 +37,7 @@ use crate::traits::{DestroyReport, RecoveryReport, RecycleReport, ResetReport, R
 
 /// Public Meerkat lifecycle/control mutations that now route through the
 /// top-level Meerkat machine seam instead of bespoke adapter entrypoints.
+#[derive(CommandManifest)]
 pub(crate) enum MeerkatMachineSessionCommand {
     RegisterSession {
         session_id: SessionId,
@@ -107,6 +110,7 @@ pub(crate) enum MeerkatMachineSessionCommandResult {
 
 /// Public comms-drain mutations that now route through the Meerkat machine
 /// instead of a wrapper/helper split.
+#[derive(CommandManifest)]
 pub(crate) enum MeerkatMachineDrainCommand {
     SetPeerIngressContext {
         session_id: SessionId,
@@ -126,12 +130,14 @@ pub(crate) enum MeerkatMachineDrainCommandResult {
 
 /// Public comms-drain local lifecycle helpers that do not require `Arc<Self>`
 /// task-spawn authority.
+#[derive(CommandManifest)]
 pub(crate) enum MeerkatMachineDrainLocalCommand {
     AbortAll,
     Abort { session_id: SessionId },
     Wait { session_id: SessionId },
 }
 
+#[derive(CommandManifest)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MeerkatMachineControlCommand {
     Ingest {
@@ -166,6 +172,7 @@ pub(crate) enum MeerkatMachineControlCommand {
     },
 }
 
+#[derive(CommandManifest)]
 pub(crate) enum MeerkatMachineIngressCommand {
     AcceptWithCompletion { session_id: SessionId, input: Input },
     AcceptWithoutWake { session_id: SessionId, input: Input },
@@ -179,6 +186,44 @@ pub(crate) enum MeerkatMachineIngressCommandResult {
     AcceptOutcome(AcceptOutcome),
 }
 
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+    let mut variants = IndexSet::new();
+    variants.extend(
+        MeerkatMachineSessionCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants.extend(
+        MeerkatMachineControlCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants.extend(
+        MeerkatMachineDrainCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants.extend(
+        MeerkatMachineDrainLocalCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants.extend(
+        MeerkatMachineIngressCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants.extend(
+        MeerkatMachineLegacyRunCommand::command_manifest()
+            .iter()
+            .copied(),
+    );
+    variants
+}
+
+#[derive(CommandManifest)]
 pub(crate) enum MeerkatMachineLegacyRunCommand {
     Prepare {
         session_id: SessionId,

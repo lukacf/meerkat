@@ -182,6 +182,12 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         .iter()
         .map(|variant| variant.name.as_str())
         .collect::<Vec<_>>();
+    let signal_names = schema
+        .signals
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
     let effect_names = schema
         .effects
         .variants
@@ -199,13 +205,21 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "Prepare",
         "Commit",
         "Fail",
+        "InterruptCurrentRun",
+        "CancelAfterBoundary",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MeerkatMachine should absorb input {required}"
+        );
+    }
+
+    for required in [
         "EnsureDrainRunning",
         "ClassifyExternalEnvelope",
         "ClassifyPlainEvent",
         "RegisterOperation",
         "StartConversationRun",
-        "InterruptCurrentRun",
-        "CancelAfterBoundary",
         "StageAdd",
         "StageRemove",
         "StageReload",
@@ -216,8 +230,8 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "RequestDeferredTools",
     ] {
         assert!(
-            input_names.iter().any(|name| name == &required),
-            "MeerkatMachine should absorb input {required}"
+            signal_names.iter().any(|name| name == &required),
+            "MeerkatMachine should absorb signal {required}"
         );
     }
 
@@ -348,6 +362,12 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         .iter()
         .map(|variant| variant.name.as_str())
         .collect::<Vec<_>>();
+    let signal_names = schema
+        .signals
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
     let effect_names = schema
         .effects
         .variants
@@ -367,6 +387,14 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         "TaskCreate",
         "TaskUpdate",
         "SubscribeMobEvents",
+    ] {
+        assert!(
+            input_names.iter().any(|name| name == &required),
+            "MobMachine should absorb input {required}"
+        );
+    }
+
+    for required in [
         "StageSpawn",
         "KickoffStarted",
         "RuntimeRunSubmitted",
@@ -378,8 +406,8 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         "UntilConditionFailed",
     ] {
         assert!(
-            input_names.iter().any(|name| name == &required),
-            "MobMachine should absorb input {required}"
+            signal_names.iter().any(|name| name == &required),
+            "MobMachine should absorb signal {required}"
         );
     }
 

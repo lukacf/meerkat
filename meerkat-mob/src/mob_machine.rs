@@ -15,11 +15,14 @@ use crate::runtime::MobOrchestratorSnapshot;
 use crate::tasks::MobTask;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use indexmap::IndexSet;
+use meerkat_machine_derive::CommandManifest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Public Mob mutations route through this single top-level machine command
 /// surface instead of each `MobHandle` method hand-sending actor commands.
+#[derive(CommandManifest)]
 pub(crate) enum MobMachineCommand {
     RunFlow {
         flow_id: FlowId,
@@ -169,4 +172,14 @@ pub(crate) enum MobMachineCommandResult {
     #[cfg(test)]
     OrchestratorSnapshot(MobOrchestratorSnapshot),
     KickoffBarrierSnapshot(Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>),
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
+    let mut variants = IndexSet::from_iter(MobMachineCommand::command_manifest().iter().copied());
+    for excluded in ["FlowTrackerCounts", "OrchestratorSnapshot"] {
+        variants.shift_remove(excluded);
+    }
+    variants
 }

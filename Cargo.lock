@@ -2645,6 +2645,17 @@ name = "meerkat-machine-codegen"
 version = "0.5.2"
 dependencies = [
  "meerkat-machine-schema",
+ "meerkat-mob",
+ "meerkat-runtime",
+]
+
+[[package]]
+name = "meerkat-machine-derive"
+version = "0.5.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2746,6 +2757,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
+ "meerkat-machine-derive",
  "meerkat-machine-kernels",
  "meerkat-runtime",
  "meerkat-session",
@@ -2893,6 +2905,7 @@ dependencies = [
  "chrono",
  "indexmap",
  "meerkat-core",
+ "meerkat-machine-derive",
  "meerkat-store",
  "rusqlite",
  "serde",

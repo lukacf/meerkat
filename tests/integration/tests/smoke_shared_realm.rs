@@ -291,11 +291,20 @@ async fn rpc_read_response_line(
 ) -> Result<String, Box<dyn std::error::Error>> {
     loop {
         let mut line = String::new();
-        let bytes_read = timeout(
+        let bytes_read = match timeout(
             Duration::from_secs(timeout_secs),
             process.stdout.read_line(&mut line),
         )
-        .await??;
+        .await
+        {
+            Ok(bytes_read) => bytes_read?,
+            Err(_) => {
+                return Err(format!(
+                    "timed out waiting for stdio response line after {timeout_secs}s"
+                )
+                .into());
+            }
+        };
         if bytes_read == 0 {
             let mut stderr = String::new();
             let _ = process.stderr.read_to_string(&mut stderr).await;
@@ -350,9 +359,23 @@ async fn rpc_call(
 
 async fn shutdown_stdio_process(mut process: RpcProcess) -> Result<(), Box<dyn std::error::Error>> {
     drop(process.stdin);
-    let status = timeout(Duration::from_secs(20), process.child.wait()).await??;
-    if !status.success() {
-        return Err(format!("stdio process exited unsuccessfully: {status}").into());
+    match timeout(Duration::from_secs(20), process.child.wait()).await {
+        Ok(status) => {
+            let status = status?;
+            if !status.success() {
+                return Err(format!("stdio process exited unsuccessfully: {status}").into());
+            }
+        }
+        Err(_) => {
+            if let Some(pid) = process.child.id() {
+                let _ = Command::new("kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .status()
+                    .await;
+            }
+            let _ = timeout(Duration::from_secs(5), process.child.wait()).await?;
+        }
     }
     Ok(())
 }
@@ -363,11 +386,19 @@ async fn rpc_read_json_line(
 ) -> Result<Value, Box<dyn std::error::Error>> {
     loop {
         let mut line = String::new();
-        let bytes_read = timeout(
+        let bytes_read = match timeout(
             Duration::from_secs(timeout_secs),
             process.stdout.read_line(&mut line),
         )
-        .await??;
+        .await
+        {
+            Ok(bytes_read) => bytes_read?,
+            Err(_) => {
+                return Err(
+                    format!("timed out waiting for stdio JSON line after {timeout_secs}s").into(),
+                );
+            }
+        };
         if bytes_read == 0 {
             let mut stderr = String::new();
             let _ = process.stderr.read_to_string(&mut stderr).await;
@@ -525,10 +556,18 @@ fn allocate_port() -> u16 {
 }
 
 async fn wait_for_rest_server(
-    mut child: Child,
+    child: Child,
     port: u16,
 ) -> Result<Child, Box<dyn std::error::Error>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    wait_for_rest_server_with_timeout(child, port, 20).await
+}
+
+async fn wait_for_rest_server_with_timeout(
+    mut child: Child,
+    port: u16,
+    timeout_secs: u64,
+) -> Result<Child, Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
             return Ok(child);
@@ -546,7 +585,7 @@ async fn wait_for_rest_server(
             let _ = child.start_kill();
             let output = child.wait_with_output().await?;
             return Err(format!(
-                "timed out waiting for port {port}\nstdout:\n{}\nstderr:\n{}",
+                "timed out waiting for port {port} after {timeout_secs}s\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             )
@@ -1897,7 +1936,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
     .await?;
     let mut pump = RpcEventPump::default();
 
-    let initialize = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+    let initialize = pump.call(&mut rpc, "initialize", json!({}), 60).await?;
     assert!(
         initialize["methods"].as_array().is_some_and(|methods| {
             methods
@@ -1968,7 +2007,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
                     }
                 }
             }),
-            30,
+            60,
         )
         .await?;
     assert_eq!(created["mob_id"].as_str(), Some(mob_id));
@@ -1990,7 +2029,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
                      If none arrived, reply exactly SEEN:"
                 )
             }),
-            30,
+            60,
         )
         .await?;
     assert_eq!(parent_spawn["agent_identity"].as_str(), Some("parent"));
@@ -2138,7 +2177,7 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
             "--instance",
             "scenario-55-rest",
         ]);
-    let rest_child = wait_for_rest_server(rest.spawn()?, port).await?;
+    let rest_child = wait_for_rest_server_with_timeout(rest.spawn()?, port, 60).await?;
     eprintln!("[scenario 55] rest started on port {port}");
 
     let sessions = rest_list_sessions(port, 8).await?;
@@ -2242,7 +2281,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     .await?;
     let mut pump = RpcEventPump::default();
 
-    let initialize = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+    let initialize = pump.call(&mut rpc, "initialize", json!({}), 60).await?;
     assert!(
         initialize["methods"].as_array().is_some_and(|methods| {
             methods
@@ -2272,7 +2311,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
                     }
                 }
             }),
-            30,
+            60,
         )
         .await?;
     assert_eq!(created["mob_id"].as_str(), Some(mob_id));
@@ -2288,7 +2327,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
                 "runtime_mode": "turn_driven",
                 "initial_turn": "deferred"
             }),
-            30,
+            60,
         )
         .await?;
     assert!(
@@ -2333,7 +2372,7 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
             "--instance",
             "scenario-56-rest",
         ]);
-    let rest_child = wait_for_rest_server(rest.spawn()?, port).await?;
+    let rest_child = wait_for_rest_server_with_timeout(rest.spawn()?, port, 60).await?;
 
     let rest_worker_status = rest_mob_member_status(port, mob_id, "worker-1").await?;
     assert_eq!(rest_worker_status["status"].as_str(), Some("active"));

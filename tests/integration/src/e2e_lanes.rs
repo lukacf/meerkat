@@ -1417,11 +1417,11 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT",
-                    "{cargo_target_dir}/e2e-bins/rkat-scenario-54",
+                    "{cargo_target_dir}/e2e-bins/scenario-54/rkat",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_RPC",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-54",
+                    "{cargo_target_dir}/e2e-bins/scenario-54/rkat-rpc",
                 ),
             ],
             cargo_bin_env: &[],
@@ -1437,16 +1437,16 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "--features",
                     "mob",
                 ],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins/scenario-54"],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat",
-                    "{cargo_target_dir}/e2e-bins/rkat-scenario-54",
+                    "{cargo_target_dir}/e2e-bins/scenario-54/rkat",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rpc",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-54",
+                    "{cargo_target_dir}/e2e-bins/scenario-54/rkat-rpc",
                 ],
             ],
             command: CommandSpec::CargoTest {
@@ -1471,15 +1471,15 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT",
-                    "{cargo_target_dir}/e2e-bins/rkat-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_RPC",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat-rpc",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_REST",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat-rest",
                 ),
             ],
             cargo_bin_env: &[],
@@ -1505,21 +1505,21 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "--features",
                     "mob",
                 ],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins/scenario-55"],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat",
-                    "{cargo_target_dir}/e2e-bins/rkat-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rpc",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat-rpc",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rest",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-scenario-55",
+                    "{cargo_target_dir}/e2e-bins/scenario-55/rkat-rest",
                 ],
             ],
             command: CommandSpec::CargoTest {
@@ -1541,11 +1541,11 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT_RPC",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-56",
+                    "{cargo_target_dir}/e2e-bins/scenario-56/rkat-rpc",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_REST",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-scenario-56",
+                    "{cargo_target_dir}/e2e-bins/scenario-56/rkat-rest",
                 ),
             ],
             cargo_bin_env: &[],
@@ -1570,16 +1570,16 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "--features",
                     "mob",
                 ],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins/scenario-56"],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rpc",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-scenario-56",
+                    "{cargo_target_dir}/e2e-bins/scenario-56/rkat-rpc",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rest",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-scenario-56",
+                    "{cargo_target_dir}/e2e-bins/scenario-56/rkat-rest",
                 ],
             ],
             command: CommandSpec::CargoTest {
@@ -1759,27 +1759,31 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT_RPC",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-system-rpc-rest-rpc",
+                    "{cargo_target_dir}/e2e-bins/system-rpc-rest-rpc/rkat-rpc",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_REST",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-system-rpc-rest-rpc",
+                    "{cargo_target_dir}/e2e-bins/system-rpc-rest-rpc/rkat-rest",
                 ),
             ],
             cargo_bin_env: &[],
             pre_commands: &[
                 &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
                 &["cargo", "build", "-p", "meerkat-rest", "--bin", "rkat-rest"],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/system-rpc-rest-rpc",
+                ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rpc",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-system-rpc-rest-rpc",
+                    "{cargo_target_dir}/e2e-bins/system-rpc-rest-rpc/rkat-rpc",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rest",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-system-rpc-rest-rpc",
+                    "{cargo_target_dir}/e2e-bins/system-rpc-rest-rpc/rkat-rest",
                 ],
             ],
             command: CommandSpec::CargoTest {
@@ -1801,27 +1805,31 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT",
-                    "{cargo_target_dir}/e2e-bins/rkat-system-cli-rpc-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rpc-cli/rkat",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_RPC",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-system-cli-rpc-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rpc-cli/rkat-rpc",
                 ),
             ],
             cargo_bin_env: &[],
             pre_commands: &[
                 &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
                 &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rpc-cli",
+                ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat",
-                    "{cargo_target_dir}/e2e-bins/rkat-system-cli-rpc-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rpc-cli/rkat",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rpc",
-                    "{cargo_target_dir}/e2e-bins/rkat-rpc-system-cli-rpc-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rpc-cli/rkat-rpc",
                 ],
             ],
             command: CommandSpec::CargoTest {
@@ -1843,27 +1851,31 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             env: &[
                 (
                     "RKAT_TEST_BIN_RKAT",
-                    "{cargo_target_dir}/e2e-bins/rkat-system-cli-rest-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rest-cli/rkat",
                 ),
                 (
                     "RKAT_TEST_BIN_RKAT_REST",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-system-cli-rest-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rest-cli/rkat-rest",
                 ),
             ],
             cargo_bin_env: &[],
             pre_commands: &[
                 &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
                 &["cargo", "build", "-p", "meerkat-rest", "--bin", "rkat-rest"],
-                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rest-cli",
+                ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat",
-                    "{cargo_target_dir}/e2e-bins/rkat-system-cli-rest-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rest-cli/rkat",
                 ],
                 &[
                     "cp",
                     "{cargo_target_dir}/debug/rkat-rest",
-                    "{cargo_target_dir}/e2e-bins/rkat-rest-system-cli-rest-cli",
+                    "{cargo_target_dir}/e2e-bins/system-cli-rest-cli/rkat-rest",
                 ],
             ],
             command: CommandSpec::CargoTest {

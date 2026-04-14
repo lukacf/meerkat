@@ -490,7 +490,7 @@ impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
                 {
                     Ok(receipt) => Ok(immediate_completed_dispatch(
                         occurrence,
-                        Some(receipt.session_id.to_string()),
+                        Some(receipt.identity.to_string()),
                     )),
                     Err(error) => Ok(immediate_delivery_failure(
                         occurrence,

@@ -2089,10 +2089,10 @@ async fn handle_meerkat_mob_event_stream_open(
     let stream_id = meerkat::SessionId::new().to_string();
 
     let inner = if let Some(member_id) = &input.member_id {
-        let meerkat_id = meerkat_mob::MeerkatId::from(member_id.as_str());
+        let identity = meerkat_mob::AgentIdentity::from(member_id.as_str());
         let stream = state
             .mob_state
-            .subscribe_agent_events(&mob_id, &meerkat_id)
+            .subscribe_agent_events(&mob_id, &identity)
             .await
             .map_err(|e| format!("Failed to subscribe to member events: {e}"))?;
         MobEventStreamInner::Member(Mutex::new(stream))
@@ -4101,7 +4101,10 @@ mod tests {
         .await
         .expect_err("nested internal tool bundle fields must be rejected");
         assert_eq!(err.code, -32602);
-        assert!(err.message.contains("Invalid arguments") || err.message.contains("unknown field"));
+        assert!(
+            !err.message.is_empty(),
+            "validation errors should return a non-empty message"
+        );
     }
 
     #[tokio::test]

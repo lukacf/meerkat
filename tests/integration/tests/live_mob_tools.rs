@@ -337,7 +337,7 @@ async fn e2e_delegate_creates_implicit_mob() {
     let roster = handle.roster().await;
     assert!(
         roster
-            .get(&meerkat_mob::MeerkatId::from("helper-alpha"))
+            .get_by_identity(&meerkat_mob::AgentIdentity::from("helper-alpha"))
             .is_some(),
         "roster should contain helper-alpha"
     );
@@ -484,7 +484,9 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     let handle = mob_state.handle_for(&mob_id).await.expect("handle");
     let roster = handle.roster().await;
     assert!(
-        roster.get(&meerkat_mob::MeerkatId::from("w-1")).is_some(),
+        roster
+            .get_by_identity(&meerkat_mob::AgentIdentity::from("w-1"))
+            .is_some(),
         "worker w-1 should be in roster after spawn"
     );
 
@@ -526,7 +528,7 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = mob_state
-            .mob_member_status(&mob_id, &meerkat_mob::MeerkatId::from("w-1"))
+            .mob_member_status(&mob_id, &meerkat_mob::AgentIdentity::from("w-1"))
             .await;
         match status {
             Ok(snap) if snap.is_final => break,
@@ -1010,11 +1012,11 @@ async fn e2e_delegate_bidirectional_comms() {
     };
 
     // Wait for the helper member to appear in the roster.
-    let helper_id = meerkat_mob::MeerkatId::from("comms-helper");
+    let helper_id = meerkat_mob::AgentIdentity::from("comms-helper");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let handle = mob_state.handle_for(&mob_id).await.expect("handle");
-        if handle.roster().await.get(&helper_id).is_some() {
+        if handle.roster().await.get_by_identity(&helper_id).is_some() {
             break;
         }
         assert!(
@@ -1034,7 +1036,7 @@ async fn e2e_delegate_bidirectional_comms() {
                 .roster()
                 .await
                 .list()
-                .map(|entry| entry.meerkat_id.to_string())
+                .map(|entry| entry.meerkat_id().to_string())
                 .collect::<Vec<_>>(),
             session_history_text(router.as_ref(), &session_id, 100).await
         );

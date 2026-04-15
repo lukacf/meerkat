@@ -134,7 +134,7 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
-          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface,mini-skills
+          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
           cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries

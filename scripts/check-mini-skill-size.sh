@@ -25,8 +25,8 @@ if [[ -z "$STRIP_BIN" ]]; then
   fi
 fi
 
-base_features="anthropic,openai,gemini,jsonl-store,session-store,mini-surface"
-with_skill_features="${base_features},mini-skills"
+base_features="anthropic,openai,gemini,jsonl-store,session-store"
+with_skill_features="${base_features},skills"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT

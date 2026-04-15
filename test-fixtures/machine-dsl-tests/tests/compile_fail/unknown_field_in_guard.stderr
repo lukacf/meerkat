@@ -1,0 +1,11 @@
+error: derived-phase machines require a `phase_projection` block
+ --> tests/compile_fail/unknown_field_in_guard.rs:4:13
+  |
+4 |     machine Bad {
+  |             ^^^
+
+error: unknown state field `nonexistent_field`
+  --> tests/compile_fail/unknown_field_in_guard.rs:29:26
+   |
+29 |             guard { self.nonexistent_field == true }
+   |                          ^^^^^^^^^^^^^^^^^

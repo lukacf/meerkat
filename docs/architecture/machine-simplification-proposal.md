@@ -51,6 +51,11 @@ Hopcroft-style behavioral quotient over the reachable graph.
 - Pruned the remaining top-level Mob frame / loop mirror by removing `RegisterReadyFrame`, `RegisterPendingBodyFrame`, `FrameTerminated`, `StartRootFrame`, `StartBodyFrame`, `StartLoop`, `BodyFrameStarted`, `BodyFrame*`, `UntilConditionFailed`, and `CancelLoop`, along with `active_frame_count`, `active_loop_count`, and their orphan top-level effects/invariants.
 - Collapsed the formal Mob `Creating` phase into `Running`, removing the dead top-level `Start` signal and all `Creating`-only formal transitions while leaving the public `MobState` surface unchanged.
 - Removed the unreachable top-level Meerkat `Recovering` phase and its self-loops from the formal model while leaving the internal runtime-control `Recovering` phase and public `RuntimeState` enum unchanged.
+- Extracted the Meerkat pure query/helper surface (`ContainsSession`,
+  `SessionHasExecutor`, `SessionHasComms`, `OpsLifecycleRegistry`,
+  `InputState`, `ListActiveInputs`, `RuntimeState`, `LoadBoundaryReceipt`) into
+  `surface_only_inputs`, removing 40 formal self-loop transitions while keeping
+  the runtime command manifest and helper behavior unchanged.
 - Cleared the full phase-exit workspace gates on the rebased branch tip: `./scripts/repo-cargo nextest run --workspace` finished with 4,305 passing tests / 149 skipped, and `./scripts/repo-cargo clippy --workspace -- -D warnings` finished clean after fixing branch-head regressions in tool-visibility boundary change detection, stale semantic-model expectations, and idle-session LLM hot-swap fallback handling.
 - Regenerated machine/composition artifacts and re-ran schema parity, drift, TLC, render, runtime, and owner tests on top of the landed tranches.
 
@@ -89,6 +94,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Prune Mob frame / loop lifecycle signals | passed / landed | Removed the remaining top-level frame/loop mirror, including `active_frame_count` and `active_loop_count`; TLC generated states fell from 202,140 to 162,926 and distinct states fell from 5,411 to 4,859. |
 | `Creating` vs `Running` can merge internally | passed / landed | Fresh and resumed mobs already surface `Running`; removed the dead formal `Creating` phase and `Start` signal without changing the public `MobState` enum. |
 | Meerkat `Recovering` is a transient / no-op top-level phase | passed / landed | Removed the unreachable top-level `Recovering` phase from the formal model; the internal `RuntimeControlAuthority` still owns recovery/recycle transitions, and TLC state space stayed unchanged. |
+| Meerkat pure queries should stay surfaced without formal transitions | passed / landed | Moved the read-only helper/query family into `surface_only_inputs`; runtime/schema audits stayed green and Meerkat TLC generated states dropped from 3,668,832 to 3,113,272 while the raw/phase quotients stayed at 385 / 390. |
 | Meerkat `Stopped` vs `Retired` can merge internally | rejected | The top-level transition sets diverge in load-bearing ways: `Retired` still accepts `Reset`, `StopRuntimeExecutor`, and `Recycle`, while `Stopped` does not, and the retire path carries archival/drain semantics that phase 1 should keep explicit. |
 | Meerkat `Idle` vs `Attached` can merge internally | rejected | In the current formal model, phase identity still carries load-bearing "executor attached" semantics that are not derivable from the existing Meerkat extended state. Several absorbed transitions are phase-gated without a field-level attachment witness, so phase-1 collapse would require introducing a replacement attachment bit plus a new public projection layer rather than actually simplifying the model. |
 
@@ -216,9 +222,9 @@ The checked-in row ledger for that audit now lives in
   `Running <-> Stopped`, `Running <-> Retired`, `Idle <-> Retired`,
   `Idle <-> Stopped`, `Attached <-> Retired`, `Attached <-> Stopped`,
   `Idle <-> Running`, `Retired <-> Stopped`
-- Interesting schema rows in scope: `323`
-- Runtime probes implemented: `323`
-- Schema/runtime alignments: `323`
+- Transition-bearing schema rows in scope: `243`
+- Runtime probes implemented: `243`
+- Schema/runtime alignments: `243`
 - Schema/runtime mismatches: `0`
 - Remaining unprobed rows: `0`
 
@@ -244,22 +250,29 @@ directory.
 
 Current full-row numbers:
 
-- rows in scope: `340`
-- runtime probes implemented: `340`
-- schema/runtime alignments: `340`
+- transition-bearing rows in scope: `260`
+- runtime probes implemented: `260`
+- schema/runtime alignments: `260`
 - schema/runtime mismatches: `0`
 - remaining unprobed rows: `0`
 
-That final step from `339 / 340` to `340 / 340` was not another Meerkat phase
-change. It came from making the audit boundary explicit: the pair report now
-composes the simulated Meerkat machine outcome with lower-authority
-carrier-derived control-report summaries for surfaces such as
-`DestroyReport.inputs_abandoned`.
+That final exactness step did not come from another phase merge. It came from
+making the audit boundary explicit: the pair report now composes the simulated
+Meerkat machine outcome with lower-authority carrier-derived control-report
+summaries for surfaces such as `DestroyReport.inputs_abandoned`.
 
-The modeled-state audit remains green at `185 / 185` rows aligned. The exact
-observable audit is now also green because it no longer pretends the top-level
+The exact observable audit is green because it no longer pretends the top-level
 phase machine alone owns report counts that are actually produced from the
 input-ledger carrier.
+
+The query extraction cut the audited transition-bearing surface further without
+reopening parity gaps:
+
+- modeled-state audit is now `145 / 145`
+- the acceptance map is now `243 / 243`
+- the exact full-row map is now `260 / 260`
+- the removed rows are the eight pure read-only query helpers now carried as
+  `surface_only_inputs`
 
 So the Meerkat story is now:
 
@@ -278,9 +291,10 @@ The Meerkat parity pass has now closed four concrete families:
 - durable tool-visibility mutation
 - helper/query surface (`EnsureSessionWithExecutor`, `SetSilentIntents`,
   `ContainsSession`, `SessionHasExecutor`, `SessionHasComms`,
-  `OpsLifecycleRegistry`, `InputState`, `ListActiveInputs`)
+  `OpsLifecycleRegistry`, `InputState`, `ListActiveInputs`,
+  `RuntimeState`, `LoadBoundaryReceipt`)
 - reducer/control acceptance surface (`Abort*`, `Wait`, `Ingest`,
-  `PublishEvent`, `RuntimeState`, `LoadBoundaryReceipt`, `Accept*`,
+  `PublishEvent`, `Accept*`,
   `Recycle`, `Prepare`, `Commit`, `Fail`)
 
 The probe also still confirms several genuinely load-bearing distinctions:
@@ -398,6 +412,8 @@ The Meerkat audit has shifted from parity triage to post-parity stock-taking:
   public-phase matrix
 - the exact observable audit is also green once control-plane report counts are
   composed with their lower-authority ledger carrier
+- the pure read-only query surface is now intentionally outside formal
+  transition coverage while remaining in the surfaced runtime command manifest
 - the next step is to use the post-parity Hopcroft rerun to steer the DSL work
 
 ### Post-parity Meerkat rerun
@@ -423,7 +439,8 @@ Current result:
 - raw quotient states: `385`
 - phase-observed quotient states: `390`
 - full-observed quotient states: `58,038`
-- TLC: `3,668,832 generated / 59,371 distinct / depth 9`
+- TLC: `3,113,272 generated / 59,371 distinct / depth 9`
+- reachable edges: `1,305,806` (down from `1,539,266` before query extraction)
 - dominant mixed block: `32,248` states spanning `Initializing`, `Idle`,
   `Attached`, `Running`, `Retired`, and `Stopped`
 - dominant block tuples: `16,859`

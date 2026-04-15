@@ -12176,18 +12176,18 @@ fn runtime_modeled_summary_from_kernel_state(
         .state
         .fields
         .iter()
-        .filter_map(|field| {
+        .filter(|field| {
             runtime_reference
                 .formal_available_fields
                 .contains_key(&field.name)
-                .then(|| {
-                    let value = state
-                        .fields
-                        .get(&field.name)
-                        .map(runtime_modeled_formal_string_from_kernel_value)
-                        .unwrap_or_else(|| "null".to_string());
-                    (field.name.clone(), value)
-                })
+        })
+        .map(|field| {
+            let value = state
+                .fields
+                .get(&field.name)
+                .map(runtime_modeled_formal_string_from_kernel_value)
+                .unwrap_or_else(|| "null".to_string());
+            (field.name.clone(), value)
         })
         .collect();
 
@@ -12763,7 +12763,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::LoadBoundaryReceipt => {
             MeerkatMachineCommand::LoadBoundaryReceipt {
                 runtime_id: fixture.runtime_id.clone(),
-                run_id: fixture.prepared_run_id.clone().unwrap_or_else(RunId::new),
+                run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
                 sequence: 0,
             }
         }
@@ -12782,11 +12782,8 @@ fn runtime_parity_probe_command(
             input: runtime_parity_prompt("runtime parity prepare"),
         },
         RuntimeParityProbeInput::Commit => {
-            let input_id = fixture
-                .prepared_input_id
-                .clone()
-                .unwrap_or_else(InputId::new);
-            let run_id = fixture.prepared_run_id.clone().unwrap_or_else(RunId::new);
+            let input_id = fixture.prepared_input_id.clone().unwrap_or_default();
+            let run_id = fixture.prepared_run_id.clone().unwrap_or_default();
             MeerkatMachineCommand::Commit {
                 session_id: fixture.session_id.clone(),
                 input_id: input_id.clone(),
@@ -12808,7 +12805,7 @@ fn runtime_parity_probe_command(
         }
         RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
             session_id: fixture.session_id.clone(),
-            run_id: fixture.prepared_run_id.clone().unwrap_or_else(RunId::new),
+            run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
             error: "runtime parity failure".to_string(),
         },
         RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
@@ -13431,6 +13428,11 @@ async fn write_runtime_parity_audit_report(
 
 async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModeledStateAuditReport {
     let schema = modeled_meerkat_kernel::schema();
+    let surface_only_inputs = schema
+        .surface_only_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut rows = Vec::new();
 
     for phase in [
@@ -13441,6 +13443,9 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
         RuntimeParityPhase::Stopped,
     ] {
         for input_variant in &schema.inputs.variants {
+            if surface_only_inputs.contains(input_variant.name.as_str()) {
+                continue;
+            }
             let Some(probe) = runtime_parity_probe_for_input_variant(&input_variant.name) else {
                 rows.push(RuntimeModeledStateRowReport {
                     phase: phase.schema_name().to_string(),

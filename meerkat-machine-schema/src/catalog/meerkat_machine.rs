@@ -146,7 +146,16 @@ pub fn meerkat_machine() -> MachineSchema {
             name: "MeerkatMachineInput".into(),
             variants: input_variants,
         },
-        surface_only_inputs: vec![],
+        surface_only_inputs: vec![
+            "ContainsSession".into(),
+            "SessionHasExecutor".into(),
+            "SessionHasComms".into(),
+            "OpsLifecycleRegistry".into(),
+            "InputState".into(),
+            "ListActiveInputs".into(),
+            "RuntimeState".into(),
+            "LoadBoundaryReceipt".into(),
+        ],
         signals: EnumSchema {
             name: "MeerkatMachineSignal".into(),
             variants: signal_variants,
@@ -1983,25 +1992,15 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     }
 
     for phase in ["Idle", "Attached", "Running", "Retired", "Stopped"] {
-        for (variant, bindings) in [
-            ("SetSilentIntents", vec!["session_id", "intents"]),
-            ("ContainsSession", vec!["session_id"]),
-            ("SessionHasExecutor", vec!["session_id"]),
-            ("SessionHasComms", vec!["session_id"]),
-            ("OpsLifecycleRegistry", vec!["session_id"]),
-            ("InputState", vec!["session_id", "input_id"]),
-            ("ListActiveInputs", vec!["session_id"]),
-        ] {
-            transitions.push(self_loop_transition_with(
-                &format!("{variant}{phase}"),
-                phase,
-                variant,
-                bindings,
-                vec![],
-                vec![],
-                vec![session_registered_guard()],
-            ));
-        }
+        transitions.push(self_loop_transition_with(
+            &format!("SetSilentIntents{phase}"),
+            phase,
+            "SetSilentIntents",
+            vec!["session_id", "intents"],
+            vec![],
+            vec![],
+            vec![session_registered_guard()],
+        ));
     }
 
     // Abort/Wait only require a registered session in the runtime; they are
@@ -2161,59 +2160,6 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             bindings,
             vec![],
             emit_variant.into_iter().map(simple_emit).collect(),
-            vec![session_registered_guard()],
-        ));
-    }
-
-    // RuntimeState/LoadBoundaryReceipt route through runtime lookup for any
-    // registered runtime entry, not just runtime-bound Attached/Running.
-    for (variant, bindings) in [
-        ("RuntimeState", vec!["runtime_id"]),
-        ("LoadBoundaryReceipt", vec!["runtime_id", "sequence"]),
-    ] {
-        transitions.push(self_loop_transition_with(
-            &format!("{variant}Idle"),
-            "Idle",
-            variant,
-            bindings.clone(),
-            vec![],
-            vec![],
-            vec![session_registered_guard()],
-        ));
-        transitions.push(self_loop_transition_with(
-            &format!("{variant}Attached"),
-            "Attached",
-            variant,
-            bindings.clone(),
-            vec![],
-            vec![],
-            vec![session_registered_guard()],
-        ));
-        transitions.push(self_loop_transition_with(
-            &format!("{variant}Running"),
-            "Running",
-            variant,
-            bindings.clone(),
-            vec![],
-            vec![],
-            vec![session_registered_guard()],
-        ));
-        transitions.push(self_loop_transition_with(
-            &format!("{variant}Retired"),
-            "Retired",
-            variant,
-            bindings.clone(),
-            vec![],
-            vec![],
-            vec![session_registered_guard()],
-        ));
-        transitions.push(self_loop_transition_with(
-            &format!("{variant}Stopped"),
-            "Stopped",
-            variant,
-            bindings,
-            vec![],
-            vec![],
             vec![session_registered_guard()],
         ));
     }

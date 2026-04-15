@@ -672,8 +672,13 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
 }
 
 #[test]
-fn every_query_runtime_command_has_transition_coverage() {
+fn every_query_runtime_command_has_expected_surface_coverage() {
     let meerkat = meerkat_machine();
+    let meerkat_surface_only_inputs = meerkat
+        .surface_only_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
     let meerkat_transitioned = meerkat
         .transitions
         .iter()
@@ -688,13 +693,21 @@ fn every_query_runtime_command_has_transition_coverage() {
         "ListActiveInputs",
         "RuntimeState",
         "LoadBoundaryReceipt",
-        "Wait",
     ] {
         assert!(
-            meerkat_transitioned.contains(required),
-            "MeerkatMachine query command {required} should have transition coverage"
+            meerkat_surface_only_inputs.contains(required),
+            "MeerkatMachine query command {required} should stay surfaced even without transitions"
+        );
+        assert!(
+            !meerkat_transitioned.contains(required),
+            "MeerkatMachine query command {required} should no longer require transition coverage"
         );
     }
+    let required = "Wait";
+    assert!(
+        meerkat_transitioned.contains(required),
+        "MeerkatMachine helper command {required} should still have transition coverage"
+    );
 
     let mob = mob_machine();
     let mob_surface_only_inputs = mob

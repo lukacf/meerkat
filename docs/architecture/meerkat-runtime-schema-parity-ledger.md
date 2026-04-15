@@ -41,9 +41,9 @@ There are now two audit layers:
   `Running ↔ Stopped`, `Running ↔ Retired`, `Idle ↔ Retired`,
   `Idle ↔ Stopped`, `Attached ↔ Retired`, `Attached ↔ Stopped`,
   `Idle ↔ Running`, `Retired ↔ Stopped`
-- Interesting rows in scope: `323`
-- Live-probed rows: `323`
-- `fixed`: `323`
+- Transition-bearing rows in scope: `243`
+- Live-probed rows: `243`
+- `fixed`: `243`
 - `align_schema`: `0`
 - `align_runtime`: `0`
 - `needs_decision`: `0`
@@ -53,6 +53,11 @@ Current state:
 - the Meerkat registration-helper tranche is aligned
 - the durable tool-visibility tranche is aligned
 - the helper/query tranche is aligned
+- the pure query/helper surface is now explicitly carried as
+  `surface_only_inputs` instead of formal self-loops:
+  `ContainsSession`, `SessionHasExecutor`, `SessionHasComms`,
+  `OpsLifecycleRegistry`, `InputState`, `ListActiveInputs`,
+  `RuntimeState`, `LoadBoundaryReceipt`
 - the reducer/control tranche is aligned
 - the cross-pair public-phase expansion tranche is aligned
 - Meerkat acceptance parity is now green across the current public-phase
@@ -64,23 +69,25 @@ Current state:
   `Running ↔ Stopped`, `Running ↔ Retired`, `Idle ↔ Retired`,
   `Idle ↔ Stopped`, `Attached ↔ Retired`, `Attached ↔ Stopped`,
   `Idle ↔ Running`, `Retired ↔ Stopped`
-- Full rows in scope: `340`
-- Live-probed rows: `340`
-- aligned: `340`
+- Transition-bearing full rows in scope: `260`
+- Live-probed rows: `260`
+- aligned: `260`
 - mismatched: `0`
 - unprobed: `0`
 
 Current exact-parity state:
 
 - acceptance parity is still green
-- modeled formal-state parity is green at `185 / 185`
-- exact full-row parity is green at `340 / 340`
+- modeled formal-state parity is green at `145 / 145`
+- exact full-row parity is green at `260 / 260`
 - the pair audit now compares runtime behavior against the simulated schema
   outcome from the same representative pre-state rather than against static
   transition topology
 - the exact observable audit now also composes in lower-authority ledger
   carrier summaries for control-plane report counts such as
   `DestroyReport.inputs_abandoned`
+- the pure query surface remains runtime-audited helper behavior, but it is no
+  longer counted as formal transition coverage
 
 Interpretation:
 
@@ -116,8 +123,9 @@ Interpretation:
   - direct runtime probes confirmed that `Recycle`, `Prepare`, `Commit`, and
     `Fail` already matched the current schema surface for the audited frontier
   - the schema was widened to match the runtime’s existing acceptance surface
-    for `Abort*`, `Wait`, `Ingest`, `PublishEvent`, `RuntimeState`,
-    `LoadBoundaryReceipt`, and `Accept*`
+    for `Abort*`, `Wait`, `Ingest`, `PublishEvent`, and `Accept*`
+  - `RuntimeState` and `LoadBoundaryReceipt` are now carried with the other
+    pure query helpers as `surface_only_inputs`
   - `InterruptCurrentRun` and `CancelAfterBoundary` are now modeled as
     attached-loop control commands: `Attached` accepts them as self-loops,
     while `Running` keeps the active-work surface and `Idle` / `Retired` /
@@ -125,25 +133,25 @@ Interpretation:
 
 ## Pair Ledger
 
-- `Attached ↔ Idle`: `33` interesting, `33` probed, `33` fixed, `0`
+- `Attached ↔ Idle`: `25` interesting, `25` probed, `25` fixed, `0`
   mismatches, `0` unprobed
-- `Attached ↔ Running`: `36` interesting, `36` probed, `36` fixed, `0`
+- `Attached ↔ Running`: `28` interesting, `28` probed, `28` fixed, `0`
   mismatches, `0` unprobed
-- `Running ↔ Stopped`: `33` interesting, `33` probed, `33` fixed, `0`
+- `Running ↔ Stopped`: `25` interesting, `25` probed, `25` fixed, `0`
   mismatches, `0` unprobed
-- `Running ↔ Retired`: `35` interesting, `35` probed, `35` fixed, `0`
+- `Running ↔ Retired`: `27` interesting, `27` probed, `27` fixed, `0`
   mismatches, `0` unprobed
-- `Idle ↔ Retired`: `27` interesting, `27` probed, `27` fixed, `0`
+- `Idle ↔ Retired`: `19` interesting, `19` probed, `19` fixed, `0`
   mismatches, `0` unprobed
-- `Idle ↔ Stopped`: `30` interesting, `30` probed, `30` fixed, `0`
+- `Idle ↔ Stopped`: `22` interesting, `22` probed, `22` fixed, `0`
   mismatches, `0` unprobed
-- `Attached ↔ Retired`: `34` interesting, `34` probed, `34` fixed, `0`
+- `Attached ↔ Retired`: `26` interesting, `26` probed, `26` fixed, `0`
   mismatches, `0` unprobed
-- `Attached ↔ Stopped`: `34` interesting, `34` probed, `34` fixed, `0`
+- `Attached ↔ Stopped`: `26` interesting, `26` probed, `26` fixed, `0`
   mismatches, `0` unprobed
-- `Idle ↔ Running`: `36` interesting, `36` probed, `36` fixed, `0`
+- `Idle ↔ Running`: `28` interesting, `28` probed, `28` fixed, `0`
   mismatches, `0` unprobed
-- `Retired ↔ Stopped`: `25` interesting, `25` probed, `25` fixed, `0`
+- `Retired ↔ Stopped`: `17` interesting, `17` probed, `17` fixed, `0`
   mismatches, `0` unprobed
 
 The last acceptance mismatch cluster was `Attached ↔ Running` on
@@ -185,10 +193,15 @@ Closed rows:
 - `OpsLifecycleRegistry`
 - `InputState`
 - `ListActiveInputs`
+- `RuntimeState`
+- `LoadBoundaryReceipt`
 
 Outcome:
 
-- the helper/query family is now live-probed and aligned for the audited pairs
+- the helper/query family is live-probed and aligned for the audited pairs
+- the pure read-only Meerkat queries are now modeled as surfaced-only runtime
+  inputs rather than formal self-loops, matching the existing Mob query
+  boundary
 
 ### Batch C: Reducer/control probe expansion
 
@@ -201,8 +214,6 @@ Closed rows:
 - `Wait`
 - `Ingest`
 - `PublishEvent`
-- `RuntimeState`
-- `LoadBoundaryReceipt`
 - `AcceptWithCompletion`
 - `AcceptWithoutWake`
 - `Recycle`
@@ -249,8 +260,9 @@ Outcome:
    as lower-authority carrier facts in the exact observable audit unless and
    until the DSL work deliberately lifts them into the top-level machine.
 3. Use the trustworthy post-parity Hopcroft rerun as the Meerkat
-   simplification baseline:
-   raw `59,371 -> 385`, phase `59,371 -> 390`, full `59,371 -> 58,038`.
+   simplification baseline after query extraction:
+   raw `59,371 -> 385`, phase `59,371 -> 390`, TLC `3,113,272 generated /
+   59,371 distinct / depth 9`.
 4. Read that baseline together with the largest-block field projection from
    [`docs/architecture/machine-simplification-proposal.md`](machine-simplification-proposal.md):
    the dominant Meerkat mixed block is now measured as `32,248` states over

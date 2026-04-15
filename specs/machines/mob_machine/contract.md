@@ -10,7 +10,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_identity`: `Option<AgentIdentity>`
 - `active_runtime_id`: `Option<AgentRuntimeId>`
 - `active_fence_token`: `Option<FenceToken>`
-- `current_generation`: `Option<Generation>`
 - `active_member_count`: `u32`
 - `active_run_count`: `u32`
 - `pending_spawn_count`: `u32`

@@ -56,6 +56,10 @@ Hopcroft-style behavioral quotient over the reachable graph.
   `InputState`, `ListActiveInputs`, `RuntimeState`, `LoadBoundaryReceipt`) into
   `surface_only_inputs`, removing 40 formal self-loop transitions while keeping
   the runtime command manifest and helper behavior unchanged.
+- Removed the Mob top-level `current_generation` field and switched
+  `RequestRuntimeBinding` emission to consume the transition bindings directly,
+  so the formal machine no longer stores a generation value purely to replay it
+  into a routed seam effect.
 - Removed the Meerkat LLM/capability projection layer
   (`current_llm_identity`, `current_capability_surface`,
   `capability_surface_status`, `capability_base_filter`,
@@ -99,6 +103,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Prune Mob frame / loop lifecycle signals | passed / landed | Removed the remaining top-level frame/loop mirror, including `active_frame_count` and `active_loop_count`; TLC generated states fell from 202,140 to 162,926 and distinct states fell from 5,411 to 4,859. |
 | `Creating` vs `Running` can merge internally | passed / landed | Fresh and resumed mobs already surface `Running`; removed the dead formal `Creating` phase and `Start` signal without changing the public `MobState` enum. |
 | Mob work/task/subscription shadow counters should not stay as top-level formal state | passed / landed | Removed `inflight_work_id`, `task_count`, and `event_subscription_count`; exact Mob parity stayed green and TLC distinct states fell from 4,797 to 1,390 while the raw/phase quotients stayed at 202 / 204. |
+| Mob `current_generation` should not stay as top-level seam-shadow state | passed / landed | Removed `current_generation` and emitted `RequestRuntimeBinding.generation` directly from the transition bindings; exact Mob parity stayed green and the truthful Hopcroft/TLC readout stayed unchanged, proving the field was fully correlated rather than behavior-bearing. |
 | Meerkat `Recovering` is a transient / no-op top-level phase | passed / landed | Removed the unreachable top-level `Recovering` phase from the formal model; the internal `RuntimeControlAuthority` still owns recovery/recycle transitions, and TLC state space stayed unchanged. |
 | Meerkat pure queries should stay surfaced without formal transitions | passed / landed | Moved the read-only helper/query family into `surface_only_inputs`; runtime/schema audits stayed green and Meerkat TLC generated states dropped from 3,668,832 to 3,113,272 while the raw/phase quotients stayed at 385 / 390. |
 | Meerkat committed visibility publication progress should not stay as top-level shadow state | passed / landed | Removed `committed_visibility_revision` from the formal state; exact audited parity stayed green and Meerkat TLC distinct states fell from 59,371 to 45,610 while the raw/phase quotients stayed at 385 / 390. |
@@ -415,6 +420,20 @@ The important read is that the raw quotient stayed at `202` even as the
 reachable state space collapsed from `4,797` to `1,390`. That means the removed
 fields were carrying presentation-only distinctions, not additional labeled
 behavior. This is the exact kind of simplification we want before DSL work.
+
+We then removed the residual top-level `current_generation` seam-shadow field
+and re-ran the same trustworthy Mob lanes. The readout stayed flat:
+
+- reachable states: `1,390`
+- raw quotient states: `202`
+- phase-observed quotient states: `204`
+- full-observed quotient states: `1,390`
+- TLC: `45,831 generated / 1,390 distinct / depth 7`
+
+That is a useful result in its own right: `current_generation` was not merely
+low-signal, it was fully correlated with the remaining field tuple on the
+current truthful state graph. Removing it simplified the formal contract
+without reducing the modeled behavior.
 
 ### Reading the current pass
 

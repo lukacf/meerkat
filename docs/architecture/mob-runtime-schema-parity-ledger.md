@@ -42,6 +42,10 @@ Current state:
   `65 / 65 / 65 / 0 / 0`
 - the formal machine no longer carries the pure shadow fields
   `inflight_work_id`, `task_count`, or `event_subscription_count`
+- the formal machine also no longer carries the seam-shadow
+  `current_generation` field; `RequestRuntimeBinding` now emits generation
+  directly from the transition bindings instead of replaying a top-level
+  stored copy
 
 ## Resolution Rubric
 
@@ -72,6 +76,14 @@ Current state:
   - `event_subscription_count`
 - None of those fields participated in guards or emitted semantics, and the
   exact lifecycle-triangle parity audit stayed green after the cut.
+- The following tranche removed `current_generation` from the formal state and
+  switched `RequestRuntimeBinding` generation emission to come directly from the
+  transition bindings.
+- That cut also stayed green on the exact lifecycle triangle, and the truthful
+  raw/phase/full Hopcroft readout remained unchanged (`1,390 -> 202`,
+  `1,390 -> 204`, `1,390 -> 1,390`), which means `current_generation` was
+  fully correlated with the remaining state rather than carrying independent
+  labeled behavior.
 
 ## Pair Ledger
 
@@ -106,7 +118,8 @@ Current state:
 
 ## Next Loop
 
-1. Decide whether `active_runtime_id` / `active_fence_token` are genuinely
-   load-bearing Mob semantics or the next seam-shadow family to normalize.
+1. Decide whether `active_runtime_id` / `active_fence_token` / `active_identity`
+   are genuinely load-bearing Mob semantics or the next seam-shadow family to
+   normalize.
 2. Re-run the same parity-plus-Hopcroft loop after that decision before making
    any broader DSL-facing claims.

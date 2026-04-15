@@ -907,7 +907,7 @@ async fn machine_recycle_preserving_work(
     driver.set_control_projection(target_phase, None, None);
     match driver {
         DriverEntry::Ephemeral(driver) => driver.recycle_preserving_work(),
-        DriverEntry::Persistent(driver) => driver.recycle_preserving_work().await,
+        DriverEntry::Persistent(driver) => driver.recycle_preserving_work(target_phase).await,
     }
 }
 
@@ -1393,19 +1393,33 @@ impl MeerkatMachine {
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+        let control_projection = Arc::new(StdRwLock::new(
+            crate::driver::ephemeral::RuntimeControlProjection::default(),
+        ));
         match (&self.store, &self.blob_store) {
-            (Some(store), Some(blob_store)) => DriverEntry::Persistent(
-                PersistentRuntimeDriver::new(runtime_id, store.clone(), blob_store.clone()),
-            ),
+            (Some(store), Some(blob_store)) => {
+                DriverEntry::Persistent(PersistentRuntimeDriver::new_with_control(
+                    runtime_id,
+                    store.clone(),
+                    blob_store.clone(),
+                    control_projection,
+                ))
+            }
             (Some(_store), None) => {
                 tracing::warn!(
                     %session_id,
                     "persistent runtime store present but blob store missing; \
                      falling back to ephemeral driver"
                 );
-                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id))
+                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control(
+                    runtime_id,
+                    control_projection,
+                ))
             }
-            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
+            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control(
+                runtime_id,
+                control_projection,
+            )),
         }
     }
 

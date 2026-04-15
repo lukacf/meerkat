@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::HandlingMode;
 
+use crate::accept::{AdmissionQueueAction, ExistingQueuedAdmissionAction};
 use crate::input_state::{InputLifecycleState, InputTerminalOutcome};
 use crate::policy::PolicyDecision;
 
@@ -41,12 +42,10 @@ pub struct RequestId(pub String);
 /// Typed inputs for the RuntimeIngress helper.
 ///
 /// Shell code classifies raw inputs into these typed inputs, then calls
-/// [`RuntimeIngressAuthority::apply`]. For admission/coalescing/supersession
-/// this helper still owns the legality. For run-batch contributor paths
-/// (`StageDrainSnapshot`, `BoundaryApplied`, `RunCompleted`,
-/// `ReplayQueuedContributors`) the checked-in `MeerkatMachine` now owns the
-/// legality and replay classification, and this helper applies only the
-/// already-decided queue/lifecycle updates.
+/// [`RuntimeIngressAuthority::apply`]. The checked-in `MeerkatMachine` now owns
+/// coarse lifecycle legality plus admission/replay classification; this helper
+/// applies the already-decided queue/ledger mutations and emits the matching
+/// mechanical effects.
 #[derive(Debug, Clone)]
 pub enum RuntimeIngressInput {
     /// Admit a queued input (Queue or Steer handling mode).
@@ -58,9 +57,13 @@ pub enum RuntimeIngressInput {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
         policy: PolicyDecision,
-        /// Pre-resolved existing input for coalesce/supersede (mechanical IO
-        /// lookup by shell; authority decides whether to use it).
-        existing_superseded_id: Option<InputId>,
+        /// Whether the machine decided this admission should materialize a
+        /// queued ledger/queue entry rather than remain a no-routing accept.
+        persist_and_queue: bool,
+        /// Machine-owned routing plan for this admitted input.
+        queue_action: AdmissionQueueAction,
+        /// Machine-owned action against an existing queued input.
+        existing_action: Option<ExistingQueuedAdmissionAction>,
     },
     /// Admit an input that is immediately consumed on accept (Ignore+OnAccept).
     AdmitConsumedOnAccept {
@@ -399,7 +402,9 @@ impl RuntimeIngressAuthority {
                 request_id,
                 reservation_key,
                 policy,
-                existing_superseded_id,
+                persist_and_queue,
+                queue_action,
+                existing_action,
             } => self.eval_admit_queued(
                 work_id,
                 content_shape,
@@ -408,7 +413,9 @@ impl RuntimeIngressAuthority {
                 request_id,
                 reservation_key,
                 policy,
-                existing_superseded_id,
+                *persist_and_queue,
+                queue_action,
+                existing_action,
             ),
 
             RuntimeIngressInput::AdmitConsumedOnAccept {
@@ -501,7 +508,9 @@ impl RuntimeIngressAuthority {
         request_id: &Option<RequestId>,
         reservation_key: &Option<ReservationKey>,
         policy: &PolicyDecision,
-        existing_superseded_id: &Option<InputId>,
+        persist_and_queue: bool,
+        queue_action: &AdmissionQueueAction,
+        existing_action: &Option<ExistingQueuedAdmissionAction>,
     ) -> Result<(RuntimeIngressFields, Vec<RuntimeIngressEffect>), RuntimeIngressError> {
         // Guard: input_is_new
         if self.fields.lifecycle.contains_key(work_id) {
@@ -547,65 +556,55 @@ impl RuntimeIngressAuthority {
         });
 
         // --- Shell-directive effects ---
-        // The authority owns all routing/coalescing/supersession decisions.
-        match policy.apply_mode {
-            crate::policy::ApplyMode::Ignore => {
-                // Ignore mode with non-OnAccept consume: no queue effects needed.
-            }
-            crate::policy::ApplyMode::InjectNow
-            | crate::policy::ApplyMode::StageRunStart
-            | crate::policy::ApplyMode::StageRunBoundary => {
-                effects.push(RuntimeIngressEffect::PersistAndQueue {
-                    work_id: work_id.clone(),
-                });
-                match policy.queue_mode {
-                    crate::policy::QueueMode::Coalesce => {
-                        if let Some(existing_id) = existing_superseded_id {
-                            effects.push(RuntimeIngressEffect::RemoveFromQueues {
-                                work_id: existing_id.clone(),
-                            });
-                            effects.push(RuntimeIngressEffect::CoalesceExisting {
-                                new_id: work_id.clone(),
-                                existing_id: existing_id.clone(),
-                            });
-                        }
-                        effects.push(RuntimeIngressEffect::EnqueueTo {
-                            work_id: work_id.clone(),
-                            target: handling_mode,
+        // Routing/coalescing/supersession decisions are machine-owned; this
+        // helper only realizes the already-decided mutations.
+        if persist_and_queue {
+            effects.push(RuntimeIngressEffect::PersistAndQueue {
+                work_id: work_id.clone(),
+            });
+
+            if let Some(existing_action) = existing_action {
+                match existing_action {
+                    ExistingQueuedAdmissionAction::Coalesce { existing_id } => {
+                        effects.push(RuntimeIngressEffect::RemoveFromQueues {
+                            work_id: existing_id.clone(),
+                        });
+                        effects.push(RuntimeIngressEffect::CoalesceExisting {
+                            new_id: work_id.clone(),
+                            existing_id: existing_id.clone(),
                         });
                     }
-                    crate::policy::QueueMode::Supersede => {
-                        if let Some(existing_id) = existing_superseded_id {
-                            effects.push(RuntimeIngressEffect::RemoveFromQueues {
-                                work_id: existing_id.clone(),
-                            });
-                            effects.push(RuntimeIngressEffect::SupersedeExisting {
-                                new_id: work_id.clone(),
-                                existing_id: existing_id.clone(),
-                            });
-                        }
-                        effects.push(RuntimeIngressEffect::EnqueueTo {
-                            work_id: work_id.clone(),
-                            target: handling_mode,
+                    ExistingQueuedAdmissionAction::Supersede { existing_id } => {
+                        effects.push(RuntimeIngressEffect::RemoveFromQueues {
+                            work_id: existing_id.clone(),
                         });
-                    }
-                    crate::policy::QueueMode::Priority => {
-                        effects.push(RuntimeIngressEffect::EnqueueFront {
-                            work_id: work_id.clone(),
-                            target: handling_mode,
-                        });
-                    }
-                    crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => {
-                        effects.push(RuntimeIngressEffect::EnqueueTo {
-                            work_id: work_id.clone(),
-                            target: handling_mode,
+                        effects.push(RuntimeIngressEffect::SupersedeExisting {
+                            new_id: work_id.clone(),
+                            existing_id: existing_id.clone(),
                         });
                     }
                 }
-                effects.push(RuntimeIngressEffect::EmitQueuedEvent {
-                    work_id: work_id.clone(),
-                });
             }
+
+            match queue_action {
+                AdmissionQueueAction::None => {}
+                AdmissionQueueAction::EnqueueTo { target } => {
+                    effects.push(RuntimeIngressEffect::EnqueueTo {
+                        work_id: work_id.clone(),
+                        target: *target,
+                    });
+                }
+                AdmissionQueueAction::EnqueueFront { target } => {
+                    effects.push(RuntimeIngressEffect::EnqueueFront {
+                        work_id: work_id.clone(),
+                        target: *target,
+                    });
+                }
+            }
+
+            effects.push(RuntimeIngressEffect::EmitQueuedEvent {
+                work_id: work_id.clone(),
+            });
         }
 
         Ok((fields, effects))
@@ -1081,7 +1080,9 @@ mod tests {
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
-            existing_superseded_id: None,
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo { target: mode },
+            existing_action: None,
         })
         .expect("admit should succeed")
     }
@@ -1196,7 +1197,11 @@ mod tests {
                     emit_operator_content: true,
                     policy_version: PolicyVersion(1),
                 },
-                existing_superseded_id: None,
+                persist_and_queue: true,
+                queue_action: AdmissionQueueAction::EnqueueTo {
+                    target: HandlingMode::Steer,
+                },
+                existing_action: None,
             })
             .expect("admit should succeed");
 
@@ -1228,7 +1233,11 @@ mod tests {
             request_id: None,
             reservation_key: None,
             policy: test_policy(),
-            existing_superseded_id: None,
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: HandlingMode::Queue,
+            },
+            existing_action: None,
         });
         assert!(matches!(
             result,

@@ -5,6 +5,7 @@
 //! logic to the ephemeral driver.
 
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
@@ -45,8 +46,24 @@ impl PersistentRuntimeDriver {
         store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        Self::new_with_control(
+            runtime_id,
+            store,
+            blob_store,
+            Arc::new(StdRwLock::new(
+                crate::driver::ephemeral::RuntimeControlProjection::default(),
+            )),
+        )
+    }
+
+    pub fn new_with_control(
+        runtime_id: LogicalRuntimeId,
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+        control: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
+    ) -> Self {
         Self {
-            inner: EphemeralRuntimeDriver::new(runtime_id.clone()),
+            inner: EphemeralRuntimeDriver::new_with_control(runtime_id.clone(), control),
             store,
             blob_store,
             runtime_id,
@@ -240,10 +257,13 @@ impl PersistentRuntimeDriver {
     /// work from durable runtime truth.
     ///
     /// Unlike `reset()`, this must not abandon queued/staged work.
-    pub async fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+    pub async fn recycle_preserving_work(
+        &mut self,
+        target_phase: RuntimeState,
+    ) -> Result<usize, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let silent_intents = self.inner.silent_comms_intents();
-        let restore_attached = matches!(self.inner.runtime_state(), RuntimeState::Attached);
+        let control = self.inner.control_handle();
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
@@ -260,13 +280,10 @@ impl PersistentRuntimeDriver {
             )));
         }
 
-        self.inner = EphemeralRuntimeDriver::new(self.runtime_id.clone());
+        self.inner = EphemeralRuntimeDriver::new_with_control(self.runtime_id.clone(), control);
         self.inner.set_silent_comms_intents(silent_intents);
         let _ = RuntimeDriver::recover(self).await?;
-        if restore_attached && matches!(self.inner.runtime_state(), RuntimeState::Idle) {
-            self.inner
-                .set_control_projection(RuntimeState::Attached, None, None);
-        }
+        self.inner.set_control_projection(target_phase, None, None);
         Ok(self.inner.active_input_ids().len())
     }
 

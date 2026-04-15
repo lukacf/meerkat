@@ -1311,26 +1311,34 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 input_id: input_id.clone(),
             },
         ));
-        // --- Ingress authority: authority-owned classification ---
-        // All mechanical lookups done unconditionally; authority.admit() decides
-        // the admission path (queued vs consumed-on-accept) based on the policy.
-        // Zero policy branching in shell code.
+        // --- Ingress authority: machine-owned admission plan ---
+        // All mechanical lookups happen here, but the checked-in admission
+        // plan now decides the semantic path (consume-on-accept, queue,
+        // priority, coalesce, supersede). The helper only applies that plan.
         let handling_mode = handling_mode_from_policy(&policy);
         let content_shape = ContentShape(input.kind_id().to_string());
         let is_prompt = matches!(input, Input::Prompt(_));
         let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
-        let ingress_input = if policy.apply_mode == crate::policy::ApplyMode::Ignore
-            && policy.consume_point == crate::policy::ConsumePoint::OnAccept
-        {
-            RuntimeIngressInput::AdmitConsumedOnAccept {
-                work_id: input_id.clone(),
-                content_shape,
-                request_id: None,
-                reservation_key: None,
-                policy: policy.clone(),
+        let admission_plan = crate::accept::admission_plan_from_policy(
+            &policy,
+            handling_mode,
+            existing_superseded_id,
+        );
+        let ingress_input = match admission_plan {
+            crate::accept::AdmissionPlan::ConsumedOnAccept => {
+                RuntimeIngressInput::AdmitConsumedOnAccept {
+                    work_id: input_id.clone(),
+                    content_shape,
+                    request_id: None,
+                    reservation_key: None,
+                    policy: policy.clone(),
+                }
             }
-        } else {
-            RuntimeIngressInput::AdmitQueued {
+            crate::accept::AdmissionPlan::Queued {
+                persist_and_queue,
+                queue_action,
+                existing_action,
+            } => RuntimeIngressInput::AdmitQueued {
                 work_id: input_id.clone(),
                 content_shape,
                 handling_mode,
@@ -1338,8 +1346,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 request_id: None,
                 reservation_key: None,
                 policy: policy.clone(),
-                existing_superseded_id,
-            }
+                persist_and_queue,
+                queue_action,
+                existing_action,
+            },
         };
         match self.ingress.apply(ingress_input) {
             Ok(transition) => {

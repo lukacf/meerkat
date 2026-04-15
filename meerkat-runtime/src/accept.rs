@@ -1,12 +1,39 @@
 //! §14 AcceptOutcome — result of accepting an input.
 
 use meerkat_core::lifecycle::InputId;
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::driver::PostAdmissionSignal;
 use crate::input_state::InputState;
 use crate::policy::PolicyDecision;
+
+/// Machine-owned queue action for an admitted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionQueueAction {
+    None,
+    EnqueueTo { target: HandlingMode },
+    EnqueueFront { target: HandlingMode },
+}
+
+/// Machine-owned action against an existing queued input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExistingQueuedAdmissionAction {
+    Coalesce { existing_id: InputId },
+    Supersede { existing_id: InputId },
+}
+
+/// Machine-owned admission plan for an accepted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionPlan {
+    ConsumedOnAccept,
+    Queued {
+        persist_and_queue: bool,
+        queue_action: AdmissionQueueAction,
+        existing_action: Option<ExistingQueuedAdmissionAction>,
+    },
+}
 
 /// Typed reason why an input was rejected at the accept boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +112,63 @@ impl AcceptOutcome {
     /// Check if the input was rejected.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Rejected { .. })
+    }
+}
+
+/// Classify the machine-owned admission disposition for an accepted input.
+///
+/// This is the semantic answer to “what happens to an accepted input?” Helpers
+/// should only apply the already-decided queue/lifecycle mutations.
+pub fn admission_plan_from_policy(
+    policy: &PolicyDecision,
+    handling_mode: HandlingMode,
+    existing_superseded_id: Option<InputId>,
+) -> AdmissionPlan {
+    if policy.apply_mode == crate::policy::ApplyMode::Ignore
+        && policy.consume_point == crate::policy::ConsumePoint::OnAccept
+    {
+        return AdmissionPlan::ConsumedOnAccept;
+    }
+
+    if policy.apply_mode == crate::policy::ApplyMode::Ignore {
+        return AdmissionPlan::Queued {
+            persist_and_queue: false,
+            queue_action: AdmissionQueueAction::None,
+            existing_action: None,
+        };
+    }
+
+    match policy.queue_mode {
+        crate::policy::QueueMode::Coalesce => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: existing_superseded_id
+                .map(|existing_id| ExistingQueuedAdmissionAction::Coalesce { existing_id }),
+        },
+        crate::policy::QueueMode::Supersede => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: existing_superseded_id
+                .map(|existing_id| ExistingQueuedAdmissionAction::Supersede { existing_id }),
+        },
+        crate::policy::QueueMode::Priority => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueFront {
+                target: handling_mode,
+            },
+            existing_action: None,
+        },
+        crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: None,
+        },
     }
 }
 

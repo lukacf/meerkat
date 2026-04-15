@@ -1582,8 +1582,6 @@ mod tests {
     // ---- Direction 5: DSL dispatch matches kernel ----
 
     #[test]
-    #[ignore] // Kernel type validation rejects Named types from stub newtypes;
-    // the schema-level equivalence test passes — this is a test fixture limitation
     fn dsl_dispatch_matches_kernel() {
         let schema = MeerkatMachineState::schema();
         let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);

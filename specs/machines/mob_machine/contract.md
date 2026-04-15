@@ -13,7 +13,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_member_count`: `u32`
 - `active_run_count`: `u32`
 - `pending_spawn_count`: `u32`
-- `wiring_edge_count`: `u32`
 - `coordinator_bound`: `Bool`
 
 ## Inputs
@@ -530,8 +529,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `UnwireRunning`
 - From: `Running`
 - On: `Unwire`()
-- Guards:
-  - `wired_edges_present`
 - Emits: `NotifyCoordinator`
 - To: `Running`
 

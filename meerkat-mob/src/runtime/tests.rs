@@ -17382,7 +17382,6 @@ struct MobRuntimeParitySnapshotSummary {
     runtime_fence_tokens: BTreeMap<String, u64>,
     active_member_count: usize,
     all_member_count: usize,
-    wiring_edge_count: usize,
     task_count: Option<usize>,
     coordinator_bound: Option<bool>,
     pending_spawn_count: Option<u32>,
@@ -17832,7 +17831,6 @@ async fn mob_runtime_parity_snapshot_summary(
     let tasks = handle.task_list().await.ok();
     let orchestrator = handle.debug_orchestrator_snapshot().await.ok();
     let lifecycle = handle.debug_lifecycle_snapshot().await.ok();
-    let wiring_edge_count = mob_runtime_parity_wiring_edge_count(&all_members);
     let representative = active_members
         .iter()
         .min_by(|left, right| left.agent_identity.cmp(&right.agent_identity));
@@ -17937,10 +17935,6 @@ async fn mob_runtime_parity_snapshot_summary(
         .expect("serialize pending_spawn_count"),
     );
     formal_available_fields.insert(
-        "wiring_edge_count".into(),
-        serde_json::to_string(&wiring_edge_count).expect("serialize wiring_edge_count"),
-    );
-    formal_available_fields.insert(
         "coordinator_bound".into(),
         serde_json::to_string(
             &orchestrator
@@ -17966,7 +17960,6 @@ async fn mob_runtime_parity_snapshot_summary(
         runtime_fence_tokens,
         active_member_count: active_members.len(),
         all_member_count: all_members.len(),
-        wiring_edge_count,
         task_count: tasks.as_ref().map(std::vec::Vec::len),
         coordinator_bound: orchestrator
             .as_ref()
@@ -17987,32 +17980,6 @@ async fn mob_runtime_parity_snapshot_summary(
         formal_available_fields,
         formal_unavailable_fields,
     })
-}
-
-fn mob_runtime_parity_wiring_edge_count(entries: &[RosterEntry]) -> usize {
-    let identities = entries
-        .iter()
-        .map(|entry| entry.agent_identity.clone())
-        .collect::<BTreeSet<_>>();
-    let mut edges = BTreeSet::new();
-
-    for entry in entries {
-        for peer in &entry.wired_to {
-            if !identities.contains(peer) {
-                continue;
-            }
-            let (left, right) = if entry.agent_identity <= *peer {
-                (entry.agent_identity.clone(), peer.clone())
-            } else {
-                (peer.clone(), entry.agent_identity.clone())
-            };
-            if left != right {
-                edges.insert((left, right));
-            }
-        }
-    }
-
-    edges.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18047,9 +18014,6 @@ fn mob_runtime_parity_field_value(
         )),
         "pending_spawn_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.pending_spawn_count.unwrap_or_default() as u64,
-        )),
-        "wiring_edge_count" => Some(MobRuntimeParityExprValue::U64(
-            snapshot.wiring_edge_count as u64,
         )),
         "task_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.task_count.unwrap_or_default() as u64,

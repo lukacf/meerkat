@@ -47,7 +47,6 @@ pub fn mob_machine() -> MachineSchema {
                 field("active_member_count", TypeRef::U32),
                 field("active_run_count", TypeRef::U32),
                 field("pending_spawn_count", TypeRef::U32),
-                field("wiring_edge_count", TypeRef::U32),
                 field("coordinator_bound", TypeRef::Bool),
             ],
             init: InitSchema {
@@ -59,7 +58,6 @@ pub fn mob_machine() -> MachineSchema {
                     init("active_member_count", Expr::U64(0)),
                     init("active_run_count", Expr::U64(0)),
                     init("pending_spawn_count", Expr::U64(0)),
-                    init("wiring_edge_count", Expr::U64(0)),
                     init("coordinator_bound", Expr::Bool(true)),
                 ],
             },
@@ -815,14 +813,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
 
     // --- Running self-loops ---
     for (variant, emit_variant, updates) in [
-        (
-            "Wire",
-            Some("NotifyCoordinator"),
-            vec![Update::Increment {
-                field: "wiring_edge_count".into(),
-                amount: 1,
-            }],
-        ),
+        ("Wire", Some("NotifyCoordinator"), vec![]),
         ("ExternalTurn", Some("EmitProgressNote"), vec![]),
         ("InternalTurn", Some("EmitProgressNote"), vec![]),
         ("TaskCreate", Some("EmitTaskNotice"), vec![]),
@@ -1103,17 +1094,8 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "Unwire".into(),
             bindings: vec![],
         },
-        guards: vec![Guard {
-            name: "wired_edges_present".into(),
-            expr: Expr::Gt(
-                Box::new(Expr::Field("wiring_edge_count".into())),
-                Box::new(Expr::U64(0)),
-            ),
-        }],
-        updates: vec![Update::Decrement {
-            field: "wiring_edge_count".into(),
-            amount: 1,
-        }],
+        guards: vec![],
+        updates: vec![],
         to: phase.into(),
         emit: vec![simple_emit("NotifyCoordinator")],
     });
@@ -1500,10 +1482,6 @@ fn reset_mob_projection_updates_with_coordinator(coordinator_bound: bool) -> Vec
             field: "pending_spawn_count".into(),
             expr: Expr::U64(0),
         },
-        Update::Assign {
-            field: "wiring_edge_count".into(),
-            expr: Expr::U64(0),
-        },
         set_bool("coordinator_bound", coordinator_bound),
     ]);
     updates
@@ -1527,10 +1505,6 @@ fn destroy_mob_projection_updates() -> Vec<Update> {
         },
         Update::Assign {
             field: "pending_spawn_count".into(),
-            expr: Expr::U64(0),
-        },
-        Update::Assign {
-            field: "wiring_edge_count".into(),
             expr: Expr::U64(0),
         },
         set_bool("coordinator_bound", false),

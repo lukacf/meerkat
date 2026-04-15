@@ -411,11 +411,7 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
         .map(|transition| transition.name.as_str())
         .collect::<Vec<_>>();
 
-    for required in [
-        "pending_spawn_count",
-        "wiring_edge_count",
-        "coordinator_bound",
-    ] {
+    for required in ["pending_spawn_count", "coordinator_bound"] {
         assert!(
             field_names.iter().any(|name| name == &required),
             "MobMachine state should retain absorbed field {required}"

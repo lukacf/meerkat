@@ -92,6 +92,11 @@ Current state:
   lower-authority lifecycle bookkeeping inside `MobLifecycleAuthority`, and
   removing it from top-level `MobMachine` left the truthful Hopcroft/TLC
   baseline flat at raw/phase/full `207 / 209 / 2238`
+- the formal machine also no longer carries `wiring_edge_count`; the live
+  runtime only uses concrete roster adjacency and idempotent wire/unwire plans,
+  not exact edge-count semantics, so removing the top-level count collapsed the
+  truthful Mob baseline from raw/phase/full `207 / 209 / 2238` to
+  `132 / 134 / 1181`
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 - external-turn legality now honors the roster's
@@ -237,9 +242,9 @@ Current state:
 - The latest init-state parity hardening corrected the bootstrap truth without
   changing the remaining intrinsic quotient, which is why the reachable space
   rose while the raw quotient stayed flat.
-- The dominant mixed block (`1,170` states) is now split primarily by
-  `runtime_fence_tokens`, `pending_spawn_count`, `wiring_edge_count`,
-  `active_run_count`, `active_member_count`,
+- The dominant mixed block (`558` states) is now split primarily by
+  `runtime_fence_tokens`, `pending_spawn_count`, `active_run_count`,
+  `active_member_count`,
   `externally_addressable_runtime_ids`, `coordinator_bound`, and
   `live_runtime_ids`.
 

@@ -11533,6 +11533,28 @@ async fn test_mob_schema_initial_orchestrator_projection_matches_runtime() {
 }
 
 #[tokio::test]
+async fn test_mob_runtime_parity_field_evaluator_covers_formal_state_fields() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let snapshot = mob_runtime_parity_snapshot_summary(&handle)
+        .await
+        .expect("runtime parity snapshot");
+    let schema = schema_mob_machine();
+
+    let missing = schema
+        .state
+        .fields
+        .iter()
+        .filter(|field| mob_runtime_parity_field_value(&snapshot, &field.name).is_none())
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "runtime parity field evaluator is missing schema fields: {missing:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let initial = handle
@@ -17901,6 +17923,9 @@ fn mob_runtime_parity_field_value(
         )),
         "pending_spawn_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.pending_spawn_count.unwrap_or_default() as u64,
+        )),
+        "wiring_edge_count" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.wiring_edge_count as u64,
         )),
         "task_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.task_count.unwrap_or_default() as u64,

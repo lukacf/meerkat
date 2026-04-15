@@ -76,6 +76,10 @@ Current state:
 - the formal machine now starts `Running + coordinator_bound=true`, matching
   the live runtime bootstrap path and the initial `debug_orchestrator_snapshot`
   seen from a freshly created Mob
+- the parity harness now evaluates all remaining formal Mob core fields
+  directly from representative runtime snapshots, including
+  `wiring_edge_count`, so guard-sensitive rows like `Unwire` are no longer
+  partially classified on missing-field tolerance
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 

@@ -81,6 +81,11 @@ Hopcroft-style behavioral quotient over the reachable graph.
   fresh runtime snapshot directly; the truthful Mob quotient stayed flat while
   the reachable state count rose because the old bootstrap state had been
   wrong.
+- Hardened the Mob parity harness so representative-state guard evaluation now
+  covers all five remaining formal Mob core fields, including
+  `wiring_edge_count`; the stricter audit rerun stayed exact, which means the
+  remaining core split is not an artifact of a missing guard input in the
+  checker.
 - Removed the Meerkat LLM/capability projection layer
   (`current_llm_identity`, `current_capability_surface`,
   `capability_surface_status`, `capability_base_filter`,

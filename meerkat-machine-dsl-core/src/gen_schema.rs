@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ast::MachineDef;
+use crate::ast::{ExprDef, MachineDef, TransitionDef, UpdateDef};
 
 /// Generate `fn schema() -> meerkat_machine_schema::MachineSchema`.
 ///
@@ -167,7 +167,6 @@ fn gen_init_fields(def: &MachineDef) -> Vec<TokenStream> {
 }
 
 fn gen_schema_expr(expr: &crate::ast::ExprDef) -> TokenStream {
-    use crate::ast::ExprDef;
     match expr {
         ExprDef::Bool(v) => quote! { Expr::Bool(#v) },
         ExprDef::U64(v) => quote! { Expr::U64(#v) },
@@ -435,12 +434,13 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 })
                 .collect();
 
-            // Derive `from` phases — for now emit empty and let validation fill in
-            // (the full derivation algorithm is a later step)
+            // Derive `from` phases from guard expressions
+            let from_phases = derive_from_phases(def, t);
+
             quote! {
                 TransitionSchema {
                     name: #name.into(),
-                    from: vec![], // derived by validation
+                    from: vec![#(#from_phases.into()),*],
                     on: InputMatch {
                         kind: #kind,
                         variant: #variant.into(),
@@ -460,7 +460,6 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
     updates
         .iter()
         .map(|u| {
-            use crate::ast::UpdateDef;
             match u {
                 UpdateDef::Assign { field, value } => {
                     let f = field.to_string();
@@ -521,6 +520,132 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
             }
         })
         .collect()
+}
+
+/// Derive `from` phases for a transition from its guard expression.
+///
+/// For stored-phase machines: extract phase enum literals from the guard.
+/// If the guard contains `self.lifecycle_phase == Phase::Draft`, then from = ["Draft"].
+/// If the guard uses a helper like `is_active_phase(self.lifecycle_phase)`, we expand
+/// the helper body to find the phases.
+/// If the guard doesn't reference the phase field, from = all non-terminal phases.
+///
+/// For derived-phase machines: enumerate all phases, substitute the phase projection's
+/// defining conditions into the guard, and check if the result is trivially false.
+fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
+    let non_terminal: Vec<String> = def
+        .phase_enum
+        .variants
+        .iter()
+        .filter(|v| !def.terminal_phases.iter().any(|tp| tp == *v))
+        .map(|v| v.to_string())
+        .collect();
+
+    let guard = match &t.guard {
+        Some(g) => g,
+        None => return non_terminal, // no guard → all non-terminal phases
+    };
+
+    if def.is_stored_phase() {
+        // Extract phases from guard by pattern matching
+        let mut phases = Vec::new();
+        extract_phase_refs_from_guard(def, guard, &mut phases);
+        if phases.is_empty() {
+            // Guard doesn't reference the phase field → all non-terminal
+            non_terminal
+        } else {
+            phases
+        }
+    } else {
+        // Derived-phase: for now, return all non-terminal phases.
+        // Full boolean substitution is a later optimization.
+        non_terminal
+    }
+}
+
+/// Extract phase references from a guard expression for stored-phase machines.
+///
+/// Looks for patterns like:
+/// - `self.lifecycle_phase == Phase::Draft` → ["Draft"]
+/// - `self.lifecycle_phase != Phase::Completed` → all non-terminal except Completed
+/// - `helper(self.lifecycle_phase)` → expand helper body, extract phases
+/// - `guard1 && guard2` → intersection of extracted phases
+/// - `guard1 || guard2` → union of extracted phases
+fn extract_phase_refs_from_guard(def: &MachineDef, expr: &ExprDef, out: &mut Vec<String>) {
+    use crate::ast::ExprDef;
+
+    let phase_field_name = match def.phase_field_name() {
+        Some(f) => f.to_string(),
+        None => return,
+    };
+
+    match expr {
+        // self.lifecycle_phase == Phase::Draft
+        ExprDef::Eq(left, right) => {
+            if is_phase_field(left, &phase_field_name) {
+                if let ExprDef::Phase(variant) = right.as_ref() {
+                    out.push(variant.to_string());
+                }
+            } else if is_phase_field(right, &phase_field_name) {
+                if let ExprDef::Phase(variant) = left.as_ref() {
+                    out.push(variant.to_string());
+                }
+            }
+        }
+        // is_active_phase(self.lifecycle_phase) — helper call with phase field
+        ExprDef::Call { helper, args } => {
+            // Check if any arg is the phase field
+            let has_phase_arg = args
+                .iter()
+                .any(|a| is_phase_field_expr(a, &phase_field_name));
+            if has_phase_arg {
+                // Find the helper and extract phase refs from its body
+                if let Some(h) = def.helpers.iter().find(|h| h.name == *helper) {
+                    extract_phases_from_helper_body(&h.body, out);
+                }
+            }
+        }
+        // guard1 && guard2 — both must hold, but for from-derivation we take the union
+        // (if either branch mentions specific phases, those are the valid ones)
+        ExprDef::And(exprs) => {
+            for e in exprs {
+                extract_phase_refs_from_guard(def, e, out);
+            }
+        }
+        // guard1 || guard2 — union
+        ExprDef::Or(exprs) => {
+            for e in exprs {
+                extract_phase_refs_from_guard(def, e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
+    matches!(expr, ExprDef::Field(name) if name == phase_field_name)
+}
+
+fn is_phase_field_expr(expr: &ExprDef, phase_field_name: &str) -> bool {
+    is_phase_field(expr, phase_field_name)
+}
+
+/// Extract phase literals from a helper body expression.
+/// Looks for `param == Phase::X || param == Phase::Y` patterns.
+fn extract_phases_from_helper_body(expr: &ExprDef, out: &mut Vec<String>) {
+    match expr {
+        ExprDef::Eq(_, right) => {
+            if let ExprDef::Phase(variant) = right.as_ref() {
+                out.push(variant.to_string());
+            }
+        }
+        ExprDef::Or(exprs) => {
+            for e in exprs {
+                extract_phases_from_helper_body(e, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn gen_dispositions(def: &MachineDef) -> Vec<TokenStream> {

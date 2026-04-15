@@ -734,4 +734,45 @@ mod order_lifecycle {
         assert_eq!(schema.invariants.len(), 3);
         assert_eq!(schema.effect_dispositions.len(), 6);
     }
+
+    #[test]
+    fn schema_from_phases_are_derived() {
+        let schema = OrderLifecycleState::schema();
+
+        // AddItemDraft guards on lifecycle_phase == Draft
+        let add_item = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "AddItemDraft")
+            .unwrap();
+        assert_eq!(add_item.from, vec!["Draft"]);
+
+        // SubmitDraft guards on lifecycle_phase == Draft
+        let submit = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "SubmitDraft")
+            .unwrap();
+        assert_eq!(submit.from, vec!["Draft"]);
+
+        // AssignSubmitted guards on lifecycle_phase == Submitted
+        let assign = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "AssignSubmitted")
+            .unwrap();
+        assert_eq!(assign.from, vec!["Submitted"]);
+
+        // CancelActive guards on is_active_phase(lifecycle_phase) — expands to Draft, Submitted, Assigned, Paid
+        let cancel = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "CancelActive")
+            .unwrap();
+        assert_eq!(cancel.from.len(), 4);
+        assert!(cancel.from.contains(&"Draft".to_string()));
+        assert!(cancel.from.contains(&"Submitted".to_string()));
+        assert!(cancel.from.contains(&"Assigned".to_string()));
+        assert!(cancel.from.contains(&"Paid".to_string()));
+    }
 }

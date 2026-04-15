@@ -168,6 +168,11 @@ Current state:
   and visibility owner stayed intact below the machine boundary. TLC stayed
   green, the raw quotient stayed flat at `459`, and the truthful Meerkat graph
   fell again from `14,536` to `11,293` reachable states.
+- Fast-loop landed: `peer_ingress_configured` was removed from the checked-in
+  Meerkat state after the runtime review confirmed it is only a projection of
+  lower-authority ingress/drain slot truth. TLC stayed green, the raw quotient
+  dropped from `459` to `340`, and the truthful Meerkat graph fell again from
+  `11,293` to `7,255` reachable states.
 
 ## Full-row Snapshot (2026-04-15)
 

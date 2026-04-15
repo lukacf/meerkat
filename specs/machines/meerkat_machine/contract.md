@@ -14,7 +14,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `attachment_live`: `Bool`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
-- `peer_ingress_configured`: `Bool`
 - `silent_intent_overrides`: `Set<String>`
 - `staged_requested_deferred_names`: `Set<String>`
 - `active_visibility_revision`: `u64`
@@ -711,7 +710,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `EnsureDrainRunning`()
 - Guards:
   - `session_registered`
-  - `peer_ingress_configured`
 - Emits: `SpawnDrainTask`
 - To: `Attached`
 
@@ -720,7 +718,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `EnsureDrainRunning`()
 - Guards:
   - `session_registered`
-  - `peer_ingress_configured`
 - Emits: `SpawnDrainTask`
 - To: `Running`
 

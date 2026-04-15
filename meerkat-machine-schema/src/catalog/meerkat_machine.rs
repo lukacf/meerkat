@@ -58,7 +58,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     TypeRef::Option(Box::new(TypeRef::Named("RunId".into()))),
                 ),
                 field("pre_run_phase", TypeRef::Option(Box::new(TypeRef::String))),
-                field("peer_ingress_configured", TypeRef::Bool),
                 field(
                     "silent_intent_overrides",
                     TypeRef::Set(Box::new(TypeRef::String)),
@@ -80,7 +79,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("attachment_live", Expr::Bool(false)),
                     init("current_run_id", Expr::None),
                     init("pre_run_phase", Expr::None),
-                    init("peer_ingress_configured", Expr::Bool(false)),
                     init("silent_intent_overrides", Expr::EmptySet),
                     init("staged_requested_deferred_names", Expr::EmptySet),
                     init("active_visibility_revision", Expr::U64(0)),
@@ -766,10 +764,6 @@ fn reset_session_state() -> Vec<Update> {
             expr: Expr::None,
         },
         Update::Assign {
-            field: "peer_ingress_configured".into(),
-            expr: Expr::Bool(false),
-        },
-        Update::Assign {
             field: "staged_requested_deferred_names".into(),
             expr: Expr::EmptySet,
         },
@@ -1053,10 +1047,7 @@ fn set_peer_ingress_transition(name: &str, phase: &str) -> TransitionSchema {
             bindings: vec!["keep_alive".into()],
         },
         guards: vec![session_registered_guard()],
-        updates: vec![Update::Assign {
-            field: "peer_ingress_configured".into(),
-            expr: Expr::Bool(true),
-        }],
+        updates: vec![],
         to: phase.into(),
         emit: vec![],
     }
@@ -1617,16 +1608,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             vec![],
             vec![],
             vec![simple_emit("SpawnDrainTask")],
-            vec![
-                session_registered_guard(),
-                Guard {
-                    name: "peer_ingress_configured".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("peer_ingress_configured".into())),
-                        Box::new(Expr::Bool(true)),
-                    ),
-                },
-            ],
+            vec![session_registered_guard()],
         ));
     }
 
@@ -2065,10 +2047,6 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         Update::Assign {
             field: "current_run_id".into(),
             expr: Expr::None,
-        },
-        Update::Assign {
-            field: "peer_ingress_configured".into(),
-            expr: Expr::Bool(false),
         },
     ];
     transitions.push(TransitionSchema {

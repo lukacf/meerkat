@@ -4034,7 +4034,6 @@ impl MeerkatMachine {
                 }
             }
         };
-        let peer_ingress_configured = drain.slot_present;
         let driver = driver_handle.lock().await;
         let driver_kind = match &*driver {
             DriverEntry::Ephemeral(_) => MeerkatDriverKind::Ephemeral,
@@ -4191,10 +4190,6 @@ impl MeerkatMachine {
             available_fields.insert(
                 "pre_run_phase".into(),
                 formal_projection_value(&control.pre_run_phase.map(|phase| phase.to_string())),
-            );
-            available_fields.insert(
-                "peer_ingress_configured".into(),
-                formal_projection_value(&peer_ingress_configured),
             );
             available_fields.insert(
                 "silent_intent_overrides".into(),

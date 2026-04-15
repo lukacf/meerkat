@@ -7,9 +7,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
-- `active_identity`: `Option<AgentIdentity>`
-- `active_runtime_id`: `Option<AgentRuntimeId>`
-- `active_fence_token`: `Option<FenceToken>`
 - `active_member_count`: `u32`
 - `active_run_count`: `u32`
 - `pending_spawn_count`: `u32`
@@ -108,9 +105,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `RequestRuntimeRetire`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `RequestRuntimeDestroy`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
-- `EmitMemberLifecycleNotice`(agent_identity: AgentIdentity, kind: String)
+- `RequestRuntimeRetire`
+- `RequestRuntimeDestroy`
+- `EmitMemberLifecycleNotice`(kind: String)
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
 - `AppendFailureLedger`
@@ -124,8 +121,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitTaskNotice`
 
 ## Invariants
-- `destroyed_has_no_active_runtime`
-- `active_runtime_has_identity`
 - `retiring_members_do_not_exceed_active_members`
 
 ## Transitions
@@ -144,7 +139,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `SubmitWork`(agent_runtime_id, fence_token, work_id)
 - Guards:
-  - `runtime_is_bound`
+  - `active_members_present`
 - To: `Running`
 
 ### `ObserveWorkCompleted`
@@ -499,7 +494,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RunFlow`()
 - Guards:
   - `active_members_present`
-  - `runtime_is_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -508,7 +502,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartFlow`()
 - Guards:
   - `active_members_present`
-  - `runtime_is_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -517,7 +510,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CreateRun`()
 - Guards:
   - `active_members_present`
-  - `runtime_is_bound`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
@@ -526,7 +518,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartRun`()
 - Guards:
   - `active_members_present`
-  - `runtime_is_bound`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 

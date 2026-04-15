@@ -18974,33 +18974,7 @@ fn mob_modeled_kernel_state(
             .formal_available_fields
             .get(&field.name)
             .map(|raw| mob_modeled_kernel_value_from_raw(&field.ty, raw))
-            .unwrap_or_else(|| match field.name.as_str() {
-                "active_identity" => before
-                    .representative_agent_identity
-                    .as_ref()
-                    .map(|raw| {
-                        mob_modeled_option_some(meerkat_machine_kernels::KernelValue::String(
-                            raw.clone(),
-                        ))
-                    })
-                    .unwrap_or(meerkat_machine_kernels::KernelValue::None),
-                "active_runtime_id" => before
-                    .representative_runtime_id
-                    .as_ref()
-                    .map(|raw| {
-                        mob_modeled_option_some(meerkat_machine_kernels::KernelValue::String(
-                            raw.clone(),
-                        ))
-                    })
-                    .unwrap_or(meerkat_machine_kernels::KernelValue::None),
-                "active_fence_token" => before
-                    .representative_fence_token
-                    .map(|value| {
-                        mob_modeled_option_some(meerkat_machine_kernels::KernelValue::U64(value))
-                    })
-                    .unwrap_or(meerkat_machine_kernels::KernelValue::None),
-                _ => mob_modeled_default_kernel_value(&field.ty),
-            });
+            .unwrap_or_else(|| mob_modeled_default_kernel_value(&field.ty));
         fields.insert(field.name.clone(), value);
     }
 

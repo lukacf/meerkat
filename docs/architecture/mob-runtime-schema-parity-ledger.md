@@ -61,6 +61,10 @@ Current state:
 - `CancelWork` is now a surfaced-only input rather than a formal top-level
   transition, because the runtime behavior hangs on concrete `WorkRef` carrier
   lineage rather than on the lifecycle phase alone
+- the formal machine no longer carries the representative runtime-identity
+  shadow trio `active_identity`, `active_runtime_id`, or `active_fence_token`;
+  the remaining `SubmitWork` / flow-start guards now use the authoritative
+  active-member counters instead
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 
@@ -108,6 +112,16 @@ Current state:
 - That pair of fixes kept the exact lifecycle triangle green while also
   removing the last `meerkat_mob_seam` deadlock caused by impossible external
   calls against a destroyed Mob.
+- The current tranche removed the remaining representative runtime-identity
+  shadow from the top-level formal state:
+  - `active_identity`
+  - `active_runtime_id`
+  - `active_fence_token`
+- That cut also stayed green on the exact lifecycle triangle, and the truthful
+  raw/phase/full Hopcroft readout tightened from `1,214 -> 187 -> 189 -> 1,214`
+  to `770 -> 138 -> 140 -> 770`, which means the removed fields were still
+  contributing artificial labeled distinctions rather than core lifecycle
+  behavior.
 
 ## Pair Ledger
 
@@ -125,13 +139,12 @@ Current state:
   surface (`78 / 78 / 78 / 0`).
 - The broad quotient result still stands after the parity cleanup, and the
   shadow-field cuts plus `CancelWork` extraction made that read much cleaner:
-  the truthful state space has now collapsed from `4,797` to `1,214`.
+  the truthful state space has now collapsed from `4,797` to `770`.
 - The trustworthy raw/phase/full reread is now:
-  raw `1,214 -> 187`, phase `1,214 -> 189`, full `1,214 -> 1,214`.
-- The dominant mixed block (`585` states) is now split primarily by
+  raw `770 -> 138`, phase `770 -> 140`, full `770 -> 770`.
+- The dominant mixed block (`347` states) is now split primarily by
   `pending_spawn_count`, `wiring_edge_count`, `active_run_count`,
-  `active_member_count`, `active_fence_token`, `active_runtime_id`,
-  `coordinator_bound`, and `active_identity`.
+  `active_member_count`, `coordinator_bound`, and `retiring_member_count`.
 
 ## Notes
 
@@ -144,8 +157,8 @@ Current state:
 
 ## Next Loop
 
-1. Decide whether `active_runtime_id` / `active_fence_token` / `active_identity`
-   are genuinely load-bearing Mob semantics or the next seam-shadow family to
-   normalize.
-2. Re-run the same parity-plus-Hopcroft loop after that decision before making
-   any broader DSL-facing claims.
+1. Re-check whether any of the remaining six Mob counter/coordinator fields are
+   still representational shadow, or whether the Mob machine is now at its real
+   lifecycle/orchestration core.
+2. Keep the same parity-plus-Hopcroft loop as the gate before making broader
+   DSL-facing claims from the remaining mixed block.

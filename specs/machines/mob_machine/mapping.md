@@ -299,12 +299,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 
 ### Invariants
-- `destroyed_has_no_active_runtime`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `active_runtime_has_identity`
-  - anchors: `mob_handle_surface`, `mob_actor_authority`
-  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `retiring_members_do_not_exceed_active_members`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`

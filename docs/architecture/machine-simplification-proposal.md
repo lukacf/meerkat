@@ -63,6 +63,11 @@ Hopcroft-style behavioral quotient over the reachable graph.
 - Moved Mob `CancelWork` into `surface_only_inputs`, because the runtime
   behavior is keyed to concrete `WorkRef` lineage rather than to a top-level
   lifecycle transition surface.
+- Removed the Mob seam-shadow identity trio (`active_identity`,
+  `active_runtime_id`, `active_fence_token`) and tightened the remaining
+  `SubmitWork` / flow-start guards to the authoritative active-member counters
+  instead of replaying representative runtime identity through top-level formal
+  state.
 - Removed the Meerkat LLM/capability projection layer
   (`current_llm_identity`, `current_capability_surface`,
   `capability_surface_status`, `capability_base_filter`,
@@ -92,8 +97,8 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | MobMachine | Surface-only inputs | 0 | 12 | +12 |
 | MobMachine | Signals | 79 | 31 | -48 |
 | MobMachine | Transitions | 210 | 82 | -128 |
-| MobMachine | TLC generated states | 452,835 | 45,831 | -407,004 |
-| MobMachine | TLC distinct states | 6,401 | 1,390 | -5,011 |
+| MobMachine | TLC generated states | 452,835 | 25,943 | -426,892 |
+| MobMachine | TLC distinct states | 6,401 | 770 | -5,631 |
 | MobMachine | TLC depth | 7 | 7 | 0 |
 
 ### Hypothesis / verdict tracker
@@ -112,6 +117,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Mob work/task/subscription shadow counters should not stay as top-level formal state | passed / landed | Removed `inflight_work_id`, `task_count`, and `event_subscription_count`; exact Mob parity stayed green and TLC distinct states fell from 4,797 to 1,390 while the raw/phase quotients stayed at 202 / 204. |
 | Mob `current_generation` should not stay as top-level seam-shadow state | passed / landed | Removed `current_generation` and emitted `RequestRuntimeBinding.generation` directly from the transition bindings; exact Mob parity stayed green and the truthful Hopcroft/TLC readout stayed unchanged, proving the field was fully correlated rather than behavior-bearing. |
 | Mob `CancelWork` should stay surfaced without formal transition coverage | passed / landed | Moved `CancelWork` to `surface_only_inputs`; exact Mob parity stayed green, the truthful TLC state space fell from 1,390 to 1,214, and the raw/phase quotients tightened from 202 / 204 to 187 / 189. |
+| Mob representative runtime identity should not stay as top-level formal state | passed / landed | Removed `active_identity`, `active_runtime_id`, and `active_fence_token`; exact Mob parity stayed green, truthful TLC distinct states fell from 1,214 to 770, and the raw/phase quotients tightened from 187 / 189 to 138 / 140. |
 | Meerkat `Recovering` is a transient / no-op top-level phase | passed / landed | Removed the unreachable top-level `Recovering` phase from the formal model; the internal `RuntimeControlAuthority` still owns recovery/recycle transitions, and TLC state space stayed unchanged. |
 | Meerkat pure queries should stay surfaced without formal transitions | passed / landed | Moved the read-only helper/query family into `surface_only_inputs`; runtime/schema audits stayed green and Meerkat TLC generated states dropped from 3,668,832 to 3,113,272 while the raw/phase quotients stayed at 385 / 390. |
 | Meerkat committed visibility publication progress should not stay as top-level shadow state | passed / landed | Removed `committed_visibility_revision` from the formal state; exact audited parity stayed green and Meerkat TLC distinct states fell from 59,371 to 45,610 while the raw/phase quotients stayed at 385 / 390. |
@@ -164,9 +170,9 @@ We ran three observation modes for each machine:
 
 | Machine | Observation | Reachable states | Quotient states | Reduction | Reading |
 |---|---|---:|---:|---:|---|
-| MobMachine | `none` | 1,390 | 202 | 85.5% | Removing the pure work/task/subscription shadow fields collapsed the truthful state space hard while leaving the raw quotient unchanged, which is the signature of a successful shadow-state cut. |
-| MobMachine | `phase` | 1,390 | 204 | 85.3% | Preserving phase still barely changes the quotient; `Running` / `Stopped` / `Completed` remain mostly projection. |
-| MobMachine | `full` | 1,390 | 1,390 | 0.0% | Once the remaining extended state is preserved, every reachable snapshot is still distinct. |
+| MobMachine | `none` | 770 | 138 | 82.1% | Removing the representative runtime-identity shadow layer collapsed both the truthful graph and the raw quotient, leaving a much smaller lifecycle/counter core. |
+| MobMachine | `phase` | 770 | 140 | 81.8% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection. |
+| MobMachine | `full` | 770 | 770 | 0.0% | Once the remaining authoritative counters are preserved, every reachable Mob snapshot is still distinct. |
 | MeerkatMachine | `none` | 11,814 | 385 | 96.7% | Raw behavior still collapses to a much smaller machine after the exact parity pass and the visibility plus LLM/capability boundary simplifications. |
 | MeerkatMachine | `phase` | 11,814 | 390 | 96.7% | Preserving phase still adds only five quotient blocks; phase remains almost entirely projection here too. |
 | MeerkatMachine | `full` | 11,814 | 11,425 | 3.3% | Preserving the full snapshot still keeps almost every remaining state distinct, but the remaining shadow projection layers are materially smaller. |
@@ -407,35 +413,33 @@ cargo run -p xtask --features machine-authority -- \
 
 Current result:
 
-- reachable states: `1,214`
-- raw quotient states: `187`
-- phase-observed quotient states: `189`
-- full-observed quotient states: `1,214`
-- TLC: `38,134 generated / 1,214 distinct / depth 7`
-- dominant mixed block: `585` states spanning `Running`, `Stopped`, and
+- reachable states: `770`
+- raw quotient states: `138`
+- phase-observed quotient states: `140`
+- full-observed quotient states: `770`
+- TLC: `25,943 generated / 770 distinct / depth 7`
+- dominant mixed block: `347` states spanning `Running`, `Stopped`, and
   `Completed`
-- dominant block tuples: `316`
-- tuples reused across multiple phases: `149`
+- dominant block tuples: `205`
+- tuples reused across multiple phases: `71`
 - maximum phases sharing one tuple: `3`
 
 The dominant Mob block is now being split primarily by the remaining
-runtime-backed or seam-facing dimensions, not by the removed shadow counters:
+runtime-backed lifecycle/orchestration counters:
 
 - `pending_spawn_count`
 - `wiring_edge_count`
 - `active_run_count`
 - `active_member_count`
-- `active_fence_token`
-- `active_runtime_id`
 - `coordinator_bound`
-- `active_identity`
+- `retiring_member_count`
 
 The important read is that the raw quotient has continued to fall only when we
 removed formal distinctions that were still present in the truthful state
-graph. The reachable space is now down from `4,797` to `1,214`, while the raw
-quotient is down to `187`. That means the remaining reductions are still coming
-from real formal-state normalization rather than from papering over runtime
-behavior.
+graph. The reachable space is now down from `4,797` to `770`, while the raw
+quotient is down to `138`. That means the remaining Mob state is now much
+closer to the real lifecycle/counter core than to the earlier seam-shadow
+projection layer.
 
 We then removed the residual top-level `current_generation` seam-shadow field
 and re-ran the same trustworthy Mob lanes. The readout stayed flat:
@@ -464,6 +468,27 @@ That cut is also a good architecture read. The top-level Mob machine should
 own lifecycle and orchestration truth; concrete `WorkRef` cancellation remains a
 carrier-level concern, and impossible external calls are now rejected at the
 composition perimeter instead of being forced into the kernel state graph.
+
+The next cut removed the remaining top-level representative runtime identity
+shadow:
+
+- `active_identity`
+- `active_runtime_id`
+- `active_fence_token`
+
+and replaced the old `runtime_is_bound` guard with the remaining authoritative
+active-member counter surface. That read tightened again:
+
+- reachable states: `770`
+- raw quotient states: `138`
+- phase-observed quotient states: `140`
+- full-observed quotient states: `770`
+- TLC: `25,943 generated / 770 distinct / depth 7`
+
+That is the strongest Mob result so far. The machine is no longer spending
+state-space budget replaying a representative member/runtime identity at the
+top level, and the remaining mixed block is now dominated by lifecycle and
+orchestration counters rather than seam-shadow identity facts.
 
 ### Reading the current pass
 

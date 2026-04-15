@@ -29,18 +29,6 @@ pub fn mob_machine() -> MachineSchema {
                 ],
             },
             fields: vec![
-                field(
-                    "active_identity",
-                    TypeRef::Option(Box::new(TypeRef::Named("AgentIdentity".into()))),
-                ),
-                field(
-                    "active_runtime_id",
-                    TypeRef::Option(Box::new(TypeRef::Named("AgentRuntimeId".into()))),
-                ),
-                field(
-                    "active_fence_token",
-                    TypeRef::Option(Box::new(TypeRef::Named("FenceToken".into()))),
-                ),
                 field("active_member_count", TypeRef::U32),
                 field("active_run_count", TypeRef::U32),
                 field("pending_spawn_count", TypeRef::U32),
@@ -51,9 +39,6 @@ pub fn mob_machine() -> MachineSchema {
             init: InitSchema {
                 phase: "Running".into(),
                 fields: vec![
-                    init("active_identity", Expr::None),
-                    init("active_runtime_id", Expr::None),
-                    init("active_fence_token", Expr::None),
                     init("active_member_count", Expr::U64(0)),
                     init("active_run_count", Expr::U64(0)),
                     init("pending_spawn_count", Expr::U64(0)),
@@ -97,18 +82,15 @@ pub fn mob_machine() -> MachineSchema {
                     },
                     VariantSchema {
                         name: "RequestRuntimeRetire".into(),
-                        fields: runtime_observation_fields(),
+                        fields: vec![],
                     },
                     VariantSchema {
                         name: "RequestRuntimeDestroy".into(),
-                        fields: runtime_observation_fields(),
+                        fields: vec![],
                     },
                     VariantSchema {
                         name: "EmitMemberLifecycleNotice".into(),
-                        fields: vec![
-                            field("agent_identity", TypeRef::Named("AgentIdentity".into())),
-                            field("kind", TypeRef::String),
-                        ],
+                        fields: vec![field("kind", TypeRef::String)],
                     },
                 ];
                 variants.extend(absorbed_mob_effect_variants());
@@ -117,41 +99,13 @@ pub fn mob_machine() -> MachineSchema {
         },
         helpers: vec![],
         derived: vec![],
-        invariants: vec![
-            InvariantSchema {
-                name: "destroyed_has_no_active_runtime".into(),
-                expr: Expr::Or(vec![
-                    Expr::Neq(
-                        Box::new(Expr::CurrentPhase),
-                        Box::new(Expr::Phase("Destroyed".into())),
-                    ),
-                    Expr::Eq(
-                        Box::new(Expr::Field("active_runtime_id".into())),
-                        Box::new(Expr::None),
-                    ),
-                ]),
-            },
-            InvariantSchema {
-                name: "active_runtime_has_identity".into(),
-                expr: Expr::Or(vec![
-                    Expr::Eq(
-                        Box::new(Expr::Field("active_runtime_id".into())),
-                        Box::new(Expr::None),
-                    ),
-                    Expr::Neq(
-                        Box::new(Expr::Field("active_identity".into())),
-                        Box::new(Expr::None),
-                    ),
-                ]),
-            },
-            InvariantSchema {
-                name: "retiring_members_do_not_exceed_active_members".into(),
-                expr: Expr::Lte(
-                    Box::new(Expr::Field("retiring_member_count".into())),
-                    Box::new(Expr::Field("active_member_count".into())),
-                ),
-            },
-        ],
+        invariants: vec![InvariantSchema {
+            name: "retiring_members_do_not_exceed_active_members".into(),
+            expr: Expr::Lte(
+                Box::new(Expr::Field("retiring_member_count".into())),
+                Box::new(Expr::Field("active_member_count".into())),
+            ),
+        }],
         transitions: vec![
             // Spawn is a Running self-loop: the real runtime starts in Running
             // and does not expose a durable pre-start top-level phase.
@@ -171,15 +125,10 @@ pub fn mob_machine() -> MachineSchema {
                 guards: vec![],
                 updates: {
                     let mut updates = reset_member_runtime_updates();
-                    updates.extend(vec![
-                        assign_some("active_identity", "agent_identity"),
-                        assign_some("active_runtime_id", "agent_runtime_id"),
-                        assign_some("active_fence_token", "fence_token"),
-                        Update::Assign {
-                            field: "active_member_count".into(),
-                            expr: Expr::U64(1),
-                        },
-                    ]);
+                    updates.push(Update::Assign {
+                        field: "active_member_count".into(),
+                        expr: Expr::U64(1),
+                    });
                     updates
                 },
                 to: "Running".into(),
@@ -216,13 +165,7 @@ pub fn mob_machine() -> MachineSchema {
                         "work_id".into(),
                     ],
                 },
-                guards: vec![Guard {
-                    name: "runtime_is_bound".into(),
-                    expr: Expr::Neq(
-                        Box::new(Expr::Field("active_runtime_id".into())),
-                        Box::new(Expr::None),
-                    ),
-                }],
+                guards: vec![active_members_present_guard()],
                 updates: vec![],
                 to: "Running".into(),
                 // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
@@ -301,23 +244,7 @@ pub fn mob_machine() -> MachineSchema {
                     bindings: vec!["agent_runtime_id".into(), "fence_token".into()],
                 },
                 guards: vec![],
-                updates: {
-                    let mut updates = clear_runtime_projection_updates();
-                    updates.splice(
-                        0..0,
-                        [
-                            Update::Assign {
-                                field: "active_runtime_id".into(),
-                                expr: Expr::None,
-                            },
-                            Update::Assign {
-                                field: "active_fence_token".into(),
-                                expr: Expr::None,
-                            },
-                        ],
-                    );
-                    updates
-                },
+                updates: clear_runtime_projection_updates(),
                 to: "Stopped".into(),
                 emit: vec![lifecycle_notice_emit("retired")],
             },
@@ -337,15 +264,10 @@ pub fn mob_machine() -> MachineSchema {
                 guards: vec![],
                 updates: {
                     let mut updates = reset_member_runtime_updates();
-                    updates.extend(vec![
-                        assign_some("active_identity", "agent_identity"),
-                        assign_some("active_runtime_id", "agent_runtime_id"),
-                        assign_some("active_fence_token", "fence_token"),
-                        Update::Assign {
-                            field: "active_member_count".into(),
-                            expr: Expr::U64(1),
-                        },
-                    ]);
+                    updates.push(Update::Assign {
+                        field: "active_member_count".into(),
+                        expr: Expr::U64(1),
+                    });
                     updates
                 },
                 to: "Running".into(),
@@ -370,15 +292,10 @@ pub fn mob_machine() -> MachineSchema {
                 guards: vec![],
                 updates: {
                     let mut updates = reset_member_runtime_updates();
-                    updates.extend(vec![
-                        assign_some("active_identity", "agent_identity"),
-                        assign_some("active_runtime_id", "agent_runtime_id"),
-                        assign_some("active_fence_token", "fence_token"),
-                        Update::Assign {
-                            field: "active_member_count".into(),
-                            expr: Expr::U64(1),
-                        },
-                    ]);
+                    updates.push(Update::Assign {
+                        field: "active_member_count".into(),
+                        expr: Expr::U64(1),
+                    });
                     updates
                 },
                 to: "Running".into(),
@@ -516,20 +433,14 @@ fn runtime_binding_emit(variant: &str) -> EffectEmit {
 fn runtime_observation_emit(variant: &str) -> EffectEmit {
     EffectEmit {
         variant: variant.into(),
-        fields: IndexMap::from([
-            ("agent_runtime_id".into(), option_value("active_runtime_id")),
-            ("fence_token".into(), option_value("active_fence_token")),
-        ]),
+        fields: IndexMap::new(),
     }
 }
 
 fn lifecycle_notice_emit(kind: &str) -> EffectEmit {
     EffectEmit {
         variant: "EmitMemberLifecycleNotice".into(),
-        fields: IndexMap::from([
-            ("agent_identity".into(), option_value("active_identity")),
-            ("kind".into(), Expr::String(kind.into())),
-        ]),
+        fields: IndexMap::from([("kind".into(), Expr::String(kind.into()))]),
     }
 }
 
@@ -562,20 +473,6 @@ fn init(field: &str, expr: Expr) -> crate::FieldInit {
     crate::FieldInit {
         field: field.into(),
         expr,
-    }
-}
-
-fn assign_some(field: &str, binding: &str) -> Update {
-    Update::Assign {
-        field: field.into(),
-        expr: Expr::Some(Box::new(Expr::Binding(binding.into()))),
-    }
-}
-
-fn option_value(field: &str) -> Expr {
-    Expr::MapGet {
-        map: Box::new(Expr::Field(field.into())),
-        key: Box::new(Expr::String("value".into())),
     }
 }
 
@@ -1083,7 +980,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "RunFlow".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard(), runtime_is_bound_guard()],
+        guards: vec![active_members_present_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1100,7 +997,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "StartFlow".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard(), runtime_is_bound_guard()],
+        guards: vec![active_members_present_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1117,7 +1014,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "CreateRun".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard(), runtime_is_bound_guard()],
+        guards: vec![active_members_present_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1134,7 +1031,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "StartRun".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard(), runtime_is_bound_guard()],
+        guards: vec![active_members_present_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1413,16 +1310,6 @@ fn active_members_present_guard() -> Guard {
     }
 }
 
-fn runtime_is_bound_guard() -> Guard {
-    Guard {
-        name: "runtime_is_bound".into(),
-        expr: Expr::Neq(
-            Box::new(Expr::Field("active_runtime_id".into())),
-            Box::new(Expr::None),
-        ),
-    }
-}
-
 fn clear_runtime_projection_updates() -> Vec<Update> {
     vec![clear_active_runs()]
 }
@@ -1482,24 +1369,10 @@ fn reset_mob_projection_updates_with_coordinator(coordinator_bound: bool) -> Vec
 
 fn destroy_mob_projection_updates() -> Vec<Update> {
     let mut updates = reset_mob_projection_updates();
-    updates.extend(vec![
-        Update::Assign {
-            field: "active_identity".into(),
-            expr: Expr::None,
-        },
-        Update::Assign {
-            field: "active_runtime_id".into(),
-            expr: Expr::None,
-        },
-        Update::Assign {
-            field: "active_fence_token".into(),
-            expr: Expr::None,
-        },
-        Update::Assign {
-            field: "active_member_count".into(),
-            expr: Expr::U64(0),
-        },
-    ]);
+    updates.extend(vec![Update::Assign {
+        field: "active_member_count".into(),
+        expr: Expr::U64(0),
+    }]);
     updates
 }
 

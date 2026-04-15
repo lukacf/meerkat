@@ -4594,7 +4594,21 @@ impl MobActor {
             return Err(error);
         }
 
-        let phase = self.state();
+        let mut phase = self.state();
+        if phase == MobState::Completed {
+            self.lifecycle_authority
+                .apply_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::FinishCleanup,
+                )
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "lifecycle FinishCleanup transition failed during reset from completed: {error}"
+                    ))
+                })?;
+            phase = MobState::Stopped;
+        }
         if self.orchestrator.is_some() {
             let mut topology_unbound = false;
             if self.machine_orchestrator_can_accept(phase, MobOrchestratorInput::StopOrchestrator) {

@@ -49,19 +49,12 @@ pub(crate) enum MobLifecycleInput {
     FinishRun,
     #[cfg_attr(
         not(test),
-        expect(
+        allow(
             dead_code,
             reason = "cleanup markers retained only for lower-authority table tests after production reset flow stopped using them"
         )
     )]
     BeginCleanup,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "cleanup markers retained only for lower-authority table tests after production reset flow stopped using them"
-        )
-    )]
     FinishCleanup,
 }
 

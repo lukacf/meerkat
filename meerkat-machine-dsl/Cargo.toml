@@ -1,0 +1,23 @@
+[package]
+name = "meerkat-machine-dsl"
+description = "Proc-macro DSL for defining Meerkat machine state machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+meerkat-machine-dsl-core = { path = "../meerkat-machine-dsl-core" }
+proc-macro2 = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "machine-dsl-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
+meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
+meerkat-machine-kernels = { path = "../../meerkat-machine-kernels" }
+indexmap = "2"
+
+[lints]
+workspace = true

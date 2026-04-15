@@ -88,6 +88,10 @@ Current state:
 - the full pair audit now classifies the modeled kernel outcome plus coarse
   result summaries across all `62` transition-bearing rows of the lifecycle
   triangle, and that exact observable pass stays green too
+- the formal machine no longer carries `cleanup_pending`; that flag remains
+  lower-authority lifecycle bookkeeping inside `MobLifecycleAuthority`, and
+  removing it from top-level `MobMachine` left the truthful Hopcroft/TLC
+  baseline flat at raw/phase/full `207 / 209 / 2238`
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 - external-turn legality now honors the roster's

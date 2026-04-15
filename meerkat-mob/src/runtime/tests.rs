@@ -17387,7 +17387,6 @@ struct MobRuntimeParitySnapshotSummary {
     coordinator_bound: Option<bool>,
     pending_spawn_count: Option<u32>,
     active_flow_count: Option<u32>,
-    cleanup_pending: Option<bool>,
     topology_revision: Option<u32>,
     supervisor_active: Option<bool>,
     representative_agent_identity: Option<String>,
@@ -17406,7 +17405,6 @@ struct MobRuntimeParityObservableSnapshot {
     coordinator_bound: Option<bool>,
     pending_spawn_count: Option<u32>,
     active_flow_count: Option<u32>,
-    cleanup_pending: Option<bool>,
     topology_revision: Option<u32>,
     supervisor_active: Option<bool>,
 }
@@ -17444,7 +17442,6 @@ impl MobRuntimeParityInvocationReport {
                     coordinator_bound: after.coordinator_bound,
                     pending_spawn_count: after.pending_spawn_count,
                     active_flow_count: after.active_flow_count,
-                    cleanup_pending: after.cleanup_pending,
                     topology_revision: after.topology_revision,
                     supervisor_active: after.supervisor_active,
                 }),
@@ -17930,16 +17927,6 @@ async fn mob_runtime_parity_snapshot_summary(
         .expect("serialize active_run_count"),
     );
     formal_available_fields.insert(
-        "cleanup_pending".into(),
-        serde_json::to_string(
-            &lifecycle
-                .as_ref()
-                .map(|snapshot| snapshot.cleanup_pending)
-                .unwrap_or(false),
-        )
-        .expect("serialize cleanup_pending"),
-    );
-    formal_available_fields.insert(
         "pending_spawn_count".into(),
         serde_json::to_string(
             &orchestrator
@@ -17988,7 +17975,6 @@ async fn mob_runtime_parity_snapshot_summary(
             .as_ref()
             .map(|snapshot| snapshot.pending_spawn_count),
         active_flow_count: lifecycle.as_ref().map(|snapshot| snapshot.active_run_count),
-        cleanup_pending: lifecycle.as_ref().map(|snapshot| snapshot.cleanup_pending),
         topology_revision: orchestrator
             .as_ref()
             .map(|snapshot| snapshot.topology_revision),
@@ -18062,9 +18048,6 @@ fn mob_runtime_parity_field_value(
         "pending_spawn_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.pending_spawn_count.unwrap_or_default() as u64,
         )),
-        "cleanup_pending" => snapshot
-            .cleanup_pending
-            .map(MobRuntimeParityExprValue::Bool),
         "wiring_edge_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.wiring_edge_count as u64,
         )),

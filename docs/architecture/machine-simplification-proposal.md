@@ -124,10 +124,10 @@ Hopcroft-style behavioral quotient over the reachable graph.
   instead of delegating it entirely to handwritten `RuntimeControlAuthority`
   state.
 - Extended the exact Meerkat parity snapshot to include the stale handwritten
-  control wake/process booleans, the live ingress wake/process booleans, and
-  the driver-owned typed `post_admission_signal`; the stricter full-row pair
-  audit stayed green at `260 / 260`, which shows those carriers are not
-  hiding new public-phase mismatches on the current 10-pair frontier.
+  control wake/process booleans plus the driver-owned typed
+  `post_admission_signal`; the stricter full-row pair audit stayed green at
+  `260 / 260`, which shows those carriers are not hiding new public-phase
+  mismatches on the current 10-pair frontier.
 - Modeled attached steered `AcceptWithCompletion` as a payload-sensitive
   immediate path: when `request_immediate_processing=true`, the checked-in
   Meerkat machine now transitions `Attached -> Running` and binds the fresh
@@ -138,6 +138,12 @@ Hopcroft-style behavioral quotient over the reachable graph.
   to a single passive self-loop, and the checked-in Meerkat machine now emits
   the same typed `PostAdmissionSignal("InterruptYielding")` branch that the
   runtime uses for running peer-message admission.
+- Removed the dead hidden ingress wake/process flags
+  (`wake_requested` / `process_requested`) from `RuntimeIngressAuthority` and
+  the Meerkat diagnostic spine after verifying that the live runtime loop no
+  longer consumes them. Exact audited parity stayed green, TLC/Hopcroft stayed
+  flat, and the remaining wake/process carrier is now just emitted effects +
+  `post_admission_signal`.
 - Taught the generated closed-world composition models to reject queued
   external entry packets that are no longer admissible for the current machine
   state, which removes seam deadlocks without widening the machine transition
@@ -191,7 +197,8 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Meerkat committed visibility publication progress should not stay as top-level shadow state | passed / landed | Removed `committed_visibility_revision` from the formal state; exact audited parity stayed green and Meerkat TLC distinct states fell from 59,371 to 45,610 while the raw/phase quotients stayed at 385 / 390. |
 | Meerkat visibility witness provenance should not stay as top-level shadow state | passed / landed | Removed `requested_witnesses` and `filter_witnesses` from the formal state; exact audited parity stayed green and Meerkat TLC distinct states fell from 45,610 to 15,809 while the raw/phase quotients still held at 385 / 390. |
 | Meerkat LLM/capability projection should not stay as top-level shadow state | passed / landed | Removed `current_llm_identity`, `current_capability_surface`, `capability_surface_status`, `capability_base_filter`, and `inherited_base_filter` from the formal state; exact audited parity stayed green and Meerkat TLC distinct states fell from 15,809 to 11,814 while the raw/phase quotients still held at 385 / 390. |
-| Meerkat top-level wake/process mirrors should not stay as formal state | passed / landed | Removed the top-level `wake_pending` and `process_pending` mirrors after the truthful graph showed they were constant `FALSE` across all reachable Meerkat states; exact audited parity stayed green and the truthful TLC/Hopcroft readout stayed flat at 11,814 reachable with raw/phase/full quotients 385 / 390 / 11,425. The stricter audit now also sees the live ingress wake/process booleans plus the driver-owned `post_admission_signal`, so the remaining wake/process question is about lower-authority carrier boundaries rather than a hidden top-level phase mismatch. |
+| Meerkat top-level wake/process mirrors should not stay as formal state | passed / landed | Removed the top-level `wake_pending` and `process_pending` mirrors after the truthful graph showed they were constant `FALSE` across all reachable Meerkat states; exact audited parity stayed green and the truthful TLC/Hopcroft readout stayed flat at 11,814 reachable with raw/phase/full quotients 385 / 390 / 11,425. The stricter audit now sees the surviving control booleans plus the driver-owned `post_admission_signal`, so the remaining wake/process question is about lower-authority carrier boundaries rather than a hidden top-level phase mismatch. |
+| Hidden ingress wake/process flags should stay as lower-authority state | rejected / landed | Removed the write-only `wake_requested` / `process_requested` flags from `RuntimeIngressAuthority` and the Meerkat diagnostic spine after verifying that the live runtime loop no longer consumes them. Exact audited parity stayed green, TLC/Hopcroft stayed flat, and the only remaining live wake/process admission carrier is emitted effects plus typed `post_admission_signal`. |
 | Meerkat active-work slice should not stay as top-level formal state | passed / landed | Removed `active_work_id` plus the unreachable top-level `RunCompleted` / `RunFailed` / `RunCancelled` and old `has_active_work`-guarded operation-completion signal slice; exact audited parity stayed green and the truthful TLC/Hopcroft readout stayed flat at 11,814 reachable with raw/phase/full quotients 385 / 390 / 11,425. |
 | Meerkat `ToolFilter` verification domain should not stay singleton | passed / landed | Broadened CI/deep cfg generation from `ToolFilterValues = {"All"}` to `{"All", "toolfilter_2"}`; the truthful Meerkat state space rose from 11,814 to 38,945 distinct states while the raw/phase quotient stayed at 385 / 390, proving the old filter simplification signal had been under-constrained rather than behavior-free. |
 | Meerkat top-level filter mirrors should not stay as formal state | passed / landed | Removed top-level `active_filter` / `staged_filter` after the stronger two-sample `ToolFilter` rerun showed the authoritative filter state already lives in `MachineToolVisibilityOwner`; exact audited parity stayed green and the truthful Meerkat state space fell back from 38,945 to 11,814 distinct states while the raw/phase quotient stayed at 385 / 390. |

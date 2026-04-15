@@ -72,8 +72,7 @@ Current state:
   actually carries wake/process intent through `RuntimeIngressAuthority` plus
   the driver-owned typed `post_admission_signal`
 - the parity snapshot now includes `control.wake_pending`,
-  `control.process_pending`, `inputs.wake_requested`,
-  `inputs.process_requested`, and the typed `post_admission_signal`; adding
+  `control.process_pending`, and the typed `post_admission_signal`; adding
   those carriers to the exact full-row pair audit did **not** create any new
   public-phase mismatches on the current 10-pair frontier
 - `current_run_id` is now absorbed back into the top-level Meerkat formal
@@ -86,6 +85,11 @@ Current state:
   self-loop either: the checked-in Meerkat machine now distinguishes the live
   `InterruptYielding` admission branch from the passive queued branch, and the
   targeted runtime/model regression for running peer-message admission is green
+- the hidden ingress booleans `wake_requested` and `process_requested` are now
+  gone as well: they had become write-only shadow state under
+  `RuntimeIngressAuthority`, while the live runtime loop and exact audits were
+  already driven by emitted wake/process effects plus the typed
+  `post_admission_signal`
 - the top-level Meerkat machine no longer carries the filter mirror pair
   `active_filter` / `staged_filter`; the authoritative
   `MachineToolVisibilityOwner` still owns the real filter state, exact parity

@@ -13,11 +13,10 @@
 //!   BoundaryApplied, RunCompleted, RunFailed, RunCancelled,
 //!   SupersedeQueuedInput, CoalesceQueuedInputs, Retire, Reset, Destroy,
 //!   Recover, ReconcileTerminalInputs, SetSilentIntentOverrides
-//! - 18 fields: admitted_inputs, admission_order, content_shape, request_id,
+//! - 16 fields: admitted_inputs, admission_order, content_shape, request_id,
 //!   reservation_key, policy_snapshot, handling_mode, lifecycle,
 //!   terminal_outcome, queue, steer_queue, current_run, current_run_contributors,
-//!   last_run, last_boundary_sequence, wake_requested, process_requested,
-//!   silent_intent_overrides
+//!   last_run, last_boundary_sequence, silent_intent_overrides
 //! - 8 effects: IngressAccepted, ReadyForRun, InputLifecycleNotice,
 //!   WakeRuntime, RequestImmediateProcessing, CompletionResolved,
 //!   IngressNotice, SilentIntentApplied
@@ -314,8 +313,6 @@ struct RuntimeIngressFields {
     current_run_contributors: Vec<InputId>,
     last_run: HashMap<InputId, Option<RunId>>,
     last_boundary_sequence: HashMap<InputId, Option<u64>>,
-    wake_requested: bool,
-    process_requested: bool,
     silent_intent_overrides: BTreeSet<String>,
 }
 
@@ -338,8 +335,6 @@ impl RuntimeIngressFields {
             current_run_contributors: Vec::new(),
             last_run: HashMap::new(),
             last_boundary_sequence: HashMap::new(),
-            wake_requested: false,
-            process_requested: false,
             silent_intent_overrides: BTreeSet::new(),
         }
     }
@@ -476,16 +471,6 @@ impl RuntimeIngressAuthority {
         self.fields.reservation_key.get(work_id).cloned().flatten()
     }
 
-    /// Whether a wake was requested.
-    pub fn wake_requested(&self) -> bool {
-        self.fields.wake_requested
-    }
-
-    /// Whether immediate processing was requested.
-    pub fn process_requested(&self) -> bool {
-        self.fields.process_requested
-    }
-
     /// Silent intent overrides.
     pub fn silent_intent_overrides(&self) -> &BTreeSet<String> {
         &self.fields.silent_intent_overrides
@@ -616,16 +601,6 @@ impl RuntimeIngressAuthority {
                 existing_superseded_id,
             })
         }
-    }
-
-    /// Clear the wake_requested flag (shell reads and resets).
-    pub fn take_wake_requested(&mut self) -> bool {
-        std::mem::take(&mut self.fields.wake_requested)
-    }
-
-    /// Clear the process_requested flag (shell reads and resets).
-    pub fn take_process_requested(&mut self) -> bool {
-        std::mem::take(&mut self.fields.process_requested)
     }
 
     /// Evaluate a transition without committing it.
@@ -820,19 +795,6 @@ impl RuntimeIngressAuthority {
             HandlingMode::Queue => fields.queue.push(work_id.clone()),
             HandlingMode::Steer => fields.steer_queue.push(work_id.clone()),
         }
-
-        // Wake/process flags.
-        //
-        // Routing through the steer lane and requesting immediate processing are
-        // different facts. ResponseProgress uses the steer lane for checkpoint
-        // batching, but must remain passive unless the input kind explicitly
-        // requests immediate processing (for example a steer override or a
-        // continuation wake).
-        fields.wake_requested = matches!(
-            policy.wake_mode,
-            crate::WakeMode::WakeIfIdle | crate::WakeMode::InterruptYielding
-        ) || request_immediate_processing;
-        fields.process_requested = request_immediate_processing;
 
         effects.push(RuntimeIngressEffect::IngressAccepted {
             work_id: work_id.clone(),
@@ -1111,8 +1073,6 @@ impl RuntimeIngressAuthority {
         // Set current run
         fields.current_run = Some(run_id.clone());
         fields.current_run_contributors = contributing_work_ids.to_vec();
-        fields.wake_requested = false;
-        fields.process_requested = false;
 
         // Transition contributors to Staged and emit per-input StageInput effects
         // so the shell derives per-input lifecycle transitions from this authority.
@@ -1340,7 +1300,6 @@ impl RuntimeIngressAuthority {
 
         // Wake if there's still work in the queue
         if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
-            fields.wake_requested = true;
             effects.push(RuntimeIngressEffect::WakeRuntime);
         }
 
@@ -1418,7 +1377,6 @@ impl RuntimeIngressAuthority {
         fields.current_run_contributors = Vec::new();
 
         if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
-            fields.wake_requested = true;
             effects.push(RuntimeIngressEffect::WakeRuntime);
         }
 
@@ -1652,8 +1610,6 @@ impl RuntimeIngressAuthority {
         // Drain queues
         fields.queue.clear();
         fields.steer_queue.clear();
-        fields.wake_requested = false;
-        fields.process_requested = false;
         fields.current_run = None;
         fields.current_run_contributors = Vec::new();
 
@@ -1718,8 +1674,6 @@ impl RuntimeIngressAuthority {
 
         fields.queue.clear();
         fields.steer_queue.clear();
-        fields.wake_requested = false;
-        fields.process_requested = false;
         fields.current_run = None;
         fields.current_run_contributors = Vec::new();
 
@@ -1929,7 +1883,6 @@ impl RuntimeIngressAuthority {
         }
 
         if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
-            fields.wake_requested = true;
             effects.push(RuntimeIngressEffect::WakeRuntime);
         }
 
@@ -1991,11 +1944,6 @@ impl RuntimeIngressAuthority {
                 work_id: work_id.clone(),
                 outcome: outcome.clone(),
             });
-        }
-
-        if fields.queue.is_empty() && fields.steer_queue.is_empty() {
-            fields.wake_requested = false;
-            fields.process_requested = false;
         }
 
         Ok((phase, fields, effects))
@@ -2220,11 +2168,15 @@ mod tests {
             auth.lifecycle_state(&wid),
             Some(InputLifecycleState::Queued)
         );
-        assert!(auth.wake_requested());
         assert!(
             t.effects
                 .iter()
                 .any(|e| matches!(e, RuntimeIngressEffect::IngressAccepted { .. }))
+        );
+        assert!(
+            t.effects
+                .iter()
+                .any(|e| matches!(e, RuntimeIngressEffect::WakeRuntime))
         );
     }
 
@@ -2236,7 +2188,6 @@ mod tests {
 
         assert!(auth.queue().is_empty());
         assert_eq!(auth.steer_queue(), &[wid.clone()]);
-        assert!(auth.process_requested());
         assert!(
             t.effects
                 .iter()
@@ -2274,8 +2225,6 @@ mod tests {
 
         assert!(auth.queue().is_empty());
         assert_eq!(auth.steer_queue(), &[wid]);
-        assert!(!auth.wake_requested());
-        assert!(!auth.process_requested());
         assert!(
             !t.effects
                 .iter()
@@ -2552,15 +2501,21 @@ mod tests {
         })
         .unwrap();
 
-        auth.apply(RuntimeIngressInput::RunFailed {
-            run_id: run_id.clone(),
-        })
-        .expect("run failed should succeed");
+        let transition = auth
+            .apply(RuntimeIngressInput::RunFailed {
+                run_id: run_id.clone(),
+            })
+            .expect("run failed should succeed");
 
         assert_eq!(auth.lifecycle_state(&w1), Some(InputLifecycleState::Queued));
         assert!(auth.queue().contains(&w1));
         assert!(auth.current_run().is_none());
-        assert!(auth.wake_requested());
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, RuntimeIngressEffect::WakeRuntime))
+        );
     }
 
     #[test]
@@ -2596,7 +2551,12 @@ mod tests {
             Some(InputLifecycleState::Abandoned)
         );
         assert!(!auth.queue().contains(&w1));
-        assert!(!auth.wake_requested());
+        assert!(
+            !transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, RuntimeIngressEffect::WakeRuntime))
+        );
         assert!(transition.effects.iter().any(|effect| matches!(
             effect,
             RuntimeIngressEffect::CompletionResolved {
@@ -2704,13 +2664,19 @@ mod tests {
         })
         .unwrap();
 
-        auth.apply(RuntimeIngressInput::Recover)
+        let transition = auth
+            .apply(RuntimeIngressInput::Recover)
             .expect("recover should succeed");
 
         assert_eq!(auth.lifecycle_state(&w1), Some(InputLifecycleState::Queued));
         assert!(auth.current_run().is_none());
         assert!(auth.queue().contains(&w1));
-        assert!(auth.wake_requested());
+        assert!(
+            transition
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, RuntimeIngressEffect::WakeRuntime))
+        );
     }
 
     #[test]
@@ -2997,27 +2963,5 @@ mod tests {
         // Should be back in steer_queue, not queue
         assert!(auth.steer_queue().contains(&w1));
         assert!(!auth.queue().contains(&w1));
-    }
-
-    // ---- take_wake/process_requested clears flags ----
-
-    #[test]
-    fn take_wake_requested_clears_flag() {
-        let mut auth = RuntimeIngressAuthority::new();
-        let w1 = InputId::new();
-        admit_queued(&mut auth, w1, HandlingMode::Queue);
-
-        assert!(auth.take_wake_requested());
-        assert!(!auth.take_wake_requested()); // cleared
-    }
-
-    #[test]
-    fn take_process_requested_clears_flag() {
-        let mut auth = RuntimeIngressAuthority::new();
-        let w1 = InputId::new();
-        admit_queued(&mut auth, w1, HandlingMode::Steer);
-
-        assert!(auth.take_process_requested());
-        assert!(!auth.take_process_requested()); // cleared
     }
 }

@@ -531,8 +531,6 @@ async fn meerkat_machine_spine_snapshot_tracks_steered_prompt_input() {
 
     assert!(snapshot.inputs.queue.is_empty());
     assert_eq!(snapshot.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(snapshot.inputs.wake_requested);
-    assert!(snapshot.inputs.process_requested);
     assert_eq!(snapshot.inputs.admission_order.len(), 1);
     let input_snapshot = &snapshot.inputs.admission_order[0];
     assert_eq!(input_snapshot.input_id, input_id);
@@ -1031,8 +1029,6 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     assert_eq!(before_destroy.control.phase, RuntimeState::Idle);
     assert!(before_destroy.inputs.queue.is_empty());
     assert_eq!(before_destroy.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_destroy.inputs.wake_requested);
-    assert!(before_destroy.inputs.process_requested);
     assert_eq!(before_destroy.completion_waiters.input_count, 1);
     assert_eq!(before_destroy.completion_waiters.waiter_count, 1);
     assert_eq!(before_destroy.completion_waiters.waiting_inputs.len(), 1);
@@ -4542,8 +4538,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(before_recover.control.phase, RuntimeState::Idle);
     assert!(before_recover.inputs.queue.is_empty());
     assert_eq!(before_recover.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_recover.inputs.wake_requested);
-    assert!(before_recover.inputs.process_requested);
     assert_eq!(before_recover.completion_waiters.input_count, 1);
     assert_eq!(before_recover.completion_waiters.waiter_count, 1);
     assert_eq!(before_recover.completion_waiters.waiting_inputs.len(), 1);
@@ -4575,8 +4569,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(after_recover.control.phase, RuntimeState::Idle);
     assert!(after_recover.inputs.queue.is_empty());
     assert_eq!(after_recover.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_recover.inputs.wake_requested);
-    assert!(after_recover.inputs.process_requested);
     assert_eq!(after_recover.completion_waiters.input_count, 1);
     assert_eq!(after_recover.completion_waiters.waiter_count, 1);
     assert_eq!(after_recover.completion_waiters.waiting_inputs.len(), 1);
@@ -4629,8 +4621,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.inputs.current_run_id, None);
     assert!(after_wait_all.inputs.queue.is_empty());
     assert_eq!(after_wait_all.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_wait_all.inputs.wake_requested);
-    assert!(after_wait_all.inputs.process_requested);
     assert_eq!(after_wait_all.completion_waiters.input_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiter_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiting_inputs.len(), 1);
@@ -4712,8 +4702,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(before_recycle.control.phase, RuntimeState::Idle);
     assert!(before_recycle.inputs.queue.is_empty());
     assert_eq!(before_recycle.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_recycle.inputs.wake_requested);
-    assert!(before_recycle.inputs.process_requested);
     assert_eq!(before_recycle.completion_waiters.input_count, 1);
     assert_eq!(before_recycle.completion_waiters.waiter_count, 1);
     assert_eq!(before_recycle.completion_waiters.waiting_inputs.len(), 1);
@@ -4745,8 +4733,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(after_recycle.control.phase, RuntimeState::Idle);
     assert!(after_recycle.inputs.queue.is_empty());
     assert_eq!(after_recycle.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_recycle.inputs.wake_requested);
-    assert!(after_recycle.inputs.process_requested);
     assert_eq!(after_recycle.completion_waiters.input_count, 1);
     assert_eq!(after_recycle.completion_waiters.waiter_count, 1);
     assert_eq!(after_recycle.completion_waiters.waiting_inputs.len(), 1);
@@ -4799,8 +4785,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.inputs.current_run_id, None);
     assert!(after_wait_all.inputs.queue.is_empty());
     assert_eq!(after_wait_all.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_wait_all.inputs.wake_requested);
-    assert!(after_wait_all.inputs.process_requested);
     assert_eq!(after_wait_all.completion_waiters.input_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiter_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiting_inputs.len(), 1);
@@ -6324,8 +6308,6 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     assert_eq!(before_reset.control.phase, RuntimeState::Idle);
     assert!(before_reset.inputs.queue.is_empty());
     assert_eq!(before_reset.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_reset.inputs.wake_requested);
-    assert!(before_reset.inputs.process_requested);
     assert_eq!(before_reset.completion_waiters.input_count, 1);
     assert_eq!(before_reset.completion_waiters.waiter_count, 1);
     assert_eq!(before_reset.completion_waiters.waiting_inputs.len(), 1);
@@ -7851,8 +7833,6 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     assert_eq!(before_stop.control.phase, RuntimeState::Idle);
     assert!(before_stop.inputs.queue.is_empty());
     assert_eq!(before_stop.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_stop.inputs.wake_requested);
-    assert!(before_stop.inputs.process_requested);
     assert_eq!(before_stop.completion_waiters.input_count, 1);
     assert_eq!(before_stop.completion_waiters.waiter_count, 1);
     assert_eq!(before_stop.completion_waiters.waiting_inputs.len(), 1);
@@ -8876,8 +8856,6 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_
     assert_eq!(before_retire.control.phase, RuntimeState::Idle);
     assert!(before_retire.inputs.queue.is_empty());
     assert_eq!(before_retire.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_retire.inputs.wake_requested);
-    assert!(before_retire.inputs.process_requested);
     assert_eq!(before_retire.completion_waiters.input_count, 1);
     assert_eq!(before_retire.completion_waiters.waiter_count, 1);
     assert_eq!(before_retire.completion_waiters.waiting_inputs.len(), 1);
@@ -11317,8 +11295,6 @@ struct RuntimeParitySnapshotSummary {
     steer_queue_len: usize,
     current_run_contributor_count: usize,
     admitted_input_count: usize,
-    ingress_wake_requested: bool,
-    ingress_process_requested: bool,
     post_admission_signal: String,
     ledger_input_count: usize,
     ledger_non_terminal_count: usize,
@@ -12726,8 +12702,6 @@ async fn runtime_parity_snapshot_summary(
             steer_queue_len: snapshot.inputs.steer_queue.len(),
             current_run_contributor_count: snapshot.inputs.current_run_contributors.len(),
             admitted_input_count: snapshot.inputs.admission_order.len(),
-            ingress_wake_requested: snapshot.inputs.wake_requested,
-            ingress_process_requested: snapshot.inputs.process_requested,
             post_admission_signal: snapshot.inputs.post_admission_signal,
             ledger_input_count: snapshot.ledger.input_count,
             ledger_non_terminal_count: snapshot.ledger.non_terminal_count,

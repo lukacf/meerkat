@@ -280,6 +280,13 @@ Current state:
   for the answer. That aligns the actor with the public handle surface and
   narrows lifecycle authority to transition realization rather than being the
   source of truth for top-level phase reads.
+- The next follow-up cuts actor-side orchestrator legality and snapshot reads
+  over to the canonical top-level mob phase as well: `MobActor` now calls
+  `snapshot_in_phase(...)`, `can_accept_in_phase(...)`, and `apply_in_phase(...)`
+  with `self.state()`, so the helper no longer gets to answer top-level legality
+  from its own private phase copy during stop/resume/reset/destroy/flow paths.
+  The helper still stores phase internally for now, but that state is no longer
+  consulted by the actor for top-level legality or diagnostics.
 
 ## Notes
 
@@ -307,6 +314,10 @@ Current state:
    still read as real orchestration and stale-binding legality rather than
    leftover top-level projection state.
 5. The next high-value Mob frontier is no longer raw field removal. It is the
-   `coordinator_bound` duplication between the checked-in orchestrator
+   remaining phase ownership inside the lower authorities: after the actor-side
+   `*_in_phase(...)` cut, we can now reassess whether
+   `MobOrchestratorAuthority` still needs to store phase at all, or whether the
+   next honest move is to collapse more top-level legality out of
+   `MobLifecycleAuthority`.
    authority and the lower topology service, plus any remaining top-level
    lifecycle legality that still bypasses the checked-in machine.

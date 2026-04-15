@@ -252,14 +252,32 @@ impl MobOrchestratorAuthority {
         self.fields.to_snapshot(self.phase)
     }
 
+    /// Current snapshot projected onto an external phase owner.
+    pub(crate) fn snapshot_in_phase(&self, phase: MobState) -> MobOrchestratorSnapshot {
+        self.fields.to_snapshot(phase)
+    }
+
     /// Check if a transition is legal without applying it.
     pub(crate) fn can_accept(&self, input: MobOrchestratorInput) -> bool {
         self.evaluate(input).is_ok()
     }
 
+    /// Check legality using an externally owned top-level phase.
+    pub(crate) fn can_accept_in_phase(&self, phase: MobState, input: MobOrchestratorInput) -> bool {
+        self.evaluate_in_phase(phase, input).is_ok()
+    }
+
     /// Evaluate a transition without committing it.
     fn evaluate(
         &self,
+        input: MobOrchestratorInput,
+    ) -> Result<(MobState, MobOrchestratorFields, Vec<MobOrchestratorEffect>), MobError> {
+        self.evaluate_in_phase(self.phase, input)
+    }
+
+    fn evaluate_in_phase(
+        &self,
+        phase: MobState,
         input: MobOrchestratorInput,
     ) -> Result<(MobState, MobOrchestratorFields, Vec<MobOrchestratorEffect>), MobError> {
         use MobOrchestratorInput::{
@@ -269,7 +287,6 @@ impl MobOrchestratorAuthority {
         };
         use MobState::{Completed, Destroyed, Running, Stopped};
 
-        let phase = self.phase;
         let mut fields = self.fields.clone();
         let mut effects = Vec::new();
 
@@ -486,6 +503,23 @@ impl MobOrchestratorAuthority {
         };
 
         Ok((next_phase, fields, effects))
+    }
+
+    pub(crate) fn apply_in_phase(
+        &mut self,
+        phase: MobState,
+        input: MobOrchestratorInput,
+    ) -> Result<MobOrchestratorTransition, MobError> {
+        let (next_phase, next_fields, effects) = self.evaluate_in_phase(phase, input)?;
+
+        self.phase = next_phase;
+        self.fields = next_fields;
+
+        Ok(MobOrchestratorTransition {
+            next_phase,
+            snapshot: self.fields.to_snapshot(next_phase),
+            effects,
+        })
     }
 }
 

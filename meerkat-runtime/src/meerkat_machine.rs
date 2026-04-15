@@ -341,6 +341,76 @@ pub(crate) async fn prepare_runtime_loop_batch_start(
     Ok(())
 }
 
+pub(crate) async fn commit_runtime_loop_run(
+    driver: &SharedDriver,
+    run_id: RunId,
+    consumed_input_ids: Vec<InputId>,
+    receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+    session_snapshot: Option<Vec<u8>>,
+) -> Result<(), RuntimeDriverError> {
+    let mut driver = driver.lock().await;
+    if let Err(err) = driver
+        .as_driver_mut()
+        .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
+            run_id: run_id.clone(),
+            receipt,
+            session_snapshot,
+        })
+        .await
+    {
+        if let Err(unwind_err) = driver
+            .as_driver_mut()
+            .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                run_id,
+                error: format!("boundary commit failed: {err}"),
+                recoverable: true,
+            })
+            .await
+        {
+            return Err(RuntimeDriverError::Internal(format!(
+                "runtime boundary commit failed: {err}; additionally failed to unwind runtime state: {unwind_err}"
+            )));
+        }
+        return Err(RuntimeDriverError::Internal(format!(
+            "runtime boundary commit failed: {err}"
+        )));
+    }
+
+    driver
+        .as_driver_mut()
+        .on_run_event(meerkat_core::lifecycle::RunEvent::RunCompleted {
+            run_id,
+            consumed_input_ids,
+        })
+        .await
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "failed to persist runtime completion snapshot: {err}"
+            ))
+        })?;
+
+    Ok(())
+}
+
+pub(crate) async fn fail_runtime_loop_run(
+    driver: &SharedDriver,
+    run_id: RunId,
+    error: String,
+) -> Result<(), RuntimeDriverError> {
+    let mut driver = driver.lock().await;
+    driver
+        .as_driver_mut()
+        .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+            run_id,
+            error,
+            recoverable: true,
+        })
+        .await
+        .map_err(|run_err| {
+            RuntimeDriverError::Internal(format!("failed to record run-failed event: {run_err}"))
+        })
+}
+
 #[derive(Debug, Default)]
 struct MachineToolVisibilityOwner {
     state: StdRwLock<SessionToolVisibilityState>,

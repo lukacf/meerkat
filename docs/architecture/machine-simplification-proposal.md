@@ -729,6 +729,14 @@ The important read is now sharper than the earlier partial dump story:
   audited Meerkat frontier either: those coarse lifecycle transitions were
   already owned by driver + ledger abandonment semantics, so the helper surface
   was ceremonial rather than authoritative
+- routing runtime-loop batch start through a checked-in Meerkat helper did not
+  reopen parity either: the loop no longer realizes `start_run + stage_batch +
+  unwind` inline, so run-start sequencing is owned by the machine module
+  instead of by handwritten loop control flow
+- routing runtime-loop terminal commit/failure sequencing through checked-in
+  Meerkat helpers did not reopen parity either: the loop no longer realizes
+  `BoundaryApplied -> RunCompleted` or `RunFailed` inline, so terminal run
+  semantics moved another step closer to the two-machine boundary
 - preserving the full snapshot still keeps almost every remaining state
   distinct (`19,078`), which tells us the field tuple is still doing most of
   the real work even after the retire-drain correction

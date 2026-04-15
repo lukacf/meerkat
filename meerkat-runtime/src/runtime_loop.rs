@@ -11,7 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
 };
-use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::lifecycle::{InputId, RunId};
 
 use crate::input::Input;
 use crate::tokio;
@@ -702,7 +702,7 @@ async fn process_queue(
                 let result = executor.apply(run_id.clone(), primitive).await;
 
                 // Lock again to update driver state
-                let mut d = driver.lock().await;
+                let d = driver.lock().await;
                 match result {
                     Ok(output) => {
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
@@ -711,57 +711,20 @@ async fn process_queue(
                             run_result,
                             terminal,
                         } = output;
-
-                        // BoundaryApplied transitions Staged → Applied → APC
-                        // and triggers atomic persistence in PersistentRuntimeDriver
-                        if let Err(err) = d
-                            .as_driver_mut()
-                            .on_run_event(RunEvent::BoundaryApplied {
-                                run_id: run_id.clone(),
-                                receipt,
-                                session_snapshot,
-                            })
-                            .await
+                        drop(d);
+                        if let Err(err) = crate::meerkat_machine::commit_runtime_loop_run(
+                            driver,
+                            run_id.clone(),
+                            input_ids.clone(),
+                            receipt,
+                            session_snapshot,
+                        )
+                        .await
                         {
-                            tracing::error!(%run_id, error = %err, "failed to record boundary-applied event");
-                            if let Err(unwind_err) = d
-                                .as_driver_mut()
-                                .on_run_event(RunEvent::RunFailed {
-                                    run_id: run_id.clone(),
-                                    error: format!("boundary commit failed: {err}"),
-                                    recoverable: true,
-                                })
-                                .await
-                            {
-                                tracing::error!(
-                                    %run_id,
-                                    error = %unwind_err,
-                                    "failed to unwind runtime after boundary commit failure"
-                                );
-                            }
-                            drop(d);
+                            tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
                             let _ = executor
                                 .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                                    reason: format!("runtime boundary commit failed for run {run_id}: {err}"),
-                                })
-                                .await;
-                            return false;
-                        }
-
-                        // RunCompleted transitions APC → Consumed and returns to Idle/Retired
-                        if let Err(err) = d
-                            .as_driver_mut()
-                            .on_run_event(RunEvent::RunCompleted {
-                                run_id,
-                                consumed_input_ids: input_ids.clone(),
-                            })
-                            .await
-                        {
-                            tracing::error!(error = %err, "failed to record run-completed event");
-                            drop(d);
-                            let _ = executor
-                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                                    reason: format!("runtime terminal snapshot failed after completion: {err}"),
+                                    reason: format!("runtime loop commit failed for run {run_id}: {err}"),
                                 })
                                 .await;
                             return false;
@@ -775,18 +738,16 @@ async fn process_queue(
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
+                        drop(d);
                         // RunFailed rolls back Staged → Queued and returns to Idle
-                        if let Err(err) = d
-                            .as_driver_mut()
-                            .on_run_event(RunEvent::RunFailed {
-                                run_id,
-                                error: error_msg.clone(),
-                                recoverable: true,
-                            })
-                            .await
+                        if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
+                            driver,
+                            run_id,
+                            error_msg.clone(),
+                        )
+                        .await
                         {
                             tracing::error!(error = %err, "failed to record run-failed event");
-                            drop(d);
                             let _ = executor
                                 .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                                     reason: format!("runtime failure snapshot failed: {err}"),
@@ -814,6 +775,7 @@ async fn process_queue(
                                 );
                             }
                         }
+                        let mut d = driver.lock().await;
                         let should_continue =
                             d.take_wake_requested() && d.has_queued_input_outside(&input_ids);
                         drop(d);

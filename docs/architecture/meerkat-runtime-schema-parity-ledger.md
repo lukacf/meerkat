@@ -286,6 +286,14 @@ Interpretation:
   Meerkat parity gap either: those coarse lifecycle transitions were already
   owned by driver + ledger abandonment semantics, so the helper surface was
   just shadow ceremony around queue reconciliation
+- runtime-loop batch start is no longer realized inline either: the checked-in
+  Meerkat module now owns `start_run + stage_batch + unwind` as one helper
+  operation, so the loop no longer acts as a second semantic owner of run
+  start legality
+- runtime-loop terminal sequencing is also no longer realized inline: the
+  checked-in Meerkat module now owns the `BoundaryApplied -> RunCompleted` and
+  `RunFailed` realization helpers, so the loop no longer carries a second copy
+  of terminal run semantics below the machine boundary
 
 ## Resolution Rubric
 

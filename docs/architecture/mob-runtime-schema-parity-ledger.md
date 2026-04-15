@@ -277,3 +277,9 @@ Current state:
    lifecycle/orchestration core.
 3. Keep the same parity-plus-Hopcroft loop as the gate before making broader
    DSL-facing claims from the remaining mixed block.
+4. The refreshed fast-loop review rechecked the dominant remaining Mob drivers
+   (`pending_spawn_count`, `active_run_count`, `coordinator_bound`,
+   `live_runtime_ids`, `runtime_fence_tokens`, and
+   `externally_addressable_runtime_ids`). On the current design those drivers
+   still read as real orchestration and stale-binding legality rather than
+   leftover top-level projection state.

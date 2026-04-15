@@ -612,3 +612,9 @@ Outcome:
    `work_id` plus `origin`, but `MobMachine` still treats `SubmitWork` as one
    origin-insensitive self-loop even though runtime gives `origin` real
    external-vs-internal turn semantics before ingress.
+8. The refreshed fast-loop review rechecked the dominant remaining Meerkat
+   splitters (`silent_intent_overrides`, `pre_run_phase`, `current_run_id`,
+   `active_runtime_id`, `active_fence_token`, and internal `Attached`) and did
+   not find another honest high-impact collapse on the current design. The
+   remaining pressure is now largely real behavior pressure rather than stale
+   shadow-state pressure.

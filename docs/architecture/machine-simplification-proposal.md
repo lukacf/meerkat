@@ -311,6 +311,8 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Mob top-level `cleanup_pending` should remain machine-owned lifecycle truth | rejected / landed | Removed `cleanup_pending` from the checked-in top-level `MobMachine` after confirming it is only lower-authority cleanup bookkeeping inside `MobLifecycleAuthority`. The truthful Mob baseline stayed flat at `2238 -> 207 / 209 / 2238`, which is the expected signature for deleting an overlapping top-level mirror rather than collapsing real behavior. |
 | Mob top-level `wiring_edge_count` should remain machine-owned wiring truth | rejected / landed | Removed `wiring_edge_count` from the checked-in top-level `MobMachine` after confirming the live runtime only uses concrete roster adjacency and idempotent wire/unwire plans, not exact count semantics. The truthful Mob baseline collapsed from `2238 -> 207 / 209 / 2238` to `1181 -> 132 / 134 / 1181`, which showed the count had been an overlapping top-level summary rather than real machine-owned behavior. |
 | Mob top-level `active_member_count` should remain machine-owned member truth | rejected / landed | Removed `active_member_count` from the checked-in top-level `MobMachine` after confirming it was only a manually maintained cardinality summary of `live_runtime_ids`, while the runtime already derives roster size from the roster itself. The truthful Mob baseline collapsed again from `1181 -> 132 / 134 / 1181` to `861 -> 102 / 104 / 861`, proving the counter was overlapping top-level summary state rather than real machine-owned behavior. |
+| Refreshed fast-loop review should still collapse the remaining dominant Meerkat drivers | rejected / deferred | Re-ran the quotient-driven counterargument loop on the refreshed dominant Meerkat candidates (`silent_intent_overrides`, `pre_run_phase`, `current_run_id`, `active_runtime_id`, `active_fence_token`, and internal `Attached`). The review converged that the first four are still behavior-bearing machine truth, while `active_runtime_id` / `active_fence_token` only become reducible if the current binding seam is redesigned rather than simply trimmed. |
+| Refreshed fast-loop review should still collapse the remaining dominant Mob drivers | rejected / deferred | Re-ran the quotient-driven counterargument loop on the refreshed dominant Mob candidates (`pending_spawn_count`, `active_run_count`, `coordinator_bound`, `live_runtime_ids`, `runtime_fence_tokens`, and `externally_addressable_runtime_ids`). The remaining Mob drivers still carry real orchestration and stale-binding legality on the current design; the only partially plausible further cut would require replacing `externally_addressable_runtime_ids` with another checked-in legality source rather than actually removing semantics. |
 | Mob `retiring_member_count` should not stay as top-level formal state | passed / landed | Removed the dead retire counter; exact Mob parity stayed green and the truthful Hopcroft/TLC readout stayed flat at `770 -> 138 / 140 / 770`, proving the counter was not carrying independent formal behavior. |
 | Mob public `Stop` should reject active flows | passed / landed | Added `no_active_runs` to `StopRunning` after a focused runtime/schema probe showed `handle.stop()` rejects while flows are still active; the lifecycle-triangle parity audit stayed exact and truthful TLC generated states fell from `25,943` to `25,767` with the quotient unchanged. |
 | Mob bootstrap should start with coordinator bound | passed / landed | Changed the formal init state from `Running + coordinator_bound=false` to `Running + coordinator_bound=true` to match the live runtime bootstrap snapshot; the lifecycle-triangle parity audit stayed exact and the truthful quotient held at `138 / 140` while reachable states rose from `770` to `813`, proving the old bootstrap state had been under-modeled rather than behavior-bearing. |
@@ -681,6 +683,11 @@ table:
 - `runtime_fence_tokens`
 - `live_runtime_ids`
 
+The refreshed fast-loop review did not uncover another honest high-impact cut
+on top of that core. At this point the remaining Mob split drivers look like
+real orchestration / stale-binding behavior rather than leftover projection
+state.
+
 The important read is that the raw quotient has continued to move only when we
 changed real machine-owned distinctions in the truthful state graph. The
 reachable space is now down from `4,797` to `1,323`, while the raw quotient is
@@ -890,6 +897,17 @@ The read is strikingly consistent with the earlier field-ablation pass: the
 largest Meerkat block is now dominated by run-return state, runtime binding,
 and the still-live silent-intent carrier rather than by visibility projection,
 attachment shadow state, phase labels, or the removed ingress/deferred-name
+
+The refreshed fast-loop review rechecked each of the dominant Meerkat
+splitters above. The current conclusion is that the remaining pressure is
+mostly real behavior pressure, not “forgotten shadow field” pressure:
+
+- `silent_intent_overrides` still shapes live ingress wake/apply behavior
+- `pre_run_phase` and `current_run_id` still carry exact run-return legality
+- `Attached` still carries checked-in lifecycle semantics that are not yet
+  reducible to simple boundness
+- `active_runtime_id` / `active_fence_token` only become reducible if the
+  current return-leg binding seam is redesigned rather than merely trimmed
 mirrors.
 
 A later fast-loop cut removed `active_generation` too. The truthful Meerkat

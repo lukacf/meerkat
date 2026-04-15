@@ -86,6 +86,11 @@ Hopcroft-style behavioral quotient over the reachable graph.
   `wiring_edge_count`; the stricter audit rerun stayed exact, which means the
   remaining core split is not an artifact of a missing guard input in the
   checker.
+- Added a full Mob pair audit alongside the existing transition and
+  modeled-state passes; the modeled kernel outcome plus coarse result
+  summaries stayed exact across all `62` transition-bearing rows of the
+  lifecycle triangle, so the remaining Mob normalization work is no longer
+  blocked on parity instrumentation asymmetry.
 - Removed the Meerkat LLM/capability projection layer
   (`current_llm_identity`, `current_capability_surface`,
   `capability_surface_status`, `capability_base_filter`,
@@ -412,6 +417,9 @@ The Mob parity pass closed three concrete issues:
 - the full lifecycle triangle is now exact on the current transition-bearing
   frontier
 - the stricter modeled-state triangle is also exact (`78 / 78 / 78 / 0`)
+- the full pair audit is also exact on that same transition-bearing frontier,
+  which means the modeled kernel outcome plus result summaries already match
+  the runtime across the audited Mob lifecycle triangle
 - `CancelWork` turned out not to belong in the formal top-level transition
   graph; it is now surfaced-only, and the generated seam rejects impossible
   queued external entry packets instead of deadlocking once Mob is terminal

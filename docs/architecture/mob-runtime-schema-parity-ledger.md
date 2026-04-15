@@ -52,6 +52,8 @@ Current state:
   `62 / 62 / 62 / 0 / 0`
 - the runtime-backed modeled-state surface is also exact for the current
   triangle: `78 / 78 / 78 / 0`
+- the exact full pair audit is also exact for the current transition-bearing
+  triangle: `62 / 62 / 62 / 0 / 0`
 - the formal machine no longer carries the pure shadow fields
   `inflight_work_id`, `task_count`, or `event_subscription_count`
 - the formal machine also no longer carries the seam-shadow
@@ -80,6 +82,9 @@ Current state:
   directly from representative runtime snapshots, including
   `wiring_edge_count`, so guard-sensitive rows like `Unwire` are no longer
   partially classified on missing-field tolerance
+- the full pair audit now classifies the modeled kernel outcome plus coarse
+  result summaries across all `62` transition-bearing rows of the lifecycle
+  triangle, and that exact observable pass stays green too
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 
@@ -201,8 +206,11 @@ Current state:
 
 ## Next Loop
 
-1. Re-check whether any of the remaining five Mob counter/coordinator fields are
+1. Treat the current Mob lifecycle triangle as parity-closed on its audited
+   frontier: transition parity, modeled-state parity, and exact full-pair
+   parity are all green.
+2. Re-check whether any of the remaining five Mob counter/coordinator fields are
    still representational shadow, or whether the Mob machine is now at its real
    lifecycle/orchestration core.
-2. Keep the same parity-plus-Hopcroft loop as the gate before making broader
+3. Keep the same parity-plus-Hopcroft loop as the gate before making broader
    DSL-facing claims from the remaining mixed block.

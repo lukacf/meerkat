@@ -17434,8 +17434,11 @@ struct MobRuntimeParitySchemaRow {
 
 #[derive(Debug, Serialize)]
 struct MobRuntimeParityProbeReport {
+    schema_classification: MobRuntimeParityClassification,
     runtime_classification: MobRuntimeParityClassification,
     agrees_with_schema: bool,
+    schema_left: Option<MobModeledStateSchemaReport>,
+    schema_right: Option<MobModeledStateSchemaReport>,
     left: MobRuntimeParityInvocationReport,
     right: MobRuntimeParityInvocationReport,
 }
@@ -17513,6 +17516,7 @@ struct MobModeledStateSchemaReport {
     outcome_kind: MobModeledStateOutcomeKind,
     after: Option<MobModeledStateSummary>,
     detail: String,
+    result_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -17720,6 +17724,10 @@ impl MobRuntimeParityFixture {
 
 fn mob_runtime_parity_report_path() -> PathBuf {
     std::env::temp_dir().join("mob-runtime-phase-parity.json")
+}
+
+fn mob_runtime_parity_full_report_path() -> PathBuf {
+    std::env::temp_dir().join("mob-runtime-phase-full-parity.json")
 }
 
 fn mob_modeled_state_report_path() -> PathBuf {
@@ -18076,6 +18084,60 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
         MobError::NotYetImplemented(_) => "not_yet_implemented".to_string(),
+    }
+}
+
+fn mob_modeled_schema_result_summary(
+    before: &MobRuntimeParitySnapshotSummary,
+    probe: MobRuntimeParityProbeInput,
+) -> Option<String> {
+    match probe {
+        MobRuntimeParityProbeInput::Spawn => Some(summarize_mob_runtime_success(probe, "spawned")),
+        MobRuntimeParityProbeInput::SubmitWork => {
+            Some(summarize_mob_runtime_success(probe, "work_receipt"))
+        }
+        MobRuntimeParityProbeInput::RunFlow => Some(summarize_mob_runtime_success(probe, "run_id")),
+        MobRuntimeParityProbeInput::CancelFlow
+        | MobRuntimeParityProbeInput::Retire
+        | MobRuntimeParityProbeInput::RetireAll
+        | MobRuntimeParityProbeInput::Wire
+        | MobRuntimeParityProbeInput::Unwire
+        | MobRuntimeParityProbeInput::CancelWork
+        | MobRuntimeParityProbeInput::CancelAllWork
+        | MobRuntimeParityProbeInput::Stop
+        | MobRuntimeParityProbeInput::Resume
+        | MobRuntimeParityProbeInput::Complete
+        | MobRuntimeParityProbeInput::Reset
+        | MobRuntimeParityProbeInput::Destroy
+        | MobRuntimeParityProbeInput::TaskUpdate
+        | MobRuntimeParityProbeInput::RecordOperatorActionProvenance
+        | MobRuntimeParityProbeInput::SetSpawnPolicy
+        | MobRuntimeParityProbeInput::Shutdown
+        | MobRuntimeParityProbeInput::ForceCancel => {
+            Some(summarize_mob_runtime_success(probe, "unit"))
+        }
+        MobRuntimeParityProbeInput::Respawn => {
+            Some(summarize_mob_runtime_success(probe, "respawned"))
+        }
+        MobRuntimeParityProbeInput::ExternalTurn => {
+            Some(summarize_mob_runtime_success(probe, "bridge_session"))
+        }
+        MobRuntimeParityProbeInput::InternalTurn => {
+            Some(summarize_mob_runtime_success(probe, "member_delivery"))
+        }
+        MobRuntimeParityProbeInput::TaskCreate => {
+            Some(summarize_mob_runtime_success(probe, "task_id"))
+        }
+        MobRuntimeParityProbeInput::SubscribeAgentEvents => {
+            Some(summarize_mob_runtime_success(probe, "event_stream"))
+        }
+        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => Some(summarize_mob_runtime_success(
+            probe,
+            &format!("all_agent_streams:{}", before.all_member_count),
+        )),
+        MobRuntimeParityProbeInput::SubscribeMobEvents => {
+            Some(summarize_mob_runtime_success(probe, "mob_event_router"))
+        }
     }
 }
 
@@ -18482,14 +18544,42 @@ async fn probe_mob_runtime_parity_row(
     left_phase: MobRuntimeParityPhase,
     right_phase: MobRuntimeParityPhase,
     probe: MobRuntimeParityProbeInput,
+    schema_classification: MobRuntimeParityClassification,
 ) -> Result<MobRuntimeParityProbeReport, String> {
     let left = execute_mob_runtime_parity_probe(left_phase, probe).await?;
     let right = execute_mob_runtime_parity_probe(right_phase, probe).await?;
     let runtime_classification = classify_mob_runtime_parity_probe_pair(&left, &right);
 
     Ok(MobRuntimeParityProbeReport {
+        schema_classification,
         runtime_classification,
-        agrees_with_schema: false,
+        agrees_with_schema: runtime_classification == schema_classification,
+        schema_left: None,
+        schema_right: None,
+        left,
+        right,
+    })
+}
+
+async fn probe_mob_runtime_full_parity_row(
+    schema: &MachineSchema,
+    left_phase: MobRuntimeParityPhase,
+    right_phase: MobRuntimeParityPhase,
+    probe: MobRuntimeParityProbeInput,
+) -> Result<MobRuntimeParityProbeReport, String> {
+    let left = execute_mob_runtime_parity_probe(left_phase, probe).await?;
+    let right = execute_mob_runtime_parity_probe(right_phase, probe).await?;
+    let schema_left = mob_modeled_schema_report(schema, &left, probe);
+    let schema_right = mob_modeled_schema_report(schema, &right, probe);
+    let schema_classification = classify_mob_modeled_schema_pair(&schema_left, &schema_right);
+    let runtime_classification = classify_mob_runtime_parity_probe_pair(&left, &right);
+
+    Ok(MobRuntimeParityProbeReport {
+        schema_classification,
+        runtime_classification,
+        agrees_with_schema: runtime_classification == schema_classification,
+        schema_left: Some(schema_left),
+        schema_right: Some(schema_right),
         left,
         right,
     })
@@ -18648,7 +18738,14 @@ async fn build_mob_runtime_parity_pair_report(
         let (mut probe, note) =
             match mob_runtime_parity_probe_for_input_variant(&input_variant.name) {
                 Some(probe_input) => {
-                    match probe_mob_runtime_parity_row(left_phase, right_phase, probe_input).await {
+                    match probe_mob_runtime_parity_row(
+                        left_phase,
+                        right_phase,
+                        probe_input,
+                        MobRuntimeParityClassification::SameSurface,
+                    )
+                    .await
+                    {
                         Ok(probe) => (Some(probe), None),
                         Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                     }
@@ -18668,12 +18765,108 @@ async fn build_mob_runtime_parity_pair_report(
         };
 
         if let Some(probe) = &mut probe {
+            probe.schema_classification = schema_row.classification;
             probe.agrees_with_schema = probe.runtime_classification == schema_row.classification;
         }
 
         rows.push(MobRuntimeParityRowReport {
             input_variant: schema_row.input_variant,
             schema_classification: schema_row.classification,
+            schema_left: schema_row.left,
+            schema_right: schema_row.right,
+            probe,
+            note,
+        });
+    }
+
+    let summary = rows.iter().fold(
+        MobRuntimeParityPairSummary {
+            interesting_rows: rows.len(),
+            ..Default::default()
+        },
+        |mut summary, row| {
+            match &row.probe {
+                Some(probe) => {
+                    summary.probed_rows += 1;
+                    if probe.agrees_with_schema {
+                        summary.aligned_rows += 1;
+                    } else {
+                        summary.mismatched_rows += 1;
+                    }
+                }
+                None => summary.unprobed_rows += 1,
+            }
+            summary
+        },
+    );
+
+    MobRuntimeParityPairReport {
+        left_phase: left_phase.schema_name().to_string(),
+        right_phase: right_phase.schema_name().to_string(),
+        summary,
+        rows,
+    }
+}
+
+async fn build_mob_runtime_full_pair_report(
+    schema: &MachineSchema,
+    left_phase: MobRuntimeParityPhase,
+    right_phase: MobRuntimeParityPhase,
+) -> MobRuntimeParityPairReport {
+    let mut rows = Vec::new();
+
+    for input_variant in &schema.inputs.variants {
+        println!(
+            "probing full {} <-> {} on {}",
+            left_phase.schema_name(),
+            right_phase.schema_name(),
+            input_variant.name,
+        );
+        let (probe, note) = match mob_runtime_parity_probe_for_input_variant(&input_variant.name) {
+            Some(probe_input) => {
+                match probe_mob_runtime_full_parity_row(
+                    schema,
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
+                }
+            }
+            None => (None, Some("no runtime probe implemented".to_string())),
+        };
+
+        let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
+            schema,
+            left_phase,
+            right_phase,
+            &input_variant.name,
+            probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
+            probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
+        ) else {
+            continue;
+        };
+
+        let effective_schema_classification = probe
+            .as_ref()
+            .map(|probe| probe.schema_classification)
+            .unwrap_or(schema_row.classification);
+        let note = match (&probe, note) {
+            (Some(probe), None) if probe.schema_classification != schema_row.classification => {
+                Some(format!(
+                    "static schema classified {:?}, modeled schema classified {:?}",
+                    schema_row.classification, probe.schema_classification
+                ))
+            }
+            (_, note) => note,
+        };
+
+        rows.push(MobRuntimeParityRowReport {
+            input_variant: schema_row.input_variant,
+            schema_classification: effective_schema_classification,
             schema_left: schema_row.left,
             schema_right: schema_row.right,
             probe,
@@ -19163,6 +19356,7 @@ fn mob_modeled_schema_report(
             outcome_kind: MobModeledStateOutcomeKind::Err,
             after: None,
             detail: "missing runtime pre-state".to_string(),
+            result_summary: None,
         };
     };
 
@@ -19174,6 +19368,7 @@ fn mob_modeled_schema_report(
                 outcome_kind: MobModeledStateOutcomeKind::Err,
                 after: None,
                 detail,
+                result_summary: None,
             };
         }
     };
@@ -19187,6 +19382,7 @@ fn mob_modeled_schema_report(
                 before,
             )),
             detail: outcome.transition,
+            result_summary: mob_modeled_schema_result_summary(before, probe),
         },
         Err(error) => MobModeledStateSchemaReport {
             outcome_kind: MobModeledStateOutcomeKind::Err,
@@ -19196,7 +19392,33 @@ fn mob_modeled_schema_report(
                 unavailable_fields: before.formal_unavailable_fields.clone(),
             }),
             detail: mob_modeled_transition_refusal_detail(&error),
+            result_summary: None,
         },
+    }
+}
+
+fn classify_mob_modeled_schema_pair(
+    left: &MobModeledStateSchemaReport,
+    right: &MobModeledStateSchemaReport,
+) -> MobRuntimeParityClassification {
+    match (left.outcome_kind, right.outcome_kind) {
+        (MobModeledStateOutcomeKind::Ok, MobModeledStateOutcomeKind::Err) => {
+            MobRuntimeParityClassification::LeftOnly
+        }
+        (MobModeledStateOutcomeKind::Err, MobModeledStateOutcomeKind::Ok) => {
+            MobRuntimeParityClassification::RightOnly
+        }
+        (MobModeledStateOutcomeKind::Ok, MobModeledStateOutcomeKind::Ok)
+            if left.after == right.after && left.result_summary == right.result_summary =>
+        {
+            MobRuntimeParityClassification::SameSurface
+        }
+        (MobModeledStateOutcomeKind::Err, MobModeledStateOutcomeKind::Err)
+            if left.after == right.after && left.detail == right.detail =>
+        {
+            MobRuntimeParityClassification::SameSurface
+        }
+        _ => MobRuntimeParityClassification::DifferentSurface,
     }
 }
 
@@ -19258,6 +19480,7 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
                         outcome_kind: MobModeledStateOutcomeKind::Err,
                         after: None,
                         detail: "no runtime probe implemented".to_string(),
+                        result_summary: None,
                     },
                 });
                 continue;
@@ -19311,6 +19534,45 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
         serde_json::to_vec_pretty(&report).expect("serialize modeled-state audit report"),
     )
     .expect("write modeled-state audit report");
+
+    report
+}
+
+async fn write_mob_runtime_full_parity_audit_report(path: PathBuf) -> MobRuntimeParityAuditReport {
+    let schema = schema_mob_machine();
+    let mut pairs = Vec::new();
+
+    for &(left_phase, right_phase) in mob_runtime_parity_target_pairs() {
+        pairs.push(build_mob_runtime_full_pair_report(&schema, left_phase, right_phase).await);
+    }
+
+    let summary = pairs.iter().fold(
+        MobRuntimeParityAuditSummary {
+            pair_count: pairs.len(),
+            ..Default::default()
+        },
+        |mut summary, pair| {
+            summary.interesting_rows += pair.summary.interesting_rows;
+            summary.probed_rows += pair.summary.probed_rows;
+            summary.aligned_rows += pair.summary.aligned_rows;
+            summary.mismatched_rows += pair.summary.mismatched_rows;
+            summary.unprobed_rows += pair.summary.unprobed_rows;
+            summary
+        },
+    );
+
+    let report = MobRuntimeParityAuditReport {
+        machine: "MobMachine".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        summary,
+        pairs,
+    };
+
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&report).expect("serialize mob runtime full parity report"),
+    )
+    .expect("write mob runtime full parity report");
 
     report
 }
@@ -19396,6 +19658,53 @@ async fn audit_mob_runtime_phase_parity_map() {
                 row.note
                     .as_deref()
                     .unwrap_or("no runtime probe implemented")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "diagnostic audit"]
+async fn audit_mob_runtime_phase_full_parity_map() {
+    let path = mob_runtime_parity_full_report_path();
+    let report = write_mob_runtime_full_parity_audit_report(path.clone()).await;
+
+    println!("wrote {}", path.display());
+    println!(
+        "pairs={} rows={} probed={} aligned={} mismatched={} unprobed={}",
+        report.summary.pair_count,
+        report.summary.interesting_rows,
+        report.summary.probed_rows,
+        report.summary.aligned_rows,
+        report.summary.mismatched_rows,
+        report.summary.unprobed_rows
+    );
+    for pair in &report.pairs {
+        println!(
+            "{} <-> {}: rows={} probed={} aligned={} mismatched={} unprobed={}",
+            pair.left_phase,
+            pair.right_phase,
+            pair.summary.interesting_rows,
+            pair.summary.probed_rows,
+            pair.summary.aligned_rows,
+            pair.summary.mismatched_rows,
+            pair.summary.unprobed_rows
+        );
+        for row in pair.rows.iter().filter(|row| {
+            row.probe
+                .as_ref()
+                .is_some_and(|probe| !probe.agrees_with_schema)
+        }) {
+            let probe = row
+                .probe
+                .as_ref()
+                .expect("filtered rows must have a probe result");
+            println!(
+                "  {}: schema={:?} runtime={:?} static_schema={:?}",
+                row.input_variant,
+                probe.schema_classification,
+                probe.runtime_classification,
+                row.schema_classification
             );
         }
     }

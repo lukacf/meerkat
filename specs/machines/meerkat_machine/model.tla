@@ -1154,6 +1154,15 @@ PrepareAttached(arg_session_id, run_id) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
 
 
+DrainQueuedRunRetired(run_id) ==
+    /\ phase = "Retired"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = Some(run_id)
+    /\ pre_run_phase' = Some("retired")
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
+
+
 StartConversationRunAttached ==
     /\ phase = "Attached"
     /\ (session_id # None)
@@ -1575,6 +1584,7 @@ Next ==
     \/ ClassifyPlainEventRunning
     \/ \E arg_session_id \in SessionIdValues : \E run_id \in RunIdValues : PrepareIdle(arg_session_id, run_id)
     \/ \E arg_session_id \in SessionIdValues : \E run_id \in RunIdValues : PrepareAttached(arg_session_id, run_id)
+    \/ \E run_id \in RunIdValues : DrainQueuedRunRetired(run_id)
     \/ StartConversationRunAttached
     \/ StartImmediateAppendAttached
     \/ StartImmediateContextAttached

@@ -245,6 +245,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Ingress can keep deriving its own active run identity from contributor state | rejected / landed | Removed `RuntimeIngressAuthority::current_run()` as a second semantic owner of active run identity. The helper now validates contributor `last_run` bookkeeping directly against the control-owned run ID, the driver gate uses that contributor check instead of ingress-derived run identity, and the Meerkat diagnostic spine now echoes `current_run_id` from control rather than ingress. All three Meerkat parity audits, full runtime tests, TLC, drift, and clippy stayed green. |
 | Active run identity can stay outside the checked-in Meerkat machine | rejected / landed | Absorbed `current_run_id` into the top-level Meerkat state and wired the same prepare/commit/fail/control clears as the runtime. Exact audited parity stayed green, TLC moved to `1,068,719 generated / 11,858 distinct / depth 9`, and Hopcroft stayed at raw/phase/full `385 / 390 / 11,469`, which is the expected signature for lifting a real control truth into the model without changing the core quotient. |
 | Run terminal return can stay as a driver-local helper decision | rejected / landed | Added the missing `Running -> Retired` terminal return to the checked-in Meerkat machine and replaced the driver-local run-return classifier with a machine-owned `pre_run_phase -> next_phase` helper. Exact Meerkat parity stayed green at `243 / 243`, `260 / 260`, and `145 / 145`; TLC stayed at `1,616,227 generated / 17,384 distinct / depth 9`; and Hopcroft stayed flat at raw/phase/full `385 / 390 / 16,995`, which is the right signature for moving return semantics upstairs without changing the core quotient. |
+| Retire-drain run start can stay as an unmodeled helper-only path | rejected / landed | The live runtime can drain preserved queued work by re-entering `Running` from `Retired`, so the checked-in machine now models that behavior explicitly as an internal `DrainQueuedRunRetired` signal instead of widening the public `Prepare` surface. Exact Meerkat parity stayed green at `243 / 243`, `260 / 260`, and `145 / 145`; TLC moved to `1,827,886 generated / 19,467 distinct / depth 9`; and Hopcroft rose to raw/phase `466 / 471`, which is the right signature for exposing a previously omitted lifecycle behavior rather than papering it over. |
 | Attached steered accept can stay collapsed into the queue-only accept surface | rejected / landed | The live runtime can synchronously jump `Attached -> Running` during `AcceptWithCompletion` when admission requests immediate processing. The Meerkat catalog now models that payload-sensitive path explicitly with a run binding, and the targeted runtime/model regression is green. |
 | Running interrupt-bearing accept can stay collapsed into the passive queued accept surface | rejected / landed | The live runtime can request `InterruptYielding` during running queued `AcceptWithCompletion` even when it does not request immediate processing. The checked-in Meerkat machine now models that typed `PostAdmissionSignal("InterruptYielding")` branch explicitly, and both the targeted regression and the exact parity audits stayed green. |
 | Meerkat `Stopped` vs `Retired` can merge internally | rejected | The top-level transition sets diverge in load-bearing ways: `Retired` still accepts `Reset`, `StopRuntimeExecutor`, and `Recycle`, while `Stopped` does not, and the retire path carries archival/drain semantics that phase 1 should keep explicit. |
@@ -297,7 +298,7 @@ We ran three observation modes for each machine:
 | MobMachine | `none` | 1323 | 207 | 84.4% | After restoring the real stale-binding table to `MobMachine`, the truthful graph grew, but the result is still strongly quotientable. The added state is machine-owned binding truth, not a representative identity shadow. |
 | MobMachine | `phase` | 1323 | 209 | 84.2% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection even after binding-table restoration. |
 | MobMachine | `full` | 1323 | 1323 | 0.0% | Once the remaining authoritative counters and binding table are preserved, every reachable Mob snapshot is still distinct. |
-| MeerkatMachine | `none` | 17,384 | 385 | 97.8% | After deleting `RuntimeControlAuthority` as a semantic reducer and rerunning the truthful model, the reachable graph grows materially while the raw quotient stays flat. The main new split drivers are now checked-in control facts (`current_run_id`, `pre_run_phase`) rather than helper-owned folklore. |
+| MeerkatMachine | `none` | 19,467 | 466 | 97.6% | After deleting `RuntimeControlAuthority`, absorbing coarse run truth, and then modeling the retire-drain re-entry explicitly, the truthful graph grows again and the raw quotient rises materially. The remaining split drivers are now overwhelmingly checked-in machine facts (`current_run_id`, `pre_run_phase`, visibility state, attachment truth), not helper-owned folklore. |
 | MeerkatMachine | `phase` | 17,384 | 390 | 97.8% | Preserving phase still adds only five quotient blocks, so phase remains almost entirely projection even after the control-absorption tranche. |
 | MeerkatMachine | `full` | 17,384 | 16,995 | 2.2% | Preserving the full snapshot still keeps nearly every remaining Meerkat state distinct, but the extra structure now lives in visibility revisions, deferred-name sets, run binding/return state, ingress configuration, and drain state rather than in the deleted helper authority. |
 
@@ -676,24 +677,27 @@ cargo run -p xtask --features machine-authority -- \
 
 Current result:
 
-- reachable states: `11,858`
-- raw quotient states: `385`
-- phase-observed quotient states: `390`
-- full-observed quotient states: `11,469`
-- TLC: `1,068,719 generated / 11,858 distinct / depth 9`
-- reachable edges: `616,383`
-- dominant mixed block: `4,711` states spanning `Initializing`, `Idle`,
+- reachable states: `19,467`
+- raw quotient states: `466`
+- phase-observed quotient states: `471`
+- TLC: `1,827,886 generated / 19,467 distinct / depth 9`
+- reachable edges: `957,838`
+- dominant mixed block: `8,898` states spanning `Initializing`, `Idle`,
   `Attached`, `Running`, `Retired`, and `Stopped`
-- dominant block tuples: `2,169`
-- tuples reused across multiple phases: `1,644`
+- dominant block tuples: `4,560`
+- tuples reused across multiple phases: `3,096`
 - maximum phases sharing one tuple: `5`
 
 The important read is now sharper than the earlier partial dump story:
 
 - the raw quotient is much smaller than the reachable state space
-- phase preservation adds only `5` blocks (`385 -> 390`)
-- preserving the full snapshot still keeps almost every remaining state distinct
-  (`37,750`)
+- phase preservation adds only `5` blocks (`466 -> 471`)
+- phase still adds very little independent information on top of the field
+  tuple (`466 -> 471`)
+- preserving the full snapshot still keeps almost every remaining state
+  distinct (`16,995` on the most recent fully observed rerun before the new
+  retire-drain slice, which already told us the field tuple is doing most of
+  the real work)
 - the visibility-boundary and LLM/capability-boundary cuts removed a large
   amount of formal shadow state without changing the audited public-phase
   behavior

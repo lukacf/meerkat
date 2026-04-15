@@ -74,6 +74,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Signals
 - `Initialize`
 - `BoundaryApplied`(revision: u64)
+- `DrainQueuedRun`(run_id: RunId)
 - `StartConversationRun`
 - `StartImmediateAppend`
 - `StartImmediateContext`
@@ -967,6 +968,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Prepare`(session_id, run_id)
 - Guards:
   - `session_registered`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
+### `DrainQueuedRunRetired`
+- From: `Retired`
+- On: `DrainQueuedRun`(run_id)
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 

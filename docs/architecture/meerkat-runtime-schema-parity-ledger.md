@@ -206,6 +206,10 @@ Current exact-parity state:
   that live runtime already used during drain/retire flow, and the runtime-side
   return-phase classifier is now a machine-owned helper instead of a
   driver-local `finish_run_from_current_phase()` decision
+- the formal machine now also models the internal retire-drain start path as a
+  dedicated `DrainQueuedRunRetired` signal instead of pretending the public
+  `Prepare` surface widened to `Retired`; the runtime-side start classifier is
+  now a machine-owned helper too
 - the pure query surface remains runtime-audited helper behavior, but it is no
   longer counted as formal transition coverage
 - the next remaining dogma violation is no longer coarse control truth in a
@@ -229,6 +233,10 @@ Interpretation:
   phase quotient stayed flat at `385 / 390`, which means the old
   simplification map was stale but the core behavioral quotient remained
   stable
+- rerunning Hopcroft again after modeling retire-drain start was necessary too:
+  the truthful Meerkat graph moved again (`17,384 -> 19,467`) and the raw /
+  phase quotient rose from `385 / 390` to `466 / 471`, which means the old
+  simplification baseline had still been hiding a real lifecycle behavior slice
 - removing the helper-owned ingress phase did not reopen any Meerkat parity
   gap: acceptance parity stayed `243 / 243`, exact full-row parity stayed
   `260 / 260`, and modeled-state parity returned to `145 / 145` after

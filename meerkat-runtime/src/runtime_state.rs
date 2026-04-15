@@ -92,6 +92,20 @@ pub fn run_return_phase_from_pre_run_phase(pre_run_phase: Option<RuntimeState>) 
     }
 }
 
+/// Classify the machine-owned pre-run phase that should be remembered when a
+/// new run starts from the current coarse runtime phase.
+pub fn run_start_pre_phase_from_phase(
+    phase: RuntimeState,
+) -> Result<RuntimeState, RuntimeStateTransitionError> {
+    match phase {
+        RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Retired => Ok(phase),
+        from => Err(RuntimeStateTransitionError {
+            from,
+            to: RuntimeState::Running,
+        }),
+    }
+}
+
 impl std::fmt::Display for RuntimeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -196,6 +210,35 @@ mod tests {
         assert_eq!(
             run_return_phase_from_pre_run_phase(None),
             RuntimeState::Idle
+        );
+    }
+
+    #[test]
+    fn run_start_pre_phase_classifier_matches_machine_projection() {
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Idle),
+                Ok(RuntimeState::Idle)
+            ),
+            "idle should be a legal run start phase"
+        );
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Attached),
+                Ok(RuntimeState::Attached)
+            ),
+            "attached should be a legal run start phase"
+        );
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Retired),
+                Ok(RuntimeState::Retired)
+            ),
+            "retired should be a legal drain start phase"
+        );
+        assert!(
+            run_start_pre_phase_from_phase(RuntimeState::Stopped).is_err(),
+            "stopped should not be a legal run start phase"
         );
     }
 

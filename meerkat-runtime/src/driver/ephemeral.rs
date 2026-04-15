@@ -464,17 +464,7 @@ impl EphemeralRuntimeDriver {
         &mut self,
         run_id: RunId,
     ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
-        let pre_run_phase = match self.phase {
-            RuntimeState::Idle => RunReturnPhase::Idle,
-            RuntimeState::Attached => RunReturnPhase::Attached,
-            RuntimeState::Retired => RunReturnPhase::Retired,
-            from => {
-                return Err(crate::runtime_state::RuntimeStateTransitionError {
-                    from,
-                    to: RuntimeState::Running,
-                });
-            }
-        };
+        let pre_run_phase = crate::runtime_state::run_start_pre_phase_from_phase(self.phase)?;
         if self.current_run_id.is_some() {
             return Err(crate::runtime_state::RuntimeStateTransitionError {
                 from: self.phase,
@@ -482,7 +472,17 @@ impl EphemeralRuntimeDriver {
             });
         }
         self.current_run_id = Some(run_id);
-        self.pre_run_phase = Some(pre_run_phase);
+        self.pre_run_phase = Some(match pre_run_phase {
+            RuntimeState::Idle => RunReturnPhase::Idle,
+            RuntimeState::Attached => RunReturnPhase::Attached,
+            RuntimeState::Retired => RunReturnPhase::Retired,
+            RuntimeState::Initializing
+            | RuntimeState::Running
+            | RuntimeState::Stopped
+            | RuntimeState::Destroyed => {
+                unreachable!("run_start_pre_phase_from_phase rejected non-startable phase")
+            }
+        });
         self.phase = RuntimeState::Running;
         Ok(())
     }

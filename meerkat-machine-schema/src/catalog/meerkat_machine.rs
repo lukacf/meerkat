@@ -1638,6 +1638,10 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
             ],
         },
         VariantSchema {
+            name: "DrainQueuedRun".into(),
+            fields: vec![field("run_id", named("RunId"))],
+        },
+        VariantSchema {
             name: "Commit".into(),
             fields: vec![
                 field("input_id", named("InputId")),
@@ -2085,8 +2089,9 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     }
 
     // Prepare starts a run: Idle|Attached -> Running (not a self-loop).
-    // The runtime rejects Retired/Stopped/Destroyed, then requires
-    // is_idle_or_attached(), dequeues input, and calls start_run().
+    // The checked-in machine owns the coarse run-binding truth for explicit
+    // preparation requests; retire-preserved drain uses the internal
+    // DrainQueuedRun signal below.
     for (from_phase, pre_run_phase) in [("Idle", "idle"), ("Attached", "attached")] {
         transitions.push(TransitionSchema {
             name: format!("Prepare{from_phase}"),
@@ -2108,6 +2113,26 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             emit: vec![simple_emit("SubmitRunPrimitive")],
         });
     }
+
+    transitions.push(TransitionSchema {
+        name: "DrainQueuedRunRetired".into(),
+        from: vec!["Retired".into()],
+        on: InputMatch {
+            kind: meerkat_trigger_kind("DrainQueuedRun"),
+            variant: "DrainQueuedRun".into(),
+            bindings: vec!["run_id".into()],
+        },
+        guards: vec![],
+        updates: vec![
+            assign_some("current_run_id", "run_id"),
+            Update::Assign {
+                field: "pre_run_phase".into(),
+                expr: Expr::Some(Box::new(Expr::String("retired".into()))),
+            },
+        ],
+        to: "Running".into(),
+        emit: vec![simple_emit("SubmitRunPrimitive")],
+    });
 
     for (variant, bindings) in [
         ("StartConversationRun", vec![]),

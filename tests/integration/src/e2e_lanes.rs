@@ -1731,7 +1731,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             pre_commands: &[],
             command: CommandSpec::Raw {
                 argv: &[
-                    "cargo",
+                    "{repo_root}/scripts/repo-cargo",
                     "test",
                     "-p",
                     "rkat",

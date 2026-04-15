@@ -80,9 +80,12 @@ Current state:
   now slightly stricter: the raw Mob quotient moved from `195` to `202` once
   the schema stopped over-permitting `SubscribeAgentEvents` from
   member-less completed states.
-- The biggest current Mob quotient-bearing fields remain
-  `event_subscription_count`, `task_count`, `wiring_edge_count`,
-  `coordinator_bound`, and `pending_spawn_count`.
+- The trustworthy raw/phase/full reread is now:
+  raw `4,797 -> 202`, phase `4,797 -> 204`, full `4,797 -> 4,797`.
+- The dominant mixed block (`2,819` states) is split primarily by
+  `event_subscription_count`, `pending_spawn_count`, `task_count`,
+  `wiring_edge_count`, `active_run_count`, `active_member_count`,
+  `retiring_member_count`, and `active_fence_token`.
 
 ## Notes
 
@@ -95,8 +98,8 @@ Current state:
 
 ## Next Loop
 
-1. Use the exact Mob parity baseline when rereading the post-parity Hopcroft
-   output instead of the earlier static-schema witness.
+1. Use the exact Mob parity baseline together with the trustworthy Hopcroft
+   reread when comparing Mob to Meerkat and planning DSL work.
 2. Decide whether the next Mob pass should widen into the query/surface-only
    family or whether the better next gap is the Meerkat big-block field-split
    analysis for DSL design.

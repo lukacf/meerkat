@@ -111,10 +111,13 @@ cargo run -p xtask --features machine-authority -- \
   --profile ci --observation none --audit-map
 ```
 
-The command asks TLC to `-dump dot,actionlabels,snapshot` for the checked-in
-machine spec, parses the reachable state graph, and runs a Hopcroft-style
-partition refinement over the labeled transition system. The `--audit-map`
-extension keeps the same TLC dump, then layers two extra diagnostics on top:
+The command asks TLC to `-dump dot,actionlabels` for the checked-in machine
+spec, parses the reachable state graph, and runs a Hopcroft-style partition
+refinement over the labeled transition system. Plain DOT already includes the
+state labels we need for observation and field-projection work; the earlier
+`snapshot` export mode turned out to stall after writing partial graphs on the
+truthful Meerkat model. The `--audit-map` extension keeps the same TLC dump,
+then layers two extra diagnostics on top:
 
 - **field audit**: run `only:<field>` and `all_except:<field>` observation
   projections for every extended-state field
@@ -136,14 +139,12 @@ We ran three observation modes for each machine:
 | MobMachine | `none` | 4,797 | 202 | 95.8% | Raw behavior is still dramatically smaller than the current formal state space, but exact parity tightened the quotient slightly. |
 | MobMachine | `phase` | 4,797 | 204 | 95.7% | Preserving phase still barely changes the quotient; `Running` / `Stopped` / `Completed` remain mostly projection. |
 | MobMachine | `full` | 4,797 | 4,797 | 0.0% | Once the full extended state is preserved, every reachable snapshot is distinct. |
-| MeerkatMachine | `none` | 4,463 | 201 | 95.5% | Raw behavior again collapses to a machine of roughly the same order as Mob, even after the current acceptance-parity cleanup. |
-| MeerkatMachine | `phase` | 4,144 | 204 | 95.1% | Preserving phase barely changes the quotient; phase is not the main source of complexity. |
-| MeerkatMachine | `full` | 4,144 | 4,144 | 0.0% | As with Mob, the entire present surface lives in the extended state tuple. |
+| MeerkatMachine | `none` | 59,371 | 385 | 99.4% | Raw behavior still collapses to a much smaller machine even after the exact parity pass. |
+| MeerkatMachine | `phase` | 59,371 | 390 | 99.3% | Preserving phase adds only five quotient blocks; phase is almost entirely projection here too. |
+| MeerkatMachine | `full` | 59,371 | 58,038 | 2.2% | Preserving the full snapshot nearly eliminates quotienting; the remaining collapse is small and mostly strips non-authoritative snapshot churn such as `model_step_count`. |
 
-For Mob, all three rows above have been rerun after the exact
-runtime/schema triangle parity pass. For Meerkat, only the `none` row above
-has been rerun after the latest acceptance-parity cleanup; the `phase` and
-`full` rows remain the earlier stock-taking baseline until they are refreshed.
+All six rows above have now been rerun after the exact runtime/schema parity
+passes on the current branch tip.
 
 ### What the quotient is telling us
 
@@ -153,9 +154,10 @@ has been rerun after the latest acceptance-parity cleanup; the `phase` and
   behavioral quotient and the phase-preserved quotient are nearly identical.
 - The machine surface is therefore encoded primarily in the extended state
   fields and their guards, not in the phase labels themselves.
-- Preserving the full snapshot eliminates all quotienting, which means the next
-  simplification wave should focus on the field structure and the guard set
-  rather than on the phase enum alone.
+- Preserving the full snapshot eliminates all quotienting for Mob and nearly
+  eliminates it for Meerkat, which means the next simplification wave should
+  focus on the field structure and the guard set rather than on the phase enum
+  alone.
 
 ### Mixed-phase blocks
 
@@ -163,7 +165,7 @@ The raw quotient exposes the highest-signal parity/simplification targets:
 
 - **MobMachine** has one dominant mixed block of `2,819` states spanning
   `Running`, `Stopped`, and `Completed`.
-- **MeerkatMachine** has one dominant mixed block of `2,166` states spanning
+- **MeerkatMachine** has one dominant mixed block of `32,248` states spanning
   `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, and `Stopped`.
 
 These are not automatic merge approvals. They are a **schema-side lower bound**
@@ -355,13 +357,18 @@ The Mob parity pass closed three concrete issues:
 
 ### Post-parity Mob rerun
 
-After closing the exact triangle parity pass, we reran the raw Mob Hopcroft
-lanes:
+After closing the exact triangle parity pass, we reran the trustworthy Mob
+Hopcroft lanes on the same plain-DOT export path used above:
 
 ```bash
 cargo run -p xtask --features machine-authority -- \
-  machine-hopcroft --machine mob_machine --profile ci \
-  --observation none --audit-map
+  machine-hopcroft --machine mob_machine --profile ci --observation none
+
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine mob_machine --profile ci --observation phase
+
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine mob_machine --profile ci --observation full
 ```
 
 Current result:
@@ -373,6 +380,21 @@ Current result:
 - TLC: `167,791 generated / 4,797 distinct / depth 7`
 - dominant mixed block: `2,819` states spanning `Running`, `Stopped`, and
   `Completed`
+- dominant block tuples: `1,714`
+- tuples reused across multiple phases: `565`
+- maximum phases sharing one tuple: `3`
+
+The dominant Mob block is being split primarily by counter-like field
+dimensions, not by phase:
+
+- `event_subscription_count`
+- `pending_spawn_count`
+- `task_count`
+- `wiring_edge_count`
+- `active_run_count`
+- `active_member_count`
+- `retiring_member_count`
+- `active_fence_token`
 
 The important read is that the quotient stayed in the same order of magnitude
 but moved from `195` to `202` once the schema stopped over-permitting
@@ -391,115 +413,85 @@ The Meerkat audit has shifted from parity triage to post-parity stock-taking:
 
 ### Post-parity Meerkat rerun
 
-After closing the reducer/control acceptance gap and the last attached-loop
-control mismatch, we reran the raw Hopcroft lane:
+After closing the reducer/control acceptance gap and fixing the broader
+pair-audit methodology, we reran the trustworthy Meerkat Hopcroft lanes on the
+plain-DOT export path:
 
 ```bash
 cargo run -p xtask --features machine-authority -- \
-  machine-hopcroft --machine meerkat_machine --profile ci \
-  --observation none --audit-map
+  machine-hopcroft --machine meerkat_machine --profile ci --observation none
+
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine meerkat_machine --profile ci --observation phase
+
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine meerkat_machine --profile ci --observation full
 ```
 
 Current result:
 
-- reachable states: `4,463`
-- quotient states: `201`
-- TLC: `192,257 generated / 4,463 distinct / depth 9`
-- dominant mixed block: `2,166` states spanning `Initializing`, `Idle`,
+- reachable states: `59,371`
+- raw quotient states: `385`
+- phase-observed quotient states: `390`
+- full-observed quotient states: `58,038`
+- TLC: `3,668,832 generated / 59,371 distinct / depth 9`
+- dominant mixed block: `32,248` states spanning `Initializing`, `Idle`,
   `Attached`, `Running`, `Retired`, and `Stopped`
+- dominant block tuples: `16,859`
+- tuples reused across multiple phases: `9,647`
+- maximum phases sharing one tuple: `5`
 
-The important read is that the raw quotient stayed essentially flat even after
-the acceptance-parity cleanup. That means the large remaining simplification
-signal is not just “missing accept/reject guards in the audited pairs”; it is
-still present after those gaps are removed.
+The important read is now sharper than the earlier partial dump story:
+
+- the raw quotient is much smaller than the reachable state space
+- phase preservation adds only `5` blocks (`385 -> 390`)
+- preserving the full snapshot nearly eliminates quotienting (`58,038`)
+
+That means the remaining Meerkat complexity is carried overwhelmingly by the
+field tuple, not by the phase label.
 
 ### Largest Meerkat mixed-block projection
 
-We then extended the Hopcroft summary itself to project the largest
+We then extended the always-on Hopcroft summary to project the largest
 mixed-phase block onto its extended-state fields. On the current Meerkat run,
 that yields:
 
-- dominant mixed block: `2,166` states
-- distinct extended-state tuples inside that block: `670`
-- tuples reused across multiple phases: `404`
+- dominant mixed block: `32,248` states
+- distinct extended-state tuples inside that block: `16,859`
+- tuples reused across multiple phases: `9,647`
 - maximum phases sharing one tuple: `5`
 
 That is the strongest concrete evidence so far that the current phase surface
 is layered on top of a smaller field-driven machine instead of acting as the
 primary semantic axis. The most discriminating fields inside the block are:
 
-- `staged_visibility_revision` (`7` value buckets; largest bucket `904`)
-- `active_visibility_revision` (`3` buckets; largest bucket `990`)
-- `committed_visibility_revision` (`3` buckets; largest bucket `1,284`)
-- `peer_ingress_configured` (`2` buckets; split `1,104 / 1,062`)
-- `staged_requested_deferred_names` (`2` buckets; split `1,124 / 1,042`)
-- `requested_witnesses` (`2` buckets; split `1,144 / 1,022`)
-- `filter_witnesses` (`2` buckets; split `1,226 / 940`)
-- `active_fence_token` (`2` buckets; split `1,417 / 749`)
+- `staged_visibility_revision` (`8` value buckets; largest bucket `8,142`)
+- `committed_visibility_revision` (`3` buckets; largest bucket `13,080`)
+- `active_visibility_revision` (`3` buckets; largest bucket `15,924`)
+- `pre_run_phase` (`3` buckets; largest bucket `17,064`)
+- `peer_ingress_configured` (`2` buckets; split `16,428 / 15,820`)
+- `requested_witnesses` (`2` buckets; split `19,044 / 13,204`)
+- `filter_witnesses` (`2` buckets; split `19,330 / 12,918`)
+- `staged_requested_deferred_names` (`2` buckets; split `19,869 / 12,379`)
 
 The read is strikingly consistent with the earlier field-ablation pass: the
-largest Meerkat block is dominated by visibility-staging, deferred-tool, ingress,
-and runtime-binding/fence dimensions rather than by phase labels.
+largest Meerkat block is dominated by visibility-staging, deferred-tool,
+ingress, and runtime-carrier dimensions rather than by phase labels.
 
 ### Audit-map results
 
-The first `--audit-map` pass answers two more concrete questions:
+The trustworthy raw/phase/full reruns are now enough to set direction even
+before the heavier field-ablation lane is re-optimized:
 
-1. Which extended-state fields move the quotient the most?
-2. Which mixed-phase pairs already have obvious schema-surface deltas before we
-   even look at runtime?
+- Mob is clearly a field/counter-driven machine with a very thin phase overlay
+- Meerkat is even more strongly field-driven than the earlier partial dump
+  suggested
+- the next simplification wave should be field-normalization-first and DSL-
+  oriented, not phase-enum-first
 
-#### Field-ablation leaders
-
-- **MeerkatMachine** most quotient-bearing fields today are
-  `requested_witnesses` (`all_except` collapses `2,833` states),
-  `filter_witnesses` (`2,670`), `staged_visibility_revision` (`2,580`),
-  `staged_requested_deferred_names` (`2,293`), `drain_running` (`2,257`), and
-  `peer_ingress_configured` (`2,017`).
-- **MobMachine** most quotient-bearing fields today are
-  `event_subscription_count` (`2,596`), `task_count` (`2,581`),
-  `wiring_edge_count` (`2,219`), `coordinator_bound` (`2,182`),
-  `pending_spawn_count` (`2,113`), and then the active-work / run counters.
-
-This is the first concrete sign that the next simplification wave should be
-field-normalization-first, not phase-first.
-
-#### Pair-audit highlights
-
-- **Meerkat `Attached` ↔ `Idle`**:
-- **Meerkat `Attached` ↔ `Idle`**:
-  `same=8`, `different=24`, `left-only=3`, `right-only=0`.
-  After the acceptance-parity cleanup, this pair is now dominated by
-  surface-shape deltas rather than helper-surface accept/reject mismatches.
-  The remaining left-only rows are `ReconfigureSessionLlmIdentity`,
-  `InterruptCurrentRun`, and `CancelAfterBoundary`.
-- **Meerkat `Attached` ↔ `Running`**:
-  `same=4`, `different=27`, `left-only=4`, `right-only=2`.
-  This is now a better next-step audit pair than the original
-  `Attached`/`Idle` gap: the accept/reject surface is green, but the quotient
-  still sees a large structural split between idle attached-loop control and
-  active-run control.
-- **Meerkat `Running` ↔ `Stopped`**:
-  `same=2`, `different=21`, `left-only=10`, `right-only=1`.
-  The helper/query and accept/reject gaps here are mostly gone, but the
-  quotient still sees a real split driven by active-work and lifecycle-control
-  surface, not just stale schema permissiveness.
-- **Mob `Running` ↔ `Stopped`**:
-  `same=3`, `different=8`, `left-only=15`, `right-only=1`.
-  This pair is now fully runtime-verified on the representative frontier:
-  `27 / 27 / 27 / 0 / 0`. The quotient witness still shows the lifecycle split
-  clearly: `Spawn`, `SubmitWork`, `RunFlow`, `Respawn`, and `Wire` are
-  `left-only`, while `Retire` / `RetireAll` are `different_surface`.
-- **Mob `Completed` ↔ `Running`** and **`Completed` ↔ `Stopped`**:
-  `Completed` is still behaviorally merged into the same raw quotient block,
-  but the exact parity pass now confirms that its remaining accepted surface is
-  mostly the query/subscription/provenance shell while `Running` /
-  `Stopped` still own the lifecycle-mutating inputs.
-
-The Meerkat public-phase frontier and the Mob lifecycle triangle are now
-runtime-verified. Outside those audited frontiers, the mixed-phase pair counts
-are still schema-first witness counts and should be read as the next checklist,
-not as proof.
+The heavier `--audit-map` field-ablation lane is still valuable, but on the
+truthful Meerkat graph it is now expensive enough that it should be optimized
+before we rely on it as the primary stock-taking surface.
 
 ### Public-surface consequence
 

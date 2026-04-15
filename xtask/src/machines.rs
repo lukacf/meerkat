@@ -2469,6 +2469,7 @@ struct HopcroftWitnessPair {
     right_state_idx: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_hopcroft_for_target(
     root: &Path,
     target: HopcroftTarget<'_>,
@@ -2585,7 +2586,10 @@ fn dump_tlc_dot_for_target(
     cmd.arg("-workers")
         .arg(workers.to_string())
         .arg("-dump")
-        .arg("dot,actionlabels,snapshot")
+        // Plain DOT already carries the state labels we parse for observation
+        // and field-audit work. Adding `snapshot` causes the Meerkat export to
+        // stall after writing a partial graph on the truthful 59k-state model.
+        .arg("dot,actionlabels")
         .arg(&dump_path)
         .arg("-metadir")
         .arg(&metadir)
@@ -3008,11 +3012,8 @@ fn summarize_hopcroft_target(
     } else {
         None
     };
-    let largest_mixed_phase_block_field_projection = if audit_map {
-        summarize_largest_mixed_phase_block_field_projection(graph, quotient, &mixed_phase_blocks)
-    } else {
-        None
-    };
+    let largest_mixed_phase_block_field_projection =
+        summarize_largest_mixed_phase_block_field_projection(graph, quotient, &mixed_phase_blocks);
 
     HopcroftSummary {
         kind: target.kind.into(),

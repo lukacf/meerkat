@@ -251,13 +251,13 @@ Outcome:
 2. Decide whether `DestroyReport.inputs_abandoned` belongs inside the formal
    machine authority boundary or remains an intentionally out-of-model report
    surface.
-3. Only after that exact-parity boundary decision, use the post-parity
-   Hopcroft rerun as
-   the Meerkat simplification baseline.
+3. Use the trustworthy post-parity Hopcroft rerun as the Meerkat
+   simplification baseline:
+   raw `59,371 -> 385`, phase `59,371 -> 390`, full `59,371 -> 58,038`.
 4. Read that baseline together with the largest-block field projection from
    [`docs/architecture/machine-simplification-proposal.md`](machine-simplification-proposal.md):
-   the dominant Meerkat mixed block is now measured as `2,166` states over
-   `670` extended-state tuples, with `404` tuples reused across multiple
+   the dominant Meerkat mixed block is now measured as `32,248` states over
+   `16,859` extended-state tuples, with `9,647` tuples reused across multiple
    phases.
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in

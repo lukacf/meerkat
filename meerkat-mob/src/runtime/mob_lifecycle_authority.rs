@@ -2,8 +2,8 @@
 //!
 //! This module provides typed enums and a sealed mutator trait that enforces
 //! all MobLifecycle state mutations flow through the machine authority.
-//! Handwritten shell code calls [`MobLifecycleAuthority::apply`] and executes
-//! returned effects; it cannot mutate canonical state directly.
+//! Handwritten shell code calls [`MobLifecycleAuthority::apply_in_phase`] and
+//! executes returned effects; it cannot mutate canonical state directly.
 //!
 //! The transition table encoded here is the single source of truth, matching
 //! the machine schema in `meerkat-machine-schema/src/catalog/mob_lifecycle.rs`:
@@ -131,9 +131,9 @@ mod sealed {
 
 /// Sealed trait for MobLifecycle state mutation.
 ///
-/// Only [`MobLifecycleAuthority`] implements this. Handwritten code cannot
-/// create alternative implementations, ensuring single-source-of-truth
-/// semantics for lifecycle state.
+/// Only [`MobLifecycleAuthority`] implements this. Tests keep a phase-owning
+/// helper surface for direct table checks, while production code routes coarse
+/// lifecycle legality through [`MobLifecycleAuthority::apply_in_phase`].
 pub(crate) trait MobLifecycleMutator: sealed::Sealed {
     /// Apply a typed input to the current machine state.
     ///
@@ -153,7 +153,8 @@ pub(crate) trait MobLifecycleMutator: sealed::Sealed {
 /// cache so that `MobHandle` can read the current phase lock-free.
 #[derive(Clone)]
 pub(crate) struct MobLifecycleAuthority {
-    /// Canonical phase.
+    /// Test-only phase owner retained for direct authority table tests.
+    #[cfg(test)]
     phase: MobState,
     /// Canonical machine-owned fields.
     fields: MobLifecycleFields,
@@ -172,6 +173,7 @@ impl MobLifecycleAuthority {
     pub(crate) fn with_phase(observable: Arc<AtomicU8>, phase: MobState) -> Self {
         observable.store(phase as u8, Ordering::Release);
         Self {
+            #[cfg(test)]
             phase,
             fields: MobLifecycleFields {
                 active_run_count: 0,
@@ -182,6 +184,7 @@ impl MobLifecycleAuthority {
     }
 
     /// Current phase (read from canonical state).
+    #[cfg(test)]
     pub(crate) fn phase(&self) -> MobState {
         self.phase
     }
@@ -190,6 +193,15 @@ impl MobLifecycleAuthority {
     pub(crate) fn snapshot(&self) -> MobLifecycleSnapshot {
         MobLifecycleSnapshot {
             phase: self.phase,
+            active_run_count: self.fields.active_run_count,
+            cleanup_pending: self.fields.cleanup_pending,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_in_phase(&self, phase: MobState) -> MobLifecycleSnapshot {
+        MobLifecycleSnapshot {
+            phase,
             active_run_count: self.fields.active_run_count,
             cleanup_pending: self.fields.cleanup_pending,
         }
@@ -204,14 +216,20 @@ impl MobLifecycleAuthority {
     /// Check if a transition is legal without applying it.
     ///
     /// Used by shell code for pre-checks (e.g. Destroy/Reset eligibility).
+    #[cfg(test)]
     pub(crate) fn can_accept(&self, input: MobLifecycleInput) -> bool {
         self.evaluate(input).is_ok()
+    }
+
+    pub(crate) fn can_accept_in_phase(&self, phase: MobState, input: MobLifecycleInput) -> bool {
+        self.evaluate_in_phase(phase, input).is_ok()
     }
 
     /// Require that the authority is in one of the given phases.
     ///
     /// Returns `MobError::InvalidTransition` if not. The `hint_to` parameter
     /// provides a target state for the error message (not a real transition).
+    #[cfg(test)]
     pub(crate) fn require_phase(
         &self,
         allowed: &[MobState],
@@ -228,8 +246,17 @@ impl MobLifecycleAuthority {
     }
 
     /// Evaluate a transition without committing it.
+    #[cfg(test)]
     fn evaluate(
         &self,
+        input: MobLifecycleInput,
+    ) -> Result<(MobState, MobLifecycleFields, Vec<MobLifecycleEffect>), MobError> {
+        self.evaluate_in_phase(self.phase, input)
+    }
+
+    fn evaluate_in_phase(
+        &self,
+        phase: MobState,
         input: MobLifecycleInput,
     ) -> Result<(MobState, MobLifecycleFields, Vec<MobLifecycleEffect>), MobError> {
         use MobLifecycleInput::{
@@ -238,7 +265,6 @@ impl MobLifecycleAuthority {
         };
         use MobState::{Completed, Destroyed, Running, Stopped};
 
-        let phase = self.phase;
         let mut fields = self.fields.clone();
         let mut effects = Vec::new();
 
@@ -329,8 +355,27 @@ impl MobLifecycleAuthority {
 
         Ok((next_phase, fields, effects))
     }
+
+    pub(crate) fn apply_in_phase(
+        &mut self,
+        phase: MobState,
+        input: MobLifecycleInput,
+    ) -> Result<MobLifecycleTransition, MobError> {
+        let (next_phase, next_fields, effects) = self.evaluate_in_phase(phase, input)?;
+
+        self.fields = next_fields.clone();
+        self.observable.store(next_phase as u8, Ordering::Release);
+
+        Ok(MobLifecycleTransition {
+            next_phase,
+            active_run_count: next_fields.active_run_count,
+            cleanup_pending: next_fields.cleanup_pending,
+            effects,
+        })
+    }
 }
 
+#[cfg(test)]
 impl MobLifecycleMutator for MobLifecycleAuthority {
     fn apply(&mut self, input: MobLifecycleInput) -> Result<MobLifecycleTransition, MobError> {
         let (next_phase, next_fields, effects) = self.evaluate(input)?;

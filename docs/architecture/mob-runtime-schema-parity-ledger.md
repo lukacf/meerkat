@@ -292,6 +292,13 @@ Current state:
   `MobOrchestratorAuthority`, while production builder/actor code uses only the
   explicit `*_in_phase(...)` surface. This means live runtime orchestration no
   longer has any hidden second phase owner below the checked-in `MobMachine`.
+- The next ownership cut applies the same pattern to `MobLifecycleAuthority`:
+  actor startup, stop/resume/reset, run admission, and run completion now use
+  `apply_in_phase(...)` / `can_accept_in_phase(...)`, and actor-local
+  `require_state(...)` checks read the canonical shared `MobState` directly.
+  Stored lifecycle phase now remains only as test scaffolding, while production
+  lifecycle authority is reduced to field updates plus shared-state publication
+  parameterized by the actor's canonical phase.
 
 ## Notes
 
@@ -318,13 +325,13 @@ Current state:
    `externally_addressable_runtime_ids`). On the current design those drivers
    still read as real orchestration and stale-binding legality rather than
    leftover top-level projection state.
-5. The next high-value Mob frontier is now concentrated in
-   `MobLifecycleAuthority`, not `MobOrchestratorAuthority`: after the
-   production-side phase removal, the orchestrator helper is reduced to field +
-   effect realization parameterized by the actor's canonical mob phase.
-6. The next honest fast-loop candidate is therefore whether the remaining
-   coarse lifecycle legality and snapshot reads in `MobLifecycleAuthority`
-   should be collapsed the same way, or whether they still carry distinct
-   machine-local behavior that cannot yet move under `MobMachine`.
+5. The next high-value Mob frontier is no longer helper-owned coarse phase in
+   either lower authority. `MobOrchestratorAuthority` and
+   `MobLifecycleAuthority` are both now parameterized by the actor's canonical
+   `MobState` on the production path.
+6. The next honest fast-loop candidate is whether any remaining machine-local
+   legality in `MobLifecycleAuthority` still needs to exist as a separate lower
+   authority at all, or whether the next largest win is to collapse more of its
+   run-count / cleanup semantics directly under `MobMachine`.
    authority and the lower topology service, plus any remaining top-level
    lifecycle legality that still bypasses the checked-in machine.

@@ -110,7 +110,9 @@ The product-layering work also shipped two official slim binaries:
 - `rkat-rpc-mini`
 
 These are static capability-gated builds of the existing CLI/RPC crates, not
-new reimplementations and not runtime-dynamic command subsets.
+new reimplementations and not runtime-dynamic command subsets. On the CLI side,
+optional command surfaces now follow compiled capability features such as
+`mob`, `mcp`, and `skills`, rather than a profile-specific hide/show switch.
 
 ## Workstream 1: Make Composability Great Again
 

@@ -69,7 +69,7 @@ async fn integration_real_rkat_mini_surface() -> Result<(), Box<dyn std::error::
     assert!(help_stdout.contains("skill"));
     assert!(!help_stdout.contains("mob"));
     assert!(!help_stdout.contains("mcp"));
-    assert!(!help_stdout.contains("blob"));
+    assert!(help_stdout.contains("blob"));
 
     let mob_help = Command::new(&rkat_mini)
         .args(["mob", "--help"])

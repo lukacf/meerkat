@@ -132,8 +132,8 @@ test-feature-matrix-surface:
 	$(CARGO) check -p meerkat-mcp-server --no-default-features --features comms
 	$(CARGO) check -p rkat --no-default-features --features session-store
 	$(CARGO) check -p rkat --no-default-features --features session-store,mcp
-	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface
-	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface,mini-skills
+	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
+	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
 	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 	$(CARGO) check -p rkat --no-default-features --features session-store,comms,mcp
 

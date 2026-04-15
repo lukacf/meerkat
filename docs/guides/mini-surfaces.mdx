@@ -37,6 +37,7 @@ Included commands:
 
 - `run`
 - `init`
+- `blob`
 - `skill`
 - `config`
 - `session`
@@ -49,11 +50,14 @@ Omitted commands:
 
 - `mob`
 - `mcp`
-- `blob`
 - peer/comms-facing UX
 - schedule-facing UX
 
 The built-in shell and patch tools are still available through `--tools workspace`.
+
+<Note>
+The CLI now gates command visibility by compiled capability features rather than by a special UI-only profile. That means `rkat-mini` still exposes core commands like `blob`, while capability-backed surfaces like `mob` and `mcp` disappear when their supporting features are not compiled in.
+</Note>
 
 ### Why `skill` is in the shipped mini surface
 
@@ -117,7 +121,7 @@ The official mini binaries are examples of the same shared surface seams you can
 ```bash
 ./scripts/repo-cargo build -p rkat --bin rkat-mini \
   --no-default-features \
-  --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface,mini-skills
+  --features anthropic,openai,gemini,jsonl-store,session-store,skills
 ```
 
 ### Build an even smaller variant without `skill`
@@ -125,7 +129,7 @@ The official mini binaries are examples of the same shared surface seams you can
 ```bash
 ./scripts/repo-cargo build -p rkat --bin rkat-mini \
   --no-default-features \
-  --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface
+  --features anthropic,openai,gemini,jsonl-store,session-store
 ```
 
 ### Build `rkat-rpc-mini`

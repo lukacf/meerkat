@@ -1766,7 +1766,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                     "rkat",
                     "--no-default-features",
                     "--features",
-                    "anthropic,openai,gemini,jsonl-store,session-store,mini-surface,mini-skills,integration-real-tests",
+                    "anthropic,openai,gemini,jsonl-store,session-store,skills,integration-real-tests",
                     "--test",
                     "system_cli_mini",
                     "integration_real_rkat_mini_surface",

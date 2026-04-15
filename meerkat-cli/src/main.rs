@@ -1,6 +1,6 @@
 //! meerkat-cli - Headless CLI for Meerkat
-#![cfg_attr(feature = "mini-surface", allow(dead_code))]
 
+#[cfg(feature = "mcp")]
 mod mcp;
 #[cfg(feature = "comms")]
 mod stdin_events;
@@ -23,6 +23,7 @@ use meerkat_contracts::{SessionLocator, SessionLocatorError, format_session_ref}
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+#[cfg(feature = "mob")]
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, ResumeOverrideMask, SessionBuildOptions,
@@ -39,18 +40,25 @@ use meerkat_core::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
+#[cfg(feature = "mob")]
 use meerkat_mob::{FlowId, MobDefinition, RunId};
+#[cfg(feature = "mob")]
 use meerkat_mob_pack::archive::MobpackArchive;
+#[cfg(feature = "mob")]
 use meerkat_mob_pack::pack::{
     compute_archive_digest, inspect_archive_bytes, pack_directory_with_excludes,
     validate_archive_bytes,
 };
+#[cfg(feature = "mob")]
 use meerkat_mob_pack::targz::extract_targz_safe;
+#[cfg(feature = "mob")]
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
 use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
-use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
+#[cfg(feature = "mob")]
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -73,26 +81,11 @@ const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
 
-#[cfg(not(feature = "mini-surface"))]
-const CLI_ABOUT: &str = "Run agent tasks, manage local config, and build mob artifacts";
-#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
-const CLI_ABOUT: &str = "Run agent tasks and manage lightweight local config from the terminal";
-#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
-const CLI_ABOUT: &str = "Run agent tasks and manage lightweight local config from the terminal";
+const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from the terminal";
 
-#[cfg(not(feature = "mini-surface"))]
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, mcp, config, realm\n  Deployment:   mob\n  Utility:      session, blob, models, capabilities, doctor\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> -h` for the basic view and `rkat <command> --help` for all options.";
-#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, config, realm\n  Utility:      session, models, capabilities, doctor\n\nExamples:\n  rkat-mini \"summarize this repository\"\n  cat story.txt | rkat-mini \"summarize the story\"\n  git diff | rkat-mini run \"review these changes\"\n  rkat-mini run -t workspace \"fix the failing test\"\n  rkat-mini skill list\n\nUse `rkat-mini <command> -h` for the basic view and `rkat-mini <command> --help` for all options.";
-#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
-const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, config, realm\n  Utility:      session, models, capabilities, doctor\n\nExamples:\n  rkat-mini \"summarize this repository\"\n  cat story.txt | rkat-mini \"summarize the story\"\n  git diff | rkat-mini run \"review these changes\"\n  rkat-mini run -t workspace \"fix the failing test\"\n\nUse `rkat-mini <command> -h` for the basic view and `rkat-mini <command> --help` for all options.";
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
 
-#[cfg(not(feature = "mini-surface"))]
-const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
-#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
-const RUN_AFTER_HELP: &str = "Examples:\n  rkat-mini run \"summarize this repository\"\n  cat story.txt | rkat-mini run \"summarize the story\"\n  git diff | rkat-mini run --json \"review these changes\"\n  rkat-mini run --resume \"keep going\"\n  rkat-mini run --resume ~2 \"pick this thread back up\"\n  rkat-mini run --skill ./skills/reviewer \"review these changes\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
-#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
-const RUN_AFTER_HELP: &str = "Examples:\n  rkat-mini run \"summarize this repository\"\n  cat story.txt | rkat-mini run \"summarize the story\"\n  git diff | rkat-mini run --json \"review these changes\"\n  rkat-mini run --resume \"keep going\"\n  rkat-mini run --resume ~2 \"pick this thread back up\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
+const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
 
 /// Safely truncate a string to approximately `max_bytes`, respecting UTF-8 char boundaries.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
@@ -425,7 +418,7 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
             builtins: true,
             shell: true,
             memory: true,
-            mob: !cfg!(feature = "mini-surface"),
+            mob: cfg!(feature = "mob"),
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
@@ -811,7 +804,7 @@ enum Commands {
         output_schema: Option<String>,
 
         /// Skill IDs or local skill paths to preload for this run. Repeatable.
-        #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+        #[cfg(feature = "skills")]
         #[arg(
             long = "skill",
             value_name = "PATH_OR_ID",
@@ -877,7 +870,7 @@ enum Commands {
         /// By default MCP servers connect in the background and their tools
         /// become available as each server is ready. Use this flag when the
         /// first prompt requires MCP tools to be available.
-        #[cfg(not(feature = "mini-surface"))]
+        #[cfg(feature = "mcp")]
         #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         wait_for_mcp: bool,
 
@@ -924,7 +917,6 @@ enum Commands {
     },
 
     /// Blob management
-    #[cfg(not(feature = "mini-surface"))]
     Blob {
         #[command(subcommand)]
         command: BlobCommands,
@@ -937,7 +929,7 @@ enum Commands {
         command: RealmCommands,
     },
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mcp")]
     #[command(
         after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list --scope all\n  rkat mcp get filesystem --scope project"
     )]
@@ -947,7 +939,7 @@ enum Commands {
         command: McpCommands,
     },
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[command(
         after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack\n  rkat mob deploy dist/release-triage.mobpack \"triage the latest release regressions\"\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web"
     )]
@@ -957,7 +949,7 @@ enum Commands {
         command: MobCommands,
     },
 
-    #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+    #[cfg(feature = "skills")]
     #[command(name = "skill")]
     /// Skill introspection and realm-local skill resources
     Skills {
@@ -1158,6 +1150,7 @@ enum CliTransport {
     Sse,
 }
 
+#[cfg(feature = "skills")]
 #[derive(Subcommand)]
 enum SkillsCommands {
     /// Add a filesystem-backed skill source to the current realm config
@@ -1200,6 +1193,7 @@ enum SkillsCommands {
     },
 }
 
+#[cfg(feature = "mcp")]
 #[derive(Subcommand)]
 enum McpCommands {
     /// Add an MCP server
@@ -1268,6 +1262,7 @@ enum McpCommands {
     },
 }
 
+#[cfg(feature = "mob")]
 #[derive(Subcommand)]
 enum MobCommands {
     /// Pack a mob directory into a .mobpack archive.
@@ -1407,6 +1402,7 @@ enum MobCommands {
     },
 }
 
+#[cfg(feature = "mob")]
 #[derive(Subcommand)]
 enum MobWebCommands {
     /// Build a browser-deployable WASM bundle from a .mobpack archive.
@@ -1417,12 +1413,14 @@ enum MobWebCommands {
     },
 }
 
+#[cfg(feature = "mob")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum TrustPolicyArg {
     Permissive,
     Strict,
 }
 
+#[cfg(feature = "mob")]
 impl From<TrustPolicyArg> for TrustPolicy {
     fn from(value: TrustPolicyArg) -> Self {
         match value {
@@ -1432,6 +1430,7 @@ impl From<TrustPolicyArg> for TrustPolicy {
     }
 }
 
+#[cfg(feature = "mob")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum DeploySurfaceArg {
     Cli,
@@ -1492,7 +1491,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             params,
             provider_params_json,
             output_schema,
-            #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+            #[cfg(feature = "skills")]
             skills,
             allow_tools,
             block_tools,
@@ -1501,20 +1500,20 @@ async fn main() -> anyhow::Result<ExitCode> {
             app_context,
             tools,
             yolo,
-            #[cfg(not(feature = "mini-surface"))]
+            #[cfg(feature = "mcp")]
             wait_for_mcp,
             verbose,
             keep_alive,
             stdin,
             line_format,
         } => {
-            #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+            #[cfg(feature = "skills")]
             let run_skills = skills;
-            #[cfg(not(any(not(feature = "mini-surface"), feature = "mini-skills")))]
+            #[cfg(not(feature = "skills"))]
             let run_skills = Vec::new();
-            #[cfg(not(feature = "mini-surface"))]
+            #[cfg(feature = "mcp")]
             let wait_for_mcp_enabled = wait_for_mcp;
-            #[cfg(feature = "mini-surface")]
+            #[cfg(not(feature = "mcp"))]
             let wait_for_mcp_enabled = false;
             Box::pin(handle_run_command(
                 prompt,
@@ -1561,14 +1560,13 @@ async fn main() -> anyhow::Result<ExitCode> {
                 interrupt_session(&session_id, &cli_scope).await
             }
         },
-        #[cfg(not(feature = "mini-surface"))]
         Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
-        #[cfg(not(feature = "mini-surface"))]
+        #[cfg(feature = "mcp")]
         Commands::Mcp { command } => handle_mcp_command(command).await,
-        #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+        #[cfg(feature = "skills")]
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
-        #[cfg(not(feature = "mini-surface"))]
+        #[cfg(feature = "mob")]
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get {
@@ -2973,11 +2971,13 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
 /// the parent CLI agent. Host-mode behavior is backend-driven by mob runtime
 /// requests and must not be overridden here.
 #[allow(dead_code)]
+#[cfg(feature = "mob")]
 struct RunMobSessionService {
     inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
 }
 
 #[allow(dead_code)]
+#[cfg(feature = "mob")]
 impl RunMobSessionService {
     fn new(inner: Arc<EphemeralSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -2985,6 +2985,7 @@ impl RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl SessionService for RunMobSessionService {
     async fn create_session(
         &self,
@@ -3073,6 +3074,7 @@ impl SessionService for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl SessionServiceCommsExt for RunMobSessionService {
     async fn comms_runtime(
         &self,
@@ -3090,6 +3092,7 @@ impl SessionServiceCommsExt for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_core::service::SessionServiceControlExt for RunMobSessionService {
     async fn append_system_context(
         &self,
@@ -3104,6 +3107,7 @@ impl meerkat_core::service::SessionServiceControlExt for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
     async fn read_history(
         &self,
@@ -3116,6 +3120,7 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn subscribe_session_events(
         &self,
@@ -3150,11 +3155,13 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     }
 }
 
+#[cfg(feature = "mob")]
 struct RunMobToolsContext {
     state: Arc<meerkat_mob_mcp::MobMcpState>,
     known_mob_ids: std::collections::BTreeSet<String>,
 }
 
+#[cfg(feature = "mob")]
 impl RunMobToolsContext {
     #[cfg(test)]
     fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
@@ -3195,6 +3202,7 @@ impl RunMobToolsContext {
     }
 }
 
+#[cfg(feature = "mob")]
 async fn prepare_run_mob_tools(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
@@ -3267,6 +3275,7 @@ fn build_cli_service(
     meerkat::surface::build_embedded_service(factory, config, 64, default_schedule_tools)
 }
 
+#[cfg(feature = "mob")]
 async fn build_deploy_mob_session_service(
     scope: &RuntimeScope,
     config: Config,
@@ -3444,7 +3453,7 @@ async fn run_agent(
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let keep_alive = resolve_keep_alive(keep_alive)?;
-    let effective_mob = !cfg!(feature = "mini-surface") && (enable_mob || config.tools.mob_enabled);
+    let effective_mob = cfg!(feature = "mob") && (enable_mob || config.tools.mob_enabled);
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let preload_skills = if preload_skills.is_empty() {
         None
@@ -3530,6 +3539,7 @@ async fn run_agent(
     // Wrap in Arc so we can share with the stdin reader task
     let service = Arc::new(service);
 
+    #[cfg(feature = "mob")]
     let mut run_mob_tools = if effective_mob {
         let mob_persistent = get_or_create_mob_persistent_service_from_bundle(
             scope,
@@ -3543,18 +3553,23 @@ async fn run_agent(
     } else {
         None
     };
+    #[cfg(not(feature = "mob"))]
+    let mut run_mob_tools: Option<()> = None;
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     // Mob tools now flow through mob_tools (factory pattern), not external_tools.
     // Only MCP tools remain as external_tools.
     let external_tools = mcp_external_tools;
+    #[cfg(feature = "mob")]
     let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
         run_mob_tools.as_ref().map(|ctx| {
             Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
                 Arc::clone(&ctx.state),
             )) as Arc<dyn meerkat_core::service::MobToolsFactory>
         });
+    #[cfg(not(feature = "mob"))]
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> = None;
 
     let parsed_app_context = app_context
         .as_deref()
@@ -3777,6 +3792,7 @@ async fn run_agent(
             runtime_adapter.unregister_session(&session_id).await;
             service.shutdown().await;
             shutdown_mcp(&mcp_adapter).await;
+            #[cfg(feature = "mob")]
             if let Some(ref mut mob_ctx) = run_mob_tools {
                 mob_ctx.persist(scope).await?;
             }
@@ -4038,28 +4054,33 @@ async fn resume_session_with_llm_override(
     let service = Arc::new(persistent_service);
 
     log_stage("compose_external_tool_dispatchers");
-    let mut run_mob_tools =
-        if !cfg!(feature = "mini-surface") && tooling.mob.resolve(config.tools.mob_enabled) {
-            log_stage("get_or_create_mob_persistent_service");
-            let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
-            let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-                Arc::new(MobCliSessionService::new(mob_persistent));
-            Some(prepare_run_mob_tools(scope, run_mob_service).await?)
-        } else {
-            None
-        };
+    #[cfg(feature = "mob")]
+    let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
+        log_stage("get_or_create_mob_persistent_service");
+        let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
+        let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(MobCliSessionService::new(mob_persistent));
+        Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "mob"))]
+    let mut run_mob_tools: Option<()> = None;
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     // Mob tools now flow through mob_tools (factory pattern), not external_tools.
     // Only MCP tools remain as external_tools.
     let external_tools = mcp_external_tools;
+    #[cfg(feature = "mob")]
     let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
         run_mob_tools.as_ref().map(|ctx| {
             Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
                 Arc::clone(&ctx.state),
             )) as Arc<dyn meerkat_core::service::MobToolsFactory>
         });
+    #[cfg(not(feature = "mob"))]
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> = None;
 
     let output_pipeline = CliOutputPipeline::new(
         stream,
@@ -4251,6 +4272,7 @@ async fn resume_session_with_llm_override(
             log_stage("shutdown_mcp");
             shutdown_mcp(&mcp_adapter).await;
             log_stage("persist_mob_registry");
+            #[cfg(feature = "mob")]
             if let Some(ref mut mob_ctx) = run_mob_tools {
                 mob_ctx.persist(scope).await?;
             }
@@ -4772,6 +4794,7 @@ fn remember_cli_persistent_surface(
     Ok(cache.entry(key).or_insert(created).clone())
 }
 
+#[cfg(feature = "mob")]
 fn mob_persistent_service_cache()
 -> &'static Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Weak<CliPersistentService>>>> =
@@ -4787,6 +4810,7 @@ fn mob_persistent_service_key(scope: &RuntimeScope) -> String {
     )
 }
 
+#[cfg(feature = "mob")]
 fn cached_mob_persistent_service(
     scope: &RuntimeScope,
 ) -> anyhow::Result<Option<Arc<CliPersistentService>>> {
@@ -4798,6 +4822,7 @@ fn cached_mob_persistent_service(
         .and_then(Weak::upgrade))
 }
 
+#[cfg(feature = "mob")]
 fn remember_mob_persistent_service(
     scope: &RuntimeScope,
     created: Arc<CliPersistentService>,
@@ -4814,6 +4839,7 @@ fn remember_mob_persistent_service(
     }
 }
 
+#[cfg(feature = "mob")]
 fn build_mob_persistent_service_from_bundle(
     scope: &RuntimeScope,
     config: Config,
@@ -4825,6 +4851,7 @@ fn build_mob_persistent_service_from_bundle(
     remember_mob_persistent_service(scope, persistent_service)
 }
 
+#[cfg(feature = "mob")]
 async fn get_or_create_mob_persistent_service(
     scope: &RuntimeScope,
     config: Config,
@@ -4837,6 +4864,7 @@ async fn get_or_create_mob_persistent_service(
     build_mob_persistent_service_from_bundle(scope, config, manifest, persistence)
 }
 
+#[cfg(feature = "mob")]
 fn get_or_create_mob_persistent_service_from_bundle(
     scope: &RuntimeScope,
     config: Config,
@@ -4854,10 +4882,12 @@ fn get_or_create_mob_persistent_service_from_bundle(
 ///
 /// Mob actor keep-alive behavior is defined by runtime/backend decisions.
 /// This wrapper forwards requests without rewriting keep-alive flags.
+#[cfg(feature = "mob")]
 struct MobCliSessionService {
     inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
 }
 
+#[cfg(feature = "mob")]
 impl MobCliSessionService {
     fn new(inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>) -> Self {
         Self { inner }
@@ -4865,6 +4895,7 @@ impl MobCliSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl SessionService for MobCliSessionService {
     async fn create_session(
         &self,
@@ -4921,6 +4952,7 @@ impl SessionService for MobCliSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl SessionServiceCommsExt for MobCliSessionService {
     async fn comms_runtime(
         &self,
@@ -4938,6 +4970,7 @@ impl SessionServiceCommsExt for MobCliSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_core::service::SessionServiceControlExt for MobCliSessionService {
     async fn append_system_context(
         &self,
@@ -4952,6 +4985,7 @@ impl meerkat_core::service::SessionServiceControlExt for MobCliSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
     async fn read_history(
         &self,
@@ -4964,6 +4998,7 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn subscribe_session_events(
         &self,
@@ -5198,24 +5233,39 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let (config, _) = load_config(scope).await?;
     let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
 
-    // Archive and clean up any session-owned mobs.
-    if config.tools.mob_enabled
-        && let Ok(mob_persistent) = remember_mob_persistent_service(scope, Arc::clone(&service))
-        && let Ok((state, _registry)) = hydrate_mob_state(
-            scope,
-            Arc::new(MobCliSessionService::new(mob_persistent))
-                as Arc<dyn meerkat_mob::MobSessionService>,
-            None,
-            None,
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
+    #[cfg(feature = "mob")]
     {
-        meerkat_mob_mcp::archive_session_with_mob_cleanup(service.as_ref(), &state, &session_id)
+        // Archive and clean up any session-owned mobs.
+        if config.tools.mob_enabled
+            && let Ok(mob_persistent) = remember_mob_persistent_service(scope, Arc::clone(&service))
+            && let Ok((state, _registry)) = hydrate_mob_state(
+                scope,
+                Arc::new(MobCliSessionService::new(mob_persistent))
+                    as Arc<dyn meerkat_mob::MobSessionService>,
+                None,
+                None,
+                None,
+                std::collections::BTreeMap::new(),
+            )
+            .await
+        {
+            meerkat_mob_mcp::archive_session_with_mob_cleanup(
+                service.as_ref(),
+                &state,
+                &session_id,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
-    } else {
+        } else {
+            service
+                .archive(&session_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+        }
+    }
+    #[cfg(not(feature = "mob"))]
+    {
+        let _ = config;
         service
             .archive(&session_id)
             .await
@@ -5404,6 +5454,7 @@ async fn persist_cli_config(config: Config, scope: &RuntimeScope) -> anyhow::Res
     Ok(())
 }
 
+#[cfg(feature = "skills")]
 async fn resolve_skill_repo_for_config(
     raw: &str,
     name_override: Option<String>,
@@ -5422,6 +5473,7 @@ async fn resolve_skill_repo_for_config(
     })
 }
 
+#[cfg(feature = "skills")]
 async fn repo_matches_selector(
     repo: &meerkat_core::skills_config::SkillRepositoryConfig,
     selector: &str,
@@ -5442,6 +5494,7 @@ async fn repo_matches_selector(
 }
 
 /// Handle Skills subcommands
+#[cfg(feature = "skills")]
 async fn handle_skills_command(
     command: SkillsCommands,
     scope: &RuntimeScope,
@@ -5632,6 +5685,7 @@ async fn handle_skills_command(
 }
 
 /// Handle MCP subcommands
+#[cfg(feature = "mcp")]
 async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     match command {
         McpCommands::Add {
@@ -5683,11 +5737,13 @@ async fn handle_mcp_command(command: McpCommands) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(feature = "mob")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct PersistedMobRegistry {
     mobs: std::collections::BTreeMap<String, PersistedMob>,
 }
 
+#[cfg(feature = "mob")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedMob {
     /// Legacy fallback for old registry entries written before events were persisted.
@@ -5701,16 +5757,19 @@ struct PersistedMob {
     runs: std::collections::BTreeMap<String, meerkat_mob::MobRun>,
 }
 
+#[cfg(feature = "mob")]
 fn mob_registry_path(scope: &RuntimeScope) -> PathBuf {
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     paths.root.join("mob_registry.json")
 }
 
+#[cfg(feature = "mob")]
 fn mob_registry_lock_path(scope: &RuntimeScope) -> PathBuf {
     let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id);
     paths.root.join("mob_registry.lock")
 }
 
+#[cfg(feature = "mob")]
 struct MobRegistryLock {
     #[cfg(unix)]
     _lock: nix::fcntl::Flock<std::fs::File>,
@@ -5718,6 +5777,7 @@ struct MobRegistryLock {
     _lock: std::fs::File,
 }
 
+#[cfg(feature = "mob")]
 async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRegistryLock> {
     let path = mob_registry_lock_path(scope);
     if let Some(parent) = path.parent() {
@@ -5820,6 +5880,7 @@ async fn acquire_mob_registry_lock(scope: &RuntimeScope) -> anyhow::Result<MobRe
     Ok(MobRegistryLock { _lock: lock_file })
 }
 
+#[cfg(feature = "mob")]
 async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobRegistry> {
     let path = mob_registry_path(scope);
     if !path.exists() {
@@ -5833,6 +5894,7 @@ async fn load_mob_registry(scope: &RuntimeScope) -> anyhow::Result<PersistedMobR
     Ok(parsed)
 }
 
+#[cfg(feature = "mob")]
 async fn save_mob_registry(
     scope: &RuntimeScope,
     registry: &PersistedMobRegistry,
@@ -5864,6 +5926,7 @@ async fn save_mob_registry(
         .map_err(|e| anyhow::anyhow!("failed to commit mob registry '{}': {e}", path.display()))
 }
 
+#[cfg(feature = "mob")]
 async fn sync_mob_events(
     state: &meerkat_mob_mcp::MobMcpState,
     registry: &mut PersistedMobRegistry,
@@ -5889,6 +5952,7 @@ async fn sync_mob_events(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 async fn persist_mob_handle_snapshot(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
@@ -5918,6 +5982,7 @@ async fn persist_mob_handle_snapshot(
     save_mob_registry(scope, &registry).await
 }
 
+#[cfg(feature = "mob")]
 async fn refresh_persisted_run_snapshots(
     state: &meerkat_mob_mcp::MobMcpState,
     mob_id: &str,
@@ -5951,6 +6016,7 @@ async fn refresh_persisted_run_snapshots(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 fn cache_run_snapshot(
     registry: &mut PersistedMobRegistry,
     mob_id: &str,
@@ -5964,6 +6030,7 @@ fn cache_run_snapshot(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 fn cached_run_snapshot(
     registry: &PersistedMobRegistry,
     mob_id: &str,
@@ -5977,6 +6044,7 @@ fn cached_run_snapshot(
         .cloned()
 }
 
+#[cfg(feature = "mob")]
 fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     match value {
         "Creating" => Some(meerkat_mob::MobState::Creating),
@@ -5988,9 +6056,11 @@ fn parse_mob_state(value: &str) -> Option<meerkat_mob::MobState> {
     }
 }
 
+#[cfg(feature = "mob")]
 type LlmClientProvider =
     Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>;
 
+#[cfg(feature = "mob")]
 async fn hydrate_mob_state(
     scope: &RuntimeScope,
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
@@ -6102,6 +6172,7 @@ async fn hydrate_mob_state(
     Ok((state, registry))
 }
 
+#[cfg(feature = "mob")]
 fn parse_run_flow_params(raw_params: Option<String>) -> anyhow::Result<serde_json::Value> {
     match raw_params {
         Some(raw) => {
@@ -6116,10 +6187,12 @@ fn parse_run_flow_params(raw_params: Option<String>) -> anyhow::Result<serde_jso
     }
 }
 
+#[cfg(feature = "mob")]
 fn render_flow_status_json(run: Option<meerkat_mob::MobRun>) -> anyhow::Result<String> {
     serde_json::to_string(&run).map_err(|e| anyhow::anyhow!("failed to encode flow status: {e}"))
 }
 
+#[cfg(feature = "mob")]
 async fn wait_for_terminal_flow_run(
     state: &meerkat_mob_mcp::MobMcpState,
     mob_id: &str,
@@ -6145,6 +6218,7 @@ async fn wait_for_terminal_flow_run(
     }
 }
 
+#[cfg(feature = "mob")]
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
     if let MobCommands::Pack { dir, output, sign } = &command {
         println!("{}", execute_mob_pack(dir, output, sign.as_deref()).await?);
@@ -6530,6 +6604,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     result
 }
 
+#[cfg(feature = "mob")]
 fn format_inspect_output(info: &meerkat_mob_pack::pack::InspectResult) -> String {
     let mut out = String::new();
     out.push_str(&format!("name\t{}\n", info.name));
@@ -6542,6 +6617,7 @@ fn format_inspect_output(info: &meerkat_mob_pack::pack::InspectResult) -> String
     out
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_pack(
     dir: &std::path::Path,
     output: &std::path::Path,
@@ -6555,6 +6631,7 @@ async fn execute_mob_pack(
     Ok(result.digest.to_string())
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_inspect(pack: &std::path::Path) -> anyhow::Result<String> {
     let bytes = tokio::fs::read(pack)
         .await
@@ -6564,6 +6641,7 @@ async fn execute_mob_inspect(pack: &std::path::Path) -> anyhow::Result<String> {
     Ok(format_inspect_output(&info))
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> {
     let bytes = tokio::fs::read(pack)
         .await
@@ -6574,15 +6652,18 @@ async fn execute_mob_validate(pack: &std::path::Path) -> anyhow::Result<String> 
     Ok(format!("valid\t{digest}"))
 }
 
+#[cfg(feature = "mob")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WasmBuildTarget {
     output_dir: PathBuf,
 }
 
+#[cfg(feature = "mob")]
 struct WebBuildInvocation {
     wasm_pack_bin: String,
 }
 
+#[cfg(feature = "mob")]
 #[derive(serde::Serialize)]
 struct DerivedWebManifest {
     mobpack: DerivedWebMobpack,
@@ -6592,6 +6673,7 @@ struct DerivedWebManifest {
     web: DerivedWebRuntime,
 }
 
+#[cfg(feature = "mob")]
 #[derive(serde::Serialize)]
 struct DerivedWebMobpack {
     name: String,
@@ -6599,22 +6681,26 @@ struct DerivedWebMobpack {
     description: Option<String>,
 }
 
+#[cfg(feature = "mob")]
 #[derive(serde::Serialize)]
 struct DerivedWebSource {
     digest: String,
 }
 
+#[cfg(feature = "mob")]
 #[derive(serde::Serialize)]
 struct DerivedWebRequires {
     capabilities: Vec<String>,
 }
 
+#[cfg(feature = "mob")]
 #[derive(serde::Serialize)]
 struct DerivedWebRuntime {
     profile: String,
     forbid: Vec<String>,
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_web_build(
     pack: &std::path::Path,
     output: &std::path::Path,
@@ -6626,6 +6712,7 @@ async fn execute_mob_web_build(
     execute_mob_web_build_internal(pack, output, invocation).await
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_web_build_internal(
     pack: &std::path::Path,
     output: &std::path::Path,
@@ -6704,6 +6791,7 @@ async fn execute_mob_web_build_internal(
     ))
 }
 
+#[cfg(feature = "mob")]
 fn derive_manifest_web_toml(
     manifest: &meerkat_mob_pack::manifest::MobpackManifest,
     digest: &str,
@@ -6744,10 +6832,12 @@ fn derive_manifest_web_toml(
     Ok(out)
 }
 
+#[cfg(feature = "mob")]
 fn forbidden_web_capabilities() -> [&'static str; 3] {
     ["shell", "mcp_stdio", "process_spawn"]
 }
 
+#[cfg(feature = "mob")]
 fn validate_web_forbidden_capabilities(
     manifest: &meerkat_mob_pack::manifest::MobpackManifest,
 ) -> anyhow::Result<()> {
@@ -6765,6 +6855,7 @@ fn validate_web_forbidden_capabilities(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 async fn run_wasm_pack_build(
     wasm_pack_bin: &str,
     wasm_out_dir: &std::path::Path,
@@ -6803,11 +6894,13 @@ async fn run_wasm_pack_build(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 struct WebRuntimeCrateDir {
     path: PathBuf,
     cleanup_after_use: bool,
 }
 
+#[cfg(feature = "mob")]
 async fn resolve_web_runtime_crate_dir() -> anyhow::Result<WebRuntimeCrateDir> {
     if let Ok(configured) = std::env::var("RKAT_WEB_RUNTIME_CRATE_DIR") {
         let path = PathBuf::from(configured);
@@ -6837,6 +6930,7 @@ async fn resolve_web_runtime_crate_dir() -> anyhow::Result<WebRuntimeCrateDir> {
     })
 }
 
+#[cfg(feature = "mob")]
 fn validate_web_runtime_crate_dir(path: &std::path::Path) -> anyhow::Result<()> {
     if !path.join("Cargo.toml").exists() {
         return Err(anyhow::anyhow!(
@@ -6853,6 +6947,7 @@ fn validate_web_runtime_crate_dir(path: &std::path::Path) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 async fn write_embedded_web_runtime_crate() -> anyhow::Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!(
         "rkat-web-runtime-{}-{}",
@@ -6878,10 +6973,13 @@ async fn write_embedded_web_runtime_crate() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+#[cfg(feature = "mob")]
 const EMBEDDED_WEB_RUNTIME_CARGO_TOML: &str =
     include_str!("web_runtime_template/Cargo.toml.template");
+#[cfg(feature = "mob")]
 const EMBEDDED_WEB_RUNTIME_LIB_RS: &str = include_str!("web_runtime_template/lib.rs.template");
 
+#[cfg(feature = "mob")]
 async fn finalize_web_bundle(
     staging_dir: &std::path::Path,
     wasm_out_dir: &std::path::Path,
@@ -6955,6 +7053,7 @@ async fn finalize_web_bundle(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 fn validate_web_artifact_set(dir: &std::path::Path) -> anyhow::Result<()> {
     let required = [
         "index.html",
@@ -6978,6 +7077,7 @@ fn validate_web_artifact_set(dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 const WEB_INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
   <head>
@@ -6991,6 +7091,7 @@ const WEB_INDEX_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
+#[cfg(feature = "mob")]
 async fn execute_mob_deploy(
     scope: &RuntimeScope,
     pack: &std::path::Path,
@@ -7014,11 +7115,14 @@ async fn execute_mob_deploy(
     .await
 }
 
+#[cfg(feature = "mob")]
 type RpcDeployIo = (
     Box<dyn AsyncBufRead + Send + Unpin>,
     Box<dyn AsyncWrite + Send + Unpin>,
 );
+#[cfg(feature = "mob")]
 type DeployConfigObserver = Arc<dyn Fn(&Config) + Send + Sync>;
+#[cfg(feature = "mob")]
 struct DeployInvocation {
     cli_trust_policy: Option<TrustPolicyArg>,
     surface: DeploySurfaceArg,
@@ -7027,6 +7131,7 @@ struct DeployInvocation {
     config_observer: Option<DeployConfigObserver>,
 }
 
+#[cfg(feature = "mob")]
 async fn execute_mob_deploy_internal(
     scope: &RuntimeScope,
     pack: &std::path::Path,
@@ -7123,6 +7228,7 @@ async fn execute_mob_deploy_internal(
     Ok(rendered)
 }
 
+#[cfg(feature = "mob")]
 fn resolve_trust_policy<F>(
     cli_policy: Option<TrustPolicyArg>,
     mut env_lookup: F,
@@ -7144,6 +7250,7 @@ where
     Ok(TrustPolicy::Permissive)
 }
 
+#[cfg(feature = "mob")]
 fn parse_trust_policy(raw: &str) -> Option<TrustPolicy> {
     match raw.to_ascii_lowercase().as_str() {
         "permissive" => Some(TrustPolicy::Permissive),
@@ -7152,6 +7259,7 @@ fn parse_trust_policy(raw: &str) -> Option<TrustPolicy> {
     }
 }
 
+#[cfg(feature = "mob")]
 fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<TrustPolicy>> {
     let config_path =
         meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id)
@@ -7176,6 +7284,7 @@ fn read_config_trust_policy(scope: &RuntimeScope) -> anyhow::Result<Option<Trust
         .map(Some)
 }
 
+#[cfg(feature = "mob")]
 fn load_deploy_config_with_pack_defaults(
     scope: &RuntimeScope,
     pack_defaults_toml: Option<&Vec<u8>>,
@@ -7202,6 +7311,7 @@ fn load_deploy_config_with_pack_defaults(
     Ok(config)
 }
 
+#[cfg(feature = "mob")]
 fn apply_toml_delta_layer(
     config: &mut Config,
     toml_bytes: &[u8],
@@ -7214,6 +7324,7 @@ fn apply_toml_delta_layer(
         .map_err(|err| anyhow::anyhow!("invalid TOML in {source_label}: {err}"))
 }
 
+#[cfg(feature = "mob")]
 fn user_trust_store_path(scope: &RuntimeScope) -> PathBuf {
     scope
         .user_config_root
@@ -7223,6 +7334,7 @@ fn user_trust_store_path(scope: &RuntimeScope) -> PathBuf {
         .join("trusted-signers.toml")
 }
 
+#[cfg(feature = "mob")]
 fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
     scope
         .context_root
@@ -7232,6 +7344,7 @@ fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
         .join("trusted-signers.toml")
 }
 
+#[cfg(feature = "mob")]
 fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet<String> {
     let mut caps = std::collections::BTreeSet::from([
         "core".to_string(),
@@ -7248,6 +7361,7 @@ fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet
     caps
 }
 
+#[cfg(feature = "mob")]
 fn validate_required_capabilities(
     manifest: &meerkat_mob_pack::manifest::MobpackManifest,
     runtime_caps: &std::collections::BTreeSet<String>,
@@ -7266,6 +7380,7 @@ fn validate_required_capabilities(
     Ok(())
 }
 
+#[cfg(feature = "mob")]
 async fn run_rpc_surface<R, W>(
     scope: &RuntimeScope,
     config: Config,
@@ -8781,7 +8896,7 @@ mod tests {
         assert!(err.to_string().contains("intent"));
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_mob_run_flow_short_flags_parse() {
         let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
@@ -8805,7 +8920,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_pack_command_parses() {
         let cli = Cli::try_parse_from([
@@ -8832,7 +8947,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_deploy_command_parses() {
         let cli = Cli::try_parse_from([
@@ -8873,7 +8988,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_deploy_surface_flag_parses() {
         let cli = Cli::try_parse_from([
@@ -8897,7 +9012,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mcp")]
     #[test]
     fn test_cli_mcp_add_and_remove_parse_local_config_surface() {
         let add = Cli::try_parse_from([
@@ -8952,7 +9067,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_help_snapshots_cover_current_public_surface() {
         use clap::CommandFactory;
@@ -8976,23 +9090,26 @@ mod tests {
         assert!(run.contains("--stdin <STDIN>"));
         assert!(run.contains("piped stdin is read as blob context"));
 
-        let mob = render_help(Cli::command().find_subcommand("mob").unwrap().clone());
-        assert!(mob.contains("pack"));
-        assert!(mob.contains("deploy"));
-        assert!(mob.contains("run-flow"));
-        assert!(mob.contains("flow-status"));
-        assert!(!mob.contains("prefabs"));
-        assert!(!mob.contains("create"));
-        // spawn-helper and fork-helper are user-facing; raw "spawn" is not
-        assert!(mob.contains("spawn-helper"));
-        assert!(mob.contains("fork-helper"));
-        assert!(mob.contains("member-status"));
-        assert!(mob.contains("force-cancel"));
-        assert!(mob.contains("respawn"));
-        assert!(mob.contains("wait-kickoff"));
+        #[cfg(feature = "mob")]
+        {
+            let mob = render_help(Cli::command().find_subcommand("mob").unwrap().clone());
+            assert!(mob.contains("pack"));
+            assert!(mob.contains("deploy"));
+            assert!(mob.contains("run-flow"));
+            assert!(mob.contains("flow-status"));
+            assert!(!mob.contains("prefabs"));
+            assert!(!mob.contains("create"));
+            // spawn-helper and fork-helper are user-facing; raw "spawn" is not
+            assert!(mob.contains("spawn-helper"));
+            assert!(mob.contains("fork-helper"));
+            assert!(mob.contains("member-status"));
+            assert!(mob.contains("force-cancel"));
+            assert!(mob.contains("respawn"));
+            assert!(mob.contains("wait-kickoff"));
+        }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_wait_kickoff_command_parses() {
         let cli = Cli::try_parse_from([
@@ -9029,7 +9146,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_deploy_override_flags_parse() {
         let cli = Cli::try_parse_from([
@@ -9069,7 +9186,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mini-surface"))]
+    #[cfg(feature = "mob")]
     #[test]
     fn test_cli_mob_web_build_command_parses() {
         let cli = Cli::try_parse_from([

@@ -328,8 +328,8 @@ jobs:
           cargo check -p meerkat-mcp-server --no-default-features --features comms
           cargo check -p rkat --no-default-features --features session-store
           cargo check -p rkat --no-default-features --features session-store,mcp
-          cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface
-          cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,mini-surface,mini-skills
+          cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
+          cargo check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
           cargo check -p rkat --no-default-features --features session-store,comms,mcp
 
   wasm-check:

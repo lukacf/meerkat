@@ -166,9 +166,8 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![],
             },
-            // SubmitWork is a Running self-loop in the formal model. The
-            // runtime still tolerates a transient Creating authority state
-            // internally, but fresh/resumed mobs surface Running.
+            // SubmitWork is a Running self-loop in the formal model. Fresh and
+            // resumed mobs normalize directly to Running at runtime as well.
             TransitionSchema {
                 name: "SubmitWorkRunning".into(),
                 from: vec!["Running".into()],

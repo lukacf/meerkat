@@ -1233,8 +1233,7 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
-                    if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    if let Err(error) = self.require_state(&[MobState::Running]) {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -1266,11 +1265,7 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
+                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => {
                             let canceled = self.cancel_pending_spawns_for_member(
                                 &meerkat_id,
@@ -1294,19 +1289,14 @@ impl MobActor {
                     initial_message,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_respawn(meerkat_id, initial_message).await,
                         Err(error) => Err(super::handle::MobRespawnError::from(error)),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
+                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
                     };
@@ -1317,8 +1307,7 @@ impl MobActor {
                     target,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_wire(local, target).await,
                         Err(error) => Err(error),
                     };
@@ -1329,8 +1318,7 @@ impl MobActor {
                     target,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_unwire(local, target).await,
                         Err(error) => Err(error),
                     };
@@ -1343,8 +1331,7 @@ impl MobActor {
                     render_metadata,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             self.handle_external_turn(
                                 meerkat_id,
@@ -1363,8 +1350,7 @@ impl MobActor {
                     content,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_internal_turn(meerkat_id, content).await,
                         Err(error) => Err(error),
                     };
@@ -1645,7 +1631,7 @@ impl MobActor {
                 MobCommand::Reset { reply_tx } => {
                     // Shell guard: reject early if lifecycle phase doesn't support Reset.
                     // This prevents fail_all_pending_spawns from running as a side-effect
-                    // when the transition is invalid (e.g. Creating or Destroyed).
+                    // when the transition is invalid (e.g. Destroyed).
                     if let Err(error) = self.lifecycle_authority.require_phase(
                         &[MobState::Running, MobState::Stopped, MobState::Completed],
                         MobState::Running,
@@ -1663,8 +1649,7 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             self.handle_task_create(subject, description, blocked_by)
                                 .await
@@ -1679,8 +1664,7 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
                     };
@@ -1802,8 +1786,7 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_force_cancel(meerkat_id).await,
                         Err(error) => Err(error),
                     };
@@ -2645,7 +2628,7 @@ impl MobActor {
                             actor.provisioner.clone(),
                         );
                         if let Err(error) = actor
-                            .require_state(&[MobState::Running, MobState::Creating])
+                            .require_state(&[MobState::Running])
                         {
                             if let Err(retire_error) = provision.rollback().await {
                                 Err(MobError::Internal(format!(
@@ -2838,7 +2821,7 @@ impl MobActor {
                 meerkat_id.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+            if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
                         "policy spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
@@ -3489,7 +3472,7 @@ impl MobActor {
                 meerkat_id.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+            if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(meerkat_id.as_str()),

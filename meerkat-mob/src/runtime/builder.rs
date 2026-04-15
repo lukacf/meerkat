@@ -948,19 +948,18 @@ impl MobBuilder {
         ));
         // Only create the orchestrator authority when the definition has an orchestrator.
         // Plain mobs (orchestrator: None) skip orchestrator guards entirely.
-        let initial_phase = MobState::from_u8(state.load(Ordering::Acquire));
+        let initial_phase = match MobState::from_u8(state.load(Ordering::Acquire)) {
+            MobState::Creating => MobState::Running,
+            phase => phase,
+        };
         let orchestrator = if definition.orchestrator.is_some() {
             let mut orch = match initial_phase {
-                MobState::Creating | MobState::Running => {
-                    // Fresh creation: start in Creating and initialize.
-                    let mut authority =
-                        super::mob_orchestrator_authority::MobOrchestratorAuthority::new(
-                            state.clone(),
-                        );
-                    let _ = authority.apply(
-                        super::mob_orchestrator_authority::MobOrchestratorInput::InitializeOrchestrator,
-                    );
-                    authority
+                MobState::Running => {
+                    // Fresh creation and stale Creating restores both normalize to
+                    // the checked-in Running bootstrap state.
+                    super::mob_orchestrator_authority::MobOrchestratorAuthority::new_running(
+                        state.clone(),
+                    )
                 }
                 _ => {
                     // Resume: restore to the persisted phase.

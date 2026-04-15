@@ -218,6 +218,20 @@ impl MobOrchestratorAuthority {
         }
     }
 
+    /// Create a fresh authority directly in Running phase with the canonical
+    /// running-default fields used by live mob bootstrap.
+    pub(crate) fn new_running(observable: Arc<AtomicU8>) -> Self {
+        observable.store(MobState::Running as u8, Ordering::Release);
+        Self {
+            phase: MobState::Running,
+            fields: MobOrchestratorFields {
+                supervisor_active: true,
+                ..MobOrchestratorFields::default()
+            },
+            observable,
+        }
+    }
+
     /// Create an authority initialized to a specific phase.
     ///
     /// Used during resume to restore the authority to the persisted phase

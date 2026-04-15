@@ -4444,24 +4444,30 @@ impl MobActor {
         let phase = self.state();
         if self.orchestrator.is_some() {
             let mut topology_unbound = false;
+            let mut orchestrator_phase = phase;
             if self.machine_orchestrator_can_accept(phase, MobOrchestratorInput::StopOrchestrator) {
-                self.machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)?
+                let transition = self
+                    .machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)?
                     .ok_or_else(|| {
                         MobError::Internal(
                             "orchestrator missing during destroy despite expected binding".into(),
                         )
                     })?;
+                orchestrator_phase = transition.next_phase;
                 topology_unbound = true;
             }
             if topology_unbound {
                 self.flow_engine.unbind_topology_coordinator();
             }
-            self.machine_apply_orchestrator(phase, MobOrchestratorInput::DestroyOrchestrator)?
-                .ok_or_else(|| {
-                    MobError::Internal(
-                        "orchestrator missing during destroy despite expected binding".into(),
-                    )
-                })?;
+            self.machine_apply_orchestrator(
+                orchestrator_phase,
+                MobOrchestratorInput::DestroyOrchestrator,
+            )?
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "orchestrator missing during destroy despite expected binding".into(),
+                )
+            })?;
         }
         self.lifecycle_authority
             .apply_in_phase(

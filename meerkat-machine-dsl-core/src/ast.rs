@@ -147,6 +147,11 @@ pub struct InvariantDef {
 #[derive(Debug)]
 pub struct TransitionDef {
     pub name: Ident,
+    /// If set, this transition is expanded into one per listed phase, with
+    /// phase-specific naming (e.g., `DoThingIdle`, `DoThingAttached`).
+    /// Each expanded transition gets a `self.lifecycle_phase == Phase::X` guard
+    /// prepended and a `to X` target.
+    pub per_phase: Option<Vec<Ident>>,
     pub trigger: TriggerDef,
     pub guard: Option<ExprDef>,
     pub updates: Vec<UpdateDef>,
@@ -168,7 +173,7 @@ pub struct TriggerDef {
     pub bindings: Vec<Ident>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EffectEmitDef {
     pub variant: Ident,
     pub fields: Vec<(Ident, ExprDef)>,
@@ -263,7 +268,7 @@ pub enum ExprDef {
 // Updates
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum UpdateDef {
     Assign {
         field: Ident,

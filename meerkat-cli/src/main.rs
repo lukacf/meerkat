@@ -8632,12 +8632,21 @@ mod tests {
 
         assert_eq!(runtime_skill_id, "demo-skill");
         assert_eq!(runtime_repo.source_uuid, config_repo.source_uuid);
-        match (&runtime_repo.transport, &config_repo.transport) {
+        let filesystem_paths = match (&runtime_repo.transport, &config_repo.transport) {
             (
                 meerkat_core::skills_config::SkillRepoTransport::Filesystem { path: runtime_path },
                 meerkat_core::skills_config::SkillRepoTransport::Filesystem { path: config_path },
-            ) => assert_eq!(runtime_path, config_path),
-            other => panic!("expected filesystem transports, got {other:?}"),
+            ) => Some((runtime_path, config_path)),
+            _ => None,
+        };
+        assert!(
+            filesystem_paths.is_some(),
+            "expected filesystem transports, got runtime={:?} config={:?}",
+            runtime_repo.transport,
+            config_repo.transport
+        );
+        if let Some((runtime_path, config_path)) = filesystem_paths {
+            assert_eq!(runtime_path, config_path);
         }
     }
 

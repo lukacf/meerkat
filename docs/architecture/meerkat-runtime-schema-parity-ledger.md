@@ -193,6 +193,10 @@ Current exact-parity state:
   newly accepted inputs; that control intent is now decided in the
   driver/machine path and the helper only executes the explicit admit
   transition plus lower-level queue/ledger bookkeeping
+- the machine side now owns the admission signal classifier explicitly too:
+  accept-time wake / interrupt / immediate-processing intent is derived from
+  the resolved `AcceptOutcome` policy plus the steer/immediacy bit, while the
+  driver helper no longer caches that admission signal locally
 - the ingress helper also no longer derives a second authoritative
   `current_run` projection from contributor state; the live guard path now
   validates contributor `last_run` metadata directly against the control-owned

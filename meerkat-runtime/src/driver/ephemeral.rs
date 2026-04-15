@@ -1278,8 +1278,6 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         let content_shape = ContentShape(input.kind_id().to_string());
         let is_prompt = matches!(input, Input::Prompt(_));
         let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
-        let post_admission_signal =
-            admission_signal_from_policy(&policy, request_immediate_processing);
         let ingress_input = if policy.apply_mode == crate::policy::ApplyMode::Ignore
             && policy.consume_point == crate::policy::ConsumePoint::OnAccept
         {
@@ -1306,9 +1304,6 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         match self.ingress.apply(ingress_input) {
             Ok(transition) => {
                 self.process_accept_effects(&transition.effects, &input);
-                if self.post_admission_signal < post_admission_signal {
-                    self.post_admission_signal = post_admission_signal;
-                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -1543,20 +1538,5 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     }
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger.active_input_ids()
-    }
-}
-
-fn admission_signal_from_policy(
-    policy: &crate::policy::PolicyDecision,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match policy.wake_mode {
-        crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-        crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-        crate::WakeMode::None => PostAdmissionSignal::None,
     }
 }

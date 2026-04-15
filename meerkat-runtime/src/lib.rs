@@ -57,7 +57,7 @@ pub mod store;
 pub mod traits;
 
 // Re-exports for convenience
-pub use accept::{AcceptOutcome, RejectReason};
+pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};
 pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
     check_supersession, create_aggregate_input, is_coalescing_eligible,

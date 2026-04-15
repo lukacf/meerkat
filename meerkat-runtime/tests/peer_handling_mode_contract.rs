@@ -10,7 +10,9 @@ use meerkat_runtime::input::{
 };
 use meerkat_runtime::policy_table::DefaultPolicyTable;
 use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{ApplyMode, RoutingDisposition, WakeMode};
+use meerkat_runtime::{
+    ApplyMode, RoutingDisposition, WakeMode, post_admission_signal_from_accept_outcome,
+};
 
 fn runtime_id() -> LogicalRuntimeId {
     LogicalRuntimeId::new("peer-handling-mode-contract")
@@ -52,10 +54,13 @@ async fn running_queue_peer_message_interrupts_yielding() {
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
-        driver.take_post_admission_signal(),
+        post_admission_signal_from_accept_outcome(&outcome, false),
         PostAdmissionSignal::InterruptYielding
     );
-    assert!(!driver.take_wake_requested());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 #[tokio::test]
@@ -71,7 +76,11 @@ async fn running_steer_peer_message_requests_immediate_processing() {
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
-    let signal = driver.take_post_admission_signal();
+    let signal = post_admission_signal_from_accept_outcome(&outcome, true);
     assert_eq!(signal, PostAdmissionSignal::RequestImmediateProcessing);
     assert!(signal.should_wake());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }

@@ -4,6 +4,7 @@ use meerkat_core::lifecycle::InputId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::driver::PostAdmissionSignal;
 use crate::input_state::InputState;
 use crate::policy::PolicyDecision;
 
@@ -84,6 +85,36 @@ impl AcceptOutcome {
     /// Check if the input was rejected.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Rejected { .. })
+    }
+}
+
+/// Classify the machine-owned post-admission control signal for a resolved
+/// accept outcome.
+///
+/// Admission-time wake / interrupt / immediate-processing semantics are owned
+/// by the checked-in Meerkat machine. The runtime helper may still carry other
+/// wake signals for non-admission bookkeeping, but plain accept classification
+/// should flow through this function.
+pub fn post_admission_signal_from_accept_outcome(
+    outcome: &AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !matches!(outcome, AcceptOutcome::Accepted { .. }) {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            crate::WakeMode::None => PostAdmissionSignal::None,
+        },
+        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
+            PostAdmissionSignal::None
+        }
     }
 }
 

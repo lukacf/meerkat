@@ -161,16 +161,6 @@ impl DriverEntry {
         }
     }
 
-    /// Drain and return the typed post-admission signal.
-    pub(crate) fn take_post_admission_signal(
-        &mut self,
-    ) -> crate::driver::ephemeral::PostAdmissionSignal {
-        match self {
-            DriverEntry::Ephemeral(d) => d.take_post_admission_signal(),
-            DriverEntry::Persistent(d) => d.take_post_admission_signal(),
-        }
-    }
-
     /// Inspect the current typed post-admission signal without draining it.
     pub(crate) fn post_admission_signal(&self) -> crate::driver::ephemeral::PostAdmissionSignal {
         match self {
@@ -1300,6 +1290,8 @@ impl MeerkatMachine {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
 
+                let request_immediate_processing =
+                    crate::driver::ephemeral::requests_immediate_processing(&input);
                 let (outcome, signal) = {
                     let mut drv = driver.lock().await;
                     let result = drv
@@ -1307,7 +1299,8 @@ impl MeerkatMachine {
                         .accept_input(input)
                         .await
                         .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-                    let signal = drv.take_post_admission_signal();
+                    let signal =
+                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
                     (result, signal)
                 };
 
@@ -1591,9 +1584,13 @@ impl MeerkatMachine {
                     });
                 }
 
+                let request_immediate_processing =
+                    crate::driver::ephemeral::requests_immediate_processing(&input);
                 let (outcome, signal, handle) = {
                     let mut driver = driver.lock().await;
                     let result = driver.as_driver_mut().accept_input(input).await?;
+                    let signal =
+                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
 
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
@@ -1610,7 +1607,6 @@ impl MeerkatMachine {
                                     completions.register(input_id.clone())
                                 })
                             };
-                            let signal = driver.take_post_admission_signal();
                             (result, signal, handle)
                         }
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -1620,21 +1616,13 @@ impl MeerkatMachine {
                                 .unwrap_or(true);
 
                             if is_terminal {
-                                (
-                                    result,
-                                    crate::driver::ephemeral::PostAdmissionSignal::None,
-                                    None,
-                                )
+                                (result, signal, None)
                             } else {
                                 let handle = {
                                     let mut completions = completions.lock().await;
                                     completions.register(existing_id.clone())
                                 };
-                                (
-                                    result,
-                                    crate::driver::ephemeral::PostAdmissionSignal::None,
-                                    Some(handle),
-                                )
+                                (result, signal, Some(handle))
                             }
                         }
                         AcceptOutcome::Rejected { reason } => {
@@ -1689,10 +1677,13 @@ impl MeerkatMachine {
                     });
                 }
 
+                let request_immediate_processing =
+                    crate::driver::ephemeral::requests_immediate_processing(&input);
                 let outcome = {
                     let mut driver = driver.lock().await;
                     let result = driver.as_driver_mut().accept_input(input).await?;
-                    let signal = driver.take_post_admission_signal();
+                    let signal =
+                        Self::machine_owned_admission_signal(&result, request_immediate_processing);
                     debug_assert!(
                         !signal.should_process_immediately(),
                         "queue-only admission unexpectedly requested immediate processing"
@@ -3842,6 +3833,16 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
 impl MeerkatMachine {
     fn logical_runtime_id(session_id: &SessionId) -> LogicalRuntimeId {
         LogicalRuntimeId::new(session_id.to_string())
+    }
+
+    fn machine_owned_admission_signal(
+        outcome: &AcceptOutcome,
+        request_immediate_processing: bool,
+    ) -> crate::driver::ephemeral::PostAdmissionSignal {
+        crate::accept::post_admission_signal_from_accept_outcome(
+            outcome,
+            request_immediate_processing,
+        )
     }
 
     fn driver_error_from_command_error(err: MeerkatMachineCommandError) -> RuntimeDriverError {

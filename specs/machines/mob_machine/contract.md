@@ -124,6 +124,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `SpawnRunning`
 - From: `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+- Guards:
+  - `coordinator_bound`
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -498,6 +500,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RunFlow`()
 - Guards:
   - `active_members_present`
+  - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -506,6 +509,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartFlow`()
 - Guards:
   - `active_members_present`
+  - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -595,6 +599,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Respawn`(agent_runtime_id)
 - Guards:
   - `runtime_id_present`
+  - `coordinator_bound`
 - Emits: `ExposePendingSpawn`
 - To: `Running`
 

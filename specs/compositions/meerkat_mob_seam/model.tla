@@ -3026,6 +3026,7 @@ mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_
        /\ packet.payload.external_addressable = arg_external_addressable
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \cup {packet.payload.agent_runtime_id})
        /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
@@ -4157,6 +4158,7 @@ mob_RunFlowRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ (mob_live_runtime_ids # {})
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4176,6 +4178,7 @@ mob_StartFlowRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ (mob_live_runtime_ids # {})
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4412,6 +4415,7 @@ mob_RespawnRunning(arg_agent_runtime_id) ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, ((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None") + 1))
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4555,7 +4559,7 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Attached") /\ ((meerkat_active_runtime_id # None))
 
 EntryPacketAdmissible_mob(packet) ==
-    \/ /\ (packet.variant = "Spawn") /\ (mob_phase = "Running")
+    \/ /\ (packet.variant = "Spawn") /\ (mob_phase = "Running") /\ ((mob_coordinator_bound = TRUE))
     \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ (((packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ ((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None") = packet.payload.fence_token))) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids))
     \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ (((packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ ((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None") = packet.payload.fence_token))) /\ ((packet.payload.origin = "Internal"))
     \/ /\ (packet.variant = "RecordOperatorActionProvenance") /\ (mob_phase = "Running")
@@ -4592,14 +4596,14 @@ EntryPacketAdmissible_mob(packet) ==
     \/ /\ (packet.variant = "Shutdown") /\ (mob_phase = "Stopped")
     \/ /\ (packet.variant = "Shutdown") /\ (mob_phase = "Completed")
     \/ /\ (packet.variant = "CancelFlow") /\ (mob_phase = "Running")
-    \/ /\ (packet.variant = "RunFlow") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {}))
+    \/ /\ (packet.variant = "RunFlow") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((mob_coordinator_bound = TRUE))
     \/ /\ (packet.variant = "Unwire") /\ (mob_phase = "Running")
     \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
     \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Stopped") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
     \/ /\ (packet.variant = "RetireAll") /\ (mob_phase = "Running")
     \/ /\ (packet.variant = "RetireAll") /\ (mob_phase = "Stopped")
     \/ /\ (packet.variant = "Destroy") /\ (mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed")
-    \/ /\ (packet.variant = "Respawn") /\ (mob_phase = "Running") /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+    \/ /\ (packet.variant = "Respawn") /\ (mob_phase = "Running") /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids)) /\ ((mob_coordinator_bound = TRUE))
     \/ /\ (packet.variant = "CancelAllWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ (((packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ ((IF packet.payload.agent_runtime_id \in DOMAIN mob_runtime_fence_tokens THEN mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None") = packet.payload.fence_token)))
 
 EntryPacketAdmissible(packet) ==

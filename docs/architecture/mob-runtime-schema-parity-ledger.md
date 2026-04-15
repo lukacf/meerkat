@@ -263,6 +263,13 @@ Current state:
   boundary. `MobActor` now rejects those verbs using MobMachine-aligned
   phase/run predicates first, while the lifecycle and orchestrator authorities
   are left as realization checks after the machine-owned gate passes.
+- The next tranche fixed a real schema/runtime gap on the coordinator path
+  rather than shaving another field: `Spawn`, `Respawn`, and `RunFlow` now
+  require `coordinator_bound=true` in the checked-in machine, matching the live
+  runtime's existing `StageSpawn` / `StartFlow` rejections when the
+  orchestrator is unbound. The actor shell now uses the same coordinator-bound
+  gate directly instead of letting the lower orchestrator authority answer that
+  validity question first.
 
 ## Notes
 

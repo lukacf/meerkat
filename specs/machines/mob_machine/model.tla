@@ -40,6 +40,7 @@ TerminalStutter ==
 
 SpawnRunning(agent_identity, agent_runtime_id, fence_token, generation, external_addressable) ==
     /\ phase = "Running"
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \cup {agent_runtime_id})
@@ -535,6 +536,7 @@ FinishCleanupCompleted ==
 RunFlowRunning ==
     /\ phase = "Running"
     /\ (live_runtime_ids # {})
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -544,6 +546,7 @@ RunFlowRunning ==
 StartFlowRunning ==
     /\ phase = "Running"
     /\ (live_runtime_ids # {})
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -657,6 +660,7 @@ DestroyFromAny ==
 RespawnRunning(agent_runtime_id) ==
     /\ phase = "Running"
     /\ (agent_runtime_id \in live_runtime_ids)
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, ((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None") + 1))

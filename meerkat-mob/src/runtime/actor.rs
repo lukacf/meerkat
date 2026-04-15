@@ -387,6 +387,12 @@ impl MobActor {
         self.run_cancel_tokens.len() as u32
     }
 
+    fn machine_coordinator_bound(&self) -> bool {
+        self.orchestrator
+            .as_ref()
+            .map_or(true, |orch| orch.snapshot().coordinator_bound)
+    }
+
     fn require_mob_machine_stop(&self) -> Result<(), MobError> {
         if self.state() != MobState::Running {
             return Err(MobError::InvalidTransition {
@@ -465,6 +471,26 @@ impl MobActor {
                 to: MobState::Stopped,
             })
         }
+    }
+
+    fn require_mob_machine_spawn(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_mob_machine_run_flow(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            });
+        }
+        Ok(())
     }
 
     /// Guard that the mob is in one of the `allowed` phases.
@@ -1317,7 +1343,7 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
-                    if let Err(error) = self.require_state(&[MobState::Running]) {
+                    if let Err(error) = self.require_mob_machine_spawn() {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -1373,7 +1399,7 @@ impl MobActor {
                     initial_message,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
+                    let result = match self.require_mob_machine_spawn() {
                         Ok(()) => self.handle_respawn(meerkat_id, initial_message).await,
                         Err(error) => Err(super::handle::MobRespawnError::from(error)),
                     };
@@ -1460,7 +1486,7 @@ impl MobActor {
                     scoped_event_tx,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
+                    let result = match self.require_mob_machine_run_flow() {
                         Ok(()) => {
                             self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
                                 .await

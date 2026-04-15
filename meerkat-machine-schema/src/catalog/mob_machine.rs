@@ -133,7 +133,7 @@ pub fn mob_machine() -> MachineSchema {
                         "external_addressable".into(),
                     ],
                 },
-                guards: vec![],
+                guards: vec![coordinator_bound_guard()],
                 updates: {
                     let mut updates = reset_member_runtime_updates();
                     updates.extend(vec![
@@ -1010,7 +1010,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "RunFlow".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard()],
+        guards: vec![active_members_present_guard(), coordinator_bound_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1027,7 +1027,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "StartFlow".into(),
             bindings: vec![],
         },
-        guards: vec![active_members_present_guard()],
+        guards: vec![active_members_present_guard(), coordinator_bound_guard()],
         updates: vec![Update::Increment {
             field: "active_run_count".into(),
             amount: 1,
@@ -1230,7 +1230,7 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             variant: "Respawn".into(),
             bindings: vec!["agent_runtime_id".into()],
         },
-        guards: vec![runtime_id_present_guard()],
+        guards: vec![runtime_id_present_guard(), coordinator_bound_guard()],
         updates: vec![Update::MapInsert {
             field: "runtime_fence_tokens".into(),
             key: Expr::Binding("agent_runtime_id".into()),
@@ -1394,6 +1394,16 @@ fn no_active_runs_guard() -> Guard {
         expr: Expr::Eq(
             Box::new(Expr::Field("active_run_count".into())),
             Box::new(Expr::U64(0)),
+        ),
+    }
+}
+
+fn coordinator_bound_guard() -> Guard {
+    Guard {
+        name: "coordinator_bound".into(),
+        expr: Expr::Eq(
+            Box::new(Expr::Field("coordinator_bound".into())),
+            Box::new(Expr::Bool(true)),
         ),
     }
 }

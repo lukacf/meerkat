@@ -2,7 +2,7 @@
 //!
 //! This helper owns the live run-lifecycle and control-plane bookkeeping that
 //! still exists below the checked-in `MeerkatMachine` model. In particular, it
-//! tracks the active run identity and pre-run return phase used by the
+//! tracks the active run identity and the narrowed run-return phase used by the
 //! executor/control shell.
 //!
 //! Importantly, this module does **not** own the runtime's input-admission or
@@ -86,7 +86,25 @@ pub struct RuntimeControlTransition {
 #[derive(Debug, Clone)]
 struct RuntimeControlFields {
     current_run_id: Option<RunId>,
-    pre_run_state: Option<RuntimeState>,
+    pre_run_phase: Option<RunReturnPhase>,
+}
+
+/// The only return targets a completed run can legally project to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunReturnPhase {
+    Idle,
+    Attached,
+    Retired,
+}
+
+impl RunReturnPhase {
+    fn as_runtime_state(self) -> RuntimeState {
+        match self {
+            Self::Idle => RuntimeState::Idle,
+            Self::Attached => RuntimeState::Attached,
+            Self::Retired => RuntimeState::Retired,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +156,7 @@ impl RuntimeControlAuthority {
             phase: RuntimeState::Initializing,
             fields: RuntimeControlFields {
                 current_run_id: None,
-                pre_run_state: None,
+                pre_run_phase: None,
             },
         }
     }
@@ -149,7 +167,7 @@ impl RuntimeControlAuthority {
             phase,
             fields: RuntimeControlFields {
                 current_run_id: None,
-                pre_run_state: None,
+                pre_run_phase: None,
             },
         }
     }
@@ -164,9 +182,11 @@ impl RuntimeControlAuthority {
         self.fields.current_run_id.as_ref()
     }
 
-    /// Pre-run state from canonical state.
+    /// Pre-run return phase projected into the public runtime-state vocabulary.
     pub fn pre_run_state(&self) -> Option<RuntimeState> {
-        self.fields.pre_run_state
+        self.fields
+            .pre_run_phase
+            .map(RunReturnPhase::as_runtime_state)
     }
 
     /// Check if the runtime is in the Idle state.
@@ -238,7 +258,7 @@ impl RuntimeControlAuthority {
                     });
                 }
                 fields.current_run_id = Some(run_id.clone());
-                fields.pre_run_state = Some(Idle);
+                fields.pre_run_phase = Some(RunReturnPhase::Idle);
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -254,7 +274,7 @@ impl RuntimeControlAuthority {
                     });
                 }
                 fields.current_run_id = Some(run_id.clone());
-                fields.pre_run_state = Some(Attached);
+                fields.pre_run_phase = Some(RunReturnPhase::Attached);
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -270,58 +290,58 @@ impl RuntimeControlAuthority {
                     });
                 }
                 fields.current_run_id = Some(run_id.clone());
-                fields.pre_run_state = Some(Retired);
+                fields.pre_run_phase = Some(RunReturnPhase::Retired);
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
                 Running
             }
 
-            // RunCompleted from Running — split by pre_run_state
+            // RunCompleted from Running — split by pre_run_phase
             (Running, RunCompleted { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 let target = self.resolve_run_return(&fields);
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 target
             }
             // RunCompleted from Retired — run was in-flight when retire was requested
             (Retired, RunCompleted { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 Retired
             }
 
-            // RunFailed from Running — split by pre_run_state
+            // RunFailed from Running — split by pre_run_phase
             (Running, RunFailed { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 let target = self.resolve_run_return(&fields);
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 target
             }
             // RunFailed from Retired — run was in-flight when retire was requested
             (Retired, RunFailed { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 Retired
             }
 
-            // RunCancelled from Running — split by pre_run_state
+            // RunCancelled from Running — split by pre_run_phase
             (Running, RunCancelled { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 let target = self.resolve_run_return(&fields);
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 target
             }
             // RunCancelled from Retired — run was in-flight when retire was requested
             (Retired, RunCancelled { run_id }) => {
                 self.validate_run_terminal(run_id, &fields)?;
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 Retired
             }
 
@@ -348,7 +368,7 @@ impl RuntimeControlAuthority {
             // ResetRequested from Initializing/Idle/Attached/Recovering/Retired
             (Initializing | Idle | Attached | Recovering | Retired, ResetRequested) => {
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 effects.push(RuntimeControlEffect::ApplyControlPlaneCommand {
                     command: "Reset".into(),
                 });
@@ -361,7 +381,7 @@ impl RuntimeControlAuthority {
             // StopRequested from all non-terminal states
             (Initializing | Idle | Attached | Running | Recovering | Retired, StopRequested) => {
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 effects.push(RuntimeControlEffect::ApplyControlPlaneCommand {
                     command: "Stop".into(),
                 });
@@ -377,7 +397,7 @@ impl RuntimeControlAuthority {
                 DestroyRequested,
             ) => {
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 effects.push(RuntimeControlEffect::ApplyControlPlaneCommand {
                     command: "Destroy".into(),
                 });
@@ -438,7 +458,7 @@ impl RuntimeControlAuthority {
                     });
                 }
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 Idle
             }
             (Attached, RecycleRequested) => {
@@ -449,7 +469,7 @@ impl RuntimeControlAuthority {
                     });
                 }
                 fields.current_run_id = None;
-                fields.pre_run_state = None;
+                fields.pre_run_phase = None;
                 Attached
             }
 
@@ -481,16 +501,15 @@ impl RuntimeControlAuthority {
     }
 
     /// Resolve the return state after a run terminal event.
-    /// Uses pre_run_state to determine where to return:
+    /// Uses the narrowed pre-run phase to determine where to return:
     /// - Some(Retired) -> Retired
     /// - Some(Attached) -> Attached
     /// - Some(Idle) | None -> Idle
     fn resolve_run_return(&self, fields: &RuntimeControlFields) -> RuntimeState {
-        match fields.pre_run_state {
-            Some(RuntimeState::Retired) => RuntimeState::Retired,
-            Some(RuntimeState::Attached) => RuntimeState::Attached,
-            _ => RuntimeState::Idle,
-        }
+        fields
+            .pre_run_phase
+            .map(RunReturnPhase::as_runtime_state)
+            .unwrap_or(RuntimeState::Idle)
     }
 
     /// Infer a target state for error reporting when a transition is illegal.

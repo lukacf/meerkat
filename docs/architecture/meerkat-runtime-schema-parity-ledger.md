@@ -152,6 +152,10 @@ Current exact-parity state:
   explicitly restored `Recovering` state plus duplicated run-return
   bookkeeping, but the live recover/recycle flow no longer depends on a
   helper-side `Recovering` workflow
+- that duplicated run-return bookkeeping is narrower than before too: the
+  helper no longer stores a full `RuntimeState` as `pre_run_state`, only the
+  three return targets the checked-in machine already models
+  (`idle` / `attached` / `retired`)
 - the dead top-level active-work slice is also gone: `active_work_id` never
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed

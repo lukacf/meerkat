@@ -43,13 +43,14 @@
             "group": "Guides",
             "pages": [
               "guides/self-hosted-gemma4",
-              "guides/structured-output",
-              "guides/memory",
-              "guides/hooks",
-              "guides/skills",
-              "guides/comms",
-              "guides/mobs",
-              "guides/mobpack",
+        "guides/structured-output",
+        "guides/memory",
+        "guides/hooks",
+        "guides/skills",
+        "guides/mini-surfaces",
+        "guides/comms",
+        "guides/mobs",
+        "guides/mobpack",
               "guides/scheduling"
             ]
           },

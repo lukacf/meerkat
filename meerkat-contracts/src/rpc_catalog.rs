@@ -6,6 +6,11 @@ pub struct RpcMethodCatalogOptions {
     pub mob_enabled: bool,
     pub mcp_enabled: bool,
     pub comms_enabled: bool,
+    pub blob_enabled: bool,
+    pub session_events_enabled: bool,
+    pub session_streams_enabled: bool,
+    pub schedule_enabled: bool,
+    pub skills_enabled: bool,
 }
 
 impl RpcMethodCatalogOptions {
@@ -15,6 +20,25 @@ impl RpcMethodCatalogOptions {
             mob_enabled: true,
             mcp_enabled: true,
             comms_enabled: true,
+            blob_enabled: true,
+            session_events_enabled: true,
+            session_streams_enabled: true,
+            schedule_enabled: true,
+            skills_enabled: true,
+        }
+    }
+
+    pub const fn mini_surface() -> Self {
+        Self {
+            runtime_available: false,
+            mob_enabled: false,
+            mcp_enabled: false,
+            comms_enabled: false,
+            blob_enabled: false,
+            session_events_enabled: false,
+            session_streams_enabled: false,
+            schedule_enabled: false,
+            skills_enabled: false,
         }
     }
 }
@@ -74,82 +98,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::basic("session/list", "List active sessions"),
         RpcMethodDescriptor::basic("session/read", "Get session state"),
         RpcMethodDescriptor::basic("session/history", "Get full session history"),
-        RpcMethodDescriptor::typed(
-            "blob/get",
-            "Fetch raw blob payload metadata and bytes by blob id",
-            "BlobGetParams",
-            "BlobPayload",
-        ),
         RpcMethodDescriptor::basic("session/archive", "Remove session"),
-        RpcMethodDescriptor::basic(
-            "session/external_event",
-            "Queue a runtime-backed external event",
-        ),
-        RpcMethodDescriptor::basic(
-            "session/inject_context",
-            "Stage runtime system context for application at the next LLM boundary",
-        ),
-        RpcMethodDescriptor::basic("session/stream_open", "Open a session event stream"),
-        RpcMethodDescriptor::basic("session/stream_close", "Close a session event stream"),
-        RpcMethodDescriptor::typed(
-            "schedule/create",
-            "Create a schedule",
-            "CreateScheduleRequest",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/get",
-            "Get one schedule",
-            "ScheduleIdParams",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/list",
-            "List schedules",
-            "ListSchedulesParams",
-            "ScheduleListResult",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/update",
-            "Update a schedule",
-            "UpdateScheduleParams",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/pause",
-            "Pause a schedule",
-            "ScheduleIdParams",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/resume",
-            "Resume a schedule",
-            "ScheduleIdParams",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/delete",
-            "Delete a schedule",
-            "ScheduleIdParams",
-            "Schedule",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/occurrences",
-            "List schedule occurrences",
-            "ScheduleOccurrencesParams",
-            "ScheduleOccurrencesResult",
-        ),
-        RpcMethodDescriptor::result_only(
-            "schedule/tools",
-            "List schedule transport tools",
-            "ScheduleToolsResult",
-        ),
-        RpcMethodDescriptor::typed(
-            "schedule/call",
-            "Call a schedule transport tool",
-            "ScheduleToolCallParams",
-            "Value",
-        ),
         RpcMethodDescriptor::basic("turn/start", "Start a new turn on existing session"),
         RpcMethodDescriptor::basic("turn/interrupt", "Cancel in-flight turn"),
         RpcMethodDescriptor::basic("config/get", "Read config"),
@@ -161,9 +110,107 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Get the effective model catalog (built-in plus config-backed entries)",
             "ModelsCatalogResponse",
         ),
-        RpcMethodDescriptor::basic("skills/list", "List available skills"),
-        RpcMethodDescriptor::basic("skills/inspect", "Inspect one skill"),
     ];
+
+    if options.blob_enabled {
+        methods.push(RpcMethodDescriptor::typed(
+            "blob/get",
+            "Fetch raw blob payload metadata and bytes by blob id",
+            "BlobGetParams",
+            "BlobPayload",
+        ));
+    }
+
+    if options.session_events_enabled {
+        methods.extend([
+            RpcMethodDescriptor::basic(
+                "session/external_event",
+                "Queue a runtime-backed external event",
+            ),
+            RpcMethodDescriptor::basic(
+                "session/inject_context",
+                "Stage runtime system context for application at the next LLM boundary",
+            ),
+        ]);
+    }
+
+    if options.session_streams_enabled {
+        methods.extend([
+            RpcMethodDescriptor::basic("session/stream_open", "Open a session event stream"),
+            RpcMethodDescriptor::basic("session/stream_close", "Close a session event stream"),
+        ]);
+    }
+
+    if options.schedule_enabled {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "schedule/create",
+                "Create a schedule",
+                "CreateScheduleRequest",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/get",
+                "Get one schedule",
+                "ScheduleIdParams",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/list",
+                "List schedules",
+                "ListSchedulesParams",
+                "ScheduleListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/update",
+                "Update a schedule",
+                "UpdateScheduleParams",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/pause",
+                "Pause a schedule",
+                "ScheduleIdParams",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/resume",
+                "Resume a schedule",
+                "ScheduleIdParams",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/delete",
+                "Delete a schedule",
+                "ScheduleIdParams",
+                "Schedule",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/occurrences",
+                "List schedule occurrences",
+                "ScheduleOccurrencesParams",
+                "ScheduleOccurrencesResult",
+            ),
+            RpcMethodDescriptor::result_only(
+                "schedule/tools",
+                "List schedule transport tools",
+                "ScheduleToolsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "schedule/call",
+                "Call a schedule transport tool",
+                "ScheduleToolCallParams",
+                "Value",
+            ),
+        ]);
+    }
+
+    if options.skills_enabled {
+        methods.extend([
+            RpcMethodDescriptor::basic("skills/list", "List available skills"),
+            RpcMethodDescriptor::basic("skills/inspect", "Inspect one skill"),
+        ]);
+    }
 
     if options.runtime_available {
         methods.extend([
@@ -342,15 +389,20 @@ pub fn rpc_notification_catalog(
             "Cancel an in-flight JSON-RPC request by request id",
         ),
         RpcNotificationDescriptor::basic("session/event", "AgentEvent payload during turns"),
-        RpcNotificationDescriptor::basic(
-            "session/stream_event",
-            "Standalone session stream event notification",
-        ),
-        RpcNotificationDescriptor::basic(
-            "session/stream_end",
-            "Standalone session stream terminal notification",
-        ),
     ];
+
+    if options.session_streams_enabled {
+        notifications.extend([
+            RpcNotificationDescriptor::basic(
+                "session/stream_event",
+                "Standalone session stream event notification",
+            ),
+            RpcNotificationDescriptor::basic(
+                "session/stream_end",
+                "Standalone session stream terminal notification",
+            ),
+        ]);
+    }
 
     if options.mob_enabled {
         notifications.extend([

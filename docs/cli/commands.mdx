@@ -24,6 +24,8 @@ rkat run --resume "keep going"
 rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 ```
 
+Meerkat also ships `rkat-mini`, a smaller static surface for run/session/config workflows. See [Mini surfaces](/guides/mini-surfaces) for the exact contract.
+
 ## Global flags
 
 All commands accept the same realm and convention-root flags:
@@ -54,6 +56,30 @@ rkat [--realm <id>] [--isolated] [--instance <id>] \
 | `rkat capabilities` | Show runtime capabilities |
 | `rkat doctor` | Check local setup, provider keys, and self-hosted server reachability |
 | `rkat init` | Create project config from the global template |
+
+## `rkat-mini`
+
+`rkat-mini` keeps the same task-first execution model but trims the shipped command set down to:
+
+- `run`
+- `init`
+- `skill`
+- `config`
+- `session`
+- `realm`
+- `models`
+- `capabilities`
+- `doctor`
+
+It intentionally omits:
+
+- `mob`
+- `mcp`
+- `blob`
+- peer/comms-facing UX
+- schedule-facing UX
+
+The built-in shell and patch flows still work through `--tools workspace`.
 
 ## Prompt-first usage
 

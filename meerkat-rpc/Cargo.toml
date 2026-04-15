@@ -16,6 +16,10 @@ categories.workspace = true
 name = "rkat-rpc"
 path = "src/main.rs"
 
+[[bin]]
+name = "rkat-rpc-mini"
+path = "src/main.rs"
+
 [[test]]
 name = "live_smoke_rpc"
 path = "tests/live_smoke_rpc.rs"
@@ -57,6 +61,7 @@ comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 schedule = ["meerkat/schedule"]
+mini-surface = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -895,7 +895,7 @@ impl MobHandle {
                             render_metadata: None,
                             reply_tx,
                         })
-                        .await??
+                        .await??;
                     }
                     WorkOrigin::Internal => {
                         self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
@@ -903,9 +903,9 @@ impl MobHandle {
                             content,
                             reply_tx,
                         })
-                        .await??
+                        .await??;
                     }
-                };
+                }
                 Ok(MobMachineCommandResult::WorkReceipt { work_ref })
             }
             MobMachineCommand::CancelWork { work_ref } => {

@@ -35,18 +35,16 @@ impl InMemoryMobEventStore {
     }
 }
 
+type ExternalBindingOverlayMap = BTreeMap<
+    (MobId, crate::ids::AgentIdentity, crate::ids::Generation),
+    ExternalBindingOverlayRecord,
+>;
+
 /// In-memory runtime metadata store for tests and ephemeral mobs.
 #[derive(Debug, Default)]
 pub struct InMemoryMobRuntimeMetadataStore {
     supervisor_records: Arc<RwLock<BTreeMap<MobId, SupervisorAuthorityRecord>>>,
-    external_binding_overlays: Arc<
-        RwLock<
-            BTreeMap<
-                (MobId, crate::ids::AgentIdentity, crate::ids::Generation),
-                ExternalBindingOverlayRecord,
-            >,
-        >,
-    >,
+    external_binding_overlays: Arc<RwLock<ExternalBindingOverlayMap>>,
 }
 
 impl InMemoryMobRuntimeMetadataStore {

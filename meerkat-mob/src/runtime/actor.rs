@@ -47,7 +47,7 @@ const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 #[derive(Clone)]
 enum WiringEndpoint {
     Local {
-        entry: RosterEntry,
+        entry: Box<RosterEntry>,
         comms: Arc<dyn CoreCommsRuntime>,
         spec: TrustedPeerSpec,
         comms_name: String,
@@ -4505,14 +4505,12 @@ impl MobActor {
 
         match MobWiringAuthority::plan_local_unwire(a, b, a_has_b_edge, b_has_a_edge)? {
             LocalUnwirePlan::NoOp => {
-                match (&endpoint_a, &endpoint_b) {
-                    (
-                        WiringEndpoint::Local { comms: comms_a, .. },
-                        WiringEndpoint::Local { spec: spec_b, .. },
-                    ) => {
-                        let _ = comms_a.remove_trusted_peer(&spec_b.peer_id).await?;
-                    }
-                    _ => {}
+                if let (
+                    WiringEndpoint::Local { comms: comms_a, .. },
+                    WiringEndpoint::Local { spec: spec_b, .. },
+                ) = (&endpoint_a, &endpoint_b)
+                {
+                    let _ = comms_a.remove_trusted_peer(&spec_b.peer_id).await?;
                 }
                 match (&endpoint_a, &endpoint_b) {
                     (
@@ -4647,7 +4645,7 @@ impl MobActor {
                 });
                 self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
                     .await?;
-                self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
+                self.notify_peer_unwired(spec_b, a, entry_a, &supervisor_sender)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
                     let supervisor_sender = supervisor_sender.clone();
@@ -4711,7 +4709,7 @@ impl MobActor {
                             .await
                     }
                 });
-                self.notify_peer_unwired(spec_a, b, &entry_b, &supervisor_sender)
+                self.notify_peer_unwired(spec_a, b, entry_b, &supervisor_sender)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
                     let supervisor_sender = supervisor_sender.clone();
@@ -6630,7 +6628,7 @@ impl MobActor {
                 });
                 self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
                     .await?;
-                self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
+                self.notify_peer_added(&supervisor_sender, spec_b, a, entry_a)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
                     let supervisor_sender = supervisor_sender.clone();
@@ -6692,7 +6690,7 @@ impl MobActor {
                             .await
                     }
                 });
-                self.notify_peer_added(&supervisor_sender, spec_a, b, &entry_b)
+                self.notify_peer_added(&supervisor_sender, spec_a, b, entry_b)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
                     let supervisor_sender = supervisor_sender.clone();
@@ -6869,7 +6867,7 @@ impl MobActor {
                 .trusted_peer_spec(&entry.member_ref, &comms_name, &public_key)
                 .await?;
             return Ok(WiringEndpoint::Local {
-                entry: entry.clone(),
+                entry: Box::new(entry.clone()),
                 comms,
                 spec,
                 comms_name,

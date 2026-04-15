@@ -143,6 +143,7 @@ impl MockCommsRuntime {
         names
     }
 
+    #[allow(dead_code)]
     async fn trusted_peer_addresses(&self) -> Vec<String> {
         let mut addresses = self
             .trusted_peers
@@ -698,6 +699,7 @@ impl MockSessionService {
         }
     }
 
+    #[allow(dead_code)]
     async fn trusted_peer_addresses(&self, session_id: &SessionId) -> Vec<String> {
         let runtime = {
             let sessions = self.sessions.read().await;
@@ -17101,13 +17103,11 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
 
     assert!(
         trusted_peer.address == address,
-        "peer-only trust specs should use the real external address. Got: {:?}",
-        trusted_peers
+        "peer-only trust specs should use the real external address. Got: {trusted_peers:?}",
     );
     assert!(
         trusted_peer.peer_id == peer_id,
-        "peer-only trust should retain the real external peer identity. Got: {:?}",
-        trusted_peers
+        "peer-only trust should retain the real external peer identity. Got: {trusted_peers:?}",
     );
 }
 
@@ -20079,7 +20079,7 @@ async fn mob_runtime_parity_execute_probe(
                 None,
             )
             .await
-            .map(|_| summarize_mob_runtime_success(probe, "bridge_session")),
+            .map(|()| summarize_mob_runtime_success(probe, "bridge_session")),
         MobRuntimeParityProbeInput::InternalTurn => fixture
             .handle
             .internal_turn(
